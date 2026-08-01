@@ -174,10 +174,7 @@ fn fetchland_candidate(fetch: ObjectId) -> CandidateAction {
             source_id: fetch,
             ability_index: 0,
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Ability,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }
 }
 

@@ -90,20 +90,157 @@ pub fn resolve(
 
     let clamped_count = count.min(cards.len());
 
-    // CR 608.2d: Determine who makes the choice.
+    // CR 608.2d: Determine who makes the choice. For `Chooser::Opponent` in a
+    // multiplayer game with two or more live opponents (and no pre-targeted
+    // opponent), the CONTROLLER first decides which opponent will make the
+    // choice — "an opponent" is the controller's pick, exactly like clash's
+    // opponent selection (CR 701.30b) and the pile-separation prompt (CR
+    // 608.2d; `SeparatePilesChooseOpponent`). Plargg and Nassari's release
+    // notes state the intent directly: "you choose which opponent gets to
+    // choose one of the exiled nonland cards." Pausing on a typed prompt keeps
+    // the decision out of APNAP defaults; the handler re-enters through
+    // `resolve_with_choosing_player` with the picked opponent.
+    if matches!(chooser, Chooser::Opponent) && !has_targeted_opponent(ability) {
+        let candidates: Vec<PlayerId> = players::opponents(state, ability.controller)
+            .into_iter()
+            .filter(|&p| {
+                state
+                    .players
+                    .iter()
+                    .any(|pl| pl.id == p && !pl.is_eliminated)
+            })
+            .collect();
+        if candidates.len() >= 2 {
+            state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+                player: ability.controller,
+                candidates,
+                ability: Box::new(ability.clone()),
+            };
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::ChooseFromZone,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+    }
     let choosing_player = resolve_chooser(state, ability, chooser);
+    present_zone_choice(
+        state,
+        ability,
+        cards,
+        clamped_count,
+        up_to,
+        constraint,
+        choosing_player,
+        events,
+    )
+}
 
+/// CR 608.2d: Re-entry point for the `ChooseFromZoneOpponentChooser` handler —
+/// the controller has picked which opponent makes the choice, so present the
+/// standard `ChooseFromZoneChoice` prompt directly to that opponent. The
+/// candidate pool is re-derived from live state (it cannot have changed while
+/// paused — pauses do not pass priority — but re-deriving keeps a single
+/// source of truth).
+pub(crate) fn resolve_with_choosing_player(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    choosing_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (count, zone, additional_zones, zone_owner, filter, up_to, constraint) =
+        match &ability.effect {
+            Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones,
+                zone_owner,
+                filter,
+                up_to,
+                constraint,
+                ..
+            } => (
+                *count as usize,
+                *zone,
+                additional_zones.clone(),
+                *zone_owner,
+                filter.clone(),
+                *up_to,
+                constraint.clone(),
+            ),
+            _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
+        };
+    let cards = resolve_candidate_cards(
+        state,
+        ability,
+        zone,
+        &additional_zones,
+        zone_owner,
+        filter.as_ref(),
+    )?;
+    // CR 608.2d: The pool can only have shrunk to empty if state changed while
+    // paused (it cannot — see above), but fail closed identically to `resolve`.
+    if cards.is_empty() || count == 0 {
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ChooseFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+    let clamped_count = count.min(cards.len());
+    present_zone_choice(
+        state,
+        ability,
+        cards,
+        clamped_count,
+        up_to,
+        constraint,
+        choosing_player,
+        events,
+    )
+}
+
+/// CR 601.2c: "target opponent chooses" pre-binds the chooser at announcement —
+/// a `Player` target other than the controller occupies the chooser slot, so no
+/// resolution-time opponent selection happens.
+fn has_targeted_opponent(ability: &ResolvedAbility) -> bool {
+    ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Player(id) if *id != ability.controller))
+}
+
+/// CR 608.2: Park the interactive `ChooseFromZoneChoice` prompt for
+/// `choosing_player`, preserving the resolving trigger context for the parked
+/// continuation (shared tail of `resolve` and `resolve_with_choosing_player`).
+#[allow(clippy::too_many_arguments)]
+fn present_zone_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    cards: Vec<ObjectId>,
+    clamped_count: usize,
+    up_to: bool,
+    constraint: Option<ChooseFromZoneConstraint>,
+    choosing_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     // CR 608.2: An ability's resolution is a single ongoing process. This
     // interactive pause makes `stack::resolve_top` run to completion and
     // unconditionally clear the live, resolution-scoped trigger context; preserve
     // it here (this site runs inside `execute_effect`, before that clear) so an
     // `EventContextAmount` ("that many") sub_ability continuation resolves the
-    // triggering event's amount after the pause (Amy Pond). Restored by the
-    // `ChooseFromZoneChoice` handler around the continuation drain. Set
-    // unconditionally on every single-pool raise: `capture` yields `None` for a
-    // non-trigger ChooseFromZone (activated/spell), so a stale value from a prior
-    // resolution can never carry over; consumed by `.take()` in the handler.
-    state.pending_choose_zone_trigger_context = ResolvingTriggerContext::capture(state);
+    // triggering event's amount after the pause (Amy Pond). The context belongs
+    // to that continuation frame, and the `ChooseFromZoneChoice` handler consumes
+    // it around the continuation drain. A standalone choice has no continuation
+    // to resume and therefore no context to carry.
+    let trigger_context = ResolvingTriggerContext::capture(state);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.choose_zone_trigger_context =
+            trigger_context.or_else(|| frame.pending.trigger_context.clone());
+    }
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: choosing_player,
@@ -173,7 +310,7 @@ pub fn resolve_for_each_category_put_counter(
 /// are skipped (CR 608.2c — nothing to exile of that color/type). When no member
 /// remains, emits the resolution event so the parked continuation runs. Drives
 /// both the initial call from `resolve_for_each_category` and each resumed call
-/// from `drain_pending_per_category_zone_choice`.
+/// from `drain_active_per_category_zone_choice`.
 fn prompt_next_category_member(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -247,12 +384,13 @@ fn prompt_next_category_member(
             constraint: None,
             source_id: ability.source_id,
         };
-        state.pending_per_category_zone_choice =
-            Some(crate::types::game_state::PendingPerCategoryZoneChoice {
+        state.push_per_category_zone_choice(
+            crate::types::game_state::PendingPerCategoryZoneChoice {
                 ability: Box::new(ability.clone()),
                 pool: pool.to_vec(),
                 remaining_member_filters,
-            });
+            },
+        );
         return Ok(());
     }
 
@@ -278,13 +416,16 @@ fn prompt_next_category_member(
 /// current member's pick resolves. Exiles the chosen card and extends the
 /// chain's "cards exiled this way" tracked set (started empty by
 /// `resolve_for_each_category`), then prompts the next member. Mirrors
-/// `drain_pending_per_player_zone_choice`.
-pub(crate) fn drain_pending_per_category_zone_choice(
+/// `drain_active_per_player_zone_choice`.
+pub(crate) fn drain_active_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::BatchMoveResult {
-    let Some(pending) = state.pending_per_category_zone_choice.take() else {
+    let Some(pending) = state
+        .take_active_per_category_zone_choice()
+        .expect("per-category zone-choice drain may consume only its active frame")
+    else {
         return crate::game::zone_pipeline::BatchMoveResult::Done;
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
@@ -372,7 +513,13 @@ pub(crate) fn complete_per_category_exile(
     events: &mut Vec<GameEvent>,
 ) {
     if !chosen.is_empty() {
-        super::publish_tracked_set(state, chosen);
+        super::publish_tracked_set_with_causes(
+            state,
+            chosen
+                .iter()
+                .map(|&id| (id, Some(crate::types::ability::ThisWayCause::Exiled)))
+                .collect(),
+        );
     }
     let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
 }
@@ -415,6 +562,12 @@ fn resolve_category_pool(state: &GameState, ability: &ResolvedAbility) -> Vec<Ob
             crate::game::targeting::latest_tracked_set_id(state)
                 .and_then(|id| state.tracked_object_sets.get(&id).cloned())
         })
+        // CR 701.20b + CR 608.2c: Reveal-only Dig / RevealTop may leave the
+        // revealed pile only in `last_revealed_ids` when no TrackedSet consumer
+        // forced publication (Portent of Calamity: Dig → ForEachCategory →
+        // LastRevealed rest-move). Prefer the live reveal window over an empty
+        // ability-target fallback.
+        .or_else(|| (!state.last_revealed_ids.is_empty()).then(|| state.last_revealed_ids.clone()))
         .unwrap_or_else(|| {
             ability
                 .targets
@@ -520,12 +673,12 @@ pub(crate) fn resolve_random_in_chain(
 
 /// CR 101.4 + CR 608.2c: Park the next eligible player's `ChooseFromZoneChoice`
 /// for a `ChooseFromZone { zone_owner: EachPlayer }` iteration, stashing the
-/// players still to be prompted in `pending_per_player_zone_choice`. Players
+/// players still to be prompted in a typed per-player zone-choice frame. Players
 /// whose zone holds no matching candidate are skipped (CR 608.2c — there's
 /// nothing to choose). When no eligible player remains, the iteration is
 /// disposed (the parked `pending_continuation` then runs). Drives both the
 /// initial call from `resolve` and each resumed call from
-/// `drain_pending_per_player_zone_choice`.
+/// `drain_active_per_player_zone_choice`.
 fn prompt_next_each_player(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -577,6 +730,16 @@ fn prompt_next_each_player(
         // Multiverse). `Chooser::Opponent` would route to an opponent; honor it.
         let choosing_player = resolve_chooser(state, ability, chooser);
 
+        // CR 608.2: The per-player frame is inserted above the continuation
+        // that runs after every player has chosen. Capture the live trigger
+        // context while that continuation still owns the top, before parking
+        // this child frame (Amy Pond's `EventContextAmount` tail).
+        let trigger_context = ResolvingTriggerContext::capture(state);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.choose_zone_trigger_context =
+                trigger_context.or_else(|| frame.pending.trigger_context.clone());
+        }
+
         state.waiting_for = WaitingFor::ChooseFromZoneChoice {
             player: choosing_player,
             cards,
@@ -585,12 +748,11 @@ fn prompt_next_each_player(
             constraint,
             source_id: ability.source_id,
         };
-        state.pending_per_player_zone_choice =
-            Some(crate::types::game_state::PendingPerPlayerZoneChoice {
-                ability: Box::new(ability.clone()),
-                remaining_players,
-                accumulated,
-            });
+        state.push_per_player_zone_choice(crate::types::game_state::PendingPerPlayerZoneChoice {
+            ability: Box::new(ability.clone()),
+            remaining_players,
+            accumulated,
+        });
         return Ok(());
     }
 
@@ -598,7 +760,7 @@ fn prompt_next_each_player(
     // `accumulated == false` this is the FIRST resolution of the iteration (no
     // player was ever prompted), so it MUST rebind a FRESH (empty) chain tracked
     // set before the parked continuation runs — mirroring the first-resolution
-    // rebind in `drain_pending_per_player_zone_choice`. Otherwise an EARLIER
+    // rebind in `drain_active_per_player_zone_choice`. Otherwise an EARLIER
     // same-chain producer's tracked set (e.g. Breach the Multiverse's preceding
     // mill) stays bound and a downstream `ChangeZoneAll { TrackedSet }` over-acts
     // on that stale set instead of this iteration's (empty) picks: "those chosen
@@ -622,13 +784,16 @@ fn prompt_next_each_player(
 /// pick, extended on each subsequent pick) so a downstream "put those cards
 /// onto the battlefield" reads exactly the cards chosen across all players,
 /// then prompts the next eligible player. Mirrors
-/// `vote::drain_pending_vote_ballot_iteration`.
-pub(crate) fn drain_pending_per_player_zone_choice(
+/// `vote::drain_active_vote_ballot` through its typed frame.
+pub(crate) fn drain_active_per_player_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(pending) = state.pending_per_player_zone_choice.take() else {
+    let Some(pending) = state
+        .take_active_per_player_zone_choice()
+        .expect("per-player zone-choice drain may consume only its active frame")
+    else {
         return;
     };
 
@@ -709,7 +874,7 @@ fn resolve_candidate_cards(
     filter: Option<&TargetFilter>,
 ) -> Result<Vec<ObjectId>, EffectError> {
     if let Some(cards) = chain_tracked_set_cards(state) {
-        return Ok(cards);
+        return Ok(retain_matching_candidates(state, ability, cards, filter));
     }
 
     let cards = crate::game::targeting::latest_tracked_set_id(state)
@@ -728,10 +893,33 @@ fn resolve_candidate_cards(
     let cards = if cards.is_empty() {
         collect_direct_zone_cards(state, ability, zone, additional_zones, zone_owner, filter)?
     } else {
-        cards
+        retain_matching_candidates(state, ability, cards, filter)
     };
 
     Ok(cards)
+}
+
+/// CR 608.2d: Narrow a tracked-set (or explicit-target) candidate pool through
+/// the effect's own card filter. A typed restriction like "choose a NONLAND
+/// card exiled this way" (Plargg and Nassari, Author of Shadows) must constrain
+/// the pool even when the candidates arrive from the chain's tracked set — the
+/// set records every card the preceding clause exiled, lands included, but only
+/// the nonland ones are legal picks. `filter: None` (the bare "choose one of
+/// them" anaphor) keeps the raw set, preserving the untyped tracked-set path.
+fn retain_matching_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    cards: Vec<ObjectId>,
+    filter: Option<&TargetFilter>,
+) -> Vec<ObjectId> {
+    let Some(filter) = filter else {
+        return cards;
+    };
+    let filter_ctx = FilterContext::from_ability(ability);
+    cards
+        .into_iter()
+        .filter(|id| matches_target_filter(state, *id, filter, &filter_ctx))
+        .collect()
 }
 
 fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
@@ -1090,7 +1278,24 @@ mod tests {
             runner.state().waiting_for
         );
         assert!(
-            runner.state().pending_choose_zone_trigger_context.is_some(),
+            runner
+                .state()
+                .active_ability_continuation_frame()
+                .map(|frame| &frame.choose_zone_trigger_context)
+                .or_else(|| {
+                    runner
+                        .state()
+                        .resolution_stack
+                        .active_predecessor()
+                        .and_then(|frame| match frame {
+                            crate::types::resolution::ResolutionFrame::AbilityContinuation(
+                                frame,
+                            ) => Some(&frame.choose_zone_trigger_context),
+                            _ => None,
+                        })
+                })
+                .and_then(Option::as_ref)
+                .is_some(),
             "the resolving trigger context must be captured across the pause"
         );
 
@@ -1125,7 +1330,11 @@ mod tests {
             "Amy Pond's own counters are untouched"
         );
         assert!(
-            runner.state().pending_choose_zone_trigger_context.is_none(),
+            runner
+                .state()
+                .active_ability_continuation_frame()
+                .and_then(|frame| frame.choose_zone_trigger_context.as_ref())
+                .is_none(),
             "the stash is consumed exactly once"
         );
     }
@@ -2258,7 +2467,7 @@ mod tests {
             other => panic!("expected ChooseFromZoneChoice for White member, got {other:?}"),
         }
         assert!(
-            state.pending_per_category_zone_choice.is_some(),
+            state.active_per_category_zone_choice().is_some(),
             "iteration must be parked after the first member"
         );
     }
@@ -2333,7 +2542,7 @@ mod tests {
         }
         // The iteration is complete (no parked member, no choice prompt).
         assert!(
-            state.pending_per_category_zone_choice.is_none(),
+            state.active_per_category_zone_choice().is_none(),
             "iteration must be disposed after every member"
         );
         // The chain tracked set holds exactly the cards exiled this way.
@@ -2428,6 +2637,7 @@ mod tests {
         use crate::types::actions::GameAction;
         use crate::types::identifiers::TrackedSetId;
         use crate::types::mana::ManaColor;
+        use crate::types::resolution::{FrameKind, ResolutionFrame, ResolutionStateWire};
         let mut state = GameState::new_two_player(7);
         let white = make_colored_card(&mut state, 1, "White Card", ManaColor::White);
         let blue = make_colored_card(&mut state, 2, "Blue Card", ManaColor::Blue);
@@ -2479,6 +2689,23 @@ mod tests {
         // would (the parking happens because the first member parks a choice).
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::AbilityContinuation,
+                FrameKind::PerCategoryZoneChoice,
+            ],
+            "the category prompt must remain active above its deferred continuation"
+        );
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real category prompt serializes as v2");
+        state = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("real category prompt round-trips through the v2 wire")
+            .into_game_state();
 
         // Exile each colored card at its member prompt (White then Blue).
         for expected in [white, blue] {
@@ -2501,7 +2728,7 @@ mod tests {
         // CR 608.2c: the iteration is disposed and resolution returned to
         // priority — NOT a dangling member prompt.
         assert!(
-            state.pending_per_category_zone_choice.is_none(),
+            state.active_per_category_zone_choice().is_none(),
             "iteration must be disposed"
         );
         assert!(
@@ -2695,7 +2922,7 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), &state));
 
         let ability = ResolvedAbility::new(
             Effect::ForEachCategory {
@@ -3062,16 +3289,15 @@ mod tests {
             PlayerId(0),
         );
         // First resolution: no players left to prompt afterwards, accumulated=false.
-        state.pending_per_player_zone_choice =
-            Some(crate::types::game_state::PendingPerPlayerZoneChoice {
-                ability: Box::new(ability),
-                remaining_players: vec![],
-                accumulated: false,
-            });
+        state.push_per_player_zone_choice(crate::types::game_state::PendingPerPlayerZoneChoice {
+            ability: Box::new(ability),
+            remaining_players: vec![],
+            accumulated: false,
+        });
 
         let mut events = Vec::new();
         // The first player DECLINES — an empty "up to one" pick.
-        drain_pending_per_player_zone_choice(&mut state, &[], &mut events);
+        drain_active_per_player_zone_choice(&mut state, &[], &mut events);
 
         let bound = state
             .chain_tracked_set_id
@@ -3175,5 +3401,283 @@ mod tests {
             Some(&vec![ObjectId(7), ObjectId(8)]),
             "the prior producer's set must be untouched, never inherited by the iteration"
         );
+    }
+
+    /// CR 101.4 + CR 608.2c: An initial each-player zone choice that pauses
+    /// before its trailing instruction is discovered must retain that prompt as
+    /// the active child. The continuation is its immediate parent, so the real
+    /// SelectCards path drains both players before the tracked-set rider runs.
+    ///
+    /// REVERT PROBE: pushing the continuation above the active per-player frame
+    /// makes the first action take the ordinary choice path instead, leaving the
+    /// second player's frame orphaned and these hand assertions false.
+    #[test]
+    fn per_player_zone_choice_keeps_continuation_below_active_prompt() {
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame, ResolutionStateWire};
+
+        let mut state = GameState::new_two_player(19);
+        let first = create_object(
+            &mut state,
+            CardId(19),
+            PlayerId(0),
+            "First graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Second graveyard card".to_string(),
+            Zone::Graveyard,
+        );
+        let continuation = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility {
+            sub_ability: Some(Box::new(continuation)),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "the per-player prompt must remain active above its deferred continuation"
+        );
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("real per-player prompt serializes as v2");
+        state = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("real per-player prompt round-trips through the v2 wire")
+            .into_game_state();
+
+        for expected in [first, second] {
+            match &state.waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                    assert_eq!(cards, &vec![expected]);
+                }
+                other => panic!("expected per-player ChooseFromZoneChoice, got {other:?}"),
+            }
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("the production choice action must advance the per-player iteration");
+        }
+
+        assert!(state.active_per_player_zone_choice().is_none());
+        assert!(state.active_ability_continuation().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects.get(&first).unwrap().zone, Zone::Hand);
+        assert_eq!(state.objects.get(&second).unwrap().zone, Zone::Hand);
+    }
+
+    fn each_player_choice_with_gain_life_tail(source: ObjectId) -> ResolvedAbility {
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ResolvedAbility {
+            sub_ability: Some(Box::new(tail)),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        }
+    }
+
+    #[test]
+    fn repeat_for_parks_below_complete_per_player_choice_child_stack() {
+        // CR 608.2c + CR 101.4: a repeated iteration owns both the deferred
+        // continuation and the active each-player prompt. Its repeat frame must
+        // be below that complete two-frame child stack.
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame};
+
+        let mut state = GameState::new_two_player(31);
+        let first = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "First repeat choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "Second repeat choice".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = each_player_choice_with_gain_life_tail(ObjectId(310));
+        ability.repeat_for = Some(crate::types::ability::QuantityExpr::Fixed { value: 2 });
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("first repeat iteration parks on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::RepeatFor,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "repeat-for must be below its entire per-player child stack"
+        );
+
+        for expected in [first, second, first, second] {
+            match &state.waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                    assert_eq!(cards, &vec![expected]);
+                }
+                other => panic!("expected per-player ChooseFromZoneChoice, got {other:?}"),
+            }
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the repeat iteration");
+        }
+
+        assert_eq!(state.players[0].life, 22, "one tail per repeat iteration");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn repeat_until_parks_below_complete_per_player_choice_child_stack() {
+        // CR 107.1c + CR 608.2c + CR 101.4: the repeat-until owner must wait
+        // for both player choices and their shared continuation before it raises
+        // the repeat decision.
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::{FrameKind, ResolutionFrame};
+
+        let mut state = GameState::new_two_player(32);
+        let first = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "First repeat-until choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(34),
+            PlayerId(1),
+            "Second repeat-until choice".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = each_player_choice_with_gain_life_tail(ObjectId(320));
+        ability.repeat_until = Some(crate::types::ability::RepeatContinuation::ControllerChoice);
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("repeat-until iteration parks on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::RepeatUntil,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "repeat-until must be below its entire per-player child stack"
+        );
+
+        for expected in [first, second] {
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the paused process");
+        }
+
+        assert_eq!(
+            state.players[0].life, 21,
+            "the deferred tail resolves first"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        assert!(state.resolution_stack.is_empty());
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("declining the production repeat prompt completes the resolution");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

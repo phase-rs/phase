@@ -81,8 +81,8 @@ pub fn resolve_combine_host(
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
             };
-            state.pending_continuation =
-                Some(PendingContinuation::new(Box::new(continuation), state));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: hosts,
@@ -147,8 +147,8 @@ pub fn resolve_choose_augment_and_combine(
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),
             };
-            state.pending_continuation =
-                Some(PendingContinuation::new(Box::new(continuation), state));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: candidates,
@@ -388,6 +388,8 @@ fn merged_copiable_values(
         power: Some(host_values.power.unwrap_or(0) + augment.base_power.unwrap_or(0)),
         toughness: Some(host_values.toughness.unwrap_or(0) + augment.base_toughness.unwrap_or(0)),
         loyalty: host_values.loyalty,
+        // CR 707.2: The merged object's copiable loyalty characteristic follows its host.
+        printed_loyalty: host_values.printed_loyalty,
         keywords,
         abilities: Arc::new(abilities),
         trigger_definitions: Arc::new(triggers),

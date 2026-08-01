@@ -231,14 +231,24 @@ mod tests {
 
     /// CR 701.15a + CR 701.15b: Maximum Carnage chapter I — "each creature
     /// attacks each combat if able and attacks a player other than you if able"
-    /// is the printed goad definition. The parser must lower it to
-    /// `Effect::GoadAll` over all creatures; resolving that effect marks every
-    /// creature (both the controller's and the opponents') as goaded by the
-    /// resolving controller. Reverting `try_parse_goad_equivalent` makes the
-    /// chapter line lower to `Effect::Unimplemented` — there is no GoadAll to
-    /// resolve and no creature gets goaded, so this test fails.
+    /// prints the goad *requirement pair*, not the goad keyword action. Official
+    /// ruling (2025-09-19): "that ability doesn't cause any creatures to become
+    /// goaded. Effects that refer to 'goaded creatures' won't apply."
+    ///
+    /// So the parser must lower the line to `Effect::GenericEffect` carrying ONE
+    /// `StaticDefinition` with both `AddStaticMode` mods, and resolving it must
+    /// leave every creature's `goaded_by` empty while registering a transient
+    /// continuous effect whose affected filter is still the INTACT broadcast
+    /// `Typed` filter (CR 611.2c — the affected set stays dynamic).
+    ///
+    /// This is the inversion of the previous `…goads_every_creature…` test:
+    /// restoring the `Effect::GoadAll` lowering in `subject.rs` fails the shape
+    /// assertion, and restoring the goad resolver path fails `goaded_by`.
     #[test]
-    fn maximum_carnage_goads_every_creature_via_real_parser() {
+    fn maximum_carnage_chapter_one_creates_requirements_without_goading() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::statics::StaticMode;
+
         let parsed = crate::parser::parse_oracle_text(
             "Until your next turn, each creature attacks each combat if able and attacks a player other than you if able.",
             "Maximum Carnage",
@@ -246,12 +256,41 @@ mod tests {
             &["Sorcery".to_string()],
             &[],
         );
-        let goad_effect = parsed
+        let (requirement_effect, ability_duration) = parsed
             .abilities
             .iter()
-            .map(|def| def.effect.as_ref().clone())
-            .find(|effect| matches!(effect, Effect::GoadAll { .. }))
-            .expect("Maximum Carnage chapter I must parse to Effect::GoadAll");
+            .find_map(|def| match def.effect.as_ref() {
+                effect @ Effect::GenericEffect { .. } => {
+                    Some((effect.clone(), def.duration.clone()))
+                }
+                _ => None,
+            })
+            .expect("Maximum Carnage chapter I must parse to Effect::GenericEffect");
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &requirement_effect
+        else {
+            unreachable!("matched above")
+        };
+        assert_eq!(
+            static_abilities.len(),
+            1,
+            "both requirements must ride ONE StaticDefinition so the affected \
+             filter stays intact for both (CR 611.2c), got {static_abilities:?}"
+        );
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttack,
+                },
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackAwayFromSource,
+                },
+            ],
+            "CR 701.15b attaches exactly two combat requirements"
+        );
 
         let mut state = GameState::new_two_player(42);
         let my_creature = create_object(
@@ -278,15 +317,38 @@ mod tests {
                 .push(CoreType::Creature);
         }
 
-        let ability = ResolvedAbility::new(goad_effect, vec![], ObjectId(100), PlayerId(0));
-        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        let mut ability =
+            ResolvedAbility::new(requirement_effect, vec![], ObjectId(100), PlayerId(0));
+        ability.duration = ability_duration;
+        crate::game::effects::effect::resolve(&mut state, &ability, &mut Vec::new()).unwrap();
 
-        // CR 701.15b: even the controller's own creature is goaded by the
-        // controller — it must then attack a player other than the controller.
-        assert!(state.objects[&my_creature].goaded_by.contains(&PlayerId(0)));
-        assert!(state.objects[&opp_creature]
-            .goaded_by
-            .contains(&PlayerId(0)));
+        // CR 701.15a + the 2025-09-19 ruling: NO designation on either creature.
+        for id in [my_creature, opp_creature] {
+            assert!(
+                state.objects[&id].goaded_by.is_empty(),
+                "chapter I must not goad anything, got {:?}",
+                state.objects[&id].goaded_by
+            );
+        }
+
+        // CR 611.2c: the requirement rides one TCE whose affected filter is still
+        // the broadcast `Typed` filter, so creatures entering later are bound too.
+        let tce = state
+            .transient_continuous_effects
+            .iter()
+            .find(|e| {
+                e.modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustAttackAwayFromSource,
+                    })
+            })
+            .expect("the requirement must register a transient continuous effect");
+        assert!(
+            matches!(tce.affected, TargetFilter::Typed(_)),
+            "CR 611.2c: the affected filter must stay INTACT (not frozen to a \
+             resolution-time SpecificObject set), got {:?}",
+            tce.affected
+        );
     }
 
     #[test]

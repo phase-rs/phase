@@ -22,97 +22,183 @@ expression: "&ir"
         "fragment": "When ~ enters, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ChangesZone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "SearchLibrary",
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Artifact",
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
                   {
-                    "Subtype": "Equipment"
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 83,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "you may search your library for an Equipment card, reveal it, put it into your hand"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": {
+                          "SearchDestination": {
+                            "destination": "Hand",
+                            "enter_tapped": false,
+                            "enters_under": null,
+                            "reveal": true,
+                            "attach_host": null
+                          }
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "SearchLibrary",
+                        "filter": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Artifact",
+                            {
+                              "Subtype": "Equipment"
+                            }
+                          ],
+                          "controller": null,
+                          "properties": []
+                        },
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "reveal": true
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Then",
+                    "condition": null,
+                    "is_optional": true,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 90,
+                        "end_byte": 97,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "shuffle"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Shuffle",
+                        "target": {
+                          "type": "Controller"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
                   }
                 ],
-                "controller": null,
-                "properties": []
-              },
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "reveal": true
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": "Library",
-                "destination": "Hand",
-                "target": {
-                  "type": "Any"
-                },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
                 "kind": "Spell",
-                "effect": {
-                  "type": "Shuffle",
-                  "target": {
-                    "type": "Controller"
-                  }
-                },
-                "cost": null,
-                "sub_ability": null,
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
-                "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
-              },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": true,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": "Battlefield",
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": true,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "When ~ enters, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": true,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "you may search your library for an equipment card, reveal it, put it into your hand, then shuffle.",
+              "relative_player_scope": null
+            },
+            "source_text": "When ~ enters, you may search your library for an Equipment card, reveal it, put it into your hand, then shuffle.",
+            "die_results": []
+          }
         }
       }
     },
@@ -134,59 +220,117 @@ expression: "&ir"
         "fragment": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "ChangeZone",
-            "origin": "Hand",
-            "destination": "Battlefield",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
+        "Spell": {
+          "source_text": "You may put an Equipment card from your hand onto the battlefield",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 65,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "You may put an Equipment card from your hand onto the battlefield"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": "Hand",
+                    "destination": "Battlefield",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        {
+                          "Subtype": "Equipment"
+                        }
+                      ],
+                      "controller": "You",
+                      "properties": [
+                        {
+                          "type": "InZone",
+                          "zone": "Hand"
+                        }
+                      ]
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": true,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Composite",
+              "costs": [
                 {
-                  "Subtype": "Equipment"
-                }
-              ],
-              "controller": "You",
-              "properties": [
+                  "type": "Mana",
+                  "cost": {
+                    "type": "Cost",
+                    "shards": [
+                      "White"
+                    ],
+                    "generic": 1
+                  }
+                },
                 {
-                  "type": "InZone",
-                  "zone": "Hand"
+                  "type": "Tap"
                 }
               ]
             },
-            "owner_library": false,
-            "enter_transformed": false,
-            "enter_tapped": false,
-            "enters_attacking": false
-          },
-          "cost": {
-            "type": "Composite",
-            "costs": [
-              {
-                "type": "Mana",
-                "cost": {
-                  "type": "Cost",
-                  "shards": [
-                    "White"
-                  ],
-                  "generic": 1
-                }
-              },
-              {
-                "type": "Tap"
-              }
+            "description": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
             ]
           },
-          "sub_ability": null,
-          "duration": null,
-          "description": "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": true,
-          "target_choice_timing": "Resolution",
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

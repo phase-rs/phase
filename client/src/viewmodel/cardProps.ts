@@ -172,14 +172,26 @@ export function formatCounterTooltip(
   type: string,
   count: number,
   translate?: CounterTooltipTranslator,
+  isUnbounded?: boolean,
 ): string {
   const label = formatCounterType(type);
   if (translate) {
+    // CR 732.2a / CR 701.34a: an unbounded counter renders `∞` on the badge, so its
+    // tooltip summary must say "unbounded" rather than interpolate the finite count.
+    if (isUnbounded) {
+      return translate("counterTooltip.summaryUnbounded", {
+        label,
+        description: formatCounterDescription(type, translate),
+      });
+    }
     return translate("counterTooltip.summary", {
       count,
       label,
       description: formatCounterDescription(type, translate),
     });
+  }
+  if (isUnbounded) {
+    return `${label} counters: ∞`;
   }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }
@@ -199,6 +211,24 @@ export function formatTypeLine(cardTypes: CardType, keywords?: Keyword[]): strin
     return `${main} \u2014 ${cardTypes.subtypes.join(" ")}`;
   }
   return main;
+}
+
+/**
+ * True when `obj`'s stored `back_face` is a SEPARATELY PRINTED face the UI can
+ * present on its own — a CR 712 transform/modal/meld back face, or an
+ * Adventure/Omen/Prepare alternative spell.
+ *
+ * False for CR 710 Kamigawa flip cards. Their alternative half is printed
+ * upside down on the SAME physical face, so there is no second face to inspect
+ * (CardPreview renders it as a 180° rotation instead). The `back_face` slot is
+ * shared by all of these layouts, so `back_face != null` is NOT the predicate:
+ * using it gives all 21 flip cards a bogus DFC badge and an "inspect face 1"
+ * button pointing at a face that doesn't exist. The engine owns the
+ * discriminant — it ships `layout_kind` on the serialized back face (the same
+ * value `engine::game::transform::is_double_faced_permanent` keys on).
+ */
+export function hasOtherPrintedFace(obj: Pick<GameObject, "back_face">): boolean {
+  return obj.back_face != null && obj.back_face.layout_kind !== "Flip";
 }
 
 export function computePTDisplay(obj: GameObject): PTDisplay | null {

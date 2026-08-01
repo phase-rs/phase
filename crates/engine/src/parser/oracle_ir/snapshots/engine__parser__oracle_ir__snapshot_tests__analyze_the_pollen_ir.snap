@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 779
 expression: "&ir"
 ---
 {
@@ -52,161 +51,345 @@ expression: "&ir"
         "fragment": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "SearchLibrary",
-            "filter": {
-              "type": "Typed",
-              "type_filters": [
-                "Land"
-              ],
-              "controller": null,
-              "properties": [
-                {
-                  "type": "HasSupertype",
-                  "value": "Basic"
-                }
-              ]
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "reveal": true
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "SearchLibrary",
-              "filter": {
-                "type": "Or",
-                "filters": [
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Creature"
-                    ],
-                    "controller": null,
-                    "properties": []
+        "Spell": {
+          "source_text": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Land"
-                    ],
-                    "controller": null,
-                    "properties": []
-                  }
-                ]
-              },
-              "count": {
-                "type": "Fixed",
-                "value": 1
-              },
-              "reveal": true
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": "Library",
-                "destination": "Hand",
-                "target": {
-                  "type": "Any"
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 41,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Search your library for a basic land card"
                 },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
-                "kind": "Spell",
-                "effect": {
-                  "type": "Shuffle",
-                  "target": {
-                    "type": "Controller"
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": {
+                      "SearchDestination": {
+                        "destination": "Hand",
+                        "enter_tapped": false,
+                        "enters_under": null,
+                        "reveal": true,
+                        "attach_host": null
+                      }
+                    }
                   }
                 },
-                "cost": null,
-                "sub_ability": null,
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
+                "parsed": {
+                  "effect": {
+                    "type": "SearchLibrary",
+                    "filter": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Land"
+                      ],
+                      "controller": null,
+                      "properties": [
+                        {
+                          "type": "HasSupertype",
+                          "value": "Basic"
+                        }
+                      ]
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "reveal": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
                 "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
-            },
-            "else_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": "Library",
-                "destination": "Hand",
-                "target": {
-                  "type": "Any"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 43,
+                    "end_byte": 125,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "If evidence was collected, instead search your library for a creature or land card"
                 },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
-                "kind": "Spell",
-                "effect": {
-                  "type": "Shuffle",
-                  "target": {
-                    "type": "Controller"
+                "disposition": {
+                  "FoldSearchIntoElse": {
+                    "intrinsic": {
+                      "SearchDestination": {
+                        "destination": "Hand",
+                        "enter_tapped": false,
+                        "enters_under": null,
+                        "reveal": true,
+                        "attach_host": null
+                      }
+                    }
                   }
                 },
-                "cost": null,
-                "sub_ability": null,
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
-                "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
+                "parsed": {
+                  "effect": {
+                    "type": "SearchLibrary",
+                    "filter": {
+                      "type": "Or",
+                      "filters": [
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": null,
+                          "properties": []
+                        },
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Land"
+                          ],
+                          "controller": null,
+                          "properties": []
+                        }
+                      ]
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "reveal": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": {
+                  "type": "AdditionalCostPaidInstead"
+                },
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
-            },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": {
-              "type": "AdditionalCostPaidInstead"
-            },
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+              {
+                "id": 2,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 3
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 127,
+                    "end_byte": 143,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 2
+                  },
+                  "fragment": "Reveal that card"
+                },
+                "disposition": {
+                  "Continue": {
+                    "continuation": "SearchResultClauseHandled"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Reveal",
+                    "target": {
+                      "type": "ParentTarget"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Comma",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 3,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 4
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 145,
+                    "end_byte": 166,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 3
+                  },
+                  "fragment": "put it into your hand"
+                },
+                "disposition": {
+                  "Continue": {
+                    "continuation": "SearchResultClauseHandled"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": null,
+                    "destination": "Hand",
+                    "target": {
+                      "type": "ParentTarget"
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Then",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 4,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 5
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 173,
+                    "end_byte": 180,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 4
+                  },
+                  "fragment": "shuffle"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Shuffle",
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle."
+            }
+          ]
         }
       }
     }

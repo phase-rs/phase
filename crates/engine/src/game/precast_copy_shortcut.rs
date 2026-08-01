@@ -209,6 +209,7 @@ pub(super) fn note_meaningful_action(state: &mut GameState, actor: PlayerId, act
                 | GameAction::SetAutoPass { .. }
                 | GameAction::CancelAutoPass
                 | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
@@ -743,8 +744,8 @@ fn pending_optional_is_chain_copy(
     expected_chain_source: ObjectId,
 ) -> bool {
     state
-        .pending_optional_effect
-        .as_deref()
+        .active_optional_effect_frame()
+        .map(|frame| frame.ability.as_ref())
         .is_some_and(|ability| {
             ability.controller == offer.caster
                 && ability.source_id == expected_chain_source

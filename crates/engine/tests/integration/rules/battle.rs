@@ -83,6 +83,7 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
             power: Some(4),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: Vec::new(),

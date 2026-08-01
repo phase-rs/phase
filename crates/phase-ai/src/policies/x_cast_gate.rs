@@ -442,6 +442,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         )
@@ -462,6 +463,7 @@ mod tests {
             static_abilities: vec![static_def],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
+            end_cost: None,
         });
         ability.sub_ability = Some(Box::new(spell(Effect::Destroy {
             target: TargetFilter::TrackedSet {
@@ -526,10 +528,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -542,10 +541,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -568,10 +564,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -605,10 +598,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, search_depth)
     }
@@ -660,7 +650,7 @@ mod tests {
     fn helix_pinnacle_max_x_zero_rejected() {
         // {X}: put X tower counters on ~, with no mana → max X = 0. Discriminating:
         // the reason is `x_cast_zero_no_op`, driven by the PutCounter-X detector.
-        // A `benefit_is_trivial`-delegating gate would NOT reject (Helix's
+        // An `appraise_benefit`-delegating gate would NOT reject (Helix's
         // beneficial self-counter is non-trivial), so a Reject here proves the
         // detector-based gate, not a triviality delegation.
         let mut state = base_state();
@@ -815,6 +805,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             x_only_cost(),
         );

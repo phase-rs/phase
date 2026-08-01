@@ -36,8 +36,14 @@ function makeObject(overrides: Partial<GameObject> & { id: ObjectId }): GameObje
 function makeState(
   objects: GameObject[],
   ringBearer?: Record<string, ObjectId | null>,
+  unboundedPile?: ObjectId[],
 ) {
-  return buildGameState({ objects: buildObjectMap(...objects), ring_bearer: ringBearer });
+  return buildGameState({
+    objects: buildObjectMap(...objects),
+    ring_bearer: ringBearer,
+    // CR 732.2a: engine-authored ∞-pile membership (mirrors DerivedViews::unbounded_pile).
+    derived: unboundedPile ? { unbounded_pile: unboundedPile } : undefined,
+  });
 }
 
 describe("evenSplit", () => {
@@ -115,6 +121,34 @@ describe("groupAttackers", () => {
     const stacks = groupAttackers([3, 1, 2], null);
     expect(stacks.map((s) => s.ids)).toEqual([[1], [2], [3]]);
     expect(stacks.every((s) => s.count === 1 && s.representative === null)).toBe(true);
+    // The ∞-pile flag defaults false when there is no state to consult.
+    expect(stacks.every((s) => s.isUnboundedPile === false)).toBe(true);
+  });
+
+  // CR 732.2a: the rebuilt AttackerStack must carry `isUnboundedPile` from
+  // groupByName so the picker renders `∞`. Reachable because the ∞ pile is a
+  // persistent object-id snapshot (derived_views.rs re-filters only on battlefield
+  // membership, not `tapped`), so a member that untaps on a later turn can attack.
+  // Discriminating: the pile stack (Goblin) and the non-pile stack (Elf) differ
+  // only by membership — dropping the `unbounded_pile` thread in groupAttackers
+  // flips the Goblin stack to `false` and this assertion fails.
+  it("carries ∞-pile membership onto the rebuilt stack shape", () => {
+    const state = makeState(
+      [
+        makeObject({ id: 101 }),
+        makeObject({ id: 102 }),
+        makeObject({ id: 200, name: "Elf", power: 2, toughness: 2 }),
+      ],
+      undefined,
+      [101, 102],
+    );
+
+    const stacks = groupAttackers([200, 101, 102], state);
+    const goblins = stacks.find((s) => s.name === "Goblin");
+    const elf = stacks.find((s) => s.name === "Elf");
+
+    expect(goblins?.isUnboundedPile).toBe(true);
+    expect(elf?.isUnboundedPile).toBe(false);
   });
 
   it("splits identically-named attackers with different legal-target sets into separate stacks", () => {

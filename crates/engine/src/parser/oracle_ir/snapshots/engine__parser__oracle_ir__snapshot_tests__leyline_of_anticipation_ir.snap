@@ -66,29 +66,33 @@ expression: "&ir"
         "fragment": "You may cast spells as though they had flash."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": {
-            "CastWithKeyword": {
-              "keyword": "Flash"
-            }
-          },
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Card"
+        "Static": {
+          "definition": {
+            "mode": {
+              "CastWithKeyword": {
+                "keyword": "Flash"
+              }
+            },
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Card"
+              ],
+              "controller": "You",
+              "properties": []
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [
+              "Battlefield"
             ],
-            "controller": "You",
-            "properties": []
+            "characteristic_defining": false,
+            "description": "You may cast spells as though they had flash."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [
-            "Battlefield"
-          ],
-          "characteristic_defining": false,
-          "description": "You may cast spells as though they had flash."
+          "source_text": "You may cast spells as though they had flash.",
+          "body_ir": null
         }
       }
     }

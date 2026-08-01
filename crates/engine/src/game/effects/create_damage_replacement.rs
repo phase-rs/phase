@@ -112,8 +112,10 @@ pub fn resolve(
                     // (CR 609.7a) — fall through with no source filter rather
                     // than wedging on an empty prompt.
                     if !options.is_empty() {
-                        state.pending_continuation =
-                            Some(PendingContinuation::new(Box::new(ability.clone()), state));
+                        state.park_ability_continuation(PendingContinuation::new(
+                            Box::new(ability.clone()),
+                            state,
+                        ));
                         state.waiting_for = WaitingFor::DamageSourceChoice {
                             player: ability.controller,
                             source_filter: prompt_filter,
@@ -841,12 +843,12 @@ mod tests {
             source_id: chosen_source,
             source_filter: TargetFilter::ChosenDamageSource { filter: None },
         });
-        let cont = state
-            .pending_continuation
-            .take()
+        let frame = state
+            .take_active_ability_continuation()
+            .expect("fixture cannot consume a buried continuation")
             .expect("self-continuation stashed");
         let mut events = Vec::new();
-        resolve(&mut state, &cont.chain, &mut events).unwrap();
+        resolve(&mut state, &frame.pending.chain, &mut events).unwrap();
         state.last_chosen_damage_source = None; // mirror the handler clearing it.
 
         // The shield captured a DURABLE SpecificObject filter for the chosen source.

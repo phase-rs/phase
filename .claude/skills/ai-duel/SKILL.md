@@ -72,6 +72,23 @@ rtk ./scripts/refresh-ai-baseline.sh
 rtk cargo ai-gate
 ```
 
+**Exception — deadline / wall-clock-budget changes are inert under the gate; do
+NOT refresh the baseline for them.** Because measurement mode nulls the
+wall-clock budget (`PlannerServices::with_deadline` forces `Deadline::none()`
+whenever `execution_mode.is_measurement()`, and `Deadline::none().expired()` is
+always `false`), any code guarded by `self.deadline.expired()` is a dead branch
+during `ai-gate`, so the run is byte-identical and **zero baseline movement is
+the *expected* result** — not evidence the change did nothing. If `ai-gate`
+diverges after a deadline-only change, that is a bug (a guard fired on a live
+path), not a baseline event: fix the guard, don't refresh baselines to silence
+it. Unit-test such guards by injecting
+`with_deadline(..., Some(Deadline::after(0)))` on a **non-measurement** config —
+a `.into_measurement()` config nulls the injected deadline, so the guard never
+fires and the test passes vacuously — and assert `services.deadline.expired()`
+as a witness before the negative assertion. Example: PR #6255 bounded the
+`quiesce` / `sample_backfilled_continuations` search apply-loops this way with
+no baseline change.
+
 ## Performance Guide
 
 All times are release mode (`--release`). Debug mode is 5-10x slower.

@@ -257,11 +257,13 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, ResolvedAbility, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, ResolvedAbility,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
-    use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
+    use engine::types::game_state::{
+        GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    };
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
@@ -302,10 +304,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority {
@@ -445,6 +444,8 @@ mod tests {
                 legal_targets: legal_targets.clone(),
                 optional: false,
                 chooser: None,
+                effect_kind: EffectKind::NoOp,
+                effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
             selection: Default::default(),
@@ -462,10 +463,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -575,6 +573,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -588,10 +588,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -668,6 +665,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -681,10 +680,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,

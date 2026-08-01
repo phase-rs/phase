@@ -96,21 +96,30 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
-    let Some(nested_raw) = obj.get(DRAFT_SESSION_JSON_KEY).and_then(|v| v.as_str()) else {
+    let Some(nested_value) = obj.get_mut(DRAFT_SESSION_JSON_KEY) else {
         return;
     };
-    let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
-        return;
-    };
-    let Some(nested_obj) = nested.as_object_mut() else {
-        return;
-    };
-    redact_draft_session_object(nested_obj);
-    if let Ok(serialized) = serde_json::to_string(&nested) {
-        obj.insert(
-            DRAFT_SESSION_JSON_KEY.to_string(),
-            Value::String(serialized),
-        );
+    match nested_value {
+        // Canonical shape: the session serialized into a JSON string. Parse,
+        // redact, re-serialize so the field keeps its wire type.
+        Value::String(nested_raw) => {
+            let Ok(mut nested) = serde_json::from_str::<Value>(nested_raw) else {
+                return;
+            };
+            let Some(nested_obj) = nested.as_object_mut() else {
+                return;
+            };
+            redact_draft_session_object(nested_obj);
+            if let Ok(serialized) = serde_json::to_string(&nested) {
+                *nested_value = Value::String(serialized);
+            }
+        }
+        // The same payload sent inline as an object. `snapshot_json` is an
+        // opaque host-supplied blob, so nothing upstream pins the field to a
+        // string — matching only the string shape let a host keep unopened
+        // packs and the rng seed simply by not encoding them twice.
+        Value::Object(nested_obj) => redact_draft_session_object(nested_obj),
+        _ => {}
     }
 }
 
@@ -232,6 +241,49 @@ mod tests {
         assert_eq!(nested_out["config"]["rng_seed"], 0);
         assert!(nested_out.get("packs_by_seat").is_none());
         assert_eq!(nested_out["status"], "Drafting");
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_strips_object_shaped_draft_session() {
+        // `snapshot_json` is an opaque host-supplied blob, so nothing upstream
+        // pins `draftSessionJson` to a string. Sending the identical payload
+        // inline as an object used to skip redaction entirely, persisting the
+        // unopened packs and the rng seed and echoing both from
+        // `GET /p2p-draft-backup/{code}`.
+        let raw = serde_json::json!({
+            "draftCode": "ABC123",
+            "draftSessionJson": {
+                "draft_code": "ABC123",
+                "config": { "rng_seed": 42, "pod_size": 8 },
+                "packs_by_seat": [[{"card_id": "secret-pack"}]],
+                "status": "Drafting"
+            },
+            "seatTokens": { "0": "host-secret" }
+        });
+
+        let redacted =
+            redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert!(parsed.get("seatTokens").is_none());
+        let nested_out = &parsed["draftSessionJson"];
+        assert_eq!(nested_out["config"]["rng_seed"], 0);
+        assert!(nested_out.get("packs_by_seat").is_none());
+        // Untouched fields survive, and the field keeps the shape it arrived in.
+        assert_eq!(nested_out["status"], "Drafting");
+        assert_eq!(nested_out["config"]["pod_size"], 8);
+    }
+
+    #[test]
+    fn redact_p2p_backup_snapshot_secrets_leaves_non_session_shapes_alone() {
+        // A `draftSessionJson` that is neither a string nor an object carries no
+        // session to redact; it must pass through rather than error.
+        let raw = serde_json::json!({ "draftSessionJson": 7, "draftStarted": true });
+        let redacted =
+            redact_p2p_backup_snapshot_secrets(&raw.to_string()).expect("valid snapshot");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["draftSessionJson"], 7);
+        assert_eq!(parsed["draftStarted"], true);
     }
 
     #[test]

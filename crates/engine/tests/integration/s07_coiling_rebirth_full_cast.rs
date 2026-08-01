@@ -73,6 +73,12 @@ fn run_coiling(promise_gift: bool, legendary: bool) -> usize {
                     .act(GameAction::DecideOptionalCost { pay: promise_gift })
                     .expect("decide gift");
             }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates[0];
+                runner
+                    .act(GameAction::ChooseGiftRecipient { opponent })
+                    .expect("choose gift recipient");
+            }
             WaitingFor::TargetSelection { .. } => {
                 runner
                     .act(GameAction::ChooseTarget {

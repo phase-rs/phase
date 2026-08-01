@@ -15,6 +15,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::strip_reminder_text;
 
@@ -121,7 +122,7 @@ fn is_chapter_body_continuation(line: &str) -> bool {
 /// the `(line, ETB replacement)` pair, and the set of consumed line indices.
 type SagaChaptersParse = (
     Vec<(usize, TriggerDefinition)>,
-    (usize, ReplacementDefinition),
+    (usize, ReplacementIr),
     HashSet<usize>,
 );
 
@@ -203,6 +204,15 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
     }
 
     // CR 714.3a: As a Saga enters the battlefield, its controller puts a lore counter on it.
+    //
+    // Provenance convention for a SYNTHESIZED rule item: the source text is the
+    // definition's own description. CR 714.3a prints no line — the rule applies
+    // from the subtype alone — so there is no Oracle slice to cite. Naming the
+    // first chapter's line instead would be a lie the anchor already tempts us
+    // into: `etb_line` points there for ordering, but the chapter-I trigger owns
+    // that text. A synthetic label cannot be located in the Oracle text, which is
+    // the honest answer for an item that was never printed.
+    const ETB_SYNTHETIC_SOURCE: &str = "Saga ETB lore counter";
     let etb_replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -214,7 +224,8 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
         ))
         .valid_card(TargetFilter::SelfRef)
         .destination_zone(Zone::Battlefield)
-        .description("Saga ETB lore counter".to_string());
+        .description(ETB_SYNTHETIC_SOURCE.to_string());
+    let etb_replacement = ReplacementIr::from_definition(ETB_SYNTHETIC_SOURCE, etb_replacement);
 
     // CR 714.3a: the ETB lore-counter replacement has no printed line of its own;
     // anchor it at the FIRST chapter's line so it emits at/near the front of the
@@ -318,7 +329,7 @@ mod tests {
         let (triggers, (_, etb), consumed) = parse_saga_chapters(lines, name);
         (
             triggers.into_iter().map(|(_, t)| t).collect(),
-            etb,
+            etb.definition,
             consumed,
         )
     }
@@ -578,6 +589,89 @@ mod tests {
         );
     }
 
+    /// CR 611.2b + CR 714.2b + CR 602.5: Roar of the Fifth People chapter II
+    /// grants the Saga a static ability whose text is "Creatures you control have
+    /// '{T}: Add {R}, {G}, or {W}.'". The nested single-quoted tap ability must
+    /// parse as a `GrantStaticAbility` on creatures you control — NOT a broken
+    /// activated ability on the Saga itself (#5978).
+    #[test]
+    fn roar_chapter_two_grants_creature_tap_mana_ability() {
+        use crate::game::mana_abilities::is_mana_ability;
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, ManaProduction, TypeFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        let lines = vec![
+            "II — This Saga gains \"Creatures you control have '{T}: Add {R}, {G}, or {W}.'\"",
+        ];
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Roar of the Fifth People");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().unwrap();
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*exec.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", exec.effect);
+        };
+        assert_eq!(
+            duration.as_ref(),
+            Some(&Duration::UntilHostLeavesPlay),
+            "chapter-granted ability must persist while saga is in play"
+        );
+        let ContinuousModification::GrantStaticAbility { definition } =
+            &static_abilities[0].modifications[0]
+        else {
+            panic!(
+                "expected GrantStaticAbility for nested static grant, got {:?}",
+                static_abilities[0].modifications
+            );
+        };
+        let affected = definition
+            .affected
+            .as_ref()
+            .expect("inner static must scope creatures you control");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+        let ContinuousModification::GrantAbility {
+            definition: granted,
+        } = &definition
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .expect("inner static must grant the tap mana ability")
+        else {
+            unreachable!();
+        };
+        assert!(
+            is_mana_ability(granted),
+            "granted ability must be a mana ability"
+        );
+        assert!(
+            matches!(&*granted.effect, Effect::Mana { .. }),
+            "granted ability must add mana, got {:?}",
+            granted.effect
+        );
+        if let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { color_options, .. },
+            ..
+        } = &*granted.effect
+        {
+            assert!(color_options.contains(&ManaColor::Red));
+            assert!(color_options.contains(&ManaColor::Green));
+            assert!(color_options.contains(&ManaColor::White));
+        } else {
+            panic!("expected AnyOneColor mana production");
+        }
+    }
+
     /// CR 514.2: Roar of the Fifth People chapter IV explicitly says "until end
     /// of turn" — the explicit duration must NOT be promoted to
     /// `UntilHostLeavesPlay`. Regression guard for the promoter's
@@ -728,6 +822,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
             } => {}
             other => panic!("expected ExileTop(controller, 3), got {other:?}"),

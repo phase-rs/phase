@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Prova l'anteprima",
-      "tooltip": "Gioca l'ultima build di anteprima — le carte e le correzioni più recenti arrivano qui prima di ogni rilascio."
+      "tooltip": "Gioca l'ultima build di anteprima — le carte e le correzioni più recenti arrivano qui prima di ogni rilascio.",
+      "backCta": "Torna alla versione stabile",
+      "backTooltip": "Torna alla versione di rilascio corrente."
     },
     "coverage": {
       "title": "Apri la dashboard della copertura",

@@ -86,6 +86,7 @@ export const useReplayStore = create<ReplayStore>()((set, get) => ({
         gameMode: "spectate",
         adapter,
         legalActions: [],
+        endContinuousEffectOffers: [],
         legalActionsByObject: {},
         autoPassRecommended: false,
         spellCosts: {},

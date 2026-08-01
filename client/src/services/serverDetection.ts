@@ -1,4 +1,4 @@
-import { isTauri } from "./sidecar";
+import { isTauri } from "./platform";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,

@@ -129,6 +129,15 @@ export interface AttackerStack {
    * bucket).
    */
   targets: AttackTarget[];
+  /**
+   * CR 732.2a: every member of this stack is in an accepted object-growth loop's
+   * engine-authored "∞ pile", so the picker renders `∞` instead of `×N`. Carried
+   * through from `groupByName`'s `isUnboundedPile` (see `derived.unbounded_pile`).
+   * Reachable: the pile is a persistent object-id snapshot (`derived_views.rs`
+   * re-filters only by battlefield membership, not `tapped`), so a member that
+   * untaps on a later turn stays in the pile and can be declared an attacker.
+   */
+  isUnboundedPile: boolean;
 }
 
 /**
@@ -163,6 +172,7 @@ export function groupAttackers(
         count: 1,
         representative: null,
         targets: targetsFor?.(id) ?? [],
+        isUnboundedPile: false,
       }));
   }
 
@@ -174,26 +184,50 @@ export function groupAttackers(
   const ringBearerIds = new Set(
     Object.values(state.ring_bearer ?? {}).filter((id): id is ObjectId => id != null),
   );
+  // CR 732.2a: engine-authored ∞-pile membership, threaded so the picker renders
+  // `∞` like the battlefield (mirrors buildPlayerBattlefieldView in gameStateView.ts).
+  const unboundedPileIds = new Set(state.derived?.unbounded_pile ?? []);
 
-  return groupByName(objects, ringBearerIds)
-    .flatMap((group) => subdivideByTargets([...group.ids], group.name, state, targetsFor))
+  return groupByName(objects, ringBearerIds, unboundedPileIds)
+    .flatMap((group) =>
+      subdivideByTargets(
+        [...group.ids],
+        group.name,
+        state,
+        targetsFor,
+        group.isUnboundedPile,
+      ),
+    )
     .sort((a, b) => a.ids[0] - b.ids[0]);
 }
 
 /**
  * Split one name-group into stacks sharing an identical legal-target set. With
  * no `targetsFor` the group stays whole (legacy). Sub-stacks and their members
- * are ascending-id sorted so stepper moves stay deterministic.
+ * are ascending-id sorted so stepper moves stay deterministic. Each returned
+ * stack inherits the group's `isUnboundedPile` (CR 732.2a ∞-pile membership is a
+ * per-name property, independent of the legal-target subdivision).
  */
 function subdivideByTargets(
   ids: ObjectId[],
   name: string,
   state: GameState,
-  targetsFor?: (id: ObjectId) => AttackTarget[],
+  targetsFor: ((id: ObjectId) => AttackTarget[]) | undefined,
+  isUnboundedPile: boolean,
 ): AttackerStack[] {
   const sorted = [...ids].sort((a, b) => a - b);
   if (!targetsFor) {
-    return [{ key: String(sorted[0]), name, ids: sorted, count: sorted.length, representative: state.objects[sorted[0]] ?? null, targets: [] }];
+    return [
+      {
+        key: String(sorted[0]),
+        name,
+        ids: sorted,
+        count: sorted.length,
+        representative: state.objects[sorted[0]] ?? null,
+        targets: [],
+        isUnboundedPile,
+      },
+    ];
   }
 
   // Bucket members by the canonical signature of their legal-target set.
@@ -214,6 +248,7 @@ function subdivideByTargets(
       count: bucketIds.length,
       representative: state.objects[bucketIds[0]] ?? null,
       targets,
+      isUnboundedPile,
     }))
     .sort((a, b) => a.ids[0] - b.ids[0]);
 }

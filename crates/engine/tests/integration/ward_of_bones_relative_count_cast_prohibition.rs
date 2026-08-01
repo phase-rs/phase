@@ -208,6 +208,42 @@ fn more_enchantments_blocks_only_enchantment_spells() {
     );
 }
 
+/// Boundary case: P1 controls the SAME number of creatures as P0 (1 vs 1), not
+/// STRICTLY more. "More than" is a strict inequality (`Comparator::GT`); the
+/// prohibition must not fire on a tie. This is the one case the per-type tests
+/// above never probe (they only ever use a strict count difference), so it's the
+/// discriminating regression guard against the comparator silently regressing to
+/// `GE` (which would wrongly block casts whenever the counts are merely equal).
+#[test]
+fn equal_creature_count_does_not_block_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature(P0, "Ward of Bones", 0, 0)
+        .as_artifact()
+        .from_oracle_text(WARD_OF_BONES_CAST_LINE);
+    // P0 controls one creature — the threshold P1 must EXCEED, not merely meet.
+    scenario.add_creature(P0, "P0 Bear", 2, 2);
+    // P1 controls exactly one creature: equal to P0's count, not more.
+    scenario.add_creature(P1, "P1 Bear", 2, 2);
+
+    let creature_spell = zero_creature_spell(&mut scenario, P1);
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+
+    // Equal counts are not "more than" → the prohibition must not apply. FAILS
+    // if `Comparator::GT` ever regresses to `GE`.
+    assert!(
+        can_cast_object_now(runner.state(), P1, creature_spell),
+        "P1 controls the SAME number of creatures as you (1 vs 1), not more → \
+         the creature spell must stay castable (regression guard for GT vs GE)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Two-Headed Giant: "each opponent" must not treat a TEAMMATE as an opponent
 // on the CAST seam (sibling of the land-play fix).

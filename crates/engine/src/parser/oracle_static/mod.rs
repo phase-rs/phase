@@ -127,7 +127,7 @@ mod support {
         apply_spell_keyword_subject_constraints, fold_grant_cap_rider,
         parse_chosen_qualifier_subject, parse_continuous_modifications,
         parse_quoted_ability_modifications, push_grant_clause_modifications, split_keyword_list,
-        RuleStaticPredicate,
+        with_protection_does_not_remove, RuleStaticPredicate,
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
@@ -154,12 +154,15 @@ pub(crate) use evasion::{
 };
 pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
+pub(crate) use grammar::promote_nested_ability_quotes;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
-pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
+pub(crate) use mana_transform::{
+    is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
+};
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
@@ -217,9 +220,28 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 }
 
 /// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
+///
+/// **Every transform added here must be idempotent.** Recognizers that already
+/// call `parse_static_line` (which lowers internally, above) and then hand the
+/// result to `StaticIr::from_definition` cause this function to run a second
+/// time over an already-lowered definition — the Class level-section arms in
+/// `oracle_class.rs` are the current example, and they interpose
+/// `wrap_static_with_class_level` between the two passes, so a transform must
+/// also be stable under a condition it did not see on the first pass. Both
+/// transforms below satisfy this today: `populate_active_zones_from_condition`
+/// self-guards on `active_zones.is_empty()` and its collector ignores
+/// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
+/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// non-idempotent transform added here would silently double-apply across every
+/// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {
     let mut def = ir.definition.clone();
     shared::populate_active_zones_from_condition(&mut def);
+    // CR 611.3a: a bare counter anaphor in a per-recipient continuous static
+    // names the affected object, not the source. Rebound here — after every
+    // builder has produced its definition — so the transform is single-authority
+    // rather than repeated in anthem / type_change / grammar.
+    shared::bind_counter_anaphor_to_recipient(&mut def);
     def
 }
 

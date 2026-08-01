@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Essayer l'aperçu",
-      "tooltip": "Jouez la dernière version d'aperçu — les nouvelles cartes et corrections arrivent ici avant chaque sortie."
+      "tooltip": "Jouez la dernière version d'aperçu — les nouvelles cartes et corrections arrivent ici avant chaque sortie.",
+      "backCta": "Retour à la version stable",
+      "backTooltip": "Revenir à la version de sortie actuelle."
     },
     "coverage": {
       "title": "Ouvrir le tableau de bord de couverture",

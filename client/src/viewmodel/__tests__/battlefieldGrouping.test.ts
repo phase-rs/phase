@@ -568,4 +568,51 @@ describe("groupByName", () => {
       count: 2,
     });
   });
+
+  // DESIGN STEP 4 (∞-pile): groupByName marks a group isUnboundedPile iff EVERY
+  // member is in the engine-authored pile set (CR 732.2a).
+  it("marks a group isUnboundedPile only when all members are in the pile set", () => {
+    const tappedFodder = [
+      makeGameObject({
+        id: 1,
+        tapped: true,
+        name: "Saproling",
+        power: 1,
+        toughness: 1,
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
+      }),
+      makeGameObject({
+        id: 2,
+        tapped: true,
+        name: "Saproling",
+        power: 1,
+        toughness: 1,
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
+      }),
+    ];
+    const pile = new Set([1, 2]);
+
+    // Both tapped Saprolings are pile members → the group is ∞.
+    const infinite = groupByName(tappedFodder, undefined, pile);
+    expect(infinite).toHaveLength(1);
+    expect(infinite[0].isUnboundedPile).toBe(true);
+
+    // An UNtapped Saproling groups separately (groupKey splits on tapped) and is
+    // NOT in the pile → its group is ×N, not ∞.
+    const untapped = makeGameObject({
+      id: 3,
+      tapped: false,
+      name: "Saproling",
+      power: 1,
+      toughness: 1,
+      card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
+    });
+    const mixed = groupByName([...tappedFodder, untapped], undefined, pile);
+    const untappedGroup = mixed.find((g) => g.ids.includes(3));
+    expect(untappedGroup?.isUnboundedPile).toBe(false);
+
+    // Empty pile set → no group is ∞ (the dominant no-loop case; also the default).
+    expect(groupByName(tappedFodder)[0].isUnboundedPile).toBe(false);
+    expect(groupByName(tappedFodder, undefined, new Set())[0].isUnboundedPile).toBe(false);
+  });
 });

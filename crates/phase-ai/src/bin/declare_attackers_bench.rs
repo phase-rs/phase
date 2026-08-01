@@ -23,6 +23,12 @@
 //! Counters are profile-independent; only the absolute per-call times inflate
 //! in a debug build. Prefer debug for fast iteration on the scaling shape.
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::Write;
 use std::time::Instant;
 

@@ -21,3 +21,19 @@ engine-inventory = "run --quiet -p engine-inventory-gen"
 # 16 MB stack for test threads — prevents stack overflow when Debug formatting
 # deeply nested recursive types (Effect ↔ AbilityDefinition mutual recursion).
 RUST_MIN_STACK = "16777216"
+
+# Shipped WASM gets a 16 MiB shadow stack; wasm-ld's default is 1 MiB.
+# The engine assumes native's 16 MiB (RUST_MIN_STACK above): deep paths include
+# Debug-formatting the Effect <-> AbilityDefinition recursion and the CR 732.2a
+# accept-time loop replay (drive_persistent_axis_collapse -> drive_loop_sequence_
+# iteration -> apply -- a large GameAction match + by-value GameState/ActionResult
+# frames). One period's release-optimized replay needs 1-2 MiB (measured: SIGABRTs
+# a 1 MiB thread, survives 2 MiB); the 1 MiB default overflowed on replay cycle 1
+# -> instant "engine connection lost". Matching 16 MiB means a path that fits
+# natively cannot overflow only in WASM. Cost is a one-time ~15 MiB linear-memory
+# reservation per flagged module (engine-wasm, draft-wasm, broker-wasm), NOT
+# download size (payload/.wasm size effectively unchanged). scripts/build-wasm.sh
+# guards this by asserting the shipped engine module's initial memory min.
+# `-z stack-size=N` is two wasm-ld argv tokens, hence two `-C link-arg`s.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-z", "-C", "link-arg=stack-size=16777216"]

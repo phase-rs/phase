@@ -21,6 +21,13 @@ use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::match_config::MatchConfig;
 use serde::{Deserialize, Serialize};
 
+/// Machine-readable reasons for server error replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerErrorCode {
+    DeckRejected,
+}
+
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
@@ -31,8 +38,17 @@ use serde::{Deserialize, Serialize};
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 23 — `PayableResource::ManaGeneric` changed from `{ per_x }` to
+///      `{ base_cost: ManaCost }` (#6410) — a `GameState` payload field type
+///      change, and `base_cost` intentionally carries no `#[serde(default)]`
+///      (a missing `base_cost` must fail deserialization, not silently
+///      resolve to a zero-cost payment), so old and new peers can't parse
+///      each other's serialized snapshots.
+/// 20 — Actor-scoped priority-passing settings and filtered per-player state.
 /// 19 — Connive's exact `EventObjectSnapshot` subject and resident paused
-///      post-replacement drains changed serialized full-game state.
+///      post-replacement drains changed serialized full-game state. Phase 4
+///      later pinned the existing v2 resolution wire shape; it did not add a
+///      second protocol change.
 /// 18 — Serialized GameState trigger provenance and paused logical zone-change
 ///      owners are now wire-visible.
 /// 16 — Meld pair/attacking-entry choices after mana-payment preview variants.
@@ -42,7 +58,7 @@ use serde::{Deserialize, Serialize};
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -221,6 +237,8 @@ pub enum LobbyServerMessage {
     },
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ServerErrorCode>,
     },
     LobbyUpdate {
         games: Vec<LobbyGame>,
@@ -269,6 +287,15 @@ pub enum LobbyServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
+}
+
+impl LobbyServerMessage {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
 }
 
 /// Advertised role of the server. Mirrors `server_core::protocol::ServerMode`
@@ -367,9 +394,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_tracks_resolution_state_wire_changes() {
-        assert_eq!(PROTOCOL_VERSION, 19);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 18);
+    fn protocol_version_tracks_priority_passing_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 23);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 22);
     }
 
     #[test]

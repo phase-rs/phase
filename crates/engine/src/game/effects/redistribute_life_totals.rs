@@ -428,7 +428,7 @@ mod tests {
             WaitingFor::RedistributeLifeTotals { .. }
         ));
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "sub-ability must be stashed while redistribution waits"
         );
 
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(state.players[0].life, 20);
         assert_eq!(state.players[1].life, 5);
         assert!(
-            state.pending_life_total_assignment.is_some(),
+            state.active_life_total_assignment().is_some(),
             "remaining redistribution deltas must survive the replacement prompt"
         );
 
@@ -464,8 +464,8 @@ mod tests {
 
         assert_eq!(state.players[0].life, 7, "swap to 5, then chained +2");
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_life_total_assignment.is_none());
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_life_total_assignment().is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 

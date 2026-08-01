@@ -15,7 +15,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
-    is_runtime_target_die_exile_replacement,
+    is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
@@ -49,6 +49,7 @@ use crate::types::zones::Zone;
 struct ActiveCombatAssignmentRuleEffect {
     source_id: ObjectId,
     controller: PlayerId,
+    transient_id: Option<u64>,
     timestamp: u64,
     modification: ContinuousModification,
     affected_filter: TargetFilter,
@@ -243,6 +244,50 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
     }
 }
 
+/// CR 500.4 + CR 503.1: "As a step or phase begins, if there are effects that
+/// last until that step or phase, those effects expire." Removes transient
+/// continuous effects whose `Duration::UntilNextStepOf { step: Phase::Upkeep, .. }`
+/// deadline is the upkeep step now beginning. Called from
+/// `turns.rs::auto_advance` at the Upkeep phase (after its skip check, per
+/// CR 614.10a).
+///
+/// Exact mirror of `prune_until_next_end_step_effects` one step axis over, and
+/// it exists for the same reason: the parser's step-deadline production
+/// (`oracle_nom::duration::parse_until_next_step`) emits this duration for the
+/// "until \[the beginning of\] your next upkeep" phrase — printed by 9 cards,
+/// among them Xenic Poltergeist, Erhnam Djinn, Gabriel Angelfire, Elkin Bottle
+/// and Grinning Totem — so the effect must be pruned by its scheduled step
+/// instead of outliving it. Both `PlayerScope` arms the grammar can produce are
+/// handled here, so no emitted shape is left unenforced.
+pub fn prune_until_next_upkeep_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        // CR 503.1: "your next upkeep" — CONTROLLER-scoped, so it expires only
+        // at that controller's own upkeep step.
+        let controller_scoped = matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player;
+        // CR 611.2a: definite-article "the next upkeep" states a step without
+        // naming whose it is, so the deadline is turn-AGNOSTIC — it expires at
+        // the FIRST upkeep step to occur, ungated by `active_player`.
+        let turn_agnostic = matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::AnyTurn
+            }
+        );
+        !(controller_scoped || turn_agnostic)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 514.2: Remove durational casting permissions whose
 /// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
 /// alongside `prune_end_of_turn_effects`.
@@ -285,9 +330,11 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                     },
                 ..
             } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }:
-            // these are pruned by their own systems (zone-exit cleanup, condition
-            // re-evaluation, untap step). Retain here — they are not end-of-turn.
+            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }
+            // / UntilNextStepOf { step: Upkeep }: these are pruned by their own
+            // systems (zone-exit cleanup, condition re-evaluation, untap step,
+            // and `prune_upkeep_step_casting_permissions` at the Upkeep phase).
+            // Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
             // CR 702.88a: Rebound's upkeep recast offer carries
             // `duration: Some(UntilEndOfTurn)` so the granted "cast this
@@ -525,6 +572,76 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
     }
 }
 
+/// CR 500.4 + CR 503.1: Remove durational casting permissions granted to
+/// `active_player` whose `Duration::UntilNextStepOf { step: Upkeep, player: Controller }`
+/// expires as that player's upkeep step begins. Called from
+/// `turns.rs::auto_advance` at the Upkeep phase, next to
+/// `prune_until_next_upkeep_effects`.
+///
+/// Exact mirror of `prune_end_step_casting_permissions` one step axis over,
+/// including its `exiled_by_ability_controller`-before-`granted_to` keying. It
+/// is the *casting-permission* half of the upkeep deadline: Elkin Bottle and
+/// Grinning Totem lower "Until the beginning of your next upkeep, you may play
+/// that card" to `CastingPermission::PlayFromExile { duration: … Upkeep … }`, not
+/// to a transient continuous effect, so without this the play permission would
+/// never expire — `prune_end_of_turn_casting_permissions`'s catch-all
+/// deliberately retains every non-end-step durational shape for its own system
+/// to handle, and before this function the upkeep shape had no such system.
+pub fn prune_upkeep_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.casting_permissions.retain(|p| match p {
+            CastingPermission::PlayFromExile {
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::Controller,
+                    },
+                granted_to,
+                exiled_by_ability_controller,
+                ..
+            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
+            // CR 503.1: durational `ExileWithAltCost` mirrors `PlayFromExile`,
+            // exactly as it does for the end-step deadline.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
+            // CR 611.2a: the turn-AGNOSTIC stated duration names no player, so
+            // it expires at the first upkeep step and is not keyed on
+            // `active_player` at all.
+            CastingPermission::PlayFromExile {
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::AnyTurn,
+                    },
+                ..
+            } => false,
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::Upkeep,
+                        player: PlayerScope::AnyTurn,
+                    }),
+                ..
+            } => false,
+            CastingPermission::PlayFromExile { .. }
+            | CastingPermission::AdventureCreature
+            | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
+            | CastingPermission::ExileWithEnergyCost
+            | CastingPermission::WarpExile { .. }
+            | CastingPermission::Plotted { .. }
+            | CastingPermission::Foretold { .. } => true,
+        });
+    }
+}
+
 /// Remove transient `UntilNextTurnOf { Controller }` effects whose controller's
 /// turn is starting. Called at the start of the active player's turn (untap step)
 /// per CR 514.2.
@@ -578,9 +695,26 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 /// CR 502.3: Prune "until controller's next untap step" transient effects
 /// for permanents controlled by the active player. Called during the untap step
 /// AFTER enforcing the CantUntap restriction (so the permanent skips exactly one untap).
+///
+/// CR 611.2a: the turn-AGNOSTIC `PlayerScope::AnyTurn` form ("the next untap
+/// step") states a step without naming whose it is, so it expires at the FIRST
+/// untap step to occur and is dropped without consulting the affected object's
+/// controller. Handling it here keeps every
+/// `(step, player)` pair `oracle_nom::duration::parse_until_next_step` can emit
+/// enforced, mirroring the two-scope handling in
+/// `prune_until_next_end_step_effects` / `prune_until_next_upkeep_effects`.
 pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player: PlayerId) {
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
+        if matches!(
+            e.duration,
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::AnyTurn
+            }
+        ) {
+            return false;
+        }
         if !matches!(
             e.duration,
             Duration::UntilNextStepOf {
@@ -694,9 +828,13 @@ pub(crate) fn prune_lapsed_controller_controls_source(state: &mut GameState) {
 /// CR 611.2b + CR 400.7: the captured source leaving play, OR the host leaving
 /// and re-entering as a new object (same storage ObjectId), ends the can't-untap
 /// continuous effect permanently — drop the gated def from base+live so it
-/// cannot revive on a same-ObjectId re-entry. Called from `zones.rs` on a
-/// battlefield exit, OUTSIDE `evaluate_layers`, so it marks layers full on change
-/// (mirroring `prune_host_left_effects`).
+/// cannot revive on a same-ObjectId re-entry. The same host-left arm also drops
+/// the turn-bound die-exile rider and the host-lifetime exile rider
+/// (`UntilHostLeavesPlay`, CR 702.84a): a base-installed rider must NOT revive
+/// when the object re-enters as a new CR 400.7 object reusing the same storage
+/// key. Called from `zones.rs` (`:481`) on a battlefield exit, OUTSIDE
+/// `evaluate_layers`, so it marks layers full on change (mirroring
+/// `prune_host_left_effects`).
 ///
 /// The predicate is purely id-based (`departed_id`), so no `&state` gate read is
 /// needed — each object is mutated in a single pass: case (b) the captured
@@ -720,15 +858,20 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def or a
-        // turn-bound die-exile rider on the departing host is eligible to be dropped.
-        // The host-left arm must not wipe printed replacements or unrelated runtime riders.
+        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def, a
+        // turn-bound die-exile rider, or a host-lifetime exile rider
+        // (`UntilHostLeavesPlay`, CR 702.84a) on the departing host is eligible
+        // to be dropped. The host-left arm must not wipe printed replacements or
+        // unrelated runtime riders. Dropping the host-lifetime rider from
+        // base+live here is what prevents it reviving on a same-ObjectId
+        // re-entry (CR 400.7 — the returning object is new).
         let drop = |def: &crate::types::ability::ReplacementDefinition| {
             (matches!(
                 def.condition,
                 Some(ReplacementCondition::ControllerControlsSource { .. })
             ) && is_lapsed(def))
                 || (host_left && is_runtime_target_die_exile_replacement(def))
+                || (host_left && is_runtime_host_lifetime_replacement(def))
         };
         let before_live = obj.replacement_definitions.len();
         obj.replacement_definitions.retain(|d| !drop(d));
@@ -774,6 +917,54 @@ pub(crate) fn evaluate_condition_with_recipient(
     recipient_id: ObjectId,
 ) -> bool {
     evaluate_condition_with_context(state, condition, controller, source_id, Some(recipient_id))
+}
+
+/// Selects the controller that supplies "you" for an active effect's
+/// condition. Printed and granted static abilities read their source's current
+/// controller; resolution-created transient continuous effects retain the
+/// controller that created them.
+pub(crate) fn active_effect_condition_controller(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> PlayerId {
+    condition_controller(
+        state,
+        effect.transient_id,
+        effect.controller,
+        effect.source_id,
+    )
+}
+
+fn combat_effect_condition_controller(
+    state: &GameState,
+    effect: &ActiveCombatAssignmentRuleEffect,
+) -> PlayerId {
+    condition_controller(
+        state,
+        effect.transient_id,
+        effect.controller,
+        effect.source_id,
+    )
+}
+
+/// Resolves the player named by "you" for a condition on either a printed or
+/// resolution-created continuous effect.
+// CR 109.5: "you"/"your" on a static ability refers to the current controller
+// of its source, while a resolved spell or ability retains its controller.
+fn condition_controller(
+    state: &GameState,
+    transient_id: Option<u64>,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> PlayerId {
+    if transient_id.is_some() {
+        controller
+    } else {
+        state
+            .objects
+            .get(&source_id)
+            .map_or(controller, |source| source.controller)
+    }
 }
 
 fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
@@ -2243,6 +2434,7 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
+    crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
 }
 
@@ -2384,6 +2576,8 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -2718,6 +2912,8 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -2982,6 +3178,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -3322,15 +3519,10 @@ pub(crate) fn incremental_flush_must_escalate(
     }
 
     // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
-    // sources, NARROWED to entries that actually perturb the condition. The
-    // condition axis CANNOT be read off the collected `ActiveContinuousEffect`s:
-    // `active_continuous_effects_from_static_definitions` evaluates a
-    // non-recipient-context (source-level) condition as a gate at COLLECTION time
-    // and stores `condition: None` on the resulting effect (only recipient-context
-    // conditions are retained for per-recipient re-evaluation). So a board-
-    // population gate like "as long as you control N creatures" is already consumed
-    // and invisible on the active-effect set. We must inspect the intact
-    // `StaticDefinition.condition` on each live source instead.
+    // sources, NARROWED to entries that actually perturb the condition. Conditions
+    // remain attached to collected effects for application-time evaluation, while
+    // this source walk supplies the before/after truth comparison required for an
+    // incremental full-rebuild decision.
     //
     // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
     // on board population, an object entering can flip the condition for the
@@ -3382,7 +3574,7 @@ fn active_effects_force_incremental_escalation(
 /// whose enabling `condition` is board-population-dependent AND that one of the
 /// `entered_ids` actually perturbs. Walks the same source set as
 /// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
-/// but reads the intact pre-collection `condition` field.
+/// and reads the source definition's `condition` field.
 /// O(active-source-count × entered-count); short-circuits on the first match.
 ///
 /// Three-stage test:
@@ -3397,8 +3589,7 @@ fn active_effects_force_incremental_escalation(
 ///     cannot be summarized by a single board-level boolean
 ///     (`source_condition_gate_passes` only over-approximates them). This
 ///     preserves the d9a40be71 behavior for that class.
-///  3. SOURCE-LEVEL gates (CR 611.3a — a single on/off switch consumed at
-///     collection): apply the truth-delta short-circuit. The static's BEFORE
+///  3. SOURCE-LEVEL gates: apply the truth-delta short-circuit. The static's BEFORE
 ///     truth was cached at the last full eval in `static_gate_truth`; recompute
 ///     AFTER against the live post-entry board. Escalate iff `before != after`.
 ///     Key absent (source not present / phased out at the last full eval) ->
@@ -4128,14 +4319,7 @@ fn active_continuous_effects_from_static_definitions(
             }
         }
 
-        let retained_condition = if let Some(condition) = &def.condition {
-            if !source_condition_gate_passes(state, condition, controller, source_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        let retained_condition = def.condition.clone();
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         for (mod_index, modification) in def.modifications.iter().enumerate() {
@@ -4298,17 +4482,9 @@ fn expand_granted_static_effects(
             None => continue,
         };
         // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
-        // recipient's controller. Re-run any inner condition gate with the
-        // recipient as the source so that gating like "during your turn"
-        // resolves against the recipient's controller.
-        let retained_inner_condition = if let Some(condition) = &inner.condition {
-            if !source_condition_gate_passes(state, condition, recipient_controller, recipient_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        // recipient's controller. Keep its condition until application, after
+        // preceding layers have established that controller.
+        let retained_inner_condition = inner.condition.clone();
         for (mod_index, modification) in inner.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
                 continue;
@@ -4583,22 +4759,57 @@ fn expand_granted_triggered_abilities(
 }
 
 /// Collect active transient effects, filtering out expired host-bound effects.
+/// CR 611.2 + CR 613.1: whether a stored transient continuous effect is still
+/// APPLYING, as opposed to merely still being stored.
+///
+/// A lapsed effect stays in `transient_continuous_effects` until it is swept, so
+/// presence in that list means nothing on its own: the host may have left the
+/// battlefield, a `ForAsLongAs` duration may have ended (Zygon Infiltrator's copy
+/// lapses the moment its target untaps), or the source condition may have gone
+/// false. This is the single authority for that question — `derive_views`
+/// consults it too, so a display projection can never claim an effect is live
+/// after the layer engine has stopped applying it.
+pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    // CR 400.7: a recipient that has changed zones is a new object, so a
+    // continuous effect tied to its prior incarnation cannot keep applying.
+    if let Some(recipient) = tce.affected_recipient {
+        if !state
+            .objects
+            .get(&recipient.object_id)
+            .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
+        {
+            return false;
+        }
+    }
+    // UntilHostLeavesPlay: skip if source is no longer on the battlefield
+    if tce.duration == Duration::UntilHostLeavesPlay
+        && !state
+            .objects
+            .get(&tce.source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+    {
+        return false;
+    }
+
+    if !transient_duration_holds(state, tce) {
+        return false;
+    }
+
+    if let Some(condition) = &tce.condition {
+        if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
 ) {
     for tce in &state.transient_continuous_effects {
-        // UntilHostLeavesPlay: skip if source is no longer on the battlefield
-        if tce.duration == Duration::UntilHostLeavesPlay
-            && !state
-                .objects
-                .get(&tce.source_id)
-                .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-        {
-            continue;
-        }
-
-        if !transient_duration_holds(state, tce) {
+        if !transient_effect_is_live(state, tce) {
             continue;
         }
 
@@ -4640,6 +4851,23 @@ pub(crate) fn gather_transient_continuous_effects(
                 }
             ) {
                 continue;
+            }
+            // CR 113.3d + CR 604.1 + CR 611.2c: Mirror the printed-static gather
+            // path — a transient `GrantStaticAbility` must expand its inner
+            // modifications to recipients during the same layer pass (Roar of the
+            // Fifth People chapter II: saga gains "Creatures you control have …").
+            if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
+                effects.extend(expand_granted_static_effects(
+                    state,
+                    tce.source_id,
+                    tce.timestamp,
+                    &tce.affected,
+                    inner.as_ref(),
+                    Some(TriggerProducerOrigin::Transient {
+                        continuous_effect_id: tce.id,
+                        modification_index: mod_index,
+                    }),
+                ));
             }
             effects.push(ActiveContinuousEffect {
                 source_id: tce.source_id,
@@ -4735,7 +4963,9 @@ fn apply_combat_assignment_rule_effects_filtered(
 
     for effect in effects {
         let scan_ids = effect_candidate_ids(state, &effect.affected_filter, &mut zone_cache);
-        let ctx = FilterContext::from_source(state, effect.source_id);
+        let condition_controller = combat_effect_condition_controller(state, &effect);
+        let ctx =
+            FilterContext::from_source_with_controller(effect.source_id, condition_controller);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
@@ -4745,7 +4975,7 @@ fn apply_combat_assignment_rule_effects_filtered(
                     evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        condition_controller,
                         effect.source_id,
                         id,
                     )
@@ -4877,14 +5107,7 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
             continue;
         }
 
-        let retained_condition = if let Some(condition) = &def.condition {
-            if !source_condition_gate_passes(state, condition, controller, source_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        let retained_condition = def.condition.clone();
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
         effects.extend(
@@ -4894,6 +5117,7 @@ fn active_combat_assignment_rule_effects_from_static_definitions(
                 .map(|modification| ActiveCombatAssignmentRuleEffect {
                     source_id,
                     controller,
+                    transient_id: None,
                     timestamp,
                     modification: modification.clone(),
                     affected_filter: affected_filter.clone(),
@@ -4939,6 +5163,7 @@ fn collect_transient_combat_assignment_rule_effects(
                 .map(|modification| ActiveCombatAssignmentRuleEffect {
                     source_id: tce.source_id,
                     controller: tce.controller,
+                    transient_id: Some(tce.id),
                     timestamp: tce.timestamp,
                     modification: modification.clone(),
                     affected_filter: tce.affected.clone(),
@@ -5228,17 +5453,22 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
     }
 }
 
-/// CR 611.2c + CR 109.5: True when a granted `MustBeBlockedByAll` /
-/// `MustBeBlocked` static carries a controller-relative blocker filter
-/// (`ControllerRef::You`/`Opponent`/… — "your opponents", "you control").
-/// When such a static is grafted onto a TARGET permanent by a one-shot effect
-/// (You Look Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter
-/// relative to the target's controller. This gate is the condition under which
-/// the installing player must be snapshotted as the anchor (mirrors
-/// `static_mode_uses_chosen_color`).
-fn static_mode_uses_controller_relative_blocker_filter(
-    mode: &crate::types::statics::StaticMode,
-) -> bool {
+/// CR 611.2c + CR 109.5: True when a granted static mode resolves a player
+/// reference ("you"/"your opponents") that must be the INSTALLING player rather
+/// than the carrier's controller, so the graft has to snapshot
+/// `effect.controller` as the definition's anchor.
+///
+/// Two member classes today:
+/// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
+///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
+///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
+///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
+///   to the target's controller.
+/// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
+///   controller (CR 701.15b).
+///
+/// Mirrors `static_mode_uses_chosen_color`.
+fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
     match mode {
         StaticMode::MustBeBlockedByAll {
@@ -5247,6 +5477,12 @@ fn static_mode_uses_controller_relative_blocker_filter(
         | StaticMode::MustBeBlocked { by: Some(filter) } => {
             target_filter_controller_is_relative(filter)
         }
+        // CR 109.5 + CR 701.15b: the avoided player is the INSTALLING player,
+        // not the carrier's controller — the requirement is grafted onto an
+        // opponent's creature (Kardur, Doomscourge) or the controller's own
+        // (Maximum Carnage chapter I), so re-deriving it from the carrier would
+        // avoid the wrong player.
+        StaticMode::MustAttackAwayFromSource => true,
         _ => false,
     }
 }
@@ -5729,7 +5965,40 @@ fn apply_continuous_effect_filtered(
         retained
     } else {
         let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
-        let ctx = FilterContext::from_source(state, effect.source_id);
+        // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
+        // or ability reads "you"/"your" as that spell or ability's controller,
+        // not as whoever controls the source object at the moment of some later
+        // layer pass. CR 109.5 fixes this for EVERY resolution-created case:
+        // "The words 'you' and 'your' on an object refer to the object's
+        // controller" (so, for a spell, the spell's controller); "For an
+        // activated ability, this is the player who activated the ability";
+        // "For a triggered ability, this is the controller of the object when
+        // the ability triggered". `effect.controller` is that player in all
+        // three cases. CR 611.2c makes only "the set of objects" dynamic for a
+        // rules-modifying continuous effect; the PLAYER reference stays fixed,
+        // so a controller-relative `affected` filter ("creatures your opponents
+        // control") must be evaluated against the snapshot the TCE already
+        // carries. A PRINTED static keeps the live reading (CR 109.5: "For a
+        // static ability, this is the current controller of the object it's
+        // on"), which is exactly what `transient_id` discriminates: `Some(..)`
+        // for resolution-created transients (`gather_transient_continuous_effects`),
+        // `None` for printed static-definition entries.
+        //
+        // Second half of the CR 611.2c migration that keeps the
+        // `MustAttackAwayFromSource` affected filter intact
+        // (`effects/effect.rs`) — see the T13 regression
+        // (`affected_population_does_not_follow_a_stolen_source`).
+        let condition_controller = active_effect_condition_controller(state, effect);
+        let ctx =
+            FilterContext::from_source_with_controller(effect.source_id, condition_controller);
+        let condition_uses_recipient = effect
+            .condition
+            .as_ref()
+            .is_some_and(condition_uses_recipient_context);
+        let non_recipient_condition_passes = effect.condition.as_ref().is_none_or(|condition| {
+            condition_uses_recipient
+                || evaluate_condition(state, condition, condition_controller, effect.source_id)
+        });
         newly_affected_ids = scan_ids
             .iter()
             // Incremental fast path: re-apply only to the freshly-entered objects.
@@ -5738,15 +6007,17 @@ fn apply_continuous_effect_filtered(
             .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
             .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
             .filter(|&&id| {
-                effect.condition.as_ref().is_none_or(|condition| {
-                    evaluate_condition_with_recipient(
-                        state,
-                        condition,
-                        effect.controller,
-                        effect.source_id,
-                        id,
-                    )
-                })
+                non_recipient_condition_passes
+                    && effect.condition.as_ref().is_none_or(|condition| {
+                        !condition_uses_recipient
+                            || evaluate_condition_with_recipient(
+                                state,
+                                condition,
+                                condition_controller,
+                                effect.source_id,
+                                id,
+                            )
+                    })
             })
             .copied()
             .collect();
@@ -6019,6 +6290,13 @@ fn apply_continuous_effect_filtered(
         };
 
         match &effect.modification {
+            // CR 707.2c + CR 613.1a: `CopyChosen` is a parse-time marker for
+            // Metamorphic Alteration's "enchanted creature is a copy of the
+            // chosen creature" static. The copy is materialized exactly once —
+            // as a latched `CopyValues` TCE installed at the
+            // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
+            // so applying anything here would double-install. Explicit no-op.
+            ContinuousModification::CopyChosen => {}
             ContinuousModification::CopyValues {
                 values,
                 display_source,
@@ -6152,7 +6430,7 @@ fn apply_continuous_effect_filtered(
                 // Ward/Annihilator each apply independently). `evaluate_layers` resets
                 // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
                 // accumulates unbounded across re-evaluations.
-                if resolved_keyword.sums_across_instances() {
+                if resolved_keyword.instances_must_coexist() {
                     obj.keywords.push(resolved_keyword.clone());
                 } else if resolved_keyword.overrides_same_kind_on_grant() {
                     // CR 613.7: this grant is a single-authoritative-value keyword — the
@@ -6249,7 +6527,7 @@ fn apply_continuous_effect_filtered(
                 for (keyword_output_index, kw) in add_chosen_keywords.iter().enumerate() {
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.
-                    if kw.sums_across_instances() || !obj.keywords.contains(kw) {
+                    if kw.instances_must_coexist() || !obj.keywords.contains(kw) {
                         obj.keywords.push(kw.clone());
                     }
                     for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(kw)
@@ -6574,6 +6852,24 @@ fn apply_continuous_effect_filtered(
                     obj.static_definitions.push(*definition.clone());
                 }
             }
+            // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+            // to the recipient. Mirror of `GrantStaticAbility` — push the cloned
+            // `ReplacementDefinition` onto `obj.replacement_definitions` so the
+            // granted replacement fires as a genuine replacement effect (its
+            // `valid_card: SelfRef` binds to this recipient object). Re-derived
+            // each layer pass (`obj.replacement_definitions` was reset to base at
+            // the start of the pass); structural-equality dedup keeps repeated
+            // grants (multiple sources, or a single static parsed twice)
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            ContinuousModification::GrantReplacement { replacement } => {
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|rd| rd == replacement.as_ref())
+                {
+                    obj.replacement_definitions.push(*replacement.clone());
+                }
+            }
             ContinuousModification::AddStaticMode { mode } => {
                 // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
                 // granted static mode carries an `IsChosenColor` filter prop,
@@ -6585,15 +6881,17 @@ fn apply_continuous_effect_filtered(
                 let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
                 let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
-                // CR 611.2c + CR 109.5: A controller-relative blocker filter
-                // ("your opponents") grafted onto a TARGET permanent would
-                // otherwise resolve "you" as the target's controller. Snapshot
-                // the installing player (`effect.controller`, the single
-                // authority) so combat re-derives the filter context from the
-                // spell controller — the continuous effect's anchor is locked at
-                // materialization. `None` anchor (permanent-static lures) still
-                // resolves from the carrier.
-                if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
+                // CR 611.2c + CR 109.5: A player reference carried by the granted
+                // mode — a controller-relative blocker filter ("your opponents")
+                // or `MustAttackAwayFromSource`'s avoided player (CR 701.15b) —
+                // grafted onto a TARGET permanent would otherwise resolve "you"
+                // as the target's controller. Snapshot the installing player
+                // (`effect.controller`, the single authority) so combat
+                // re-derives the reference from the spell controller — the
+                // continuous effect's anchor is locked at materialization.
+                // `None` anchor (permanent-static lures) still resolves from the
+                // carrier.
+                if static_mode_needs_source_controller_anchor(&resolved_mode) {
                     def = def.source_controller(effect.controller);
                 }
                 // CR 611.2c: stamp the directing object so combat / future
@@ -6831,11 +7129,15 @@ pub(crate) fn compute_current_copiable_values(
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
             .filter(|effect| {
+                let condition_controller = active_effect_condition_controller(state, effect);
                 matches_target_filter(
                     state,
                     object_id,
                     &effect.affected_filter,
-                    &FilterContext::from_source(state, effect.source_id),
+                    &FilterContext::from_source_with_controller(
+                        effect.source_id,
+                        condition_controller,
+                    ),
                 )
             })
             .filter(|effect| {
@@ -6843,7 +7145,7 @@ pub(crate) fn compute_current_copiable_values(
                     evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        active_effect_condition_controller(state, effect),
                         effect.source_id,
                         object_id,
                     )
@@ -6890,6 +7192,7 @@ pub(crate) fn compute_current_copiable_values(
             // the overridden loyalty value.
             ContinuousModification::SetStartingLoyalty { value } => {
                 values.loyalty = Some(*value);
+                values.printed_loyalty = Some(crate::types::card::PrintedLoyalty::Fixed(*value));
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
@@ -6998,7 +7301,7 @@ mod tests {
     use crate::types::game_state::{LayersDirty, StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -7066,6 +7369,46 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    fn add_unspent_blue_mana(state: &mut GameState, player: PlayerId, count: usize) {
+        let player = state
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == player)
+            .expect("test player must exist");
+        for _ in 0..count {
+            player.mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            });
+        }
+    }
+
+    fn six_unspent_mana_condition() -> StaticCondition {
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::UnspentMana { color: None },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        }
+    }
+
+    fn install_static_definition(
+        state: &mut GameState,
+        object_id: ObjectId,
+        def: StaticDefinition,
+    ) {
+        let object = state.objects.get_mut(&object_id).unwrap();
+        Arc::make_mut(&mut object.base_static_definitions).push(def.clone());
+        object.static_definitions.push(def);
     }
 
     /// A bare non-creature Treasure token permanent (CR 111.1: `is_token`; CR 111.6:
@@ -7936,6 +8279,220 @@ mod tests {
 
         evaluate_layers(&mut state);
         assert!(!state.objects[&id].assigns_damage_as_though_unblocked);
+    }
+
+    #[test]
+    fn printed_static_condition_uses_controller_after_layer_two_in_one_pass() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Conditional Source", 2, 2, P0);
+        install_static_definition(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])
+                .condition(six_unspent_mana_condition()),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            source.has_keyword(&Keyword::Flying),
+            "a layer-6 printed static must read the layer-2 controller in the same pass"
+        );
+    }
+
+    #[test]
+    fn transient_static_condition_keeps_its_captured_controller() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Source", 2, 2, P0);
+        let recipient = make_creature(&mut state, "Transient Recipient", 2, 2, P0);
+        add_unspent_blue_mana(&mut state, P0, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }],
+            Some(six_unspent_mana_condition()),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].controller, P1);
+        assert!(
+            state.objects[&recipient].has_keyword(&Keyword::Flying),
+            "a resolution-created effect must keep its captured P0 condition context"
+        );
+    }
+
+    #[test]
+    fn granted_static_condition_uses_its_recipient_controller_after_layer_two() {
+        let mut state = setup();
+        let grantor = make_creature(&mut state, "Grantor", 2, 2, P0);
+        let recipient = make_creature(&mut state, "Granted Static Source", 2, 2, P0);
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(six_unspent_mana_condition());
+        install_static_definition(
+            &mut state,
+            grantor,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: recipient })
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(inner),
+                }]),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            grantor,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: recipient },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let recipient = &state.objects[&recipient];
+        assert_eq!(recipient.controller, P1);
+        assert!(
+            recipient.has_keyword(&Keyword::Flying),
+            "a granted static must bind its condition to the recipient's layer-2 controller"
+        );
+    }
+
+    #[test]
+    fn combat_assignment_static_condition_uses_controller_after_layer_two() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Combat Conditional Source", 2, 2, P0);
+        install_static_definition(
+            &mut state,
+            source,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+                .condition(six_unspent_mana_condition()),
+        );
+        add_unspent_blue_mana(&mut state, P0, 5);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            source.assigns_damage_from_toughness,
+            "post-layer combat rules must use the layer-2 controller for their condition"
+        );
+    }
+
+    #[test]
+    fn transient_combat_rule_condition_stays_off_when_captured_controller_fails() {
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Combat Source", 2, 2, P0);
+        add_unspent_blue_mana(&mut state, P1, 6);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::AssignDamageFromToughness],
+            Some(six_unspent_mana_condition()),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let source = &state.objects[&source];
+        assert_eq!(source.controller, P1);
+        assert!(
+            !source.assigns_damage_from_toughness,
+            "a transient combat rule must remain gated by its captured P0 controller"
+        );
+    }
+
+    #[test]
+    fn transient_combat_rule_filter_uses_captured_controller_after_source_is_stolen() {
+        // CR 109.5 + CR 613.11: a transient combat-assignment effect's
+        // controller-relative recipient filter remains bound to its creator,
+        // even after a later layer-2 effect changes the source's controller.
+        let mut state = setup();
+        let source = make_creature(&mut state, "Transient Combat Source", 2, 2, P0);
+        let p0_recipient = make_creature(&mut state, "P0 Combat Recipient", 2, 2, P0);
+        let p1_recipient = make_creature(&mut state, "P1 Combat Recipient", 2, 2, P1);
+        state.add_transient_continuous_effect(
+            source,
+            P0,
+            Duration::Permanent,
+            creature_you_ctrl(),
+            vec![ContinuousModification::AssignDamageFromToughness],
+            None,
+        );
+        state.add_transient_continuous_effect(
+            source,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&source].controller, P1);
+        assert!(
+            state.objects[&p0_recipient].assigns_damage_from_toughness,
+            "the captured P0 controller determines the transient effect's recipients"
+        );
+        assert!(
+            !state.objects[&p1_recipient].assigns_damage_from_toughness,
+            "stealing the source must not retarget the transient effect to P1's creatures"
+        );
     }
 
     #[test]
@@ -13689,11 +14246,13 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -13721,11 +14280,13 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
                 duration_subject: None,
+                end_permission: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -15241,6 +15802,206 @@ mod tests {
         assert!(
             state.transient_continuous_effects.is_empty(),
             "armed effect expires at the cleanup of the controller's next turn"
+        );
+    }
+
+    /// CR 500.4 + CR 503.1: "until your next upkeep" (Xenic Poltergeist, Erhnam
+    /// Djinn, Gabriel Angelfire) expires one step LATER than "until your next
+    /// turn" — it must survive the controller's untap step and be pruned only
+    /// when that controller's upkeep step begins. This is the whole reason the
+    /// upkeep deadline needs its own authority rather than reusing
+    /// `UntilNextTurnOf`, and it pins the step boundary a runtime test cannot
+    /// observe (no priority window exists inside the untap step, CR 502.4).
+    #[test]
+    fn until_next_upkeep_effect_survives_untap_and_expires_at_controllers_upkeep() {
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_turn_effects(&mut state, PlayerId(0));
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "an upkeep deadline must survive its controller's untap step"
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(1));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "a Controller-scoped upkeep deadline must not expire at an opponent's upkeep"
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(0));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "the effect must expire as its controller's upkeep step begins"
+        );
+    }
+
+    /// CR 500.4 + CR 503.1: Elkin Bottle / Grinning Totem lower "Until the
+    /// beginning of your next upkeep, you may play that card" to a durational
+    /// `CastingPermission::PlayFromExile`, NOT to a transient continuous effect,
+    /// so the upkeep deadline needs the casting-permission prune as well as the
+    /// continuous-effect one. Without it the play permission never expires:
+    /// `prune_end_of_turn_casting_permissions` deliberately retains every
+    /// non-end-step durational shape for its own system to handle.
+    #[test]
+    fn until_next_upkeep_play_permission_expires_at_the_grantees_upkeep() {
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::Upkeep,
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+
+        // Neither the grantee's untap step nor an OPPONENT's upkeep reaches it.
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        prune_upkeep_step_casting_permissions(&mut state, PlayerId(1));
+        assert_eq!(
+            state.objects[&exiled].casting_permissions.len(),
+            1,
+            "an upkeep-scoped permission must survive the untap step and an \
+             opponent's upkeep"
+        );
+
+        prune_upkeep_step_casting_permissions(&mut state, PlayerId(0));
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "the permission must expire as its grantee's upkeep step begins"
+        );
+    }
+
+    /// CR 611.2a + CR 500.4: the turn-AGNOSTIC upkeep deadline ("the next
+    /// upkeep") states a step without naming whose it is, so it expires at the
+    /// FIRST upkeep step to occur, whoever's turn it is. Mirrors the `AnyTurn` arm of `prune_until_next_end_step_effects`;
+    /// without it the grammar could emit a shape nothing prunes.
+    #[test]
+    fn until_next_upkeep_turn_agnostic_expires_at_any_players_upkeep() {
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Upkeep,
+                player: PlayerScope::AnyTurn,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_upkeep_effects(&mut state, PlayerId(1));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a turn-agnostic upkeep deadline expires at the first upkeep step, \
+             not only its controller's"
+        );
+    }
+
+    /// CR 502.3 + CR 109.4: Orcish Farmer's "until its controller's next untap
+    /// step" binds the deadline to the AFFECTED object's controller, not to the
+    /// resolving ability's controller. The parser emits
+    /// `PlayerScope::Controller` for that phrase precisely because
+    /// `prune_controller_untap_step_effects` already reads it that way — this
+    /// test pins that contract, so a future change to either side breaks here
+    /// rather than silently making the land change permanent.
+    #[test]
+    fn until_object_controllers_next_untap_step_keys_on_the_affected_object() {
+        let mut state = setup();
+        // The affected land belongs to P1; the ability resolving is P0's.
+        let land = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SpecificObject { id: land },
+            vec![],
+            None,
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the ability controller's untap step is not the affected land's \
+             controller's untap step"
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(1));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "the effect must expire at the affected land's controller's untap step"
+        );
+    }
+
+    /// CR 611.2a + CR 502.3: turn-agnostic sibling of the test above — an
+    /// `AnyTurn` untap deadline is not keyed on any controller, so it expires at
+    /// the first untap step even though the affected object belongs to the
+    /// non-active player.
+    #[test]
+    fn until_next_untap_step_turn_agnostic_expires_at_any_players_untap_step() {
+        let mut state = setup();
+        let land = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::AnyTurn,
+            },
+            TargetFilter::SpecificObject { id: land },
+            vec![],
+            None,
+        );
+
+        prune_controller_untap_step_effects(&mut state, PlayerId(0));
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a turn-agnostic untap deadline expires at the first untap step"
         );
     }
 
@@ -17147,6 +17908,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17212,6 +17974,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17678,6 +18441,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),

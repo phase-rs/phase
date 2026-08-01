@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 152
 expression: "&ir"
 ---
 {
@@ -23,18 +22,22 @@ expression: "&ir"
         "fragment": "This spell can't be countered."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBeCountered",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBeCountered",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "This spell can't be countered."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "This spell can't be countered."
+          "source_text": "This spell can't be countered.",
+          "body_ir": null
         }
       }
     },

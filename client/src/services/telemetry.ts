@@ -15,7 +15,7 @@
  *   metadata (version, hash, release, platform) and nothing request-derived.
  */
 import { usePreferencesStore } from "../stores/preferencesStore";
-import { isTauri } from "./sidecar";
+import { isTauri } from "./platform";
 
 /** Max characters retained for any single string field (defence against a
  *  runaway panic message or stack frame bloating a batch). */

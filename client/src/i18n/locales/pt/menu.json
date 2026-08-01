@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Experimentar Preview",
-      "tooltip": "Jogue a build de preview mais recente — as cartas e correções mais novas chegam aqui antes de cada lançamento."
+      "tooltip": "Jogue a build de preview mais recente — as cartas e correções mais novas chegam aqui antes de cada lançamento.",
+      "backCta": "Voltar à versão estável",
+      "backTooltip": "Voltar para a versão de lançamento atual."
     },
     "coverage": {
       "title": "Abrir o painel de cobertura",

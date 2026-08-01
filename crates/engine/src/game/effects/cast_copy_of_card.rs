@@ -191,6 +191,12 @@ fn cast_one_copy(
     copy.cost_x_paid = None;
     copy.kickers_paid.clear();
     copy.additional_cost_payment_count = 0;
+    // CR 707.12: the copy is cast, but it pays its OWN costs — the source's
+    // payment record must not carry over. This path bypasses `finalize_cast`
+    // (see the keyword-snapshot block below), so the helper establishes the
+    // fresh-cast no-payment baseline; a future variant that actually pays
+    // mana for the copy must stamp AFTER this reset.
+    copy.clear_cast_payment_stamps();
     state.objects.insert(copy_id, copy);
 
     // CR 611.2f + CR 707.12: This cast path bypasses `finalize_cast`, so snapshot
@@ -213,24 +219,28 @@ fn cast_one_copy(
         resolved.context.cast_from_zone = Some(origin_zone);
     }
 
-    state.stack.push_back(StackEntry {
-        id: copy_id,
-        source_id: copy_id,
-        controller: ability.controller,
-        kind: StackEntryKind::Spell {
-            card_id,
-            ability: resolved,
-            casting_variant: CastingVariant::Normal,
-            // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
-            // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
-            // ignored here. Every card in this class today is a free recast, so
-            // the parser only ever emits `ManaCost::zero()`; the copy is cast for
-            // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
-            // card must thread that alt-cost into this stack entry at this site.
-            actual_mana_spent: 0,
+    // CR 707.12 + CR 707.10: the copy-onto-stack authority emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(
+        state,
+        StackEntry {
+            id: copy_id,
+            source_id: copy_id,
+            controller: ability.controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: resolved.map(Box::new),
+                casting_variant: CastingVariant::Normal,
+                // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
+                // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally
+                // ignored here. Every card in this class today is a free recast, so
+                // the parser only ever emits `ManaCost::zero()`; the copy is cast for
+                // free (`actual_mana_spent: 0`). A future "cast a copy and pay {cost}"
+                // card must thread that alt-cost into this stack entry at this site.
+                actual_mana_spent: 0,
+            },
         },
-    });
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+        events,
+    );
     events.push(GameEvent::SpellCast {
         card_id,
         controller: ability.controller,
@@ -333,6 +343,73 @@ mod tests {
         }));
     }
 
+    /// CR 707.12 (issue #5943): the copy is cast, but pays its OWN (zero)
+    /// costs — the source object's cast-payment record must not carry over.
+    /// This path bypasses `finalize_cast`, so `clear_cast_payment_stamps` in
+    /// `cast_one_copy` is the fresh-cast no-payment baseline. The source keeps
+    /// its own record (reach-guard).
+    #[test]
+    fn cast_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(7);
+        let source_id = add_exiled_spell_card(&mut state, "Lightning Bolt");
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&source_id].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
+        }
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CastCopyOfCard {
+                target: TargetFilter::None,
+                cost: ManaCost::zero(),
+                count: None,
+            },
+            vec![TargetRef::Object(source_id)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).expect("cast copy resolves");
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, source_id, "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the SOURCE keeps its payment record.
+        assert_eq!(
+            state.objects[&source_id].mana_spent_to_cast_amount, 2,
+            "source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "source keeps its own Phyrexian life-payment record"
+        );
+    }
+
     #[test]
     fn tracked_set_opens_up_to_choice_for_copies_to_cast() {
         let mut state = GameState::new_two_player(7);
@@ -372,7 +449,7 @@ mod tests {
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
         }
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
         assert!(events.is_empty());
     }
 

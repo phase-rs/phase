@@ -602,6 +602,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
         TargetFilter::LastRevealed => "last revealed".into(),
+        TargetFilter::LastZoneChanged => "last zone changed".into(),
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::ChosenCard => "last chosen card".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
@@ -1299,6 +1300,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
+        QuantityRef::TriggeringScryLookCount => {
+            "the number of cards looked at while scrying this way".into()
+        }
+        QuantityRef::TriggeringScryBottomCount => {
+            "the number of cards put on the bottom while scrying this way".into()
+        }
         QuantityRef::Speed { player } => {
             format!("speed ({})", fmt_player_scope(player))
         }
@@ -2023,7 +2030,7 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::CardPredicate { .. } => "card predicate",
         ChoiceType::CardPredicateGuess { .. } => "card predicate guess",
         ChoiceType::Opponent { .. } => "opponent",
-        ChoiceType::Player => "player",
+        ChoiceType::Player { .. } => "player",
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
@@ -2292,13 +2299,26 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if !matches!(position, crate::types::ability::LibraryPosition::Top) {
+                d.push(("position".into(), format!("{position:?}")));
+            }
             if *face_down {
                 d.push(("face_down".into(), "true".into()));
             }
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            d.push(("object".into(), fmt_target(object)));
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Pump {
             power,
@@ -2333,6 +2353,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 707.2c (Metamorphic Alteration): report the copy-source choice pool.
+        Effect::ChoosePermanent { filter } => {
+            d.push(("choose".into(), fmt_target(filter)));
+        }
         Effect::Destroy { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
@@ -2349,14 +2373,34 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
-        | Effect::Transform { target }
+        // CR 701.27a: single-scope Transform reports its `target` like other
+        // single-target effects; mass Transform (scope:All) reports a `filter` below.
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
+        // CR 710.4: the flipping permanent is the effect's single reported target.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::Regenerate { target }
         | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ForceBlock {
+            target,
+            attacker,
+            duration,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if let Some(attacker) = attacker {
+                d.push(("attacker".into(), format!("{attacker:?}")));
+            }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
@@ -2371,6 +2415,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.
         | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans") reports its
+        // non-targeting population `filter`, like the other mass effects.
+        | Effect::Transform {
             scope: EffectScope::All,
             target,
             ..
@@ -2985,6 +3036,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             static_abilities,
             duration,
             target,
+            // CR 116.2c: the pay-to-end permission is a runtime special action,
+            // not a characteristic-shaping detail of the continuous effect, so it
+            // is deliberately absent from this display-only detail map.
+            end_cost: _,
         } => {
             if let Some(dur) = duration {
                 d.push(("duration".into(), fmt_duration(dur)));
@@ -3021,7 +3076,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             max_total_mv,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
         } => {
             d.push(("count".into(), count.to_string()));
             if let Some(mv) = max_total_mv {
@@ -3036,8 +3091,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     .collect::<Vec<_>>()
                     .join("/"),
             ));
-            if *exile_instead_of_graveyard {
-                d.push(("exile instead of graveyard".into(), "yes".into()));
+            if let Some(destination) = graveyard_replacement {
+                d.push(("graveyard replacement".into(), format!("{destination:?}")));
             }
         }
         Effect::RollDie {
@@ -3237,9 +3292,23 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChooseCounterKind { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(condition) = target_condition {
+                d.push((
+                    "target_condition".into(),
+                    format!(
+                        "chosen counter count {:?} {}",
+                        condition.comparator,
+                        fmt_quantity(&condition.rhs)
+                    ),
+                ));
+            }
         }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -3932,6 +4001,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ControlsNone { filter } => format!("you control no {}", fmt_target(filter)),
         TC::AttackedThisTurn => "attacked this turn".into(),
+        TC::SourceAttackedThisCombat => "source attacked this combat".into(),
         TC::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         TC::CastSpellThisTurn { filter } => match filter {
             Some(f) => format!("cast a {} spell this turn", fmt_target(f)),
@@ -4165,6 +4235,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     use crate::types::ability::ContinuousModification;
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
+        // CR 707.2c (Metamorphic Alteration): parse-time marker for the enchanted
+        // host's copy — the runtime copy is the latched `CopyValues` TCE.
+        ContinuousModification::CopyChosen => "copy chosen".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
         ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),
@@ -4194,6 +4267,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("grant all triggered abilities of {}", fmt_target(source))
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
+        ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))
@@ -4340,6 +4414,7 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
                 m,
                 ContinuousModification::GrantTrigger { .. }
                     | ContinuousModification::GrantAbility { .. }
+                    | ContinuousModification::GrantReplacement { .. }
             )
         })
         .map(fmt_modification)
@@ -4528,6 +4603,11 @@ pub fn build_parse_details(
                 }
                 ContinuousModification::GrantAbility { definition } => {
                     children.push(build_ability_item(definition));
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        children.push(build_ability_item(execute));
+                    }
                 }
                 _ => {}
             }
@@ -5902,6 +5982,10 @@ fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
                 ContinuousModification::GrantTrigger { trigger } => {
                     trigger_has_unimplemented_parts(trigger)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(ability_definition_has_unimplemented_parts),
                 _ => false,
             })
 }
@@ -5995,6 +6079,11 @@ fn check_statics(
                 }
                 ContinuousModification::GrantTrigger { trigger } => {
                     check_trigger(trigger, trigger_registry, missing);
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        collect_ability_missing_parts(execute, missing);
+                    }
                 }
                 _ => {}
             }
@@ -6915,6 +7004,10 @@ fn is_static_supported(
                 ContinuousModification::GrantTrigger { trigger } => {
                     is_trigger_supported(trigger, trigger_registry)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_none_or(is_ability_supported),
                 _ => true,
             })
 }
@@ -7382,6 +7475,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
+        QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
+        QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
@@ -7516,7 +7611,27 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
-        QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
+        // CR 608.2h: `Handled` only when the entry-record matcher can actually evaluate the
+        // filter. `battlefield_entry_matches_filter` fails closed on props the entry snapshot
+        // never captured (game/restrictions.rs:517), so such a card would resolve a silent
+        // constant 0 while claiming support.
+        //
+        // REACHABILITY (measured, MTGJSON sweep): this arm is reached from
+        // `StaticDefinition.condition` (`:7050-7053`), ability conditions, `repeat_for`, and
+        // effect positions — 21 cards, 15 of them purely static-condition (e.g. Armory Mice,
+        // Saddled Rimestag, Mechan Shieldmate). It is NOT reached from a trigger
+        // intervening-if: `:7040-7042` emits only the structural tag and never descends, so
+        // Tunnel Tipster's `FilterProp::FaceDown` ledger read stays invisible here (see the
+        // §10.11 ledger item). No corpus card currently trips this arm (`unhandled=0`); it is a
+        // guard against the next printing, not a live reclassification.
+        QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
+            "BattlefieldEntriesThisTurn",
+            if crate::game::restrictions::ledger_filter_is_evaluable(filter) {
+                Handled
+            } else {
+                Unhandled
+            },
+        ),
         QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),
@@ -9049,6 +9164,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         && effective_lower.contains("becomes")
                 }
             },
+            StaticMode::UnspentManaLossCausesLifeLoss => {
+                effective_lower.contains("losing unspent mana")
+                    && effective_lower.contains("causes that player to lose that much life")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -11308,11 +11427,48 @@ mod tests {
     fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
         let summary = analyze_token_coverage();
 
-        assert_eq!(summary.total_tokens, 2845);
-        assert_eq!(summary.supported_tokens, 2845);
-        assert_eq!(summary.rules_text_tokens, 1480);
-        assert_eq!(summary.parsed_rules_text_tokens, 1480);
-        assert_eq!(summary.total_tokens - summary.supported_tokens, 0);
+        // The weekly MTGJSON vintage refresh (#6237) makes absolute token counts
+        // data-dependent. Provenance — that this catalog is what the reproducible
+        // pipeline produces for its vintage — is established UPSTREAM, not here: the
+        // `refresh-card-data.yml` workflow regenerates from a clean checkout and
+        // refuses to open a catalog PR unless `fetch-token-sets.sh` reports every
+        // token-bearing set downloaded (`failed 0`). That fetch-completeness gate,
+        // not these asserts, is what catches a partial regen at its source.
+        //
+        // So these floors are CATASTROPHIC-LOSS BACKSTOPS with deliberate headroom,
+        // not exact ratchets. The invariants below (full parse coverage) are the
+        // strong guards; the floors only fail if the catalog is grossly gutted
+        // (a truncated/empty `known-tokens.toml`), which no headroom should tolerate.
+        //
+        // Basis: a clean, complete pipeline run for vintage 2026-07-21 yields
+        // total_tokens=2858, rules_text_tokens>=1490, source_card_refs=8644. The
+        // count reflects the reproducible fetch scope (`SetList.json` token-bearing
+        // sets). An earlier hand-committed catalog carried source_card_refs=9821 from
+        // a developer's local `data/mtgjson/sets/` dir that had accumulated extra
+        // reprint set files beyond that scope — inflated printings a clean CI fetch
+        // does not reproduce. Do NOT re-pin a floor to a hand-regen count; the
+        // reproducible pipeline output is the reference. Reproduce with:
+        //
+        //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
+        //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
+        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        assert_eq!(summary.supported_tokens, summary.total_tokens);
+        assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
+        assert!(
+            summary.total_tokens >= 2700,
+            "token catalog gutted: {} presets < 2700",
+            summary.total_tokens
+        );
+        assert!(
+            summary.rules_text_tokens >= 1400,
+            "token catalog gutted: {} rules-text presets < 1400",
+            summary.rules_text_tokens
+        );
+        assert!(
+            summary.source_card_refs >= 8000,
+            "token catalog gutted: {} source_card_refs < 8000",
+            summary.source_card_refs
+        );
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));
@@ -11398,6 +11554,7 @@ mod tests {
                 ])],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
         ));
 
@@ -12121,9 +12278,11 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -12168,9 +12327,11 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
         );
 
@@ -12226,6 +12387,69 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
+        );
+    }
+
+    /// T22 (Step 7c). `battlefield_entry_matches_filter` fails closed on the
+    /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
+    /// of them resolves a silent constant 0. The classifier must stop calling that
+    /// `Handled`. Case (a) is Tunnel Tipster's real live *filter shape* (its
+    /// intervening-if carries `FilterProp::FaceDown`, so its trigger can never fire);
+    /// note the classifier never reaches Tunnel Tipster's trigger intervening-if
+    /// (see `:7519`), so this test drives `quantity_ref_feature` directly.
+    ///
+    /// REVERT-PROBE: restore the unconditional `Handled` arm → (a) and (d) FAIL;
+    /// (b)/(c) pass in both builds and are the vacuity controls.
+    #[test]
+    fn ledger_ref_feature_is_unhandled_when_filter_is_unevaluable() {
+        let ledger = |properties: Vec<FilterProp>| QuantityRef::BattlefieldEntriesThisTurn {
+            player: PlayerScope::Controller,
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties,
+            }),
+        };
+
+        // (a) Tunnel Tipster's shape — unanswerable from the entry record.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::FaceDown])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(a) FaceDown is not answerable from a BattlefieldEntryRecord"
+        );
+        // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(b) a bare filter is trivially evaluable"
+        );
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::HasColor {
+                color: ManaColor::Green
+            }])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(c) HasColor is one of the four props the matcher answers"
+        );
+        // (d) composite recursion — one unanswerable leaf poisons the whole read.
+        let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
+            unreachable!()
+        };
+        let QuantityRef::BattlefieldEntriesThisTurn {
+            filter: face_down, ..
+        } = ledger(vec![FilterProp::FaceDown])
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Or {
+                    filters: vec![bare, face_down]
+                },
+            }),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(d) CR 608.2i: an Or disjunct the matcher drops is a silent partial count of a \
+             look-back read"
         );
     }
 
@@ -13240,6 +13464,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13274,6 +13499,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13306,6 +13532,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -13456,6 +13683,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13488,6 +13716,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13530,6 +13759,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13563,6 +13793,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13598,6 +13829,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13639,6 +13871,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             });
         }
 
@@ -13657,7 +13890,7 @@ mod tests {
         let mut face = make_face();
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MustBlockAttacker {
-                attacker: ObjectId(42),
+                attacker: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
             })
             .description("Target creature blocks this creature this turn if able.".to_string()),
         );
@@ -13807,6 +14040,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(

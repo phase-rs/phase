@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Try Preview",
-      "tooltip": "Play the latest preview build — newest cards & fixes land here before each release."
+      "tooltip": "Play the latest preview build — newest cards & fixes land here before each release.",
+      "backCta": "Back to release",
+      "backTooltip": "Return to the current release build."
     },
     "coverage": {
       "title": "Open the coverage dashboard",

@@ -5,7 +5,7 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
     TargetSelectionMode,
 };
 use crate::types::zones::Zone;
@@ -20,7 +20,7 @@ pub(crate) enum TokenPtFollowup {
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
@@ -76,6 +76,35 @@ pub(crate) struct ParseContext {
     /// resolver's outermost-repeat driver. Set and consumed within a single
     /// chunk parse; never serialized.
     pub pending_repeat_for: Option<QuantityExpr>,
+    /// CR 601.2c + CR 115.4: The announced target count recovered by
+    /// `parse_each_of_target_distribution` for a "… damage to each of ⟨N⟩
+    /// ⟨noun⟩" head, produced by the SAME parse that produced the target
+    /// filter. CR 601.2c fixes the count; CR 115.4 fixes the class for the
+    /// bare-plural `targets` noun.
+    ///
+    /// Single authority for that seam, with an explicit set/reset lifecycle:
+    /// `lower_imperative_clause` clears this as the very first statement of its
+    /// body and `take()`s it immediately after `parse_imperative_effect`, so it
+    /// never outlives one clause and can never attach to an unrelated
+    /// `DealDamage`. The reset is required because `parse_imperative_effect` is
+    /// also called from sites that never consume this field (the shared-`ctx`
+    /// `try_parse_reanimate_self_and_target` sub-parse) and from speculative
+    /// sub-parses that mutate `ctx` and then discard their result.
+    ///
+    /// Two seams need more than the reset, because the reset alone is wrong in
+    /// both directions:
+    /// - The speculative recognizers that can abandon a parse mid-way
+    ///   (`try_parse_multi_target_damage_chain`,
+    ///   `try_parse_radiance_color_fanout_damage`) run against a cloned
+    ///   `ParseContext` and commit with `*ctx = tentative_ctx` only on success,
+    ///   so an abandoned attempt cannot leak a count forward.
+    /// - `try_split_damage_compound` re-enters `lower_imperative_clause` for the
+    ///   continuation, and that nested frame clears this field on entry. It
+    ///   therefore saves the primary clause's count before the sub-parse and
+    ///   restores it after, alongside the `target_chooser` save/restore.
+    ///
+    /// Set and consumed within a single chunk parse; never serialized.
+    pub pending_damage_multi_target: Option<MultiTargetSpec>,
     /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
     /// clauses emitted so far in the current effect chain. Each "choose a
     /// player" / "choose a [second|third] player" clause increments this; the
@@ -133,7 +162,7 @@ pub(crate) struct ParseContext {
     /// clause state cannot leak across trigger lines.
     pub pending_trigger_subject_clause: Option<TargetFilter>,
     /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
-    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// component, if any. Set by `parse_activated_ability_ir` after the
     /// cost is parsed and before the effect text is parsed, then restored after
     /// the ability. Consumed by `parse_cost_paid_object_reference` to
     /// disambiguate "the exiled card" — a cost-paid-object reference
@@ -171,6 +200,23 @@ pub(crate) struct ParseContext {
     /// `SelfRef` so non-token self-triggers ("Whenever ~ attacks, put a counter on
     /// it") are unaffected.
     pub token_created_in_chain: bool,
+    /// CR 608.2c + CR 301.5 + CR 303.4: An EARLIER clause in this same effect
+    /// chain turns the ability's own SOURCE into an attachable object — an Aura
+    /// (CR 303.4: an enchantment with the Aura subtype, attached via its enchant
+    /// ability) or an Equipment (CR 301.5: an artifact with the Equipment
+    /// subtype). This is the animate-then-attach class, of which the 12 Licids
+    /// are the canonical members ("This creature loses this ability and becomes
+    /// an Aura enchantment with enchant creature. Attach **it** to target
+    /// creature"). The source is the only object the chain has made attachable,
+    /// so the following clause's bare "it" attachment anaphor names it
+    /// (`TargetFilter::SelfRef`) rather than the ability's chosen target.
+    /// Seeded only in the chunk loop via
+    /// `parser::oracle_effect::chain_source_becomes_attachment`; every other
+    /// construction site defaults `false` (`..Default::default()`), so an attach
+    /// clause whose chain never animated its source keeps its pre-existing
+    /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
+    /// Graft's chained-referent `ParentTarget`).
+    pub source_becomes_attachment_in_chain: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.
@@ -261,6 +307,13 @@ pub(crate) struct ParseContext {
     /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
     /// no such producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_mass_population: Option<TargetFilter>,
+    /// True when the SAME chain's most recent producer was a self-library peek
+    /// (look at the top N cards of YOUR library without exiling/moving them).
+    /// The bare "from among them" cast anaphor that follows must route to the
+    /// one-shot during-resolution cast (CR 608.2g), not the exile-and-grant
+    /// lingering path. Mirrors `chain_has_prior_exile_producer`.
+    // CR 608.2g + CR 701.20e
+    pub chain_prior_self_library_peek: bool,
 }
 
 impl ParseContext {
@@ -274,8 +327,13 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
-        if matches!(d, OracleDiagnostic::TargetFallback { .. })
-            && self.diagnostics.iter().any(|existing| existing == &d)
+        // Both variants can be pushed from a combinator that a speculative `alt`
+        // re-enters on a discarded alternative, so an identical entry is noise
+        // rather than signal.
+        if matches!(
+            d,
+            OracleDiagnostic::TargetFallback { .. } | OracleDiagnostic::IgnoredRemainder { .. }
+        ) && self.diagnostics.iter().any(|existing| existing == &d)
         {
             return;
         }

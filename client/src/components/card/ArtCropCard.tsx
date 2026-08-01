@@ -5,11 +5,12 @@ import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -28,6 +29,7 @@ const PT_COLORS: Record<PTColor, string> = {
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
@@ -73,7 +75,10 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const src = obj.face_down ? CARD_BACK_URL : cardSrc;
   const isLoading = obj.face_down ? false : cardLoading;
-  const hasDfc = !obj.face_down && obj.back_face != null;
+  // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
+  // Kamigawa flip card stores its alternative half in the same slot and has no
+  // face 1 to inspect. Use the engine-provided layout discriminant.
+  const hasDfc = !obj.face_down && hasOtherPrintedFace(obj);
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
   const devotionValue = obj.devotion ?? null;
@@ -199,16 +204,26 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {/* Top-right overlay stack: counter badges kept clear of the
                   bottom P/T and loyalty badges. */}
               <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
-                {counters.map(([type, count]) => (
-                  <CounterTooltip key={type} type={type} count={count}>
-                    <span
-                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                      style={counterStyle}
+                {counters.map(([type, count]) => {
+                  // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+                  // counter unboundedly — render ∞ instead of the (still-finite) real count.
+                  const isUnbounded = unboundedCounterTypes.includes(type);
+                  return (
+                    <CounterTooltip
+                      key={type}
+                      type={type}
+                      count={count}
+                      isUnbounded={isUnbounded}
                     >
-                      {count}
-                    </span>
-                  </CounterTooltip>
-                ))}
+                      <span
+                        className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                        style={counterStyle}
+                      >
+                        {isUnbounded ? "∞" : count}
+                      </span>
+                    </CounterTooltip>
+                  );
+                })}
               </div>
 
               {hasDfc && (

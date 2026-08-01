@@ -209,7 +209,7 @@ pub fn resolve(
                         .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
                     state
                         .zone_changes_this_turn
-                        .push(zone_change_record.clone());
+                        .push_back(zone_change_record.clone());
                     events.push(GameEvent::ZoneChanged {
                         object_id: obj_id,
                         from: None,

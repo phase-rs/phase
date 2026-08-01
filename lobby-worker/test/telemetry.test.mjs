@@ -60,7 +60,7 @@ test("sanitizeTelemetryBatch accepts the Tier 2 report/usage events with their c
   assert.deepEqual(report.doubles, [5, 2, 3]);
   assert.deepEqual(session.blobs, ["/game"]);
   assert.deepEqual(session.doubles, []);
-  assert.deepEqual(gameStart.blobs, ["ai", "HistoricBrawl"]);
+  assert.deepEqual(gameStart.blobs, ["ai", "HistoricBrawl", "", ""]);
   assert.deepEqual(gameStart.doubles, [2, 1]);
   assert.deepEqual(route.blobs, ["/deck-builder"]);
   assert.deepEqual(route.doubles, []);
@@ -200,8 +200,8 @@ test("booleans and numbers coerce; missing/other values default", () => {
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 7, unimplemented_oracle_ids: ["x", 5, "y"] }]),
   );
   // winner_kind null → ""; array keeps only strings, comma-joined;
-  // pending_trigger_abandons absent → "".
-  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", ""]);
+  // pending_trigger_abandons and engine-mode fields absent → "".
+  assert.deepEqual(drawn.blobs, ["draw", "", "ai", "x,y", "", "", ""]);
   assert.deepEqual(drawn.doubles, [7]);
 });
 
@@ -222,4 +222,49 @@ test("the game_end pending_trigger_abandons list survives the join at the client
     batch([{ event: "game_end", result: "draw", winner_kind: null, game_mode: "ai", turn_count: 1, pending_trigger_abandons: ["a", 5, "b"] }]),
   );
   assert.equal(mixed.blobs[4], "a,b");
+});
+
+test("game event engine-mode fields occupy appended columns for current and older clients", () => {
+  const [gameEnd, gameStart, olderGameEnd, olderGameStart] = sanitizeTelemetryBatch(
+    batch([
+      {
+        event: "game_end",
+        result: "winner",
+        winner_kind: "human",
+        game_mode: "ai",
+        turn_count: 12,
+        engine_mode: "wasm",
+        native_fallback_reason: "native_engine_unavailable",
+      },
+      {
+        event: "game_start",
+        game_mode: "ai",
+        format: "Commander",
+        player_count: 2,
+        ai_count: 1,
+        engine_mode: "wasm",
+        native_fallback_reason: "native_engine_unavailable",
+      },
+      { event: "game_end", result: "draw", game_mode: "ai", turn_count: 8 },
+      { event: "game_start", game_mode: "ai", format: "Standard", player_count: 2, ai_count: 1 },
+    ]),
+  );
+
+  assert.deepEqual(toDataPoint(gameEnd).blobs.slice(4), [
+    "winner",
+    "human",
+    "ai",
+    "",
+    "",
+    "wasm",
+    "native_engine_unavailable",
+  ]);
+  assert.deepEqual(toDataPoint(gameStart).blobs.slice(4), [
+    "ai",
+    "Commander",
+    "wasm",
+    "native_engine_unavailable",
+  ]);
+  assert.deepEqual(toDataPoint(olderGameEnd).blobs.slice(4), ["draw", "", "ai", "", "", "", ""]);
+  assert.deepEqual(toDataPoint(olderGameStart).blobs.slice(4), ["ai", "Standard", "", ""]);
 });

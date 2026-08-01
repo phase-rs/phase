@@ -1,614 +1,277 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameState, LegalActionsResult, WaitingFor } from "../../../adapter/types";
-import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
+import {
+  AdapterError,
+  AdapterErrorCode,
+  type AiActionProposal,
+  type GameAction,
+  type GameState,
+  type WaitingFor,
+} from "../../../adapter/types";
+import { buildGameState } from "../../../test/factories/gameStateFactory";
 
-/**
- * Regression test for issue #484 (P0 AI softlock).
- *
- * When the AI must declare attackers with a goaded creature, its heuristic
- * output omits the forced creature and the engine rejects it. After 3 such
- * failures the controller enters its stuck-fallback. Previously the fallback
- * hardcoded `DeclareAttackers { attacks: [] }` — which is *also* illegal under
- * CR 701.15b — so `totalFailures` reached `MAX_TOTAL_FAILURES` (6) and the
- * controller halted via `notifyEngineLost` + `stop()`: the softlock.
- *
- * The fix makes the fallback fetch a guaranteed-legal action from the engine
- * via `adapter.getLegalActions()`. This test reproduces the 3-failure path and
- * asserts the fallback now recovers instead of halting.
- */
-
-// --- Mocks for the controller's heavy dependencies -------------------------
-
-const dispatchAction = vi.fn<(action: GameAction, playerId: number) => Promise<unknown>>();
-
-vi.mock("../../dispatch", () => ({
-  dispatchAction: (action: GameAction, playerId: number) => dispatchAction(action, playerId),
+const dispatchMocks = vi.hoisted(() => ({
+  dispatchAiActionProposal: vi.fn<
+    (proposal: AiActionProposal) => Promise<{ status: "applied" | "stale" }>
+  >(),
 }));
-
+const { dispatchAiActionProposal } = dispatchMocks;
 const notifyEngineLost = vi.fn();
+const attemptStateRehydrate = vi.fn(async () => false);
+const isEnginePanic = vi.fn<(error: unknown) => boolean>(() => false);
+const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(async () => {});
+
+vi.mock("../../dispatch", () => ({ dispatchAiActionProposal: dispatchMocks.dispatchAiActionProposal }));
 vi.mock("../../engineRecovery", () => ({
+  attemptStateRehydrate: () => attemptStateRehydrate(),
+  isEnginePanic: (error: unknown) => isEnginePanic(error),
   notifyEngineLost: (...args: unknown[]) => notifyEngineLost(...args),
-  attemptStateRehydrate: vi.fn(async () => false),
-  isEnginePanic: () => false,
-  routePanic: vi.fn(async () => {}),
+  routePanic: (reason: string, panic?: string) => routePanic(reason, panic),
 }));
+vi.mock("../../debugLog", () => ({ debugLog: vi.fn() }));
 
-vi.mock("../../debugLog", () => ({
-  debugLog: vi.fn(),
-}));
-
-// Store mock: `getState()` returns the current snapshot. The controller drives
-// itself via setTimeout + the `.finally()` re-invocation of checkAndSchedule,
-// so the subscription listener does not need to be invoked by the test.
 let storeState: {
   gameState: GameState | null;
   waitingFor: WaitingFor | null;
-  adapter: unknown;
+  adapter: { getAiActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null> } | null;
+  gameSessionGeneration: number;
+  isResolvingAll: boolean;
 };
+let storeSubscriber: (() => void) | null = null;
+let randomSpy: ReturnType<typeof vi.spyOn>;
 
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: {
     getState: () => storeState,
-    subscribe: () => () => {},
+    subscribe: (_selector: unknown, callback: () => void) => {
+      storeSubscriber = callback;
+      return () => {
+        if (storeSubscriber === callback) storeSubscriber = null;
+      };
+    },
   },
 }));
 
 import { createAIController } from "../aiController";
-import { debugLog } from "../../debugLog";
 
-// --- Fixtures --------------------------------------------------------------
+const PASS = { type: "PassPriority" } as GameAction;
 
-const GOADED_ID = 200;
+function priorityState(): GameState {
+  const waitingFor = { type: "Priority", data: { player: 1 } } as WaitingFor;
+  return buildGameState({ waiting_for: waitingFor, priority_player: 1, stack: [] });
+}
 
-/** The goad-compliant declaration the engine considers legal. */
-const LEGAL_DECLARE: GameAction = {
-  type: "DeclareAttackers",
-  data: { attacks: [[GOADED_ID, { type: "Player", data: 0 }]] },
-} as unknown as GameAction;
+function proposal(action: GameAction): AiActionProposal {
+  return { token: "engine-bound", semanticOwner: 1, actor: 1, action };
+}
 
-/** The illegal declaration the AI heuristic produces (omits the goaded creature). */
-const ILLEGAL_DECLARE: GameAction = {
-  type: "DeclareAttackers",
-  data: { attacks: [] },
-} as unknown as GameAction;
+async function runOnce(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(1_000);
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
-function declareAttackersState(): GameState {
-  const waitingFor: WaitingFor = {
-    type: "DeclareAttackers",
-    data: { player: 1, valid_attacker_ids: [GOADED_ID] },
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  // Keep retry timing deterministic: `runOnce` advances a fixed 1s window,
+  // while production delay variance would otherwise allow a variable number
+  // of nested retries to fit inside that same window.
+  randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+  dispatchAiActionProposal.mockReset();
+  notifyEngineLost.mockReset();
+  attemptStateRehydrate.mockReset();
+  attemptStateRehydrate.mockResolvedValue(false);
+  isEnginePanic.mockReset();
+  isEnginePanic.mockReturnValue(false);
+  routePanic.mockReset();
+  const state = priorityState();
+  storeState = {
+    gameState: state,
+    waitingFor: state.waiting_for,
+    adapter: null,
+    gameSessionGeneration: 1,
+    isResolvingAll: false,
   };
-  return buildGameState({
-    waiting_for: waitingFor,
-    stack: [],
-    has_pending_cast: false,
-    priority_player: 1,
-  });
-}
-
-function castOfferState(): GameState {
-  const waitingFor: WaitingFor = {
-    type: "CastOffer",
-    data: {
-      player: 1,
-      kind: {
-        type: "Cascade",
-        hit_card: 300,
-        exiled_misses: [],
-        source_mv: 4,
-      },
-    },
-  };
-  return buildGameState({
-    waiting_for: waitingFor,
-    stack: [],
-    has_pending_cast: false,
-    priority_player: 1,
-  });
-}
-
-function gollumNamedChoiceSource(gollumId: number) {
-  return {
-    prompt: {
-      identity: {
-        reference: { object_id: gollumId, incarnation: 0 },
-        expected_zone: "Battlefield",
-      },
-      controller: 1,
-      display_name: "Gollum, Scheming Guide",
-    },
-    binding: "ResolutionContext" as const,
-  };
-}
-
-/** Flush pending microtasks (promise `.then` chains). */
-async function flushMicrotasks() {
-  for (let i = 0; i < 10; i++) {
-    await Promise.resolve();
-  }
-}
-
-describe("aiController stuck-fallback (issue #484)", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    dispatchAction.mockReset();
-    notifyEngineLost.mockReset();
-    vi.mocked(debugLog).mockReset();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("recovers via getLegalActions instead of halting on a goaded-creature softlock", async () => {
-    const getAiAction = vi.fn(async () => ILLEGAL_DECLARE);
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [LEGAL_DECLARE],
-        autoPassRecommended: false,
-      }),
-    );
-
-    const state = declareAttackersState();
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
-    };
-
-    // The engine rejects every illegal DeclareAttackers; it accepts the
-    // goad-compliant one from getLegalActions.
-    dispatchAction.mockImplementation(async (action: GameAction) => {
-      const isLegal =
-        action.type === "DeclareAttackers" &&
-        ((action as unknown as { data: { attacks: unknown[] } }).data.attacks.length > 0);
-      if (!isLegal) {
-        throw new Error("CR 701.15b: goaded creature must attack");
-      }
-      return undefined;
-    });
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    const stopSpy = vi.spyOn(controller, "stop");
-
-    controller.start();
-
-    // Drive the 3 normal-path failures + the fallback. Each normal attempt
-    // schedules via setTimeout (AI delay), then re-invokes checkAndSchedule
-    // in its .finally(). Advance timers and flush microtasks repeatedly until
-    // the controller settles.
-    for (let i = 0; i < 12; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    // The fallback dispatched the engine-legal action from getLegalActions...
-    expect(getLegalActions).toHaveBeenCalled();
-    const dispatchedLegal = dispatchAction.mock.calls.some(
-      ([action]) =>
-        action.type === "DeclareAttackers" &&
-        (action as unknown as { data: { attacks: unknown[] } }).data.attacks.length > 0,
-    );
-    expect(dispatchedLegal).toBe(true);
-
-    // ...and the controller never halted (no softlock).
-    expect(notifyEngineLost).not.toHaveBeenCalled();
-    expect(stopSpy).not.toHaveBeenCalled();
-
-    controller.dispose();
-  });
-
-  it("falls through to PassPriority when getLegalActions yields only PassPriority", async () => {
-    const getAiAction = vi.fn(async () => ILLEGAL_DECLARE);
-    // Degenerate engine response: no DeclareAttackers entry.
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [{ type: "PassPriority" } as GameAction],
-        autoPassRecommended: false,
-      }),
-    );
-
-    const state = declareAttackersState();
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
-    };
-
-    // Only PassPriority is accepted in this degenerate scenario.
-    dispatchAction.mockImplementation(async (action: GameAction) => {
-      if (action.type === "PassPriority") return undefined;
-      throw new Error("illegal");
-    });
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    controller.start();
-
-    for (let i = 0; i < 12; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    const dispatchedPass = dispatchAction.mock.calls.some(
-      ([action]) => action.type === "PassPriority",
-    );
-    expect(dispatchedPass).toBe(true);
-    // `undefined` is never dispatched.
-    expect(dispatchAction.mock.calls.every(([action]) => action != null)).toBe(true);
-
-    controller.dispose();
-  });
-
-  it("uses the first legal action for CastOffer fallback instead of matching the WaitingFor type", async () => {
-    const illegalAction = { type: "PassPriority" } as GameAction;
-    const legalCastOfferAction = {
-      type: "CascadeChoice",
-      data: { choice: { type: "Decline" } },
-    } as unknown as GameAction;
-    const getAiAction = vi.fn(async () => illegalAction);
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [legalCastOfferAction],
-        autoPassRecommended: false,
-      }),
-    );
-
-    const state = castOfferState();
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
-    };
-
-    dispatchAction.mockImplementation(async (action: GameAction) => {
-      if (action.type === "CascadeChoice") return undefined;
-      throw new Error("CastOffer requires a cast-offer response action");
-    });
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    controller.start();
-
-    for (let i = 0; i < 12; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    expect(getLegalActions).toHaveBeenCalled();
-    expect(dispatchAction.mock.calls).toContainEqual([legalCastOfferAction, 1]);
-    expect(notifyEngineLost).not.toHaveBeenCalled();
-
-    controller.dispose();
-  });
-
-  it("recovers via getLegalActions when getAiAction returns null without halting", async () => {
-    const legalPass = { type: "PassPriority" } as GameAction;
-    const getAiAction = vi.fn(async () => null);
-    const getLegalActions = vi.fn(
-      async (): Promise<LegalActionsResult> => ({
-        actions: [legalPass],
-        autoPassRecommended: false,
-      }),
-    );
-    const state = buildGameState({
-      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
-      stack: [],
-      has_pending_cast: false,
-      priority_player: 1,
-      active_player: 1,
-    });
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions },
-    };
-    dispatchAction.mockResolvedValue(undefined);
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    const stopSpy = vi.spyOn(controller, "stop");
-    controller.start();
-
-    for (let i = 0; i < 4; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    expect(getLegalActions).toHaveBeenCalled();
-    expect(dispatchAction).toHaveBeenCalledWith(legalPass, 1);
-    expect(notifyEngineLost).not.toHaveBeenCalled();
-    expect(stopSpy).not.toHaveBeenCalled();
-
-    controller.dispose();
-  });
 });
 
-/**
- * Regression test for issue #2012 (turn-control crash).
- *
- * CR 723.5: When a player gains control of another player's turn (Emrakul, the
- * Promised End / Worst Fears / Mindslaver), the controller — not the controlled
- * seat — submits that turn's decisions. The engine re-derives `priority_player`
- * to the authorized submitter. The AI controller previously keyed off the
- * semantic `waiting_for.data.player` (the controlled seat), scheduled the AI to
- * act for a turn it no longer controlled, and the engine rejected every
- * dispatch as `WrongPlayer`. The controller then hit its failure cap and halted
- * via `notifyEngineLost` — the reported "crash."
- */
-describe("aiController turn-control authorization (issue #2012)", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    dispatchAction.mockReset();
-    notifyEngineLost.mockReset();
-    vi.mocked(debugLog).mockReset();
-  });
+afterEach(() => {
+  storeSubscriber = null;
+  randomSpy.mockRestore();
+  vi.useRealTimers();
+});
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  /** Priority belongs to AI seat 1, but the human (seat 0) holds the
-   *  authorized submitter slot (priority_player) — i.e. the human controls
-   *  the AI's turn. */
-  function humanControlsAiTurnState(): GameState {
-    const waitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
-    return buildGameState({
-      waiting_for: waitingFor,
-      stack: [],
-      has_pending_cast: false,
-      // CR 723.5: engine re-derives priority_player to the authorized submitter.
-      priority_player: 0,
-      active_player: 1,
-      turn_decision_controller: 0,
-    });
-  }
-
-  it("stays silent when a human controls the AI's turn (does not crash)", async () => {
-    const getAiAction = vi.fn(async () => ({ type: "PassPriority" }) as GameAction);
-    const state = humanControlsAiTurnState();
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
+describe("AI proposal controller", () => {
+  it("submits an engine-issued proposal exactly once without reconstructing its action", async () => {
+    const issued = proposal(PASS);
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    storeState.adapter = { getAiActionProposal };
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    const stopSpy = vi.spyOn(controller, "stop");
     controller.start();
+    await runOnce();
 
-    for (let i = 0; i < 12; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    controller.dispose();
+  });
 
-    // The AI must not compute or dispatch anything for a turn it doesn't control.
-    expect(getAiAction).not.toHaveBeenCalled();
-    expect(dispatchAction).not.toHaveBeenCalled();
-    // No failure spiral, no halt.
+  it("re-queries after the dispatch layer returns the engine's tagged stale outcome without fabricating an action", async () => {
+    const issued = proposal(PASS);
+    const getAiActionProposal = vi
+      .fn<(difficulty: string, playerId: number) => Promise<AiActionProposal | null>>()
+      .mockResolvedValueOnce(issued)
+      .mockResolvedValue(null);
+    dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+    await runOnce();
+
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(getAiActionProposal.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
     expect(notifyEngineLost).not.toHaveBeenCalled();
-    expect(stopSpy).not.toHaveBeenCalled();
-
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
     controller.dispose();
   });
 
-  it("acts as the authorized submitter on a normal (uncontrolled) AI turn", async () => {
-    const PASS: GameAction = { type: "PassPriority" } as GameAction;
-    const getAiAction = vi.fn(async () => PASS);
-    // Normal turn: AI seat 1 is both the acting player and the authorized
-    // submitter (no turn-control effect).
-    const state = buildGameState({
-      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
-      stack: [],
-      has_pending_cast: false,
-      priority_player: 1,
-      active_player: 1,
-      turn_decision_controller: null,
-    });
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
-    dispatchAction.mockResolvedValue(undefined);
+  it("halts after rejected proposals without dispatching fabricated pass or cancel actions", async () => {
+    const issued = proposal({ type: "ActivateAbility", data: { source_id: 44, ability_index: 0 } } as GameAction);
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockRejectedValue(new Error("proposal rejected"));
+    storeState.adapter = { getAiActionProposal };
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
+    await runOnce();
+    await runOnce();
+    await runOnce();
+    await runOnce();
 
-    for (let i = 0; i < 4; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    // The AI acted, dispatching as seat 1 (the authorized submitter).
-    expect(getAiAction).toHaveBeenCalled();
-    expect(dispatchAction).toHaveBeenCalled();
-    expect(dispatchAction.mock.calls.every(([, playerId]) => playerId === 1)).toBe(true);
-
+    expect(notifyEngineLost).toHaveBeenCalledWith("ai-controller-stuck:Priority");
+    expect(dispatchAiActionProposal.mock.calls.every(([sent]) => sent.action.type === "ActivateAbility")).toBe(true);
     controller.dispose();
   });
 
-  it("routes a finite pre-cast shortcut offer through its proposer", async () => {
-    const decline: GameAction = {
-      type: "PrecastCopyShortcut",
-      data: { epoch: 7, response: { type: "Decline" } },
-    };
-    const waitingFor: WaitingFor = {
-      type: "PrecastCopyShortcutOffer",
-      data: { proposer: 1, epoch: 7, route_count: 1 },
-    };
-    const state = buildGameState({
-      waiting_for: waitingFor,
-      stack: [],
-      has_pending_cast: false,
-      priority_player: 1,
-      active_player: 1,
-      turn_decision_controller: null,
-    });
-    const getAiAction = vi.fn(async () => decline);
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
-    dispatchAction.mockResolvedValue(undefined);
+  it("transports a targeted planeswalker activation as the engine-issued proposal", async () => {
+    const loyalty = proposal({
+      type: "ActivateAbility",
+      data: { source_id: 99, ability_index: 1, targets: [7] },
+    } as GameAction);
+    const getAiActionProposal = vi.fn(async () => loyalty);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    storeState.adapter = { getAiActionProposal };
 
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Hard" }] });
     controller.start();
+    await runOnce();
 
-    await vi.advanceTimersByTimeAsync(1000);
-    await flushMicrotasks();
-
-    expect(getAiAction).toHaveBeenCalledWith("Medium", 1, "PrecastCopyShortcutOffer");
-    expect(dispatchAction).toHaveBeenCalledWith(decline, 1);
-
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(loyalty);
     controller.dispose();
   });
 
-  it("logs the actual random card-predicate guess returned by the AI", async () => {
-    const gollumId = 300;
-    const guess: GameAction = {
-      type: "ChooseOption",
-      data: { choice: "Nonland" },
-    };
-    const waitingFor: WaitingFor = {
-      type: "NamedChoice",
-      data: {
-        player: 1,
-        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
-        options: ["Land", "Nonland"],
-        source: gollumNamedChoiceSource(gollumId),
-      },
-    };
-    const state = buildGameState({
-      waiting_for: waitingFor,
-      priority_player: 1,
-      active_player: 1,
-      objects: {
-        [gollumId]: {
-          name: "Gollum, Scheming Guide",
-        } as GameState["objects"][number],
-      },
-    });
-    const getAiAction = vi.fn(async () => guess);
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
-    dispatchAction.mockResolvedValue(undefined);
-
-    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
-    controller.start();
-
-    for (let i = 0; i < 4; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
-
-    expect(debugLog).toHaveBeenCalledWith(
-      "AI player 2 randomly guesses Nonland for Gollum, Scheming Guide",
-      "info",
+  it("rehydrates a lost engine state, then retries the same engine proposal lookup", async () => {
+    const issued = proposal(PASS);
+    const stateLost = new AdapterError(
+      AdapterErrorCode.STATE_LOST,
+      "engine state lost",
+      true,
     );
-
-    controller.dispose();
-  });
-
-  it("ignores a delayed card-predicate guess after the prompt changes", async () => {
-    const gollumId = 300;
-    const guess: GameAction = {
-      type: "ChooseOption",
-      data: { choice: "Nonland" },
-    };
-    const scheduledWaitingFor: WaitingFor = {
-      type: "NamedChoice",
-      data: {
-        player: 1,
-        choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
-        options: ["Land", "Nonland"],
-        source: gollumNamedChoiceSource(gollumId),
-      },
-    };
-    const currentWaitingFor: WaitingFor = {
-      type: "NamedChoice",
-      data: {
-        player: 1,
-        choice_type: "Opponent",
-        options: ["1"],
-        source: gollumNamedChoiceSource(gollumId),
-      },
-    };
-    const scheduledState = buildGameState({
-      waiting_for: scheduledWaitingFor,
-      priority_player: 1,
-      active_player: 1,
-    });
-    const currentState = buildGameState({
-      waiting_for: currentWaitingFor,
-      priority_player: 1,
-      active_player: 1,
-    });
-    const getAiAction = vi.fn(async () => guess);
-    storeState = {
-      gameState: scheduledState,
-      waitingFor: scheduledState.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
-    dispatchAction.mockResolvedValue(undefined);
+    const getAiActionProposal = vi
+      .fn<(difficulty: string, playerId: number) => Promise<AiActionProposal | null>>()
+      .mockRejectedValueOnce(stateLost)
+      .mockResolvedValueOnce(issued);
+    attemptStateRehydrate.mockResolvedValue(true);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    storeState.adapter = { getAiActionProposal };
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
-    storeState = {
-      ...storeState,
-      gameState: currentState,
-      waitingFor: currentState.waiting_for,
-    };
+    await runOnce();
 
-    await vi.runOnlyPendingTimersAsync();
-    await flushMicrotasks();
-
-    expect(dispatchAction).not.toHaveBeenCalled();
-    expect(debugLog).toHaveBeenCalledWith(
-      expect.stringContaining("AI ignored stale ChooseOption"),
-      "info",
-    );
-
+    expect(attemptStateRehydrate).toHaveBeenCalledOnce();
+    expect(getAiActionProposal).toHaveBeenCalledTimes(3);
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    expect(notifyEngineLost).not.toHaveBeenCalled();
     controller.dispose();
   });
 
-  it("acts as the controller when an AI controls the human's turn", async () => {
-    const PASS: GameAction = { type: "PassPriority" } as GameAction;
-    const getAiAction = vi.fn(async () => PASS);
-    // CR 723.5: AI seat 1 cast Emrakul/Mindslaver on the human (seat 0). The
-    // human's turn is active (data.player = 0), but the engine routes the
-    // authorized submitter to the controller (priority_player = 1). The AI must
-    // act for, and dispatch as, the controller seat — not bail because
-    // data.player is the local human (which previously soft-stalled the turn).
-    const state = buildGameState({
-      waiting_for: buildPriorityWaitingFor({ data: { player: 0 } }),
-      stack: [],
-      has_pending_cast: false,
-      priority_player: 1,
-      active_player: 0,
-      turn_decision_controller: 1,
-    });
-    storeState = {
-      gameState: state,
-      waitingFor: state.waiting_for,
-      adapter: { getAiAction, getLegalActions: vi.fn() },
-    };
-    dispatchAction.mockResolvedValue(undefined);
+  it("drops a proposal computed before Resolve All takes ownership of Priority", async () => {
+    const pendingProposal = deferred<AiActionProposal | null>();
+    const getAiActionProposal = vi.fn(() => pendingProposal.promise);
+    storeState.adapter = { getAiActionProposal };
 
     const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
     controller.start();
+    vi.advanceTimersByTime(1_000);
+    await Promise.resolve();
 
-    for (let i = 0; i < 4; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-      await flushMicrotasks();
-    }
+    storeState.isResolvingAll = true;
+    storeSubscriber?.();
+    pendingProposal.resolve(proposal(PASS));
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(getAiAction).toHaveBeenCalled();
-    expect(dispatchAction).toHaveBeenCalled();
-    // Dispatched as the controller seat (1), never as the controlled human (0).
-    expect(dispatchAction.mock.calls.every(([, playerId]) => playerId === 1)).toBe(true);
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
 
+  it("schedules Priority exactly once when Resolve All releases ownership", async () => {
+    storeState.isResolvingAll = true;
+    const issued = proposal(PASS);
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    expect(getAiActionProposal).not.toHaveBeenCalled();
+
+    storeState.isResolvingAll = false;
+    storeSubscriber?.();
+    await runOnce();
+
+    expect(getAiActionProposal).toHaveBeenCalledTimes(2);
+    expect(dispatchAiActionProposal).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it("does not retry state recovery after a newer game session supersedes the attempt", async () => {
+    const pendingFailure = deferred<AiActionProposal | null>();
+    const getAiActionProposal = vi
+      .fn<() => Promise<AiActionProposal | null>>()
+      .mockReturnValueOnce(pendingFailure.promise)
+      .mockResolvedValueOnce(null);
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    vi.advanceTimersByTime(1_000);
+    await Promise.resolve();
+
+    storeState.gameSessionGeneration += 1;
+    storeSubscriber?.();
+    pendingFailure.reject(new AdapterError(AdapterErrorCode.STATE_LOST, "engine state lost", true));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(attemptStateRehydrate).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
     controller.dispose();
   });
 });

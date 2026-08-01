@@ -119,7 +119,7 @@ pub fn resolve(
     // `HeistExile` carries no `sub_ability`, the unchosen candidates are never
     // forwarded anywhere — they simply stay in the library.
     let finalize = ResolvedAbility::new(Effect::HeistExile, vec![], source_id, controller);
-    state.pending_continuation = Some(PendingContinuation::new(Box::new(finalize), state));
+    state.park_ability_continuation(PendingContinuation::new(Box::new(finalize), state));
 
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: controller,

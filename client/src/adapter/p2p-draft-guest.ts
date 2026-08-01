@@ -20,6 +20,7 @@ import {
 import { DRAFT_PROTOCOL_VERSION } from "../network/draftProtocol";
 import type {
   DraftMatchLaunch,
+  DraftMatchSettlement,
   DraftP2PMessage,
   DraftPauseReason,
 } from "../network/draftProtocol";
@@ -27,6 +28,10 @@ import {
   saveDraftGuestSession,
   clearDraftGuestSession,
 } from "../services/draftPersistence";
+import type {
+  DraftIntergameCommand,
+  DraftIntergameCommandAck,
+} from "../services/intergameCommandLedger";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -40,11 +45,13 @@ export type DraftGuestEvent =
   | { type: "draftResumed" }
   | { type: "pairing"; round: number; table: number; opponentName: string; matchHostPeerId: string; matchId: string }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
+  | { type: "matchSettlementAcknowledged"; matchId: string; receiptId: string; revision: number }
   | { type: "timerSync"; remainingMs: number }
   | { type: "matchStart"; launch: DraftMatchLaunch }
   | { type: "bo3SideboardPrompt"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; loserSeat: number | null; timerMs: number }
   | { type: "bo3ChoosePlayDraw"; matchId: string; gameNumber: number; score: { p0_wins: number; p1_wins: number; draws: number }; timerMs: number }
   | { type: "bo3GameStart"; matchId: string; gameNumber: number; firstPlayerSeat: number }
+  | { type: "bo3AuthorizedCommand"; command: DraftIntergameCommand; acknowledgement: DraftIntergameCommandAck }
   | { type: "bo3ScoreUpdate"; matchId: string; scoreA: number; scoreB: number }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
@@ -128,19 +135,29 @@ export class P2PDraftGuest {
     await this.session.send({ type: "draft_submit_deck", mainDeck });
   }
 
-  sendMatchResult(matchId: string, winnerSeat: number | null): void {
+  sendMatchSettlement(settlement: DraftMatchSettlement): void {
     if (!this.session) return;
-    void this.session.send({ type: "draft_match_result", matchId, winnerSeat });
+    void this.session.send({ type: "draft_match_settlement", settlement });
   }
 
-  sendSideboardSubmit(matchId: string, mainDeck: string[], sideboard: Array<{ name: string; count: number }>): void {
+  sendBetweenGames(
+    matchId: string,
+    gameNumber: number,
+    score: { p0_wins: number; p1_wins: number; draws: number },
+    loserSeat: number | null,
+  ): void {
     if (!this.session) return;
-    void this.session.send({ type: "draft_bo3_sideboard_submit", matchId, mainDeck, sideboard });
+    void this.session.send({ type: "draft_bo3_between_games", matchId, gameNumber, score, loserSeat });
   }
 
-  sendPlayDrawChoice(matchId: string, playFirst: boolean): void {
+  sendAuthorizedIntergameCommand(command: DraftIntergameCommand): void {
     if (!this.session) return;
-    void this.session.send({ type: "draft_bo3_play_draw_choice", matchId, playFirst });
+    void this.session.send({ type: "draft_bo3_intergame_command", command });
+  }
+
+  sendIntergameReceipt(acknowledgement: DraftIntergameCommandAck, receiptId: string): void {
+    if (!this.session) return;
+    void this.session.send({ type: "draft_bo3_intergame_receipt", acknowledgement, receiptId });
   }
 
   // ── Message handling ───────────────────────────────────────────────
@@ -242,6 +259,16 @@ export class P2PDraftGuest {
         break;
       }
 
+      case "draft_match_settlement_ack": {
+        this.emit({
+          type: "matchSettlementAcknowledged",
+          matchId: msg.matchId,
+          receiptId: msg.receiptId,
+          revision: msg.revision,
+        });
+        break;
+      }
+
       case "draft_paused": {
         this.emit({ type: "draftPaused", reason: msg.reason });
         break;
@@ -289,6 +316,15 @@ export class P2PDraftGuest {
           score: msg.score,
           loserSeat: msg.loserSeat,
           timerMs: msg.timerMs,
+        });
+        break;
+      }
+
+      case "draft_bo3_intergame_authorized": {
+        this.emit({
+          type: "bo3AuthorizedCommand",
+          command: msg.command,
+          acknowledgement: msg.acknowledgement,
         });
         break;
       }

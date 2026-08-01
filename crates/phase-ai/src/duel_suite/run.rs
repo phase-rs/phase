@@ -207,7 +207,14 @@ pub fn run_suite(db: &CardDatabase, options: &SuiteOptions) -> Result<SuiteRepor
     let mut harvest_sink = match &options.harvest_output {
         Some(path) => {
             let meta = harvest::HarvestMeta {
-                schema: 1,
+                // schema 2 added the `mana_development_offset` control column as
+                // a SELF-ONLY absolute count; schema 3 keeps the column name and
+                // changes its semantics to a signed self-minus-opponent
+                // DIFFERENTIAL (Unit 5).
+                //
+                // The trainer accepts only schema 3+ shards, preventing it from
+                // pooling this signed differential with schema 2's absolute count.
+                schema: 3,
                 git_sha: options.git_sha.clone(),
                 card_data_hash: options.card_data_hash.clone(),
                 difficulty: format!("{:?}", options.difficulty),

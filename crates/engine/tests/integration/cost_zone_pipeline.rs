@@ -125,8 +125,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
     ));
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second rest card is parked behind the first replacement choice")
         .remaining
         .clone();
@@ -259,8 +258,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
     ));
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second selected card is batch-owned behind the first redirect")
         .remaining
         .clone();
@@ -407,7 +405,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
         dig_completed.waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(dig_runner.state().pending_batch_deliveries.is_none());
+    assert!(dig_runner.state().active_batch_delivery().is_none());
     assert_eq!(dig_runner.state().objects[&rest_a].zone, Zone::Library);
     assert_eq!(dig_runner.state().objects[&rest_b].zone, Zone::Library);
     let dig_tracked = dig_runner
@@ -460,7 +458,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
         mass_runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(mass_runner.state().pending_batch_deliveries.is_none());
+    assert!(mass_runner.state().active_batch_delivery().is_none());
     assert_eq!(mass_runner.state().objects[&selected_a].zone, Zone::Hand);
     assert_eq!(mass_runner.state().objects[&selected_b].zone, Zone::Hand);
     let mass_tracked = mass_runner
@@ -551,8 +549,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     assert!(matches!(
         runner
             .state()
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref()),
         Some(BatchCompletion::RevealRestPile { .. })
     ));
@@ -566,8 +563,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     ));
     let first_rest_park = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
     assert_eq!(first_rest_park.remaining.len(), 1);
     assert!(matches!(
@@ -586,8 +582,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     assert!(matches!(
         runner
             .state()
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref()),
         Some(BatchCompletion::RevealRestPile { .. })
     ));
@@ -860,6 +855,7 @@ fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() 
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -938,6 +934,7 @@ fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -1810,6 +1807,102 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
             .count(),
         1,
         "the deferred first departure trigger is collected once after the full group is stamped"
+    );
+}
+
+#[test]
+fn target_activation_replacement_paused_sacrifice_stages_cost_triggers_until_commit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Sacrifice Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Targeted Sacrifice Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Targeted Sacrifice Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let target = scenario.add_creature(P1, "Target", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("targeted activation starts with target selection");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("target is declared before the sacrifice cost");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("second sacrifice reaches the replacement pipeline");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the first sacrifice event stays inside the pending activation session"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement completion commits the activation");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == first
+            ))
+            .count(),
+        1,
+        "the replacement-paused sacrifice trigger is collected once at activation commit"
     );
 }
 
@@ -2726,11 +2819,16 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     ));
     assert!(
         state
-            .pending_spell_resolution
-            .as_ref()
+            .active_spell_resolution()
             .is_some_and(|ctx| ctx.object_id == mimeoplasm),
         "the outer permanent-spell resolution must survive the inner cost prompt"
     );
+
+    let serialized = serde_json::to_string(runner.state())
+        .expect("the nested SpellResolution replacement prompt serializes as v2");
+    let restored: GameState = serde_json::from_str(&serialized)
+        .expect("the nested SpellResolution replacement prompt restores from v2");
+    let mut runner = GameRunner::from_state(restored);
 
     for prompt in 0..2 {
         assert!(
@@ -2755,8 +2853,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
             assert!(
                 runner
                     .state()
-                    .pending_spell_resolution
-                    .as_ref()
+                    .active_spell_resolution()
                     .is_some_and(|ctx| ctx.object_id == mimeoplasm),
                 "an inner cost redirect must not consume the outer spell-resolution context"
             );
@@ -2787,7 +2884,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
     assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
     assert!(
-        state.pending_spell_resolution.is_none(),
+        state.active_spell_resolution().is_none(),
         "the outer context is consumed only when Mimeoplasm's own entry completes"
     );
 }
@@ -3696,7 +3793,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
             if matches!(pending.resume, ManaAbilityResume::EffectPayCost { .. })
     ));
     assert!(
-        runner.state().pending_continuation.is_none(),
+        runner.state().active_ability_continuation().is_none(),
         "only replacement post-effect work may drain before the typed Effect::PayCost root"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
@@ -7129,8 +7226,7 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     );
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining randomized cascade suffix must be batch-owned")
         .remaining
         .clone();
@@ -7622,13 +7718,12 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
         "the first top placement must surface its competing Moved redirects"
     );
     assert!(
-        redirected.state().pending_batch_deliveries.is_some(),
+        redirected.state().active_batch_delivery().is_some(),
         "the remaining placement must be carried by the batch across the pause"
     );
     let parked_order = redirected
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining top placement is batch-owned")
         .remaining
         .clone();
@@ -7811,8 +7906,7 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
     assert_eq!(runner.state().players[P0.0 as usize].life, 20);
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining randomized discover misses are batch-owned")
         .remaining
         .clone();
@@ -9709,6 +9803,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             library_position: Some(position),
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         let completed = runner
@@ -9780,6 +9875,9 @@ fn cloak_tracked_exile_redirect_pauses_before_manifest_tail() {
             target: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 0 },
             object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+            // CR 110.2a: P0-owned/P0-controlled pile — pins the None-snapshot
+            // park/re-park path (owner default, behavior-identical).
+            enters_under: None,
         },
         vec![],
         source,
@@ -9876,6 +9974,9 @@ fn cloak_tracked_exile_delivery_stays_synchronous_and_cloaks_every_member() {
             target: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 0 },
             object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+            // CR 110.2a: P0-owned/P0-controlled pile — pins the None-snapshot
+            // synchronous path (owner default, behavior-identical).
+            enters_under: None,
         },
         vec![],
         source,

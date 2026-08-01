@@ -243,20 +243,14 @@ mod tests {
                 count,
                 template: None,
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Utility,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Utility),
         }
     }
 
     fn decline() -> CandidateAction {
         CandidateAction {
             action: GameAction::DeclineShortcut,
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Pass),
         }
     }
 

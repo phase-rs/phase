@@ -1,4 +1,5 @@
 import type {
+  EndContinuousEffectOffer,
   GameAction,
   GameEvent,
   GameLogEntry,
@@ -6,8 +7,22 @@ import type {
   LegalActionsResult,
   ManaCost,
   ObjectId,
+  ObjectAction,
 } from "../adapter/types";
+import type { InteractionSubmission, ViewerInteraction } from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
+import type { P2PAuthorityStamp, P2PSessionKey } from "../services/p2pSession";
+import type { P2PTerminalResult } from "../services/p2pTerminalResult";
+
+/**
+ * The stable session identity is carried on reconnect so a resumed host can
+ * accept a legitimate guest while replacing its previous host incarnation.
+ * Every host-originated frame is stamped by P2PHostAdapter; the optional
+ * shape keeps first-contact guest_deck messages intentionally credentialless.
+ */
+export interface P2PAuthorityWire {
+  authority?: P2PAuthorityStamp;
+}
 
 /**
  * Wire-format projection of `LegalActionsResult`. Single source of truth for
@@ -23,8 +38,11 @@ import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 export interface LegalActionsWire {
   legalActions: GameAction[];
   autoPassRecommended?: boolean;
-  legalActionsByObject?: Record<string, GameAction[]>;
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
+  manaPaymentShortcutActions?: GameAction[];
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
+  viewerInteraction?: ViewerInteraction;
 }
 
 /** Host-side: project an engine `LegalActionsResult` onto the wire shape. */
@@ -32,8 +50,11 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    endContinuousEffectOffers: result.endContinuousEffectOffers ?? [],
+    manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
+    viewerInteraction: result.viewerInteraction,
   };
 }
 
@@ -42,8 +63,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
   return {
     actions: wire.legalActions,
     autoPassRecommended: wire.autoPassRecommended ?? false,
+    endContinuousEffectOffers: wire.endContinuousEffectOffers ?? [],
+    manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
+    viewerInteraction: wire.viewerInteraction,
   };
 }
 
@@ -56,11 +80,19 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  16 — PayableResource::ManaGeneric changed from { per_x } to
+ *       { base_cost: ManaCost } (#6410) — a GameState payload field type
+ *       change, and base_cost intentionally carries no serde default (a
+ *       missing base_cost must fail deserialization, not silently resolve
+ *       to a zero-cost payment), so old and new peers can't parse each
+ *       other's serialized snapshots.
  *   1 — pre-compression JSON-serialization era (no longer in production)
  *   2 — gzip + version-prefixed binary wire format
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
+ *  13 — Actor-scoped priority-passing settings and filtered per-player state.
+ *  17 — Sacrificial-mana source selection action and waiting-state snapshots.
  *  12 — Connive exact subject snapshots and resident paused post-replacement
  *       drains changed P2P GameState snapshots.
  *  11 — Serialized GameState trigger provenance and paused logical zone-change owners.
@@ -68,27 +100,33 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
  *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
+ *  17 — Bound draft-match concession request. A Traditional-draft guest
+ *       asks its match authority to settle the match; it must not send a
+ *       game-level concession through the ordinary P2P path.
  *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 12 as const;
+export const WIRE_PROTOCOL_VERSION = 17 as const;
 
-export type P2PMessage =
+export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
   | ({
       type: "game_setup";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
       playerToken: string;
+      revision?: number;
       state: GameState;
       events: GameEvent[];
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   | ({
       type: "state_update";
+      revision?: number;
       state: GameState;
       events: GameEvent[];
       logEntries?: GameLogEntry[];
@@ -101,12 +139,15 @@ export type P2PMessage =
   | { type: "disconnect"; reason: string }
   | { type: "emote"; emote: string }
   | { type: "concede" }
+  /** Protected by a draft-installed match capability on the host. */
+  | { type: "match_concede" }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
-  | { type: "reconnect"; playerToken: string }
+  | { type: "reconnect"; playerToken: string; sessionKey?: P2PSessionKey }
   | ({
       type: "reconnect_ack";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
+      revision?: number;
       state: GameState;
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
@@ -124,6 +165,10 @@ export type P2PMessage =
   // send this, since those cases may be transient and the reconnect loop is
   // correct behavior there.
   | { type: "host_left"; reason: string }
+  /** Recipient-scoped terminal commitment. It is host-originated and
+   * lease-bound; guests pin the first valid terminal id and never reconnect
+   * after accepting the commitment for their filtered state. */
+  | { type: "terminal_result"; result: P2PTerminalResult }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -137,12 +182,14 @@ export type P2PMessage =
   // Pre-game lobby progress (host → all peers in the lobby).
   | { type: "lobby_progress"; joined: number; total: number }
   | { type: "seat_mutate"; mutation: SeatMutation }
-  | { type: "seat_snapshot"; view: SeatView };
+  | { type: "seat_snapshot"; view: SeatView }
+);
 
 const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "interaction",
   "preview_mana_payment",
   "state_update",
   "action_rejected",
@@ -153,11 +200,13 @@ const VALID_TYPES = new Set([
   "disconnect",
   "emote",
   "concede",
+  "match_concede",
   "reconnect",
   "reconnect_ack",
   "reconnect_rejected",
   "kick",
   "host_left",
+  "terminal_result",
   "player_kicked",
   "player_conceded",
   "player_disconnected",

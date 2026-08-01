@@ -94,7 +94,7 @@ pub fn resolve(
     // CR 616.1: a `Moved` redirect (or, for a battlefield entry, an as-enters
     // choice) can surface a player choice mid-batch. `move_objects_simultaneously`
     // parks `state.waiting_for` and stashes the undelivered tail in
-    // `state.pending_batch_deliveries`; bail before emitting `EffectResolved` so
+    // the active `BatchDelivery` frame; bail before emitting `EffectResolved` so
     // the surfaced prompt is not clobbered and no later pick overwrites the
     // parked replacement. The resume path
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
@@ -495,8 +495,7 @@ mod tests {
             "per-card ordering prompt must be parked"
         );
         let stash = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("the undelivered tail must be stashed for the resume path");
         // Fix-4: the re-stash must carry the batch-uniform request context so
         // the drain rebuilds equivalent requests — seek attributes every move to

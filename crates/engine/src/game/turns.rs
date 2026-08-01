@@ -10,8 +10,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    AutoPassMode, ExtraPhase, GameState, PendingCounterAddition, PendingEffectResolved,
-    TurnBoundary, WaitingFor,
+    AutoPassMode, ExtraPhase, ExtraTurn, GameState, LoopCollapseAxis, PayableResource,
+    PendingCounterAddition, PendingEffectResolved, TurnBoundary, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -278,13 +278,113 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
             next_phase: next,
             in_combat,
             entering_cleanup,
+            drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
         });
     drain_pending_phase_transition_progress(state, events);
 }
 
+/// CR 732.2a: the APNAP-first player (turn order) who still holds a non-empty deferred
+/// persistent-axis materialization stash (one or more `PersistentAxisMaterialization`
+/// items — tokens, counters, life, or a drive sequence), or `None`. Filters
+/// `players::apnap_order` — the same helper `enter_phase` uses to seed the mana-empty
+/// drain — so the collapse resolves in the same turn-based order and supports 2+ players
+/// (one prompt per drain iteration, each to its own controller). Guards on a NON-EMPTY
+/// list so a stale empty-`Vec` entry (never produced by the register/take/clear API) could
+/// not re-prompt forever.
+fn next_apnap_player_with_pending_materialization(state: &GameState) -> Option<PlayerId> {
+    super::players::apnap_order(state).into_iter().find(|p| {
+        state
+            .pending_unbounded_materialization
+            .get(p)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EmptyManaPoolApplyOutcome {
+    Applied,
+    Deferred,
+}
+
+/// CR 106.4 + CR 703.4q: Apply the final replacement-ordered mana dispositions
+/// as the step or phase ends, then apply one aggregate Yurlok-class life-loss
+/// event for the mana units that were actually removed. Retained or transformed
+/// units are not lost and therefore do not contribute.
+pub(super) fn apply_empty_mana_pool_event(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> EmptyManaPoolApplyOutcome {
+    let ProposedEvent::EmptyManaPool {
+        player_id, units, ..
+    } = event
+    else {
+        debug_assert!(false, "expected EmptyManaPool event");
+        return EmptyManaPoolApplyOutcome::Applied;
+    };
+
+    // CR 604.1: This is an existence query, evaluated exactly once for this
+    // player's aggregate empty-pool event.
+    let causes_life_loss =
+        crate::game::static_abilities::player_unspent_mana_loss_causes_life_loss(state, player_id);
+    let amount =
+        crate::types::mana::apply_empty_mana_pool_decisions(state, player_id, &units, events);
+    state.pending_step_end_mana_handlers.clear();
+
+    if !causes_life_loss || amount == 0 {
+        return EmptyManaPoolApplyOutcome::Applied;
+    }
+
+    match crate::game::effects::life::apply_life_loss(state, player_id, amount, events) {
+        Ok(_) => EmptyManaPoolApplyOutcome::Applied,
+        Err(crate::game::effects::life::ReplacementDeferred::ReplacementChoice) => {
+            EmptyManaPoolApplyOutcome::Deferred
+        }
+        Err(crate::game::effects::life::ReplacementDeferred::SubstitutionContinuation) => {
+            mark_phase_transition_awaiting_post_replacement(state);
+            EmptyManaPoolApplyOutcome::Deferred
+        }
+    }
+}
+
+pub(super) fn mark_phase_transition_awaiting_post_replacement(state: &mut GameState) {
+    if let Some(progress) = state.pending_phase_transition_progress.as_mut() {
+        progress.drain_state =
+            crate::types::game_state::PhaseTransitionDrainState::AwaitingPostReplacementContinuation;
+    }
+}
+
+/// CR 614.6: Resume the typed APNAP phase owner only after the
+/// interactive substitute that suspended it has terminally left the resolution
+/// stack. Merely having a pending phase cursor is insufficient: ordinary
+/// empty-mana replacement choices and loop-collapse prompts have distinct
+/// owners and resume paths.
+pub(super) fn resume_phase_transition_after_post_replacement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let awaiting = state
+        .pending_phase_transition_progress
+        .as_ref()
+        .is_some_and(|progress| {
+            progress.drain_state
+                == crate::types::game_state::PhaseTransitionDrainState::AwaitingPostReplacementContinuation
+        });
+    if !awaiting || state.active_post_replacement_drains().is_some() {
+        return;
+    }
+    if let Some(progress) = state.pending_phase_transition_progress.as_mut() {
+        progress.drain_state = crate::types::game_state::PhaseTransitionDrainState::Ready;
+    }
+    drain_pending_phase_transition_progress(state, events);
+}
+
 /// CR 703.4q + CR 616.1: Per-phase APNAP-queue drain. Pops players one at a
-/// time, runs `clear_expiring_at_step_end` first (H2 invariant —
-/// expiry-bound units never enter the replacement pipeline), scans active
+/// time, expires reached retention markers first so those durations
+/// become eligible for ordinary emptying, scans active
 /// step-end mana handlers for that player, builds and dispatches a
 /// `ProposedEvent::EmptyManaPool` through `replace_event`. On `Execute`,
 /// applies decisions and continues. On `NeedsChoice`, sets `state.waiting_for`
@@ -295,24 +395,96 @@ pub(super) fn drain_pending_phase_transition_progress(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
+    // The typed phase cursor is parked while an interactive substitute owns
+    // resolution. A cursor's mere presence is not authority to drain it.
+    if state
+        .pending_phase_transition_progress
+        .as_ref()
+        .is_some_and(|progress| {
+            progress.drain_state != crate::types::game_state::PhaseTransitionDrainState::Ready
+        })
+    {
+        return;
+    }
+
     while let Some(progress) = state.pending_phase_transition_progress.as_mut() {
         let Some(player_id) = progress.remaining_players.pop_front() else {
-            // Queue empty: complete the phase entry.
+            // Queue empty. Copy `next_phase` out first, releasing the `progress`
+            // borrow (NLL) so the collapse pass below can re-borrow `state`.
             let next_phase = progress.next_phase;
+            // CR 500.5 + CR 106.4 + CR 104.4b: de-realize every LOOP-backed ∞-mana axis as this
+            // step/phase ends. The per-player drain above already emptied these pools (keep-gate
+            // false for non-debug players); clearing the axis stops `refill_infinite_mana` from
+            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) are
+            // EXCLUDED — their mana persists. Placed BEFORE the token-collapse check so that when a
+            // controller holds BOTH a mana axis and a token stash, the mana axis is cleared before
+            // the token pause returns — otherwise the intervening `LoopCollapse`-submit `apply()`
+            // would call `refill_infinite_mana` and re-seed the just-drained pool. Runs at true
+            // queue-empty, so it also covers any player whose drain paused on a step-end mana-handler
+            // ordering choice (CR 616.1).
+            let loop_mana_players: Vec<PlayerId> = state
+                .unbounded_resources
+                .iter()
+                .filter(|(pid, axes)| {
+                    !state.debug_infinite_mana.contains(*pid)
+                        && axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))
+                })
+                .map(|(pid, _)| *pid)
+                .collect();
+            for pid in loop_mana_players {
+                state.clear_unbounded_mana_loop(pid);
+            }
+            // CR 732.2a: SECOND pass, after the CR 500.5 mana-empty APNAP drain
+            // above — resolve any deferred persistent-axis materializations (one or
+            // more of tokens / beneficial counters / life gain / an observed-growth
+            // drive sequence) from accepted loop shortcuts, in APNAP turn order. A
+            // populated stash is present iff a materializable loop was accepted (§5);
+            // prompt its controller for the finite count N.
+            if let Some(controller) = next_apnap_player_with_pending_materialization(state) {
+                // CR 732.2a: label the prompt by the axis this loop collapses (display
+                // only — the submit handler resolves from the stash, not this field).
+                // The controller was selected on a NON-EMPTY stash, so `Mixed` here is
+                // purely defensive.
+                let axis = state
+                    .pending_unbounded_materialization
+                    .get(&controller)
+                    .map(|items| LoopCollapseAxis::from_materializations(items))
+                    .unwrap_or(LoopCollapseAxis::Mixed);
+                state.waiting_for = WaitingFor::PayAmountChoice {
+                    player: controller,
+                    resource: PayableResource::LoopCollapse { axis },
+                    // CR 732.2a: any finite count (incl. 0 — a legal collapse-to-
+                    // nothing; the ∞ still ends). `max` reuses the engine's loop
+                    // safety bound; the AI branch offers only N=1 so the wide range
+                    // never enters search. Tapped tokens carry no lethal driver.
+                    min: 0,
+                    max: crate::game::engine::MAX_SHORTCUT_CYCLES,
+                    accumulated: 0,
+                    source_id: ObjectId(0),
+                    pending_mana_ability: None,
+                };
+                // Leave the (now-empty) `pending_phase_transition_progress` INTACT
+                // (do NOT null it): the `SubmitPayAmount` handler re-drains after the
+                // mint, re-enters this queue-empty branch, and calls
+                // `finish_enter_phase`, restoring Priority in the same action. Nulling
+                // here would strand a stale `LoopCollapse` `waiting_for` until the
+                // next boundary. PAUSE — resumed by the `LoopCollapse` submit handler.
+                return;
+            }
+            // Stash empty AND queue empty → complete the phase entry.
             state.pending_phase_transition_progress = None;
             finish_enter_phase(state, next_phase, events);
             return;
         };
         let in_combat = progress.in_combat;
-        let entering_cleanup = progress.entering_cleanup;
-
-        // CR 500.5 + CR 614.6 (H2 invariant): Drop only expiry-bound units
-        // whose own rule fires on this transition. Non-expiry units flow
-        // into the replacement pipeline as Drop-disposition decisions.
+        // CR 500.5 + CR 703.4q: End reached retention durations first, then
+        // route the still-unspent units through the ordinary empty-pool event.
+        // Clearing only the marker preserves composition with any other active
+        // retain / transform handler and lets Yurlok count actual loss.
         if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
             player
                 .mana_pool
-                .clear_expiring_at_step_end(in_combat, entering_cleanup);
+                .clear_expired_end_of_combat_retention_markers(in_combat);
         }
 
         // Scan active step-end mana handlers for this player. Inlines the
@@ -324,12 +496,11 @@ pub(super) fn drain_pending_phase_transition_progress(
 
         // Build per-unit decision payload from the player's surviving pool.
         //
-        // CR 500.5 + CR 703.4q (H2 invariant): expiry-bound units (e.g.
-        // Klauth's "you don't lose this mana as steps and phases end",
-        // Firebending's "Until end of combat, you don't lose this mana as
-        // steps and phases end" — CR 702.189a) have *already* had their fate
-        // decided by `clear_expiring_at_step_end` above — they were either
-        // dropped (their rule fired) or deliberately retained.
+        // CR 500.5 + CR 703.4q: expiry-bound units (e.g. Klauth's "you don't
+        // lose this mana as steps and phases end", Firebending's "Until end of
+        // combat..." — CR 702.189a) stay excluded while their duration remains
+        // active. Once it ends, the retention-expiry authority makes them
+        // ordinary `None`-expiry units for this event.
         //
         // CR 614.17 + CR 614.17c: "you don't lose this mana …" is a "can't"
         // effect, not a replacement effect. It prevents the CR 106.4 /
@@ -343,15 +514,13 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decisions. The `enumerate` runs over the full pool so `pool_index`
         // stays aligned with the retained expiry units that remain in
         // `mana_pool.mana`.
-        // Debug-only: CR 500.5 end-of-step empty is suppressed for a player with
-        // the infinite-mana toggle active — every non-expiry unit is dispositioned
-        // `Keep` instead of `Drop` so the pool survives the step transition. This
-        // is the partner of `mana_payment::refill_infinite_mana`; together they
-        // keep a flagged player's pool continuously full.
-        let keep_for_infinite_mana = state
-            .unbounded_resources
-            .get(&player_id)
-            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))));
+        // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
+        // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
+        // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
+        // the keep-override on the explicit debug marker, never on "has a Mana axis" (a real loop
+        // sets one too — MEASURED identical footprint). This is the partner of
+        // `mana_payment::refill_infinite_mana`; together they keep a debug-flagged pool full.
+        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -383,15 +552,11 @@ pub(super) fn drain_pending_phase_transition_progress(
 
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                if let ProposedEvent::EmptyManaPool {
-                    player_id, units, ..
-                } = event
+                if apply_empty_mana_pool_event(state, event, events)
+                    == EmptyManaPoolApplyOutcome::Deferred
                 {
-                    crate::types::mana::apply_empty_mana_pool_decisions(
-                        state, player_id, &units, events,
-                    );
+                    return;
                 }
-                state.pending_step_end_mana_handlers.clear();
                 // Continue to next player.
             }
             ReplacementResult::NeedsChoice(choosing_player) => {
@@ -577,6 +742,46 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     }
 }
 
+/// CR 500.7: Enqueue an extra turn for `player` after the specified turn
+/// represented by `anchor`. Both ids are team-normalized (CR 805.8).
+pub(crate) fn enqueue_extra_turn(state: &mut GameState, player: PlayerId, anchor: PlayerId) {
+    state.extra_turns.push(ExtraTurn {
+        player: super::topology::normalize_shared_turn_recipient(state, player),
+        anchor: super::topology::normalize_shared_turn_recipient(state, anchor),
+    });
+}
+
+/// CR 500.7: Select the next active player after `completed_player`'s turn ends.
+///
+/// Returns `(next_active, is_extra_turn)`. When the extra-turn queue drains,
+/// natural order resumes after the latched specified-turn anchor rather than
+/// after the last extra-turn taker — so an out-of-sequence extra turn during
+/// player C's turn resumes with the player after C, not after the beneficiary.
+pub(crate) fn select_next_turn_after_completion(
+    state: &mut GameState,
+    completed_player: PlayerId,
+) -> (PlayerId, bool) {
+    if let Some(entry) = state.extra_turns.pop() {
+        // First pop in a chain: latch the specified turn (nested extras must not
+        // overwrite the outer CR 500.7 anchor).
+        if state.extra_turn_sequence_anchor.is_none() {
+            state.extra_turn_sequence_anchor = Some(entry.anchor);
+        }
+        let active = super::topology::normalize_shared_turn_recipient(state, entry.player);
+        (active, true)
+    } else if let Some(anchor) = state.extra_turn_sequence_anchor.take() {
+        (
+            super::topology::next_turn_representative(state, anchor),
+            false,
+        )
+    } else {
+        (
+            super::topology::next_turn_representative(state, completed_player),
+            false,
+        )
+    }
+}
+
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
 /// projection. Slot 0 is the current live turn representative; later slots are
 /// the next turns that would actually begin after extra turns, skipped turns,
@@ -628,7 +833,7 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
             .map(|idx| turn_control::release_control_at(&mut scratch, idx).grant_extra_turn_after)
             .unwrap_or(false);
             if grant_extra_turn_after {
-                scratch.extra_turns.push(completed_player);
+                enqueue_extra_turn(&mut scratch, completed_player, completed_turn_key);
             }
             scratch.active_full_turn_control = None;
             scratch.active_combat_phase_control = None;
@@ -637,16 +842,10 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
 
         scratch.turn_number += 1;
 
-        // CR 500.7: extra turns are LIFO; otherwise walk current turn order.
-        let is_extra_turn = if let Some(extra_turn_player) = scratch.extra_turns.pop() {
-            scratch.active_player =
-                super::topology::normalize_shared_turn_recipient(&scratch, extra_turn_player);
-            true
-        } else {
-            scratch.active_player =
-                super::topology::next_turn_representative(&scratch, scratch.active_player);
-            false
-        };
+        // CR 500.7: extra turns are LIFO; resume after the specified-turn anchor.
+        let (next_active, is_extra_turn) =
+            select_next_turn_after_completion(&mut scratch, completed_player);
+        scratch.active_player = next_active;
 
         // CR 614.10: a skipped turn never emits a display slot. Leave the
         // cursor on the skipped would-be active player so the next attempt
@@ -724,7 +923,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|idx| turn_control::release_control_at(state, idx).grant_extra_turn_after)
         .unwrap_or(false);
         if grant_extra_turn_after {
-            state.extra_turns.push(completed_player);
+            enqueue_extra_turn(state, completed_player, completed_turn_key);
         }
         // CR 723.1 + CR 723.2: every active window on the completed turn is done.
         // This also covers an effect that ended the turn during combat; an
@@ -737,17 +936,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.turn_number += 1;
 
     // CR 500.7: Determine the active player and whether this turn is an *extra*
-    // turn (LIFO-popped from `state.extra_turns`) or a natural turn (next seat
-    // in APNAP order). `is_extra_turn` flows into the replacement pipeline so
-    // condition-gated skip effects (e.g., Stranglehold) can observe it.
-    let is_extra_turn = if let Some(extra_turn_player) = state.extra_turns.pop() {
-        state.active_player =
-            super::topology::normalize_shared_turn_recipient(state, extra_turn_player);
-        true
-    } else {
-        state.active_player = super::topology::next_turn_representative(state, state.active_player);
-        false
-    };
+    // turn (LIFO-popped from `state.extra_turns`) or a natural turn. When the
+    // extra-turn queue drains, resume after the latched specified-turn anchor
+    // (not after the last extra-turn taker). `is_extra_turn` flows into the
+    // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
+    // can observe it.
+    let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    state.active_player = next_active;
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
     // Days). This is a fast path for "you skip your next turn" that doesn't need
@@ -862,6 +1057,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.graveyard_cast_permissions_used.clear();
     // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
     state.graveyard_cast_permissions_used_per_type.clear();
+    // P1 retention policy (not a CR rule): the resolved-rules provenance
+    // journal only has consumers within a payment/announcement window, and a
+    // turn transition cannot begin with a payment in flight (the stack is
+    // empty, prompts are settled, and mana pools drained at step end per
+    // CR 106.4). Truncating here bounds journal growth to one turn until the
+    // CR 733 settlement consumer defines the real retention window.
+    state.resolved_rules_journal = Default::default();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
@@ -1286,8 +1488,14 @@ pub fn execute_untap_with_choices(
                                 count: 1,
                             });
                         }
-                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
+                    } else if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .expect("untap-step object must remain a live exact object")
+                    {
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
@@ -1610,8 +1818,14 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
                                     count: 1,
                                 });
                             }
-                        } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.tapped = false;
+                        } else if crate::game::object_state::resolve_and_apply_object_edit(
+                            state,
+                            object_id,
+                            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                            false,
+                        )
+                        .expect("Seedborn untap object must remain a live exact object")
+                        {
                             events.push(GameEvent::PermanentUntapped { object_id });
                         }
                     }
@@ -1812,6 +2026,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
+    // CR 514.2: EndOfTurn mana retention survives the End → Cleanup phase
+    // boundary and expires as part of this cleanup action. The units remain in
+    // the pool until the ordinary CR 500.5 / CR 703.4q cleanup-exit drain.
+    for player in &mut state.players {
+        player
+            .mana_pool
+            .clear_expired_end_of_turn_retention_markers();
+    }
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
@@ -2272,6 +2494,28 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     advance_phase(state, events);
                     continue;
                 }
+                // CR 500.4 + CR 503.1: "As a step or phase begins, if there are
+                // effects that last until that step or phase, those effects
+                // expire." Mirrors `prune_until_next_end_step_effects` one step
+                // axis over, for `UntilNextStepOf { step: Upkeep }` durations
+                // ("until your next upkeep").
+                //
+                // CR 614.10a: placed AFTER the skip check on purpose — an effect
+                // scheduled for the "next" occurrence of a step waits for the
+                // first occurrence that isn't skipped, so an Eon-Hub-skipped
+                // upkeep must NOT expire the effect.
+                //
+                // CR 500.6: also ahead of the upkeep triggers below, so an
+                // expiring grant is already gone when a trigger sharing its
+                // deadline resolves (Cycle of Life).
+                super::layers::prune_until_next_upkeep_effects(state, state.active_player);
+                // CR 500.4 + CR 503.1: same deadline, casting-permission half —
+                // Elkin Bottle / Grinning Totem lower "Until the beginning of
+                // your next upkeep, you may play that card" to a durational
+                // `CastingPermission::PlayFromExile`, not a transient continuous
+                // effect. Mirrors the `prune_end_step_casting_permissions` +
+                // `prune_until_next_end_step_effects` pairing at Phase::End.
+                super::layers::prune_upkeep_step_casting_permissions(state, state.active_player);
                 // CR 704.3: Check SBAs before beginning-of-upkeep triggers so that
                 // city blessing (CR 702.131b) and other SBA-granted designations are
                 // applied before trigger conditions like "if you have the city's blessing"
@@ -3077,8 +3321,8 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
 
-        // Drive forward until cleanup; the EndOfTurn mana survives each
-        // intermediate step and only drains once the turn ends.
+        // Drive forward until cleanup; the EndOfTurn mana survives every
+        // phase boundary, including End → Cleanup.
         while state.phase != Phase::Cleanup {
             assert_eq!(
                 state.players[0].mana_pool.count_color(ManaType::Red),
@@ -3089,20 +3333,34 @@ mod tests {
             advance_phase(&mut state, &mut Vec::new());
         }
         assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+
+        // CR 514.2: the cleanup action expires the retention marker. The
+        // ordinary cleanup-exit boundary then empties the now-unretained mana.
+        execute_cleanup(&mut state, &mut Vec::new());
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.mana[0].expiry, None);
+        advance_phase(&mut state, &mut Vec::new());
+        assert_eq!(state.phase, Phase::Untap);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
-    /// PR-6: the infinite-mana keep gate is the partner of
+    /// T-B (CR 500.5): the infinite-mana keep gate is the partner of
     /// `mana_payment::refill_infinite_mana`. CR 500.5 normally empties a player's
-    /// pool as a step/phase ends; while that player's `unbounded_resources` names
-    /// any `Mana(_)` axis the engine dispositions their non-expiry units `Keep`
-    /// instead of `Drop`, so the pool survives the transition. A player NOT flagged
-    /// drains normally. RUNTIME test driving the live `advance_phase` empty-pool
-    /// pipeline (the production end-of-step seam this PR rewired).
+    /// pool as a step/phase ends; the ONLY exemption is the developer
+    /// `DebugAction::SetInfiniteMana` toggle, recorded in `GameState::debug_infinite_mana`.
+    /// A player in that set has their non-expiry units dispositioned `Keep` instead of
+    /// `Drop`, so the pool survives the transition. A player NOT in the set — even one
+    /// holding a loop-backed `Mana(_)` axis — drains normally. RUNTIME test driving the
+    /// live `advance_phase` empty-pool pipeline (the production end-of-step seam).
     ///
-    /// REVERT-PROBE: break the keep gate's `matches!(a, ResourceAxis::Mana(_))`
-    /// (so `keep_for_infinite_mana` is false) → P0's Blue mana drains → the
-    /// retention assertion fails.
+    /// MULTI-AUTHORITY (hostile) fixture: P0 is BOTH in `debug_infinite_mana` AND carries
+    /// the recorded `Mana(_)` axes — the debug marker dominates, so the pool is kept. This
+    /// is exactly the case the pre-fix "has a Mana axis" gate could not distinguish from a
+    /// real loop.
+    ///
+    /// REVERT-PROBE: drop the `debug_infinite_mana.insert(p0)` (so `keep_for_infinite_mana`
+    /// is false) → P0's Blue mana drains → the retention assertion (P0 == 1) FLIPS.
     #[test]
     fn advance_phase_keeps_mana_for_unbounded_mana_player() {
         use crate::game::mana_payment::INFINITE_MANA_AXES;
@@ -3111,8 +3369,11 @@ mod tests {
         let mut state = setup();
         state.phase = Phase::PreCombatMain;
 
-        // P0 has the infinite-mana toggle active (records the six Mana axes).
-        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        let p0 = state.players[0].id;
+        // P0 is debug-toggled (SetInfiniteMana marks `debug_infinite_mana`) AND holds the
+        // recorded Mana axes — the multi-authority case: the debug marker dominates.
+        state.debug_infinite_mana.insert(p0);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Blue,
             ObjectId(11),
@@ -3302,10 +3563,9 @@ mod tests {
     // the no-handler-default path (#10), and the Drop-disposition matcher
     // gate (#11).
     //
-    // Expiry-bound interaction tests (#6, #7) live in `types/mana.rs` as
-    // shape tests on `clear_expiring_at_step_end` since that helper runs
-    // before the pipeline starts (H2 invariant — expiry-bound units never
-    // enter the replacement path).
+    // Expiry-bound interaction tests (#6, #7) live in `types/mana.rs` for
+    // marker timing and in the Yurlok integration suite for actual-loss and
+    // still-active-handler composition through the production pipeline.
     // -----------------------------------------------------------------
 
     /// CR 616.1 (#4): When two `Retain` handlers on a single player both
@@ -3969,12 +4229,12 @@ mod tests {
 
     /// Negative test — extra-turn / extra-step mechanics that did NOT use
     /// `extra_phases` are unaffected by the typing change. `extra_turns` is
-    /// a separate `Vec<PlayerId>` consumed by `start_next_turn`.
+    /// a separate LIFO stack consumed by `start_next_turn`.
     #[test]
     fn extra_turns_field_is_independent_of_extra_phases() {
         let mut state = setup();
         state.active_player = PlayerId(0);
-        state.extra_turns.push(PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
         // No extra_phases pushed — make sure normal phase advance is unaffected.
         state.phase = Phase::Cleanup;
 
@@ -7554,8 +7814,8 @@ mod tests {
         let mut state = setup();
         state.active_player = PlayerId(0);
         state.turn_number = 1;
-        // CR 500.7: Push extra turn for player 0
-        state.extra_turns.push(PlayerId(0));
+        // CR 500.7: Push extra turn for player 0 (in-sequence: anchor = player)
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -7571,8 +7831,8 @@ mod tests {
         state.active_player = PlayerId(0);
         state.turn_number = 1;
         // CR 500.7: Push two extra turns — player 0 first, then player 1
-        state.extra_turns.push(PlayerId(0));
-        state.extra_turns.push(PlayerId(1));
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
 
         let mut events = Vec::new();
 
@@ -7585,6 +7845,69 @@ mod tests {
         start_next_turn(&mut state, &mut events);
         assert_eq!(state.active_player, PlayerId(0));
         assert!(state.extra_turns.is_empty());
+    }
+
+    /// CR 500.7: extras granted during C's turn resume with D, not with B.
+    #[test]
+    fn extra_turns_lifo_then_resume_specified_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(2); // C
+                                           // During C: grant A then B (LIFO → B first)
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(2));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(1), "LIFO: B's extra first");
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(0), "then A's extra");
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(3),
+            "resume after specified turn C → D, not after A → B"
+        );
+        assert!(state.extra_turn_sequence_anchor.is_none());
+    }
+
+    /// CR 500.7: an extra granted during A's extra turn must retain the outer C
+    /// anchor when the queue drains.
+    #[test]
+    fn extra_turn_nested_extra_preserves_outer_anchor() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        state.active_player = PlayerId(2); // C
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(2));
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(state.active_player, PlayerId(0), "C ends → A's extra");
+        assert_eq!(
+            state.extra_turn_sequence_anchor,
+            Some(PlayerId(2)),
+            "first pop must latch specified turn C"
+        );
+
+        enqueue_extra_turn(&mut state, PlayerId(1), PlayerId(0));
+
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(1),
+            "during A: grant B → B's extra"
+        );
+        assert_eq!(
+            state.extra_turn_sequence_anchor,
+            Some(PlayerId(2)),
+            "nested extra must not overwrite outer anchor"
+        );
+
+        start_next_turn(&mut state, &mut events);
+        assert_eq!(
+            state.active_player,
+            PlayerId(3),
+            "after nested extras drain, resume after original specified turn C → D"
+        );
+        assert!(state.extra_turn_sequence_anchor.is_none());
     }
 
     #[test]
@@ -7729,7 +8052,8 @@ mod tests {
 
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
         state.active_player = PlayerId(0);
-        state.extra_turns.push(PlayerId(2));
+        // Extra for P2 granted during P0's turn — anchor is the specified turn.
+        enqueue_extra_turn(&mut state, PlayerId(2), PlayerId(0));
         install_begin_turn_skip_permanent(
             &mut state,
             ObjectId(100),
@@ -7741,12 +8065,15 @@ mod tests {
 
         assert_eq!(
             projected,
-            vec![PlayerId(0), PlayerId(3)],
-            "P2's prevented extra turn leaves the cursor on P2, so the next natural slot is P3"
+            vec![PlayerId(0), PlayerId(1)],
+            "skipped OOS extra for P2 resumes after specified turn P0 → P1, not after P2 → P3"
         );
         assert_eq!(
             state.extra_turns,
-            vec![PlayerId(2)],
+            vec![ExtraTurn {
+                player: PlayerId(2),
+                anchor: PlayerId(0)
+            }],
             "projection must not pop the source state's queued extra turn"
         );
         assert!(
@@ -8228,9 +8555,9 @@ mod tests {
             Some(ReplacementCondition::OnlyExtraTurn),
         );
 
-        // Push an extra turn for player 0. With no further extras, the next
-        // natural turn after the skip should go to player 1.
-        state.extra_turns.push(PlayerId(0));
+        // Push an extra turn for player 0 (in-sequence). With no further extras,
+        // the next natural turn after the skip should go to player 1.
+        enqueue_extra_turn(&mut state, PlayerId(0), PlayerId(0));
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);

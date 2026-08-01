@@ -9,11 +9,13 @@ import init, {
   take_last_panic_message,
   initialize_game,
   submit_action,
+  submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
-  get_ai_action,
+  get_ai_action_proposal,
+  get_ai_action_proposal_from_scores,
   get_ai_scored_candidates,
-  select_action_from_scores,
+  submit_ai_action_proposal,
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
@@ -37,15 +39,19 @@ import init, {
   replay_seek_js,
   clear_replay_playback,
   preview_mana_payment_js,
+  get_card_face_data,
+  get_card_parse_details,
+  get_card_rulings,
 } from "@wasm/engine";
 
-import type { GameAction } from "./types";
+import type { AiActionProposal, GameAction } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
 type EngineRequest =
-  | { type: "init" }
+  | { type: "init"; id: number }
   | { type: "loadCardDb"; id: number; cardDataText: string }
   | {
       type: "initializeGame";
@@ -58,6 +64,7 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
@@ -65,27 +72,19 @@ type EngineRequest =
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
-  | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
-  | {
-      type: "getAiScoredCandidates";
-      id: number;
-      difficulty: string;
-      playerId: number;
-      seed: number;
-    }
-  | {
-      type: "selectActionFromScores";
-      id: number;
-      scoresJson: string;
-      difficulty: string;
-      seed: number;
-    }
+  | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
+  | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
+  | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
+  | { type: "getCardFaceData"; id: number; cardName: string }
+  | { type: "getCardParseDetails"; id: number; cardName: string }
+  | { type: "getCardRulings"; id: number; cardName: string }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -103,7 +102,6 @@ type EngineRequest =
   | { type: "clearReplayPlayback"; id: number };
 
 type EngineResponse =
-  | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
@@ -135,8 +133,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
   try {
     switch (msg.type) {
       case "init": {
-        await init();
-        respond({ type: "ready" });
+        if (__ENGINE_WASM_URL__) {
+          await init({ module_or_path: __ENGINE_WASM_URL__ });
+        } else {
+          await init();
+        }
+        result(msg.id, null);
         break;
       }
 
@@ -162,13 +164,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "buildAiCardSubset": {
         if (!cardDbLoaded) {
-          error(
-            msg.id,
-            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
-          );
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
           break;
         }
-        // Returns the serialized AiCardSubsetResult tagged union as a string.
         result(msg.id, build_ai_card_subset());
         break;
       }
@@ -183,6 +181,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         }
         const data = evaluate_deck_compatibility_js(msg.request);
         result(msg.id, data);
+        break;
+      }
+
+      case "getCardFaceData": {
+        result(msg.id, get_card_face_data(msg.cardName));
+        break;
+      }
+
+      case "getCardParseDetails": {
+        result(msg.id, get_card_parse_details(msg.cardName));
+        break;
+      }
+
+      case "getCardRulings": {
+        result(msg.id, get_card_rulings(msg.cardName));
         break;
       }
 
@@ -247,6 +260,19 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           // Rust's submit_action error contract: returns the error string
           // on failure. `NOT_INITIALIZED:` prefix signals state-loss —
           // forward verbatim so the adapter can classify it as STATE_LOST.
+          error(msg.id, actionResult);
+          break;
+        }
+        result(msg.id, {
+          events: actionResult.events ?? [],
+          log_entries: actionResult.log_entries ?? [],
+        });
+        break;
+      }
+
+      case "submitInteraction": {
+        const actionResult = submit_interaction_js(msg.actor, msg.submission);
+        if (typeof actionResult === "string") {
           error(msg.id, actionResult);
           break;
         }
@@ -341,29 +367,37 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
-      case "getAiAction": {
-        const aiResult = get_ai_action(msg.difficulty, msg.playerId);
-        result(msg.id, aiResult ?? null);
+      case "getAiActionProposal": {
+        const proposal = get_ai_action_proposal(msg.difficulty, msg.playerId);
+        result(msg.id, proposal ?? null);
         break;
       }
 
       case "getAiScoredCandidates": {
-        const scored = get_ai_scored_candidates(
-          msg.difficulty,
-          msg.playerId,
-          BigInt(msg.seed),
-        );
-        result(msg.id, scored ?? []);
+        result(msg.id, get_ai_scored_candidates(msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? []);
         break;
       }
 
-      case "selectActionFromScores": {
-        const selected = select_action_from_scores(
-          msg.scoresJson,
-          msg.difficulty,
-          BigInt(msg.seed),
+      case "getAiActionProposalFromScores": {
+        result(
+          msg.id,
+          get_ai_action_proposal_from_scores(
+            msg.scoresJson,
+            msg.difficulty,
+            msg.playerId,
+            BigInt(msg.seed),
+          ) ?? null,
         );
-        result(msg.id, selected ?? null);
+        break;
+      }
+
+      case "submitAiActionProposal": {
+        const outcome = submit_ai_action_proposal(
+          msg.proposal.token,
+          msg.proposal.actor,
+          msg.proposal.action,
+        );
+        result(msg.id, outcome);
         break;
       }
 
@@ -493,7 +527,6 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
     }
   } catch (err) {
-    const id = "id" in msg ? (msg as { id: number }).id : -1;
-    error(id, err instanceof Error ? err.message : String(err));
+    error(msg.id, err instanceof Error ? err.message : String(err));
   }
 };

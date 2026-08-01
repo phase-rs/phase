@@ -191,10 +191,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -271,10 +268,7 @@ mod tests {
         let state = GameState::new_two_player(42);
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Pass),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },

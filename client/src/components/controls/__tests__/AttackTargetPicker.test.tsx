@@ -171,6 +171,40 @@ describe("AttackTargetPicker", () => {
     ]);
   });
 
+  it("renders ∞ for an unbounded-pile attacker stack while a non-pile stack keeps ×N (CR 732.2a)", () => {
+    // Two same-size, distinct-name groups; only pile membership differs, so the
+    // badge (∞ vs ×2) is decided solely by derived.unbounded_pile. Dropping the
+    // combat.ts thread OR the StackLabel ternary regresses ∞ → ×2 and this fails.
+    // Reachable: an ∞-pile member that untaps on a later turn can be declared an
+    // attacker (the pile is a persistent object-id snapshot, not a live tapped filter).
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, 1, 2]),
+        seat_order: [0, 1, 2],
+        objects: buildObjectMap(
+          makeCreature(101, "Goblin"),
+          makeCreature(102, "Goblin"),
+          makeCreature(201, "Elf"),
+          makeCreature(202, "Elf"),
+        ),
+        derived: { unbounded_pile: [101, 102] },
+      }),
+    });
+    render(
+      <AttackTargetPicker
+        validTargets={TARGETS}
+        selectedAttackers={[101, 102, 201, 202]}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    enterDistribute();
+
+    // Pile stack (Goblin) reads ∞; non-pile stack (Elf) of the same count keeps ×2.
+    expect(screen.getAllByText("∞").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("×2").length).toBeGreaterThan(0);
+  });
+
   it("steppers claim the lowest-id unassigned member deterministically", () => {
     const { onConfirm } = renderPicker();
     enterDistribute();

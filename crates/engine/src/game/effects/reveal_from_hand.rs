@@ -88,9 +88,11 @@ pub fn resolve(
         if resolved.targets.is_empty() {
             resolved.targets.push(TargetRef::Object(source_id));
         }
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(resolved), state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
     } else {
-        state.pending_continuation = None;
+        let _ = state
+            .take_active_ability_continuation()
+            .expect("reveal continuation must be the active frame");
     }
 
     state.waiting_for = WaitingFor::RevealChoice {
@@ -264,7 +266,7 @@ mod tests {
         }
         // The decline branch is stashed for the empty-pick path.
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "on_decline should be stashed as pending continuation"
         );
     }

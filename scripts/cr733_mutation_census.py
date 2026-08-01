@@ -545,6 +545,29 @@ class FileScan(NamedTuple):
     unresolved: int
 
 
+def join_fluent_chains(
+    rows: "list[tuple[int, str, str, str]]",
+) -> "list[tuple[int, str, str, str]]":
+    """Merge rustfmt-split fluent-chain continuations into one logical line.
+
+    `state\\n    .field\\n    .entry(k)\\n    .push_back(v);` is one statement,
+    but the write regexes match single lines and would miss it entirely. A
+    production line whose code starts with `.` is appended to the preceding
+    line of the same function; the merged statement keeps the first line's
+    number. Lines starting with `..` (struct update syntax) merge harmlessly:
+    no write pattern can match through `..`.
+    """
+    joined: list[tuple[int, str, str, str]] = []
+    for i, raw, code, fn in rows:
+        stripped = code.lstrip()
+        if joined and stripped.startswith(".") and joined[-1][3] == fn:
+            pi, praw, pcode, pfn = joined[-1]
+            joined[-1] = (pi, praw, pcode.rstrip() + stripped, pfn)
+        else:
+            joined.append((i, raw, code, fn))
+    return joined
+
+
 def scan_file(
     path: Path,
     fn_names: set[str],
@@ -564,7 +587,7 @@ def scan_file(
     # `}` so bound field names on continuation lines are still captured.
     in_destructure = False
 
-    for i, _raw, code, fn in iter_production_lines(r, lines):
+    for i, _raw, code, fn in join_fluent_chains(list(iter_production_lines(r, lines))):
         line_no = i + 1
         decl_m = FN_DECL.match(code)
         decl_name = decl_m.group(1) if decl_m else None

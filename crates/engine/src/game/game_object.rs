@@ -12,7 +12,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -185,6 +185,9 @@ pub struct BackFaceData {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4: Defense of a battle (printed number while off the battlefield).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defense: Option<u32>,
@@ -340,6 +343,18 @@ pub struct EmblemSource {
     pub printed_ref: Option<PrintedCardRef>,
 }
 
+/// CR 702.16p: Start-time attachment exemption captured for one continuous
+/// protection modification (`static_definitions` index + `modifications` index
+/// on the grant source) and host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionStartSnapshot {
+    pub resolved_quality: crate::types::keywords::ProtectionTarget,
+    pub attachment_ids: Vec<ObjectId>,
+}
+
+/// `(static_definitions index, modifications index, host object id)`.
+pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -381,6 +396,12 @@ pub struct GameObject {
     /// `None` if unattached. See `AttachTarget` for variants.
     pub attached_to: Option<AttachTarget>,
     pub attachments: Vec<ObjectId>,
+    /// CR 702.16p: Per [`StaticGateKey::def_index`] on this source and enchanted
+    /// host, the controlled attachments matching that effect's resolved protection
+    /// quality when it first started applying to that host.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub protection_start_exempt_attachments:
+        HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
     /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.
     /// This is independent from attachments; paired creatures are not
@@ -421,6 +442,10 @@ pub struct GameObject {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
+    /// loyalty itself is counter-derived (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4c: Defense of a battle on the battlefield — derived from defense
     /// counters. Kept in sync with `CounterType::Defense` by layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -504,6 +529,10 @@ pub struct GameObject {
     pub base_name: String,
     #[serde(default)]
     pub base_loyalty: Option<u32>,
+    /// CR 306.5b: Printed-loyalty baseline restored after layered copy effects;
+    /// live loyalty remains derived from counters on the battlefield (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
     #[serde(default)]
     pub base_defense: Option<u32>,
@@ -660,6 +689,13 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.174a: Opponent chosen when this object's Gift cost was paid.
+    /// Mirrors `SpellContext.gift_recipient`; stamped at cast finalize
+    /// (kickers_paid pattern). Cleared by `reset_for_battlefield_exit` /
+    /// `reset_for_battlefield_entry` (CR 400.7); restored across Stack→Battlefield
+    /// only via `CastLinkSnapshot` (CR 400.7d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
     /// additional costs paid while casting the spell that produced this
     /// permanent. Kept separate from `kickers_paid` so Squad does not inherit
@@ -1038,8 +1074,13 @@ pub struct GameObject {
 
     /// CR 601.2h: Per-color breakdown of mana spent to cast this object.
     /// Populated during casting finalization; consumed by trigger conditions
-    /// like Adamant (CR 207.2c). Cleared in lockstep with `mana_spent_to_cast`
-    /// (see `triggers::clear_transient_cast_state`).
+    /// like Adamant (CR 207.2c) and spend-color ETB riders ("if {W}{W} was
+    /// spent to cast it", Emptiness — issue #5943). Unlike the transient
+    /// `mana_spent_to_cast` boolean, this tally SURVIVES post-collection
+    /// cleanup for objects on the Battlefield or Stack so CR 603.4
+    /// intervening-if re-checks read it at resolution
+    /// (`triggers::clear_post_collection_transients`); it is cleared in other
+    /// zones there, and at battlefield exit via `clear_cast_payment_stamps`.
     #[serde(default, skip_serializing_if = "ColoredManaCount::is_empty")]
     pub colors_spent_to_cast: ColoredManaCount,
 
@@ -1051,10 +1092,16 @@ pub struct GameObject {
     /// for spell-resolution effects that read their own cost (Molten Note,
     /// "deals damage equal to the amount of mana spent to cast this spell").
     ///
-    /// Unlike `mana_spent_to_cast` / `colors_spent_to_cast`, this field is NOT
-    /// cleared after trigger collection — it is a historical fact about the
-    /// object that remains valid through spell resolution and beyond. Set once
-    /// at cast finalization; initialized to 0 by `GameObject::new`.
+    /// Unlike the transient `mana_spent_to_cast` boolean, this field SURVIVES
+    /// post-collection cleanup for objects on the Battlefield or Stack — it is
+    /// a historical fact about the object that remains valid through spell
+    /// resolution (`triggers::clear_post_collection_transients`); like the
+    /// other payment stamps it is cleared in all other zones there (a
+    /// countered/fizzled spell loses its payment record at the next
+    /// collection pass), and at battlefield exit via
+    /// `clear_cast_payment_stamps` (CR 400.7: a re-entering permanent is a
+    /// new object with no payment record). Set once at cast finalization;
+    /// initialized to 0 by `GameObject::new`.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub mana_spent_to_cast_amount: u32,
 
@@ -1071,6 +1118,10 @@ pub struct GameObject {
     /// object. One entry per spent mana lets source-qualified dynamic quantities
     /// count "mana from a Cave/Treasure/artifact source" without depending on
     /// the mana source still existing or retaining the same characteristics.
+    /// Rides the shared cast-payment-stamp lifecycle: survives post-collection
+    /// cleanup on the Battlefield/Stack, cleared in all other zones by
+    /// `triggers::clear_post_collection_transients` and at battlefield exit,
+    /// both via `clear_cast_payment_stamps` (CR 400.7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_source_snapshots: Vec<crate::types::game_state::ManaSpentSourceSnapshot>,
 
@@ -1116,6 +1167,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         power: _,
         toughness: _,
         loyalty: _,
+        printed_loyalty: _,
         defense: _,
         token_rules_text: _,
         card_types: _,
@@ -1143,6 +1195,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_toughness: _,
         base_name: _,
         base_loyalty: _,
+        base_printed_loyalty: _,
         base_defense: _,
         base_card_types: _,
         base_mana_cost: _,
@@ -1170,6 +1223,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cost_x_paid: _,
         fused_split_spell: _,
         kickers_paid: _,
+        gift_recipient: _,
         additional_cost_payment_count: _,
         additional_cost_payments: _,
         convoked_creatures: _,
@@ -1234,6 +1288,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         phyrexian_life_paid: _,
         mana_spent_source_snapshots: _,
         phase_status: _,
+        protection_start_exempt_attachments: _,
     } = o;
 }
 
@@ -1269,6 +1324,69 @@ impl GameObject {
             .ok_or("trigger base-set allocator exhausted")?;
         self.trigger_base_set_instance = TriggerBaseSetInstanceRef(next);
         Ok(())
+    }
+
+    /// Appends one trigger that belongs to this object's own printed/base set,
+    /// keeping `base_trigger_definitions` and the live list in lockstep and
+    /// stamping a real `Printed` occurrence ref for the new slot.
+    ///
+    /// This is the single authority for "this object gains a trigger that is
+    /// part of what it *is*" (CR 111.3 token abilities, CR 707.9a copiable
+    /// values, synthesized printed riders). It exists so callers never push a
+    /// bare `TriggerDefinition` into the live list: that conversion stamps
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+    /// [`Self::validate_trigger_definitions`] rejects from an observable state
+    /// and which `#[serde(skip_serializing)]` turns into a hard serialization
+    /// failure at the WASM bridge.
+    ///
+    /// Grants from a *separate* source are not printed slots — those go through
+    /// the grant authority (`install_trigger_candidate`) so they carry a
+    /// `Granted`/`ExpandedGrant` producer key instead.
+    pub fn push_printed_trigger(&mut self, definition: TriggerDefinition) {
+        let base_set = self.trigger_base_set_instance;
+        let printed_index = {
+            let base = Arc::make_mut(&mut self.base_trigger_definitions);
+            let index = base.len();
+            base.push(definition.clone());
+            index
+        };
+        self.trigger_definitions.push(TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set,
+                printed_index,
+            },
+            definition,
+        ));
+    }
+
+    /// Refreshes the live entry for a printed slot that already exists in
+    /// `base_trigger_definitions`, reusing that slot's index so the occurrence
+    /// ref stays provable. Returns `false` when no matching base slot exists.
+    pub fn relive_printed_trigger(&mut self, matches: impl Fn(&TriggerDefinition) -> bool) -> bool {
+        let Some(printed_index) = self.base_trigger_definitions.iter().position(matches) else {
+            return false;
+        };
+        let base_set = self.trigger_base_set_instance;
+        if self.trigger_definitions.iter_all().any(|entry| {
+            matches!(
+                &entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: entry_base_set,
+                    printed_index: entry_printed_index,
+                } if *entry_base_set == base_set && *entry_printed_index == printed_index
+            )
+        }) {
+            return true;
+        }
+        let definition = self.base_trigger_definitions[printed_index].clone();
+        self.trigger_definitions.push(TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set,
+                printed_index,
+            },
+            definition,
+        ));
+        true
     }
 
     /// Re-materializes the live base slots without changing their generation.
@@ -1761,6 +1879,12 @@ impl GameObject {
                 mana_spent_to_cast: self.mana_spent_to_cast,
                 colors_spent_to_cast: self.colors_spent_to_cast.clone(),
                 mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
+                // CR 400.7d + CR 603.4: latched WITH the bool/color/amount
+                // stamps above — a source-qualified rider ("mana from a
+                // Treasure spent to cast it") reads this vector at its
+                // resolution re-check after the source has left and the live
+                // vector was cleared at the exit boundary (CR 400.7).
+                mana_spent_source_snapshots: self.mana_spent_source_snapshots.clone(),
                 kickers_paid: self.kickers_paid.clone(),
                 additional_cost_payment_count: self.additional_cost_payment_count,
                 additional_cost_payments: self.additional_cost_payments.clone(),
@@ -1821,6 +1945,9 @@ impl GameObject {
         }
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
+        }
+        if self.base_printed_loyalty.is_none() && self.printed_loyalty.is_some() {
+            self.base_printed_loyalty = self.printed_loyalty;
         }
         if self.base_name.is_empty() && !self.name.is_empty() {
             self.base_name = self.name.clone();
@@ -1897,6 +2024,7 @@ impl GameObject {
             dealt_deathtouch_damage: false,
             attached_to: None,
             attachments: Vec::new(),
+            protection_start_exempt_attachments: HashMap::new(),
             paired_with: None,
             pair_controller: None,
             counters: HashMap::new(),
@@ -1906,6 +2034,7 @@ impl GameObject {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
@@ -1933,6 +2062,7 @@ impl GameObject {
             base_toughness: None,
             base_name: name.clone(),
             base_loyalty: None,
+            base_printed_loyalty: None,
             base_defense: None,
             base_card_types: CardType::default(),
             base_mana_cost: ManaCost::default(),
@@ -1959,6 +2089,7 @@ impl GameObject {
             cost_x_paid: None,
             fused_split_spell: false,
             kickers_paid: Vec::new(),
+            gift_recipient: None,
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -2169,6 +2300,11 @@ impl GameObject {
         // event as `cast_from_zone`; clear it on zone change for the same reason.
         self.cast_spell_keywords.clear();
         self.kickers_paid.clear();
+        // CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance (who was
+        // promised the gift when this permanent was cast). A re-entering object
+        // has no memory of a prior Gift promise — clear before CastLinkSnapshot
+        // restores it for Stack→Battlefield cast resolution only.
+        self.gift_recipient = None;
         self.additional_cost_payment_count = 0;
         self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
@@ -2202,6 +2338,7 @@ impl GameObject {
         self.power = self.base_power;
         self.toughness = self.base_toughness;
         self.loyalty = self.base_loyalty;
+        self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
         self.defense = self.base_defense;
         self.card_types = self.base_card_types.clone();
@@ -2234,10 +2371,6 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
-        // CR 400.7 + CR 702.150a: Compleated's life-payment count belongs to
-        // the cast that created this permanent. Once it leaves the battlefield,
-        // a later entry has no memory of that payment.
-        self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
         self.saddled_by.clear();
@@ -2256,6 +2389,19 @@ impl GameObject {
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
         self.cast_controller = None;
+        // CR 400.7 + CR 702.150a: a re-entering permanent is a new object with
+        // no memory of the cast that paid for its previous existence — clear all
+        // five cast-payment stamps, including Compleated's Phyrexian life-payment
+        // count (fixes the Satoru-class blink leak: a reanimated or blinked
+        // permanent must not read a stale "mana was spent" record).
+        // Exit-time LKI / zone-change snapshots are captured before this reset
+        // runs (zones.rs: exit seam → snapshot → reset), so latched trigger
+        // contexts keep the payment record of the departing incarnation.
+        self.clear_cast_payment_stamps();
+        // CR 400.7 + CR 702.174a: Gift recipient is the same cast-link class as
+        // kickers_paid / payment stamps — a blinked or reanimated permanent must
+        // not deliver (or condition on) a prior incarnation's Gift promise.
+        self.gift_recipient = None;
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
@@ -2266,6 +2412,7 @@ impl GameObject {
         // CR 305.1 + CR 603.4: Land-play provenance is likewise battlefield-
         // entry scoped and must not survive a later zone change.
         self.played_from_zone = None;
+        self.protection_start_exempt_attachments.clear();
         self.convoked_creatures.clear();
         // CR 702.103f: `bestow_form` is intentionally NOT cleared here.
         // The zone-exit cleanup in `apply_zone_exit_cleanup` (zones.rs) reads
@@ -2298,6 +2445,28 @@ impl GameObject {
         self.room_unlocks = None;
     }
 
+    /// CR 707.10 + CR 707.12: a spell copy is not cast (and a cast copy pays
+    /// its own costs), so no payment record carries over — reset all five
+    /// cast-payment stamps to their no-payment defaults. Also the CR 400.7
+    /// battlefield-exit authority via [`Self::reset_for_battlefield_exit`],
+    /// and the post-collection clear for objects outside the Battlefield/
+    /// Stack provenance zones (`triggers::clear_post_collection_transients`:
+    /// a countered/fizzled spell loses its payment record at the next
+    /// trigger-collection pass, mirroring `cast_from_zone`).
+    ///
+    /// Call sites cover every stack-copy birth: the `allow-raw-zone:
+    /// ...spell-copy birth` markers enumerate them (`copy_spell.rs`,
+    /// `epic.rs`, `cast_copy_of_card.rs`, `paradigm.rs`). `prepare.rs`'s
+    /// exile-copy is out of this class — a later cast of that copy re-stamps
+    /// through the normal `casting.rs` payment blocks.
+    pub fn clear_cast_payment_stamps(&mut self) {
+        self.mana_spent_to_cast = false;
+        self.colors_spent_to_cast = ColoredManaCount::default();
+        self.mana_spent_to_cast_amount = 0;
+        self.phyrexian_life_paid = 0;
+        self.mana_spent_source_snapshots.clear();
+    }
+
     /// Check if this object has a specific keyword, using discriminant-based matching.
     pub fn has_keyword(&self, keyword: &Keyword) -> bool {
         super::keywords::has_keyword(self, keyword)
@@ -2306,6 +2475,102 @@ impl GameObject {
     /// CR 702.26b: Whether this object is currently phased in (normal state).
     pub fn is_phased_in(&self) -> bool {
         self.phase_status.is_phased_in()
+    }
+
+    /// CR 712.8a + CR 708.2a: the mana value this permanent will show **once it
+    /// leaves the battlefield** — the quantity a caller pricing a battlefield exit
+    /// must use, and which `self.mana_cost` and `self.base_mana_cost` each get
+    /// wrong in a different case.
+    ///
+    /// # Scope: BATTLEFIELD EXIT ONLY. Deliberately not zone-parameterized.
+    ///
+    /// `zones::apply_zone_exit_cleanup` (`zones.rs:137`) restores the stashed face
+    /// through **three independent gates**, not one disjunction, and only two of the
+    /// three are unconditional:
+    ///
+    /// | flag | gate in `apply_zone_exit_cleanup` | at `from = Battlefield` |
+    /// |---|---|---|
+    /// | `transformed` (`:261`, CR 712.8a + CR 400.7) | no zone gate at all | reverts |
+    /// | `modal_back_face` (`:273`, CR 712.8a + CR 400.7) | `to != Stack && to != Battlefield` | reverts for any non-stack, non-battlefield destination |
+    /// | `face_down` (`:286`, CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
+    ///
+    /// **Each flag INDEPENDENTLY reverts for `Battlefield -> Graveyard`** (CR
+    /// 701.21a's transition), which is what the disjunction below relies on. The
+    /// claim is deliberately per-flag: the disjunction also admits flag
+    /// COMBINATIONS, and one is real and handled in-tree — see the next section.
+    /// None of the three is exact for a battlefield-to-STACK move, where the
+    /// `modal_back_face` gate does not fire. A destination parameter is not added:
+    /// only the battlefield-exit value is proven, and a parameter with one proven
+    /// value is speculative generality. Add it when a second transition earns its
+    /// own per-flag proof.
+    ///
+    /// # The one flag combination that occurs, and why it is still correct
+    ///
+    /// A **flipped permanent that is then turned face down** (Ixidron, Cyber
+    /// Conversion — CR 712.16 does not cover flip cards, so this is legal) sets
+    /// `flipped` AND `face_down` at once, and the two statuses **share the single
+    /// `back_face` slot**. `effects::turn_face_down` (`turn_face_down.rs:66-69`)
+    /// keeps the FLIP stash there rather than overwriting it with a base snapshot,
+    /// and `zones::apply_zone_exit_cleanup` runs the CR 708.9 face-down restore
+    /// BEFORE the CR 710.4 flip revert (`zones.rs:300-309`) precisely so one slot
+    /// serves both.
+    ///
+    /// So for that object `back_face` holds the flip card's NORMAL half, not the
+    /// base face — and reading it is not merely harmless, it is REQUIRED. Turning
+    /// the permanent face down set both `mana_cost` and `base_mana_cost` to
+    /// `ManaCost::NoCost` (`morph.rs:47`, CR 708.2a), so the `None =>` arm would
+    /// return 0 here. The `face_down` disjunct is what routes this object to the
+    /// stash instead. CR 710.1c ("A flip card's color and mana cost don't change if
+    /// the permanent is flipped") makes that stash mana-cost-identical to the
+    /// printed cost, so the number returned is right. Pinned by F8-E arm (e).
+    ///
+    /// `flipped` is **not** a fourth conjunct, and this is settled — do not
+    /// re-chase it. CR 710.1c again: `flip::apply_flipped_face_to_object`
+    /// (`flip.rs:320`) leaves `mana_cost` and `base_mana_cost` untouched by design
+    /// (`flip.rs:363-365`), so for a flipped-but-face-UP permanent the `None =>`
+    /// arm already returns the right number.
+    ///
+    /// # Why not `self.mana_cost`
+    ///
+    /// It is the live, layer-mutable characteristic (CR 613.1). `layers::
+    /// seed_live_characteristics_from_base` re-seeds it from `base_mana_cost` at the
+    /// top of every layer pass, and `printed_cards::apply_copiable_values`
+    /// (`printed_cards.rs:644`) then overwrites **only** the live field — it writes
+    /// no `base_*` field at all. CR 903.3's own example puts a copied commander in
+    /// scope here ("A commander that's copying another card … is still a commander").
+    ///
+    /// # Why not `self.base_mana_cost` alone
+    ///
+    /// `printed_cards::apply_back_face_to_object` (`:287`) writes **both** the live
+    /// (`:295`) and base (`:308`) fields from the installed face, and
+    /// `morph::apply_face_down_creature_characteristics` (`morph.rs:47`) sets both to
+    /// `ManaCost::NoCost` (CR 708.2a). For those objects `base_mana_cost` describes
+    /// the face currently shown, not the face the card will show off the battlefield.
+    ///
+    /// # Known residual, stated per flag rather than as a blanket claim
+    ///
+    /// The `back_face` slot is **shared** by the transform, MDFC, face-down and flip
+    /// stashes, and its writers do not agree on which snapshot they take:
+    ///   * `transform.rs:85`/`:90` stash `printed_cards::snapshot_object_face`, which
+    ///     captures the **live** `mana_cost` (`printed_cards.rs:717`). A permanent
+    ///     transformed while already under a mana-cost-altering copy effect therefore
+    ///     parks a polluted value, and this method will read it.
+    ///   * `effects/turn_face_down.rs:68` stashes `snapshot_object_base_face` — the
+    ///     **printed** baseline. That path is clean.
+    ///     The divergence is **BIDIRECTIONAL**, not downward-only: `intrinsic_copiable_
+    ///     values` (`printed_cards.rs:486`) sources `obj.base_mana_cost` from the COPY
+    ///     SOURCE and `apply_copiable_values` writes it to the RECIPIENT's live field
+    ///     with no clamp, so a `{1}{U}` Clone copying a fifteen-drop ends with live 15
+    ///     against base 2. Tracked as task #36; the fix is an engine change at the
+    ///     transform site and is out of this unit's scope.
+    pub fn mana_value_on_battlefield_exit(&self) -> u32 {
+        let shows_stashed_face = self.transformed || self.modal_back_face || self.face_down;
+        match self.back_face.as_ref().filter(|_| shows_stashed_face) {
+            Some(stashed) => stashed.mana_cost.mana_value(),
+            // CR 613.1: "For a card, [the characteristics are] the values printed on
+            // that card" — `base_mana_cost` is the engine's name for that baseline.
+            None => self.base_mana_cost.mana_value(),
+        }
     }
 
     /// CR 702.26b: Whether this object is currently phased out (treated as
@@ -2576,6 +2841,163 @@ mod tests {
     use crate::types::counter::parse_counter_type;
     use crate::types::triggers::TriggerMode;
 
+    /// Stamp all five cast-payment fields non-default, including a synthetic
+    /// Phyrexian life payment, to verify the shared reset authority.
+    fn stamp_cast_payment(obj: &mut GameObject) {
+        obj.mana_spent_to_cast = true;
+        obj.colors_spent_to_cast
+            .add(crate::types::mana::ManaColor::White, 2);
+        obj.mana_spent_to_cast_amount = 2;
+        obj.phyrexian_life_paid = 1;
+        let lki = obj.snapshot_for_mana_spent();
+        obj.mana_spent_source_snapshots
+            .push(crate::types::game_state::ManaSpentSourceSnapshot {
+                source_id: obj.id,
+                lki,
+            });
+    }
+
+    fn assert_cast_payment_stamps_default(obj: &GameObject, context: &str) {
+        assert!(!obj.mana_spent_to_cast, "{context}: bool must be default");
+        assert!(
+            obj.colors_spent_to_cast.is_empty(),
+            "{context}: per-color tally must be default"
+        );
+        assert_eq!(
+            obj.mana_spent_to_cast_amount, 0,
+            "{context}: amount must be default"
+        );
+        assert_eq!(
+            obj.phyrexian_life_paid, 0,
+            "{context}: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            obj.mana_spent_source_snapshots.is_empty(),
+            "{context}: payment-source snapshots must be default"
+        );
+    }
+
+    /// R-helper pin: `clear_cast_payment_stamps` resets all five fields.
+    #[test]
+    fn clear_cast_payment_stamps_resets_all_five_fields() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Stack,
+        );
+        stamp_cast_payment(&mut obj);
+        obj.clear_cast_payment_stamps();
+        assert_cast_payment_stamps_default(&obj, "after clear_cast_payment_stamps");
+    }
+
+    /// CR 400.7 (issue #5943): `reset_for_battlefield_exit` clears the five
+    /// cast-payment stamps alongside `cast_from_zone` — a re-entering
+    /// permanent has no memory of the cast that paid for its previous
+    /// existence (Satoru-class blink leak).
+    #[test]
+    fn reset_for_battlefield_exit_clears_cast_payment_stamps() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Battlefield,
+        );
+        stamp_cast_payment(&mut obj);
+        obj.cast_from_zone = Some(Zone::Hand);
+
+        obj.reset_for_battlefield_exit();
+
+        assert_cast_payment_stamps_default(&obj, "after reset_for_battlefield_exit");
+        // Pin the pre-existing exit-clear neighbor so the stamps clear cannot
+        // drift away from the CR 400.7 cast-provenance authority.
+        assert!(
+            obj.cast_from_zone.is_none(),
+            "cast_from_zone exit-clear pin (CR 400.7 + CR 603.4)"
+        );
+    }
+
+    /// CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance and must
+    /// clear on battlefield exit — a blinked/reanimated permanent cannot keep a
+    /// prior incarnation's Gift promise.
+    #[test]
+    fn reset_for_battlefield_exit_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Battlefield,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_exit();
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield exit (CR 400.7)"
+        );
+    }
+
+    /// CR 400.7d: Entry reset also clears Gift recipient so effect-driven puts
+    /// (Reanimate) cannot resurrect a stamp that somehow survived exile/GY.
+    #[test]
+    fn reset_for_battlefield_entry_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Graveyard,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_entry(1, 1);
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield entry (CR 400.7d)"
+        );
+    }
+
+    /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change
+    /// snapshot latches all four trigger-relevant mana-payment stamps — including the
+    /// per-mana-unit source-snapshot vector — into the owned trigger source
+    /// context, so a source-qualified rider ("mana from a Treasure spent to
+    /// cast it") can still resolve after the exit-boundary clear wipes the
+    /// live object.
+    #[test]
+    fn snapshot_for_zone_change_latches_cast_payment_stamps() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Marut".to_string(),
+            Zone::Battlefield,
+        );
+        stamp_cast_payment(&mut obj);
+
+        let record = obj.snapshot_for_zone_change(obj.id, Some(Zone::Battlefield), Zone::Graveyard);
+        let context = record
+            .trigger_source_context()
+            .expect("zone-change snapshot always owns a trigger source context");
+
+        assert!(context.mana_spent_to_cast, "latched bool");
+        assert_eq!(context.mana_spent_to_cast_amount, 2, "latched amount");
+        assert!(!context.colors_spent_to_cast.is_empty(), "latched colors");
+        assert_eq!(
+            context.mana_spent_source_snapshots.len(),
+            1,
+            "latched payment-source snapshot vector"
+        );
+        assert_eq!(
+            context.mana_spent_source_snapshots[0].source_id, obj.id,
+            "latched snapshot must keep its payment-time source identity"
+        );
+    }
+
     #[test]
     fn game_object_has_all_rules_relevant_fields() {
         let obj = GameObject::new(
@@ -2676,6 +3098,28 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_game_object_payload_defaults_printed_loyalty_provenance() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        obj.printed_loyalty = Some(PrintedLoyalty::X);
+        obj.base_printed_loyalty = Some(PrintedLoyalty::X);
+
+        let mut json = serde_json::to_value(&obj).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("printed_loyalty");
+        fields.remove("base_printed_loyalty");
+
+        let legacy: GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.printed_loyalty, None);
+        assert_eq!(legacy.base_printed_loyalty, None);
     }
 
     #[test]
@@ -2787,6 +3231,27 @@ mod tests {
         assert_ne!(
             object.trigger_definitions[0].occurrence, object.trigger_definitions[1].occurrence,
             "repeated final slots must not collapse because their payloads match"
+        );
+    }
+
+    #[test]
+    fn reliving_a_materialized_printed_slot_does_not_duplicate_it() {
+        let mut object = trigger_test_object();
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        object.push_printed_trigger(trigger.clone());
+
+        assert!(object.relive_printed_trigger(|definition| definition == &trigger));
+        assert_eq!(
+            object.trigger_definitions.len(),
+            1,
+            "re-materializing an already-live printed slot must not duplicate its trigger"
+        );
+        assert_eq!(
+            object.trigger_definitions[0].occurrence,
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            }
         );
     }
 
@@ -3314,6 +3779,95 @@ mod tests {
             hand_obj.effective_mana_value(),
             6,
             "a Room card in hand combines both halves (CR 709.4b): {{U}} + {{4}}{{U}} = 6"
+        );
+    }
+
+    fn exit_value_fixture(id: u64, mana_value: u32) -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(id),
+            CardId(id),
+            PlayerId(0),
+            "Exit Value Fixture".to_string(),
+            Zone::Battlefield,
+        );
+        obj.mana_cost = ManaCost::generic(mana_value);
+        obj.base_mana_cost = ManaCost::generic(mana_value);
+        obj
+    }
+
+    fn install_stashed_face(obj: &mut GameObject, mana_value: u32) {
+        let mut stashed = exit_value_fixture(obj.id.0 + 1000, mana_value);
+        stashed.name = "Stashed Face".to_string();
+        obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(&stashed));
+    }
+
+    /// CR 712.8a + CR 708.2a: the exit accessor reads the restored face, not a
+    /// currently displayed transformed or face-down shell. The paired
+    /// flipped-only and flipped-plus-face-down arms pin CR 710.1c's distinction.
+    #[test]
+    fn mana_value_on_battlefield_exit_uses_the_face_that_will_be_restored() {
+        let mut transformed = exit_value_fixture(1, 0);
+        transformed.transformed = true;
+        install_stashed_face(&mut transformed, 5);
+        assert_eq!(
+            transformed.mana_value_on_battlefield_exit(),
+            5,
+            "transformed DFC restores its stashed face"
+        );
+
+        let mut face_down = exit_value_fixture(2, 0);
+        face_down.face_down = true;
+        face_down.mana_cost = ManaCost::NoCost;
+        face_down.base_mana_cost = ManaCost::NoCost;
+        install_stashed_face(&mut face_down, 4);
+        assert_eq!(
+            face_down.mana_value_on_battlefield_exit(),
+            4,
+            "face-down permanent restores its stashed identity"
+        );
+
+        let mut copied_cost_strip = exit_value_fixture(3, 4);
+        copied_cost_strip.mana_cost = ManaCost::NoCost;
+        assert_eq!(
+            copied_cost_strip.mana_value_on_battlefield_exit(),
+            4,
+            "a live cost change does not alter the printed exit cost"
+        );
+
+        let untouched = exit_value_fixture(4, 3);
+        assert_eq!(
+            untouched.mana_value_on_battlefield_exit(),
+            3,
+            "an untouched permanent uses its printed baseline"
+        );
+
+        let mut flipped_then_face_down = exit_value_fixture(5, 0);
+        flipped_then_face_down.flipped = true;
+        flipped_then_face_down.face_down = true;
+        flipped_then_face_down.mana_cost = ManaCost::NoCost;
+        flipped_then_face_down.base_mana_cost = ManaCost::NoCost;
+        install_stashed_face(&mut flipped_then_face_down, 2);
+        assert_eq!(
+            flipped_then_face_down.mana_value_on_battlefield_exit(),
+            2,
+            "the face-down gate must preserve a flipped card's normal-half stash"
+        );
+
+        let mut flipped_only = exit_value_fixture(6, 2);
+        flipped_only.flipped = true;
+        install_stashed_face(&mut flipped_only, 9);
+        assert_eq!(
+            flipped_only.mana_value_on_battlefield_exit(),
+            2,
+            "CR 710.1c: flipped-only does not route through the stash"
+        );
+
+        let mut missing_stash = exit_value_fixture(7, 4);
+        missing_stash.face_down = true;
+        assert_eq!(
+            missing_stash.mana_value_on_battlefield_exit(),
+            4,
+            "a missing stash falls back to the baseline rather than panicking"
         );
     }
 }

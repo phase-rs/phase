@@ -78,8 +78,8 @@ fn reach_planetarium_cast_offer() -> (GameRunner, ObjectId, ObjectId) {
     assert_eq!(
         runner
             .state()
-            .pending_optional_effect
-            .as_ref()
+            .active_optional_effect_frame()
+            .map(|frame| frame.ability.as_ref())
             .expect("the optional cast ability must be live")
             .targets,
         vec![TargetRef::Object(looked)],
@@ -200,7 +200,7 @@ fn planetarium_land_top_does_not_offer_an_impossible_cast() {
         runner.waiting_for_kind()
     );
     assert!(
-        runner.state().pending_optional_effect.is_none(),
+        runner.state().active_optional_effect_frame().is_none(),
         "no declined or failing cast action should remain pending"
     );
     assert_eq!(runner.state().last_revealed_ids, vec![looked]);
@@ -264,7 +264,7 @@ fn beseech_bargained_land_skips_cast_offer_and_runs_hand_fallback() {
         "Beseech's impossible land cast must not leave an optional prompt pending"
     );
     assert!(
-        outcome.state().pending_optional_effect.is_none(),
+        outcome.state().active_optional_effect_frame().is_none(),
         "the infeasible cast must be auto-declined rather than offered"
     );
     assert!(
@@ -321,7 +321,7 @@ fn beseech_bargained_mana_value_five_skips_cast_offer_and_runs_hand_fallback() {
         "Beseech's constrained-out spell must not leave an optional prompt pending"
     );
     assert!(
-        outcome.state().pending_optional_effect.is_none(),
+        outcome.state().active_optional_effect_frame().is_none(),
         "the infeasible constrained cast must be auto-declined rather than offered"
     );
     assert!(
@@ -382,8 +382,8 @@ fn kiora_mixed_land_and_spell_keeps_eligible_cast_offer() {
     assert!(
         runner
             .state()
-            .pending_optional_effect
-            .as_ref()
+            .active_optional_effect_frame()
+            .map(|frame| frame.ability.as_ref())
             .expect("Kiora's optional CastFromZone must be live")
             .targets
             .contains(&TargetRef::Object(eligible_spell)),
@@ -446,7 +446,7 @@ fn planetarium_empty_post_surveil_library_does_not_offer_cast() {
         "Planetarium's empty-library look must finish without a cast action; got {}",
         runner.waiting_for_kind()
     );
-    assert!(runner.state().pending_optional_effect.is_none());
+    assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().players[0].library.is_empty());
     assert_eq!(runner.state().objects[&surveilled].zone, Zone::Graveyard);
     assert!(runner.state().last_revealed_ids.is_empty());
@@ -543,7 +543,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
         ),
         "an impossible exact-parent play must not prompt"
     );
-    assert!(runner.state().pending_optional_effect.is_none());
+    assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().last_revealed_ids.is_empty());
     assert!(
         runner.state().last_parent_target_missing_reason.is_none(),

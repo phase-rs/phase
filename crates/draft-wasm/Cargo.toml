@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 draft-core = { path = "../draft-core" }
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 rand = "0.9"
 rand_chacha = "0.9"

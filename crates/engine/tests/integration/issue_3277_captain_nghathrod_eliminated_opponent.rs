@@ -76,7 +76,7 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
     runner
         .state_mut()
         .zone_changes_this_turn
-        .push(ZoneChangeRecord {
+        .push_back(ZoneChangeRecord {
             object_id: milled_creature,
             name: "Milled Bear".to_string(),
             core_types: vec![CoreType::Creature],

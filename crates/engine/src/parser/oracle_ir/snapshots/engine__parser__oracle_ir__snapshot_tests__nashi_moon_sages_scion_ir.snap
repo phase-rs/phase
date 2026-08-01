@@ -51,84 +51,235 @@ expression: "&ir"
         "fragment": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "DamageDone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "ExileTop",
-              "player": {
-                "type": "Controller"
+        "Trigger": {
+          "Parsed": {
+            "condition": "DamageDone",
+            "partial_def": {
+              "mode": "DamageDone",
+              "execute": null,
+              "valid_card": null,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "CombatOnly",
+              "secondary": false,
+              "valid_target": {
+                "type": "Player"
               },
-              "count": {
-                "type": "Fixed",
-                "value": 1
+              "valid_source": {
+                "type": "SelfRef"
+              },
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 43,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "exile the top card of each player's library"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ExileTop",
+                        "player": {
+                          "type": "Controller"
+                        },
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "position": {
+                          "type": "Top"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": {
+                      "type": "All"
+                    },
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 45,
+                        "end_byte": 95,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "Until end of turn, you may play one of those cards"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "CastFromZone",
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "without_paying_mana_cost": false,
+                        "mode": "Play",
+                        "duration": "UntilEndOfTurn"
+                      },
+                      "duration": "UntilEndOfTurn",
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": true,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 2,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 3
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 97,
+                        "end_byte": 192,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 2
+                      },
+                      "fragment": "If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost"
+                    },
+                    "disposition": {
+                      "ModifyPrior": {
+                        "modifier": {
+                          "AltCost": {
+                            "type": "PayLife",
+                            "amount": {
+                              "type": "Ref",
+                              "qty": {
+                                "type": "SelfManaValue"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "alt_cost_rider_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "CastFromZone",
-                "target": {
-                  "type": "TrackedSet",
-                  "id": 0
-                },
-                "without_paying_mana_cost": false,
-                "mode": "Play",
-                "alt_ability_cost": {
-                  "type": "PayLife",
-                  "amount": {
-                    "type": "Ref",
-                    "qty": {
-                      "type": "SelfManaValue"
-                    }
-                  }
-                },
-                "duration": "UntilEndOfTurn"
-              },
-              "cost": null,
-              "sub_ability": null,
-              "duration": "UntilEndOfTurn",
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
+            "modifiers": {
               "optional": false,
-              "forward_result": false,
-              "sub_link": "SequentialSibling"
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "exile the top card of each player's library. until end of turn, you may play one of those cards. if you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+              "relative_player_scope": "TargetPlayer"
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "player_scope": {
-              "type": "All"
-            }
-          },
-          "valid_card": null,
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "CombatOnly",
-          "secondary": false,
-          "valid_target": {
-            "type": "Player"
-          },
-          "valid_source": {
-            "type": "SelfRef"
-          },
-          "description": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "source_text": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+            "die_results": []
+          }
         }
       }
     }

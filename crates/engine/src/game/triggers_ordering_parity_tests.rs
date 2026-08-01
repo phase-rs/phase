@@ -937,7 +937,7 @@ fn ctx(
         source_id: ObjectId(source),
         controller: PlayerId(0),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1399,7 +1399,7 @@ fn ctx_c(
         source_id: ObjectId(source),
         controller: PlayerId(controller),
         condition,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1906,7 +1906,7 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),
     })

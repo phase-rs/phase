@@ -1,10 +1,12 @@
 import { registerSW } from "virtual:pwa-register";
-import { isTauri } from "../services/sidecar";
+import { isBundledTauriOrigin } from "../services/platform";
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
 import { claimServiceWorkerReload, markPendingAutoUpdate } from "./updateMarker";
 import {
+  claimUpdateStatus,
   setUpdateStatus,
   getUpdateStatus,
+  releaseUpdateStatus,
   setDownloadProgress,
   pushUpdateDebug,
   setUpdateError,
@@ -24,6 +26,7 @@ let manualCheckForUpdate: (() => Promise<void>) | null = null;
 let progressIntervalId: number | null = null;
 let activationTimeoutId: number | null = null;
 let simulatedProgress = 0;
+let ownsUpdateStatus = false;
 
 /**
  * Deferred update closure captured at `onNeedRefresh` time when a MP game
@@ -46,13 +49,36 @@ function formatError(error: unknown): string {
   return "Unknown error";
 }
 
+function claimServiceWorkerUpdateStatus(): boolean {
+  if (ownsUpdateStatus) return true;
+  ownsUpdateStatus = claimUpdateStatus("serviceWorker");
+  return ownsUpdateStatus;
+}
+
+function setServiceWorkerUpdateStatus(next: "checking" | "downloading" | "activating" | "deferred"): void {
+  if (ownsUpdateStatus) setUpdateStatus(next);
+}
+
+function setServiceWorkerDownloadProgress(value: number): void {
+  if (ownsUpdateStatus) setDownloadProgress(value);
+}
+
+function finishServiceWorkerUpdateStatus(): void {
+  if (!ownsUpdateStatus) return;
+  setUpdateStatus("idle");
+  setDownloadProgress(0);
+  releaseUpdateStatus("serviceWorker");
+  ownsUpdateStatus = false;
+}
+
 function startProgressSimulation() {
+  if (!claimServiceWorkerUpdateStatus()) return;
   stopProgressSimulation();
   simulatedProgress = 0;
-  setDownloadProgress(0);
+  setServiceWorkerDownloadProgress(0);
   progressIntervalId = window.setInterval(() => {
     simulatedProgress += (PROGRESS_CEILING - simulatedProgress) * PROGRESS_RATE;
-    setDownloadProgress(simulatedProgress);
+    setServiceWorkerDownloadProgress(simulatedProgress);
   }, PROGRESS_TICK_MS);
 }
 
@@ -65,7 +91,7 @@ function stopProgressSimulation() {
 
 function completeProgress() {
   stopProgressSimulation();
-  setDownloadProgress(100);
+  setServiceWorkerDownloadProgress(100);
 }
 
 function clearActivationTimeout(): void {
@@ -76,46 +102,50 @@ function clearActivationTimeout(): void {
 }
 
 function setActivatingStatus(): void {
+  if (!claimServiceWorkerUpdateStatus()) return;
   completeProgress();
-  setUpdateStatus("activating");
+  setServiceWorkerUpdateStatus("activating");
   pushUpdateDebug("Service worker is activating.");
   clearActivationTimeout();
   activationTimeoutId = window.setTimeout(() => {
-    if (getUpdateStatus() !== "activating") return;
-    setUpdateStatus("idle");
-    setDownloadProgress(0);
+    if (!ownsUpdateStatus || getUpdateStatus() !== "activating") return;
     setUpdateError("Service worker activation timed out after 20s.");
+    finishServiceWorkerUpdateStatus();
     console.warn("[phase.rs] Service worker activation timed out; reset update indicator to idle.");
   }, ACTIVATION_TIMEOUT_MS);
 }
 
 export function checkForServiceWorkerUpdate(): boolean {
-  if (import.meta.env.DEV || isTauri() || !("serviceWorker" in navigator) || !manualCheckForUpdate) {
+  if (import.meta.env.DEV || isBundledTauriOrigin() || !("serviceWorker" in navigator) || !manualCheckForUpdate) {
     pushUpdateDebug("Manual update check ignored (no service worker support or updater not ready).", "warn");
     return false;
   }
 
-  setUpdateStatus("checking");
+  const wasIdle = getUpdateStatus() === "idle";
+  const ownsStatus = claimServiceWorkerUpdateStatus();
+  if (wasIdle && ownsStatus) setServiceWorkerUpdateStatus("checking");
   pushUpdateDebug("Manual update check started.");
   manualCheckForUpdate()
     .then(() => {
-      if (getUpdateStatus() === "checking") {
-        setUpdateStatus("idle");
+      if (ownsStatus && getUpdateStatus() === "checking") {
+        finishServiceWorkerUpdateStatus();
         pushUpdateDebug("Manual update check finished with no new version.");
       }
     })
     .catch((error: unknown) => {
-      setUpdateStatus("idle");
-      setUpdateError(`Manual update check failed: ${formatError(error)}`);
+      if (ownsStatus) {
+        setUpdateError(`Manual update check failed: ${formatError(error)}`);
+        finishServiceWorkerUpdateStatus();
+      }
       console.warn("[phase.rs] Manual service worker update check failed.", error);
     });
   return true;
 }
 
 export function registerServiceWorker() {
-  // Tauri serves the app from a custom scheme (tauri.localhost / tauri://) where
-  // service workers don't register reliably; updates ship via the Tauri updater instead.
-  if (import.meta.env.DEV || isTauri() || !("serviceWorker" in navigator) || isRegistered) {
+  // The bundled Tauri origin (tauri.localhost / tauri://) does not reliably
+  // support service workers. A remote-origin shell uses the normal PWA updater.
+  if (import.meta.env.DEV || isBundledTauriOrigin() || !("serviceWorker" in navigator) || isRegistered) {
     return;
   }
 
@@ -179,7 +209,9 @@ export function registerServiceWorker() {
         "Service worker controller changed during multiplayer game; deferring reload until game ends.",
         "warn",
       );
-      setUpdateStatus("deferred");
+      if (claimServiceWorkerUpdateStatus()) {
+        setServiceWorkerUpdateStatus("deferred");
+      }
       deferredReload = doReload;
       deferredReloadUnsub = whenMultiplayerGameEnds(() => {
         pushUpdateDebug("Multiplayer game ended; applying deferred reload.");
@@ -203,11 +235,12 @@ export function registerServiceWorker() {
         setActivatingStatus();
         void updateSW(true).catch((error: unknown) => {
           clearActivationTimeout();
-          if (getUpdateStatus() === "activating") {
-            setUpdateStatus("idle");
-            setDownloadProgress(0);
+          if (ownsUpdateStatus && getUpdateStatus() === "activating") {
+            setUpdateError(`Failed to apply service worker update: ${formatError(error)}`);
+            finishServiceWorkerUpdateStatus();
+          } else if (ownsUpdateStatus) {
+            setUpdateError(`Failed to apply service worker update: ${formatError(error)}`);
           }
-          setUpdateError(`Failed to apply service worker update: ${formatError(error)}`);
           console.warn("[phase.rs] Failed to apply service worker update.", error);
         });
       };
@@ -225,8 +258,10 @@ export function registerServiceWorker() {
         // started — otherwise the user sees a spurious "activation timed
         // out after 20s" error during a deferral that may last much longer.
         clearActivationTimeout();
-        setDownloadProgress(0);
-        setUpdateStatus("deferred");
+        if (claimServiceWorkerUpdateStatus()) {
+          setServiceWorkerDownloadProgress(0);
+          setServiceWorkerUpdateStatus("deferred");
+        }
         deferredUpdate = applyUpdate;
         deferredUpdateUnsub?.();
         deferredUpdateUnsub = whenMultiplayerGameEnds(() => {
@@ -248,10 +283,15 @@ export function registerServiceWorker() {
       // Surface the download phase — fires when a new SW starts installing
       swRegistration.addEventListener("updatefound", () => {
         if (!navigator.serviceWorker.controller) return;
+        if (!claimServiceWorkerUpdateStatus()) return;
 
         const newWorker = swRegistration.installing;
-        if (!newWorker) return;
-        setUpdateStatus("downloading");
+        if (!newWorker) {
+          releaseUpdateStatus("serviceWorker");
+          ownsUpdateStatus = false;
+          return;
+        }
+        setServiceWorkerUpdateStatus("downloading");
         pushUpdateDebug("Service worker download started.");
         startProgressSimulation();
 
@@ -265,9 +305,8 @@ export function registerServiceWorker() {
           if (newWorker.state === "activated") {
             clearActivationTimeout();
             clearUpdateError();
-            if (getUpdateStatus() === "activating") {
-              setUpdateStatus("idle");
-              setDownloadProgress(0);
+            if (ownsUpdateStatus && getUpdateStatus() === "activating") {
+              finishServiceWorkerUpdateStatus();
               pushUpdateDebug("Service worker activated successfully.");
             }
             return;
@@ -276,10 +315,11 @@ export function registerServiceWorker() {
           if (newWorker.state === "redundant") {
             stopProgressSimulation();
             clearActivationTimeout();
-            setUpdateError("Service worker became redundant before activation.");
-            if (getUpdateStatus() !== "checking") {
-              setUpdateStatus("idle");
-              setDownloadProgress(0);
+            if (ownsUpdateStatus) {
+              setUpdateError("Service worker became redundant before activation.");
+            }
+            if (ownsUpdateStatus && getUpdateStatus() !== "checking") {
+              finishServiceWorkerUpdateStatus();
             }
           }
         });
@@ -341,12 +381,18 @@ export function registerServiceWorker() {
           manualCheckForUpdate = null;
           deferredUpdateUnsub?.();
           deferredReloadUnsub?.();
+          releaseUpdateStatus("serviceWorker");
+          ownsUpdateStatus = false;
         },
         { once: true },
       );
     },
     onRegisterError(error) {
-      setUpdateError(`Service worker registration failed: ${formatError(error)}`);
+      if (claimServiceWorkerUpdateStatus()) {
+        setUpdateError(`Service worker registration failed: ${formatError(error)}`);
+        releaseUpdateStatus("serviceWorker");
+        ownsUpdateStatus = false;
+      }
       console.error("Service worker registration failed", error);
     },
   });

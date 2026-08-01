@@ -116,7 +116,7 @@ pub fn resolve(
         .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
     state
         .zone_changes_this_turn
-        .push(zone_change_record.clone());
+        .push_back(zone_change_record.clone());
     events.push(GameEvent::ZoneChanged {
         object_id: obj_id,
         from: None,
@@ -332,7 +332,7 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
             "ZoneChanged must not fire before the paused counter replacement resolves"
         );
-        assert!(state.pending_counter_additions.is_some());
+        assert!(state.active_counter_additions().is_some());
 
         // Resolve the player's replacement-ordering choice for the paused AddCounter.
         let result = continue_replacement(&mut state, 0, &mut events);

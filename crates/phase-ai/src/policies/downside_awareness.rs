@@ -172,10 +172,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Spell),
         };
         (decision, candidate)
     }
@@ -321,10 +318,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(engine::types::ability::TargetRef::Object(ObjectId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,

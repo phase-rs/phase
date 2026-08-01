@@ -7,7 +7,7 @@
 
 use crate::types::game_state::{GameState, WaitingFor, YieldTarget};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaType;
+use crate::types::mana::{ManaColor, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
@@ -183,10 +183,22 @@ pub enum PinnedDecision {
     /// CR 601.2h + CR 702.51a/b: pay a convoke `ManaPayment` by tapping the minimal
     /// deterministic set of untapped creatures matching the live post-affinity color
     /// requirement. State-independent: the concrete creatures are re-bound LIVE each
-    /// iteration (canonical order — lowest ObjectId per needed color) via
-    /// `select_convoke_taps`, a pure function of (live legal untapped set, locked cost)
-    /// per CR 732.2a — so no per-iteration creature is latched here.
+    /// iteration (fodder-first order — reproduced tokens preferred, then lowest ObjectId
+    /// within each class) via `select_convoke_taps`, a pure function of (live legal untapped
+    /// set, locked cost) per CR 732.2a — so no per-iteration creature is latched here.
     ConvokeTaps { slot: DecisionSlot },
+    /// CR 608.2d + CR 605.3b: a fixed mana-color choice for an "add one mana of any color"
+    /// mana ability whose product pays a colored downstream cost (the loop's mana-neutrality
+    /// authority — e.g. Relic of Legends' Blue feeding Freed from the Real's `{U}` untap).
+    /// LATCHED to the color the player produced in the demonstrated iteration and copied
+    /// through unchanged every replay (the color is a constant, not a per-iteration re-binding —
+    /// CR 732.2a "predictable results"). Distinct CR choice KIND (color selection, CR 608.2d),
+    /// not a parameterization of the target/modal/may axes. `slot.index` disambiguates it from a
+    /// tap-cost `Targets` pin on the SAME mana-ability source.
+    ManaColor {
+        slot: DecisionSlot,
+        color: ManaColor,
+    },
 }
 
 /// CR 732.2a: the READ-side decision schema an interactive loop-shortcut OFFER exposes so the
@@ -239,16 +251,28 @@ pub enum DecisionPointKind {
     /// CR 608.2b: the legal targets for the slot (native `find_legal_targets` output).
     Targets {
         legal_targets: Vec<crate::types::ability::TargetRef>,
+        min_targets: u32,
+        max_targets: u32,
+        ordered: bool,
     },
     /// CR 702.51a: untapped creatures the controller may tap for convoke (informational — the
     /// concrete taps are re-bound live by `select_convoke_taps`).
     ConvokeTaps { tappable: Vec<ObjectId> },
     /// CR 700.2 modal: the selectable mode indices.
-    Mode { available_modes: Vec<usize> },
+    Mode {
+        available_modes: Vec<usize>,
+        min_modes: u32,
+        max_modes: u32,
+        allow_repeats: bool,
+    },
     /// CR 603.5: a binary "may" — the slot alone identifies it (FE renders yes/no).
     MayChoice,
     /// CR 732.6: a binary "[A] unless [B]" break — pay or decline.
     UnlessBreak,
+    /// CR 608.2d: a fixed mana-color choice — informational read-side (the color is latched;
+    /// the FE renders it read-only, there is no per-iteration re-selection). Externally
+    /// tagged → `{"ManaColor":{"color":"Blue"}}`.
+    ManaColor { color: ManaColor },
 }
 
 /// A pinned target. `ByIdentity` re-resolves to a live legal ObjectId each iteration
@@ -331,9 +355,15 @@ pub enum ConcreteDecision {
         slot: DecisionSlot,
         pay: UnlessPaymentOption,
     },
+    /// CR 608.2d: the copy-through mana color for this iteration (never fails — no state lookup).
+    ManaColor {
+        slot: DecisionSlot,
+        color: ManaColor,
+    },
     /// CR 601.2h + CR 702.51a/b: the live-resolved convoke tap-set for this iteration —
     /// `(creature, mana_type)` pairs to feed as `GameAction::TapForConvoke`. Re-bound each
-    /// iteration by `select_convoke_taps` (lowest-ObjectId-per-color canonical order).
+    /// iteration by `select_convoke_taps` in `DetectionFodderFirst` order (CR 702.51a lets the
+    /// loop replay tap reproduced fodder rather than a stable-partition engine permanent).
     ConvokeTaps {
         slot: DecisionSlot,
         creatures: Vec<(ObjectId, ManaType)>,
@@ -441,11 +471,22 @@ fn resolve_pin(
             slot: slot.clone(),
             pay: *pay,
         }),
+        // CR 608.2d: the mana color is latched at record time and copied through unchanged —
+        // no object to resolve, no per-iteration legality re-check (a color cannot become
+        // illegal), CR 732.2a "predictable results".
+        PinnedDecision::ManaColor { slot, color } => Ok(ConcreteDecision::ManaColor {
+            slot: slot.clone(),
+            color: *color,
+        }),
         // CR 601.2h + CR 702.51a/b: re-bind the convoke tap-set LIVE against this
         // iteration's board. The caster + locked remaining cost come from the live
         // `ManaPayment` prompt (CR 601.2f cost-lock); the single-authority selector
-        // `select_convoke_taps` picks the minimal deterministic set (lowest ObjectId
-        // per needed color). No legal set ⇒ `UnpayableConvoke` (CR 702.51b).
+        // `select_convoke_taps` picks the minimal deterministic set. A `ConvokeTaps` pin is
+        // minted ONLY by the loop-replay template (`build_recast_template`), so this replay
+        // artifact uses `DetectionFodderFirst`: CR 702.51a makes convoke optional, so the
+        // replay MAY tap the reproduced fodder it recreates each period rather than a
+        // stable-partition engine permanent (which would drift the CR 732.2a object-growth
+        // cover check and suppress a valid loop). No legal set ⇒ `UnpayableConvoke` (CR 702.51b).
         PinnedDecision::ConvokeTaps { slot } => {
             let (player, cost) = match (&state.waiting_for, state.pending_cast.as_ref()) {
                 (WaitingFor::ManaPayment { player, .. }, Some(pending)) => {
@@ -453,7 +494,12 @@ fn resolve_pin(
                 }
                 _ => return Err(ReplayFailure::UnpayableConvoke { slot: slot.clone() }),
             };
-            match crate::game::mana_payment::select_convoke_taps(state, player, &cost) {
+            match crate::game::mana_payment::select_convoke_taps(
+                state,
+                player,
+                &cost,
+                crate::game::mana_payment::ConvokeTapOrder::DetectionFodderFirst,
+            ) {
                 Some(creatures) => Ok(ConcreteDecision::ConvokeTaps {
                     slot: slot.clone(),
                     creatures,
@@ -583,6 +629,7 @@ fn pin_slot(pin: &PinnedDecision) -> DecisionSlot {
         | PinnedDecision::Mode { slot, .. }
         | PinnedDecision::MayChoice { slot, .. }
         | PinnedDecision::UnlessBreak { slot, .. }
+        | PinnedDecision::ManaColor { slot, .. }
         | PinnedDecision::ConvokeTaps { slot } => slot.clone(),
     }
 }
@@ -620,15 +667,31 @@ fn concrete_to_target_ref(t: ConcreteTarget) -> crate::types::ability::TargetRef
     }
 }
 
+/// CR 608.2b (B1 schema reification): resolve one pinned target to its live wire-side
+/// [`TargetRef`] at `iteration`, for the read-side offer schema (`build_shortcut_schema`). The
+/// pinned identity IS its own singleton legal set for a fixed declinable offer (no FE
+/// re-selection). `None` if the pin no longer resolves to a live legal object — the drive's
+/// per-iteration [`resolve`] is the runtime CR 608.2b backstop that aborts such a broken loop.
+pub(crate) fn resolve_target_ref(
+    pin: &TargetPin,
+    slot: &DecisionSlot,
+    iteration: IterationIndex,
+    state: &GameState,
+) -> Option<crate::types::ability::TargetRef> {
+    resolve_target(pin, slot, iteration, state)
+        .ok()
+        .map(concrete_to_target_ref)
+}
+
 /// CR 732.2a + CR 608.2b: the fail-closed VALUE-legality firewall for a declared shortcut.
 /// Verifies every pin in `template` is a LEGAL answer to `schema` — each pin's slot is one
 /// the offer exposed, and each pin's resolved value lies inside that slot's offered legal
 /// set. `period` (the drive count from [`shortcut_drive_period`]) bounds the iteration
 /// indices a scheduled target pin is re-resolved for, so a `RoundRobin`/`Piecewise` schedule
 /// is validated at EVERY index it will drive. EXHAUSTIVE over [`PinnedDecision`] with no
-/// wildcard: `Order` (CR 603.3b trigger-ordering) and `ConvokeTaps` (object-growth-internal,
-/// re-bound live by `select_convoke_taps`) carry no FE-declared target-legality, so they are
-/// SKIPPED explicitly. Runs once at declare (the board is frozen through Accept); the drive's
+/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point;
+/// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
+/// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
 /// per-iteration [`resolve`] is the runtime CR 608.2b backstop.
 pub fn validate_pins(
     schema: &ShortcutDecisionSchema,
@@ -644,9 +707,18 @@ pub fn validate_pins(
                     .iter()
                     .find(|p| p.slot == *slot)
                     .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
-                let DecisionPointKind::Targets { legal_targets } = &point.kind else {
+                let DecisionPointKind::Targets {
+                    legal_targets,
+                    min_targets,
+                    max_targets,
+                    ..
+                } = &point.kind
+                else {
                     return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 };
+                if targets.len() < *min_targets as usize || targets.len() > *max_targets as usize {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
                 // CR 608.2b: re-resolve every target at every driven iteration index and
                 // require the concrete value to be an offered legal target. A scheduled pin
                 // that cannot resolve to a live legal object is itself an illegal value.
@@ -666,26 +738,80 @@ pub fn validate_pins(
                     .iter()
                     .find(|p| p.slot == *slot)
                     .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
-                let DecisionPointKind::Mode { available_modes } = &point.kind else {
+                let DecisionPointKind::Mode {
+                    available_modes,
+                    min_modes,
+                    max_modes,
+                    allow_repeats,
+                } = &point.kind
+                else {
                     return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
                 };
+                if indices.len() < *min_modes as usize
+                    || indices.len() > *max_modes as usize
+                    || (!allow_repeats
+                        && indices
+                            .iter()
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            != indices.len())
+                {
+                    return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
+                }
                 for idx in indices {
                     if !available_modes.contains(idx) {
                         return Err(PinValidation::IllegalModeIndex { slot: slot.clone() });
                     }
                 }
             }
-            // CR 603.5 / CR 732.6: binary choices — an exposed matching point is the only
-            // legality requirement (the FE renders yes/no; no value set to bound).
-            PinnedDecision::MayChoice { slot, .. } | PinnedDecision::UnlessBreak { slot, .. } => {
-                if !schema.points.iter().any(|p| p.slot == *slot) {
-                    return Err(PinValidation::UnexposedSlot { slot: slot.clone() });
+            // CR 603.5 / CR 732.6 / CR 608.2d: binary/fixed choices — an exposed matching point
+            // is the only legality requirement (the FE renders the value; no per-iteration value
+            // set to bound against — a "may" is yes/no, a `ManaColor` is a latched constant).
+            PinnedDecision::MayChoice { slot, .. } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::MayChoice) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 }
             }
-            // CR 603.3b trigger-ordering + CR 702.51a convoke: not FE-declared target
-            // legality — skipped explicitly (no wildcard, so a future pin kind build-breaks
-            // here rather than silently passing unvalidated).
-            PinnedDecision::Order { .. } | PinnedDecision::ConvokeTaps { .. } => {}
+            PinnedDecision::UnlessBreak { slot, .. } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::UnlessBreak) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            PinnedDecision::ManaColor { slot, color } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::ManaColor { color: offered } if offered == *color)
+                {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            // CR 702.51a: concrete convoke objects are rebound live, but the declaration must
+            // still pin the exact exposed convoke decision slot.
+            PinnedDecision::ConvokeTaps { slot } => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::ConvokeTaps { .. }) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            // CR 603.3b: trigger-ordering pins are not loop-declaration points.
+            PinnedDecision::Order { .. } => {}
         }
     }
     Ok(())
@@ -745,6 +871,9 @@ mod tests {
                         crate::types::ability::TargetRef::Object(ObjectId(3)),
                         crate::types::ability::TargetRef::Player(PlayerId(1)),
                     ],
+                    min_targets: 1,
+                    max_targets: 2,
+                    ordered: true,
                 },
             }],
             convoke_tappable_count: 2,
@@ -914,6 +1043,42 @@ mod tests {
         assert_eq!(at(3), ObjectId(21));
         assert_ne!(at(1), at(0), "a Constant impl (A,A,A,A) would fail this");
         assert_eq!(at(2), at(0), "the round-robin wraps at len");
+    }
+
+    /// FIX-1 (CR 608.2d): a `ManaColor` pin resolves COPY-THROUGH to `ConcreteDecision::ManaColor`
+    /// with the SAME latched color and slot, at every iteration — no state lookup, never fails
+    /// (a color cannot become illegal, CR 732.2a "predictable results"). Revert-probe: if
+    /// `resolve_pin`'s ManaColor arm dropped the pin or mutated the color/slot, this flips.
+    #[test]
+    fn resolve_mana_color_pin_copies_through() {
+        let state = GameState::new_two_player(7);
+        let slot = DecisionSlot {
+            source: this_obj(404, None),
+            index: 1,
+        };
+        let template = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::ManaColor {
+                slot: slot.clone(),
+                color: ManaColor::Blue,
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(2),
+            },
+            key: tri_key(),
+        };
+        for it in 0..3 {
+            let got = resolve(&template, it, &state).expect("copy-through never fails");
+            assert_eq!(got.len(), 1, "iteration {it}: one resolved decision");
+            assert_eq!(
+                got[0],
+                ConcreteDecision::ManaColor {
+                    slot: slot.clone(),
+                    color: ManaColor::Blue,
+                },
+                "iteration {it}: the latched Blue is copied through unchanged"
+            );
+        }
     }
 
     /// T4: a `Piecewise([(0,A),(2,B)])` schedule holds A for iters 0,1 and switches to B
@@ -1172,7 +1337,8 @@ mod tests {
     /// Convoke-pin unit (§11): `resolve_pin(ConvokeTaps)` at a live `ManaPayment{Convoke}`
     /// delegates to the single-authority `select_convoke_taps`, pulling the locked cost from
     /// `pending_cast` and the payer from the prompt. Positive: a `{G}` pending cost + two
-    /// green creatures ⇒ `ConcreteDecision::ConvokeTaps` with the minimal lowest-id set.
+    /// green creatures ⇒ `ConcreteDecision::ConvokeTaps` with the minimal set (both nontoken,
+    /// so `DetectionFodderFirst`'s tie-break collapses to lowest-id here).
     /// Negative (revert-failing wiring): away from a `ManaPayment` prompt (no `pending_cast`)
     /// ⇒ `Err(UnpayableConvoke)` — proves the pin never fabricates taps without a live cost.
     #[test]

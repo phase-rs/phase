@@ -8,14 +8,18 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
+use super::devotion::DevotionPolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
@@ -29,10 +33,12 @@ use super::payoff::{
     EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
 };
 use super::plus_one_counters::PlusOneCountersPolicy;
+use super::poison::PoisonClockPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::redundancy_avoidance::RedundancyAvoidancePolicy;
+use super::sacrifice_cost_mana_gate::SacrificeCostManaGatePolicy;
 use super::sacrifice_land_protection::SacrificeLandProtectionPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::self_cost_value::SelfCostValuePolicy;
@@ -107,11 +113,17 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
+    /// additional cost, or a flashback alternative cost — could only be paid by
+    /// spending mana sources the plan still needs.
+    SacrificeCostManaGate,
     SacrificeLandProtection,
     SelfCostValue,
     ComboLineProgress,
     CedhKeepablesMulligan,
     FixedDeckKeepMulligan,
+    /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
+    MulliganCardFloor,
     PlaneswalkerLoyalty,
     EquipmentPriority,
     SpellskitePriority,
@@ -129,6 +141,26 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 700.5: mono-color devotion pip density.
+    Devotion,
+    /// CR 104.3d: the alternate poison win clock.
+    PoisonClock,
+    /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
+    GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
+    /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
+    /// it discounts.
+    CostReduction,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    DrawPayoff,
+    /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
+    /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
+    DiscardPayoff,
+    /// CR 702.122a: cast a Vehicle when the board can actually crew it.
+    VehicleDeployment,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -320,6 +352,9 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(DevotionPolicy),
+            Box::new(PoisonClockPolicy),
+            Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
             Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),
             Box::new(CopyValuePolicy),
@@ -356,6 +391,7 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),
             Box::new(SelfCostValuePolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
@@ -374,11 +410,24 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::cost_reduction::CostReductionPolicy),
+            Box::new(super::draw_payoff::DrawPayoffPolicy),
+            Box::new(super::discard_payoff::DiscardPayoffPolicy),
+            Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
         ];
+        Self::from_policies(policies)
+    }
+}
+
+impl PolicyRegistry {
+    fn from_policies(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
             for kind in policy.decision_kinds() {
@@ -387,9 +436,13 @@ impl Default for PolicyRegistry {
         }
         Self { policies, by_kind }
     }
-}
 
-impl PolicyRegistry {
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn for_tests(policies: Vec<Box<dyn TacticalPolicy>>) -> Self {
+        Self::from_policies(policies)
+    }
+
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
     /// access. Policies are stateless (`TacticalPolicy: Send + Sync`, no
     /// interior mutability by construction), so a single instance safely
@@ -540,7 +593,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
         let shifted: Vec<f64> = raw_scores
@@ -564,7 +621,11 @@ impl PolicyRegistry {
             return candidates
                 .iter()
                 .cloned()
-                .map(|candidate| PolicyPrior { candidate, prior })
+                .map(|candidate| PolicyPrior {
+                    candidate,
+                    prior,
+                    payment_successor: None,
+                })
                 .collect();
         }
 
@@ -575,6 +636,7 @@ impl PolicyRegistry {
             .map(|(candidate, prior)| PolicyPrior {
                 candidate,
                 prior: prior / total,
+                payment_successor: None,
             })
             .collect()
     }
@@ -664,10 +726,7 @@ mod shared_invariant_tests {
     fn candidate(action: GameAction, tactical_class: TacticalClass) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), tactical_class),
         }
     }
 

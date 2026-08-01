@@ -1230,7 +1230,11 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "defer")
         self.assertEqual(recommendation["reason"], "frontend_policy")
 
-    def test_current_head_hold_does_not_suppress_green_review(self) -> None:
+    def test_current_head_bare_hold_is_honored(self) -> None:
+        # A recorded hold on the current head with nothing new — green CI, no
+        # author follow-up, no parse-diff — is honored rather than re-reviewed.
+        # (Resurfacing on a real change is covered by the parse-diff and
+        # head-change tests below.)
         packet = {
             "pr": {
                 "number": 4574,
@@ -1252,8 +1256,188 @@ class PrReviewTests(unittest.TestCase):
 
         recommendation = pr_review.recommend_from_packet(packet)
 
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_bare_local_hold_resurfaces_on_parse_diff(self) -> None:
+        # A parse-diff update landing after the hold re-surfaces the same head.
+        packet = {
+            "pr": {
+                "number": 4575,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(5),
+            },
+            "parse_diff": {"updated_at": self._minutes_ago(1)},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "parse_diff_after_local_hold")
+
+    def test_member_commented_last_helper(self) -> None:
+        # A review outranks an older comment; a member review last -> True.
+        self.assertTrue(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"authorAssociation": "CONTRIBUTOR", "createdAt": self._days_ago(1)},
+                    ],
+                    "reviews": [
+                        {"authorAssociation": "MEMBER", "submittedAt": self._minutes_ago(1)},
+                    ],
+                }
+            )
+        )
+        # Missing authorAssociation (e.g. a bot or cached payload) is not a
+        # member, so the guard never suppresses on absent data.
+        self.assertFalse(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"createdAt": self._minutes_ago(1)},
+                    ],
+                    "reviews": [],
+                }
+            )
+        )
+        # No dated activity at all -> False.
+        self.assertFalse(pr_review.member_commented_last({"comments": [], "reviews": []}))
+
+    def test_member_commented_last_holds_redundant_review(self) -> None:
+        # No state trigger fires and a repo member spoke last -> hold, so the
+        # sweep does not dispatch a redundant review of the same head.
+        packet = {
+            "pr": {
+                "number": 6262,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(
+            recommendation["reason"], "redundant_review_member_commented_last"
+        )
+
+    def test_contributor_commented_last_still_reviews(self) -> None:
+        # The converse of the guard: the contributor spoke last, so there is an
+        # unacknowledged follow-up and the PR must still surface for review.
+        packet = {
+            "pr": {
+                "number": 6263,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "needs_review")
+
+    def test_member_guard_never_overrides_head_change(self) -> None:
+        # A member spoke last, but the head advanced since the recorded event: a
+        # mandatory state trigger must win over the redundancy guard.
+        previous_event = {
+            "event_type": "reviewed",
+            "outcome": "reviewed",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(10),
+        }
+        pr = {
+            "number": 6264,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "authorAssociation": "MEMBER",
+                    "createdAt": self._minutes_ago(5),
+                    "updatedAt": self._minutes_ago(5),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(pr, "maintainer", None, previous_event),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
 
     def test_author_followup_after_local_block_resurfaces_same_head(self) -> None:
         packet = {

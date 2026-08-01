@@ -20,6 +20,19 @@ use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// Parse the Oracle prefixes that declare a target slot.
+///
+/// Keeps callers that distinguish stack-time targeting from resolution-time
+/// selection aligned on the full grammatical family rather than checking only
+/// the literal `"target "` sibling.
+pub fn parse_declared_target_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("another target "), tag("other target "), tag("target "))),
+    )
+    .parse(input)
+}
+
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
@@ -85,6 +98,52 @@ pub fn parse_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
     }
 
     Ok((rest, filter))
+}
+
+/// Parse a demonstrative that names the attacking object of a trigger event.
+///
+/// This intentionally accepts only creature-compatible type phrases: "that
+/// creature" and "that Wolf" can refer to an attacker, while "that artifact"
+/// cannot be silently treated as the event attacker. Callers still own the
+/// surrounding trigger-context gate; this combinator owns the typed noun phrase
+/// and its required separator before the following grammar production.
+pub fn parse_demonstrative_attacker_referent(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, filter) = parse_type_phrase(rest)?;
+    if !target_filter_can_name_attacker(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = space1.parse(rest)?;
+    Ok((rest, filter))
+}
+
+/// CR 506.3: an attacking object must be a creature. A printed creature
+/// subtype ("Wolf") is creature-compatible even when the noun phrase omits
+/// the word "creature".
+fn target_filter_can_name_attacker(filter: &TargetFilter) -> bool {
+    let TargetFilter::Typed(typed) = filter else {
+        return false;
+    };
+    typed.type_filters.iter().any(type_filter_can_name_attacker)
+}
+
+fn type_filter_can_name_attacker(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature | TypeFilter::Subtype(_) => true,
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_can_name_attacker),
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_) => false,
+    }
 }
 
 /// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
@@ -1473,6 +1532,18 @@ mod tests {
                 .count(),
             1,
             "both ability spellings must fold to exactly one StackAbility: {filters:?}"
+        );
+    }
+
+    #[test]
+    fn demonstrative_attacker_referent_is_typed_and_creature_compatible() {
+        let (rest, wolf) = parse_demonstrative_attacker_referent("that Wolf this combat if able")
+            .expect("creature subtype can name an attacker");
+        assert_eq!(rest, "this combat if able");
+        assert!(matches!(wolf, TargetFilter::Typed(_)));
+        assert!(
+            parse_demonstrative_attacker_referent("that artifact this combat if able").is_err(),
+            "a noncreature noun cannot become an event attacker"
         );
     }
 }

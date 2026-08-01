@@ -59,12 +59,17 @@ pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
+// CR 116.2c: the "pay a cost to end a continuous effect" special action.
+pub mod end_continuous_effect;
 pub(crate) mod exile_links;
 pub mod filter;
+// CR 710: Kamigawa flip cards (flipping, alternative-face application).
+pub mod flip;
 pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod haunt;
+pub mod interaction;
 // Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
 // so `haunt.rs` stays implementation-only).
 #[cfg(test)]
@@ -72,6 +77,8 @@ pub mod haunt;
 mod haunt_tests;
 pub mod keywords;
 pub mod layers;
+pub mod ledger;
+pub mod library;
 pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;
@@ -105,6 +112,7 @@ mod conspiracy_tests;
 mod merge_tests;
 pub mod morph;
 pub mod mulligan;
+pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
@@ -194,7 +202,7 @@ pub use deck_loading::{
 };
 pub use deck_validation::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
     signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
     validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
     DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,

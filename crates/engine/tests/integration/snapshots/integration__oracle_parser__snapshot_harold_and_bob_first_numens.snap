@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 796
 expression: result
 ---
 {
@@ -41,79 +42,89 @@ expression: result
                 "type": "RemoveAllAbilities"
               },
               {
-                "type": "GrantAbility",
+                "type": "GrantStaticAbility",
                 "definition": {
-                  "kind": "Activated",
-                  "effect": {
-                    "type": "Mana",
-                    "produced": {
-                      "type": "AnyOneColor",
-                      "count": {
-                        "type": "Fixed",
-                        "value": 3
-                      },
-                      "color_options": [
-                        "White",
-                        "Blue",
-                        "Black",
-                        "Red",
-                        "Green"
-                      ]
-                    }
-                  },
-                  "cost": {
-                    "type": "Unimplemented",
-                    "description": "Enchanted Forest has '{T}"
-                  },
-                  "sub_ability": {
-                    "kind": "Spell",
-                    "effect": {
-                      "type": "GivePlayerCounter",
-                      "counter_kind": "Rad",
-                      "count": {
-                        "type": "Fixed",
-                        "value": 2
-                      },
-                      "target": {
-                        "type": "Controller"
+                  "mode": "Continuous",
+                  "affected": {
+                    "type": "Typed",
+                    "type_filters": [
+                      {
+                        "Subtype": "Forest"
                       }
-                    },
-                    "cost": null,
-                    "sub_ability": {
-                      "kind": "Spell",
-                      "effect": {
-                        "type": "Unimplemented",
-                        "name": "'",
-                        "description": "'"
-                      },
-                      "cost": null,
-                      "sub_ability": null,
-                      "duration": null,
-                      "description": null,
-                      "target_prompt": null,
-                      "condition": null,
-                      "optional_targeting": false,
-                      "optional": false,
-                      "forward_result": false,
-                      "sub_link": "SequentialSibling"
-                    },
-                    "duration": null,
-                    "description": null,
-                    "target_prompt": null,
-                    "condition": null,
-                    "optional_targeting": false,
-                    "optional": false,
-                    "forward_result": false,
-                    "sub_link": "SequentialSibling"
+                    ],
+                    "controller": null,
+                    "properties": [
+                      {
+                        "type": "EnchantedBy"
+                      }
+                    ]
                   },
-                  "duration": null,
-                  "description": "Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'",
-                  "target_prompt": null,
+                  "modifications": [
+                    {
+                      "type": "GrantAbility",
+                      "definition": {
+                        "kind": "Activated",
+                        "effect": {
+                          "type": "Mana",
+                          "produced": {
+                            "type": "AnyOneColor",
+                            "count": {
+                              "type": "Fixed",
+                              "value": 3
+                            },
+                            "color_options": [
+                              "White",
+                              "Blue",
+                              "Black",
+                              "Red",
+                              "Green"
+                            ]
+                          }
+                        },
+                        "cost": {
+                          "type": "Tap"
+                        },
+                        "sub_ability": {
+                          "kind": "Spell",
+                          "effect": {
+                            "type": "GivePlayerCounter",
+                            "counter_kind": "Rad",
+                            "count": {
+                              "type": "Fixed",
+                              "value": 2
+                            },
+                            "target": {
+                              "type": "Controller"
+                            }
+                          },
+                          "cost": null,
+                          "sub_ability": null,
+                          "duration": null,
+                          "description": null,
+                          "target_prompt": null,
+                          "condition": null,
+                          "optional_targeting": false,
+                          "optional": false,
+                          "forward_result": false,
+                          "sub_link": "SequentialSibling"
+                        },
+                        "duration": null,
+                        "description": "{T}: Add three mana of any one color. You get two rad counters.",
+                        "target_prompt": null,
+                        "condition": null,
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false,
+                        "is_mana_ability": true
+                      }
+                    }
+                  ],
                   "condition": null,
-                  "optional_targeting": false,
-                  "optional": false,
-                  "forward_result": false,
-                  "is_mana_ability": true
+                  "affected_zone": null,
+                  "effect_zone": null,
+                  "active_zones": [],
+                  "characteristic_defining": false,
+                  "description": "Enchanted Forest has \"{T}: Add three mana of any one color. You get two rad counters.\""
                 }
               }
             ]

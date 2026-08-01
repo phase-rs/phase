@@ -5,6 +5,8 @@
  * then resolve the corresponding promise when the worker responds.
  */
 import type {
+  AiActionProposal,
+  AiProposalSubmission,
   BatchResolveResult,
   FormatConfig,
   GameAction,
@@ -16,12 +18,12 @@ import type {
   ViewerSnapshot,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
 type EngineResponse =
-  | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
@@ -37,8 +39,16 @@ type EngineResponse =
 const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
 
 /**
- * Watchdog timeout for AI search round-trips (getAiAction /
- * getAiScoredCandidates / selectActionFromScores). Deliberately much larger
+ * Hard deadline for the initial WASM worker handshake. Unlike gameplay
+ * watchdogs, initialization has no useful late-response path: rejecting lets
+ * WasmAdapter dispose the stalled worker and activate its main-thread fallback.
+ */
+const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
+
+type RequestTimeoutBehavior = "notify" | "reject";
+
+/**
+ * Watchdog timeout for AI proposal generation. Deliberately much larger
  * than ENGINE_REQUEST_TIMEOUT_MS: AI search legitimately exceeds 60s on
  * pathological boards (turn-40 squirrel / mana-token storms take hundreds of
  * seconds in debug; release is ~10-50x faster but can still cross a minute),
@@ -61,25 +71,15 @@ export class EngineWorkerClient {
       slowNotified?: boolean;
     }
   >();
-  private readyPromise: Promise<void>;
-  private readyResolve!: () => void;
-
   constructor() {
     this.worker = new Worker(
       new URL("./engine-worker.ts", import.meta.url),
       { type: "module" },
     );
 
-    this.readyPromise = new Promise<void>((resolve) => {
-      this.readyResolve = resolve;
-    });
-
     this.worker.onmessage = (e: MessageEvent<EngineResponse>) => {
       const msg = e.data;
       switch (msg.type) {
-        case "ready":
-          this.readyResolve();
-          break;
         case "result": {
           const entry = this.pending.get(msg.id);
           if (entry) {
@@ -121,21 +121,32 @@ export class EngineWorkerClient {
   /**
    * Post a typed message to the worker and resolve when it replies.
    *
-   * `timeoutMs` arms a watchdog: if the worker doesn't reply within the
-   * window, the pending entry stays alive and the UI is notified that the
-   * request is slow. This is applied ONLY to gameplay round-trips (see call
-   * sites below) — never to bulk/long setup calls (card-DB load, game init,
-   * batch resolve, restore), where a long runtime is expected. A late worker
-   * reply still resolves the original promise and clears the dispatch mutex.
+   * `timeoutMs` arms a watchdog. The default `notify` behavior keeps a slow
+   * gameplay request alive and informs the UI, allowing a late reply to resolve
+   * normally. The initialization-only `reject` behavior removes and rejects a
+   * stalled request so the adapter can fall back. Bulk setup calls (card-DB
+   * load, game init, batch resolve, restore) deliberately have no timeout.
    */
-  private request<T>(message: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  private request<T>(
+    message: Record<string, unknown>,
+    timeoutMs?: number,
+    timeoutBehavior: RequestTimeoutBehavior = "notify",
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =
         timeoutMs !== undefined
           ? setTimeout(() => {
               const entry = this.pending.get(id);
-              if (entry && !entry.slowNotified) {
+              if (!entry) return;
+              if (timeoutBehavior === "reject") {
+                this.pending.delete(id);
+                entry.reject(
+                  new Error(
+                    `Engine worker ${String(message.type)} timed out after ${timeoutMs}ms`,
+                  ),
+                );
+              } else if (!entry.slowNotified) {
                 entry.slowNotified = true;
                 notifyEngineSlow(`${String(message.type)}-timeout`);
               }
@@ -151,8 +162,11 @@ export class EngineWorkerClient {
   }
 
   async initialize(): Promise<void> {
-    this.worker.postMessage({ type: "init" });
-    await this.readyPromise;
+    await this.request<null>(
+      { type: "init" },
+      ENGINE_INITIALIZATION_TIMEOUT_MS,
+      "reject",
+    );
   }
 
   async loadCardDb(text: string): Promise<number> {
@@ -163,17 +177,24 @@ export class EngineWorkerClient {
     return this.request<number>({ type: "loadCardDbFromUrl" });
   }
 
+  async buildAiCardSubset(): Promise<string> {
+    return this.request<string>({ type: "buildAiCardSubset" });
+  }
+
   async evaluateDeckCompatibility(request: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
-  /**
-   * Build the game-scoped AI card-DB subset for THIS game. Returns the
-   * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
-   * Called ONLY on the MAIN engine client (full CARD_DB + live GAME_STATE).
-   */
-  async buildAiCardSubset(): Promise<string> {
-    return this.request<string>({ type: "buildAiCardSubset" });
+  async getCardFaceData(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardFaceData", cardName });
+  }
+
+  async getCardParseDetails(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardParseDetails", cardName });
+  }
+
+  async getCardRulings(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardRulings", cardName });
   }
 
   async initializeGame(
@@ -200,8 +221,7 @@ export class EngineWorkerClient {
   // continue (and that holds the dispatch mutex). They carry a watchdog that
   // surfaces a "still waiting" prompt after ENGINE_REQUEST_TIMEOUT_MS without
   // cancelling the underlying worker request. Human round-trips use 60s;
-  // the AI-search getters (getAiAction / getAiScoredCandidates /
-  // selectActionFromScores) use the far longer ENGINE_AI_TIMEOUT_MS because a
+  // AI proposal generation uses the far longer ENGINE_AI_TIMEOUT_MS because a
   // healthy search can legitimately exceed a minute on pathological boards.
   // Bulk/long setup calls (card-DB load, game init, deck compatibility, batch
   // resolve, restore/resume, export, bracket estimate) deliberately omit the
@@ -210,6 +230,13 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async submitInteraction(actor: number, submission: InteractionSubmission): Promise<SubmitResult> {
+    return this.request<SubmitResult>(
+      { type: "submitInteraction", actor, submission },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -266,49 +293,47 @@ export class EngineWorkerClient {
     );
   }
 
-  async getAiAction(
+  async getAiActionProposal(
     difficulty: string,
     playerId: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "getAiAction",
-        difficulty,
-        playerId,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposal", difficulty, playerId },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
+  /** This worker-side endpoint scores only; it cannot mint a proposal. */
   async getAiScoredCandidates(
     difficulty: string,
     playerId: number,
     seed: number,
   ): Promise<[GameAction, number][]> {
     return this.request<[GameAction, number][]>(
-      {
-        type: "getAiScoredCandidates",
-        difficulty,
-        playerId,
-        seed,
-      },
+      { type: "getAiScoredCandidates", difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
-  async selectActionFromScores(
+  /** Main authority filters scores through a fresh contract before minting. */
+  async getAiActionProposalFromScores(
     scoresJson: string,
     difficulty: string,
+    playerId: number,
     seed: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "selectActionFromScores",
-        scoresJson,
-        difficulty,
-        seed,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposalFromScores", scoresJson, difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    return this.request<AiProposalSubmission>(
+      { type: "submitAiActionProposal", proposal },
+      ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 

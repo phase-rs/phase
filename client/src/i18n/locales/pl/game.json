@@ -5,6 +5,7 @@
     "cantActivateDuring": "Nie można teraz aktywować",
     "prohibited": "Aktywacja tej zdolności jest zabroniona"
   },
+  "manaSourceSelection": { "title": "Wybierz źródło many", "description": "Ta zdolność many wymaga poświęcenia permanenta.", "sacrifice": "Poświęć", "back": "Wróć do płatności many", "unknownSource": "Źródło many" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -122,6 +123,7 @@
     "blockWithNoneConfirm": "Naciśnij ponownie: Nie blokuj nikim",
     "selectAttackerForBlocker": "Wybierz atakującego, przed którym ten blokujący ma bronić",
     "companionToHand": "Towarzysz do ręki",
+    "endContinuousEffect": "Zakończ efekt {{source}} —",
     "resolve": "Rozpatrz",
     "resolveTooltip": "Przekaż priorytet, aby górny element na stosie mógł zostać rozpatrzony, jeśli każdy gracz również przekaże priorytet. Skrót: Spacja.",
     "resolveAll": "Rozpatrz wszystko",
@@ -248,6 +250,7 @@
     "target": "Cel",
     "copy": "Kopia",
     "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "cantBeBlocked": "Nie może zostać zablokowana",
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
@@ -373,7 +376,14 @@
     "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
     "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
-    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Bieżąca faza: {{phase}}. Otwórz ustawienia zatrzymań faz.",
+    "sheetTitle": "Fazy tury",
+    "sheetSubtitle": "Dotknij kroku, aby zmienić, kiedy automatyczne pasowanie się tam zatrzymuje.",
+    "scopeShortOff": "Wył.",
+    "scopeShortAllTurns": "Wszystkie tury",
+    "scopeShortOwnTurn": "Twoje tury",
+    "scopeShortOpponentsTurns": "Tury przeciwników"
   },
   "phaseTracker": {
     "turn": "Tura {{number}}"
@@ -413,6 +423,7 @@
   "counterTooltip": {
     "summary_one": "1 znacznik {{label}}\n{{description}}",
     "summary_other": "{{count}} znaczników {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ znaczników {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Każdy znacznik +1/+1 daje permanentowi +1/+1.",
       "m1m1": "Każdy znacznik -1/-1 daje permanentowi -1/-1.",
@@ -491,13 +502,24 @@
     "clickToFocus": "kliknij, aby skupić"
   },
   "manaPool": {
+    "onlyForSpell": "Wydaj tylko na rzucanie czarów",
     "onlyForSpellType": "Wydaj tylko na rzucanie czarów określonego typu",
     "onlyForCreatureType": "Wydaj tylko na rzucenie czaru stwora wybranego typu",
     "onlyForTypeSpellsOrAbilities": "Wydaj tylko na czary lub zdolności określonego typu",
+    "onlyForTaggedActivation": "Wydaj tylko na aktywowanie zdolności określonego rodzaju",
     "onlyForSpellWithKeywordKind": "Wydaj tylko na rzucanie czarów z określonym słowem kluczowym",
     "onlyForSpellWithKeywordKindFromZone": "Wydaj tylko na rzucanie czarów ze słowem kluczowym z cmentarza",
+    "onlyForSpellWithManaValue": "Wydaj tylko na rzucanie czarów spełniających wymaganie wartości many",
+    "onlyForSpellMatchingCostCriteria": "Wydaj tylko na rzucanie czarów spełniających wymaganie kosztu",
+    "onlyForSpellWithColorCount": "Wydaj tylko na rzucanie czarów spełniających wymaganie liczby kolorów",
+    "onlyForSpellColor": "Wydaj tylko na rzucanie czarów wybranego koloru",
+    "onlyForSpellFromZone": "Wydaj tylko na rzucanie czarów z dozwolonej strefy",
+    "onlyForFaceDownSpell": "Wydaj tylko na rzucanie zakrytych czarów",
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
+    "onlyForAny": "Wydaj tylko na jedno z wymienionych zastosowań",
+    "onlyForSpecialAction": "Wydaj tylko na określoną akcję specjalną",
+    "impossible": "Ta mana nie może zostać wydana",
     "convokePayment": "Płatność Convoke",
     "grantsProperty": "Nadaje czarowi właściwość",
     "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"
@@ -576,6 +598,15 @@
     "resourceMana": "many",
     "resourceCounters": "znaczników",
     "resourceSpeed": "prędkości",
+    "loopCollapseTitleTokens": "Wybierz, ile żetonów stworzyć",
+    "loopCollapseTitleCounters": "Wybierz, ile razy dodać liczniki",
+    "loopCollapseTitleLife": "Wybierz, ile razy zyskać życie",
+    "loopCollapseTitleMixed": "Wybierz, ile razy powtórzyć pętlę",
+    "loopCollapseAmountTokens_one": "Stwórz {{count}} żeton",
+    "loopCollapseAmountTokens_other": "Stwórz {{count}} żetonów",
+    "loopCollapseAmountCounters": "Dodaj liczniki {{value}}×",
+    "loopCollapseAmountLife": "Zyskaj życie {{value}}×",
+    "loopCollapseAmountMixed": "Powtórz pętlę {{value}}×",
     "manualMana": "Ręcznie",
     "manualManaTooltip": "Ręczna mana — tylko ta gra. Stuknij własne ziemie i manę, aby zapłacić.",
     "spendHint": "Kliknij swoją manę, aby wydać ją na ten koszt",
@@ -636,6 +667,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Musi zablokować {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -982,6 +1014,33 @@
       "subtitleActivate": "Aktywować tę zdolność?",
       "subtitlePlay": "Wybierz, jak zagrać tę kartę",
       "subtitleChoose": "Wybierz zdolność do aktywowania"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Przekręć, aby dodać manę",
+      "tapFor": "Przekręć, aby dodać {{mana}}",
+      "onlyForSpell": "Tylko na czary.",
+      "onlyForSpellType": "Tylko na czary {{spellType}}.",
+      "onlyForCreatureType": "Tylko na czary {{creatureType}}.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Tylko na czary {{spellType}} lub zdolności {{spellType}}s.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Tylko na czary lub zdolności {{spellType}}.",
+      "onlyForActivation": "Tylko do aktywowania zdolności.",
+      "onlyForTaggedActivation": "Tylko do aktywowania zdolności {{tag}}.",
+      "onlyForXCosts": "Tylko na koszty zawierające X.",
+      "onlyForSpellWithKeywordKind": "Tylko na czary z {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Tylko na czary z {{keyword}} rzucone z {{zone}}.",
+      "onlyForSpellWithManaValue": "Tylko na czary o wartości many {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Tylko na czary {{spellType}} spełniające {{criteria}}.",
+      "manaValueCriterion": "wartość many {{comparator}} {{value}}",
+      "hasXInCostCriterion": "X w ich koszcie",
+      "onlyForSpellWithColorCount": "Tylko na czary z {{comparator}} {{count}} kolorami.",
+      "onlyForSpellColor": "Tylko na czary w kolorze {{color}}.",
+      "onlyForSpellFromZone": "Tylko na czary {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Tylko na czary zakryte.",
+      "onlyForAny": "Tylko do jednego z tych zastosowań: {{restrictions}}",
+      "onlyForSpecialAction": "Tylko do specjalnej akcji {{action}}.",
+      "impossible": "Ta mana nie może zostać wydana.",
+      "convokePayment": "Tylko do tej płatności konwokacji.",
+      "anySpell": "dowolny"
     },
     "defiler": {
       "title": "Redukcja kosztu Defiler",
@@ -1684,9 +1743,30 @@
     "targetCreature": "cel stwora",
     "targetChoice": "ten wybór celu"
   },
+  "giftRecipient": {
+    "title": "Wybierz odbiorcę prezentu",
+    "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Obiecać prezent?",
+      "pay": "Obiecaj {{gift}}",
+      "decline": "Rzuć bez obietnicy",
+      "kind": {
+        "card": "kartę",
+        "treasure": "Skarb",
+        "food": "Pożywienie",
+        "tappedFish": "zakręconą Rybę"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
+  },
+  "zoneOpponentChooser": {
+    "title": "Wybierz przeciwnika",
+    "subtitle": "Wybierz, który przeciwnik dokonuje wyboru."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1765,6 +1845,13 @@
     "variantBestow": "Rzuć z Bestow",
     "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
+    "variantMutate": "Rzuć z Mutate",
+    "variantAwaken": "Rzuć z Awaken",
+    "variantCleave": "Rzuć z Cleave",
+    "variantImpending": "Rzuć z Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Rzuć z Prototype",
+    "variantFaceDown": "Rzuć zakrytą",
     "variantFallback": "Rzuć z {{type}}"
   },
   "categoryChoice": {
@@ -2057,6 +2144,7 @@
     "fromSideboard": "Z zaplecza"
   },
   "phaseName": {
+    "Untap": "Odwracanie",
     "Upkeep": "Utrzymanie",
     "Draw": "Dobieranie",
     "PreCombatMain": "Główna faza 1",

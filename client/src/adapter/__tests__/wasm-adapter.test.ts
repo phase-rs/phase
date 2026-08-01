@@ -5,6 +5,18 @@ import type { EngineAdapter, SubmitResult } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
+const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
+
+vi.mock("../../services/cardData", () => ({
+  ensureWasmInit,
+  ensureCardDatabase: vi.fn().mockResolvedValue(100),
+}));
+
+vi.mock("@wasm/engine", () => ({
+  resume_multiplayer_host_state: resumeMultiplayerHostState,
+}));
+
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
 const mockWorkerClient = {
   initialize: vi.fn().mockResolvedValue(undefined),
@@ -13,6 +25,9 @@ const mockWorkerClient = {
   evaluateDeckCompatibility: vi
     .fn()
     .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
+  getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
+  getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
+  getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -24,9 +39,9 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-  getAiAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
+  resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -75,6 +90,41 @@ describe("WasmAdapter", () => {
       expect(vi.mocked(EngineWorkerClient)).toHaveBeenCalledOnce();
       expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
     });
+
+    it("disposes a worker that fails initialization and falls back to main-thread WASM", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(
+        new Error("WASM initialization failed"),
+      );
+
+      await expect(adapter.initialize()).resolves.toBeUndefined();
+
+      expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+      expect(ensureWasmInit).toHaveBeenCalledOnce();
+      expect(adapter.getEngineClient()).toBeNull();
+    });
+
+    it("does not reactivate after disposal while initialization is pending", async () => {
+      let finishInitialization!: () => void;
+      mockWorkerClient.initialize.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishInitialization = resolve;
+          }),
+      );
+
+      const staleInitialization = adapter.initialize();
+      adapter.dispose();
+      finishInitialization();
+      await staleInitialization;
+
+      await expect(adapter.ping()).rejects.toMatchObject({
+        code: AdapterErrorCode.NOT_INITIALIZED,
+      });
+
+      await adapter.initialize();
+      expect(vi.mocked(EngineWorkerClient)).toHaveBeenCalledTimes(2);
+      await expect(adapter.ping()).resolves.toBe("phase-rs engine ready");
+    });
   });
 
   describe("warmCardDatabase", () => {
@@ -99,6 +149,25 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
       expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
+    });
+  });
+
+  describe("card display queries", () => {
+    it("loads the DB once and routes every query through the shared worker", async () => {
+      await expect(adapter.getCardFaceData("Lightning Bolt")).resolves.toEqual({
+        name: "Lightning Bolt",
+      });
+      await expect(adapter.getCardParseDetails("Lightning Bolt")).resolves.toEqual([
+        { category: "ability" },
+      ]);
+      await expect(adapter.getCardRulings("Lightning Bolt")).resolves.toEqual([
+        { date: "2020-01-01", text: "Test" },
+      ]);
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getCardFaceData).toHaveBeenCalledWith("Lightning Bolt");
+      expect(mockWorkerClient.getCardParseDetails).toHaveBeenCalledWith("Lightning Bolt");
+      expect(mockWorkerClient.getCardRulings).toHaveBeenCalledWith("Lightning Bolt");
     });
   });
 
@@ -242,6 +311,72 @@ describe("WasmAdapter", () => {
       const mockState = buildGameState();
       await expect(adapter.restoreState(mockState)).rejects.toThrow(AdapterError);
     });
+
+    it("throws when the card database fails to load and does not restore", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.restoreState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resumeMultiplayerHostState", () => {
+    it("loads the card database then resumes on the worker", async () => {
+      await adapter.initialize();
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await adapter.resumeMultiplayerHostState(mockState);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
+        JSON.stringify(mockState),
+      );
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(
+          mockWorkerClient.resumeMultiplayerHostState.mock.invocationCallOrder[0],
+        );
+    });
+
+    it("throws when the card database fails to load and does not resume", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.resumeMultiplayerHostState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.resumeMultiplayerHostState).not.toHaveBeenCalled();
+    });
+
+    it("propagates a queued main-thread fallback resume failure", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      resumeMultiplayerHostState.mockImplementationOnce(() => {
+        throw new Error("resume failed");
+      });
+      await adapter.initialize();
+
+      await expect(adapter.resumeMultiplayerHostState(buildGameState())).rejects.toThrow(
+        "resume failed",
+      );
+      expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
   });
 
   describe("initializeGame", () => {
@@ -256,37 +391,6 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initializeGame({ decks: [] });
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiAction("Medium", 1);
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
-    });
-  });
-
-  describe("getAiActionForSeats", () => {
-    it("delegates to getAiAction for the active seat", async () => {
-      await adapter.initialize();
-      await adapter.getAiActionForSeats(
-        [
-          { playerId: 0, difficulty: "Easy" },
-          { playerId: 1, difficulty: "Hard" },
-        ],
-        1,
-      );
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Hard", 1);
-    });
-
-    it("returns null if no matching seat", async () => {
-      await adapter.initialize();
-      const result = await adapter.getAiActionForSeats(
-        [{ playerId: 0, difficulty: "Easy" }],
-        1,
-      );
-      expect(result).toBeNull();
     });
   });
 

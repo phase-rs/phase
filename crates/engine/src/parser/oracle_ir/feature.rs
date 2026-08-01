@@ -465,14 +465,17 @@ pub(crate) fn scope_to_unit(
             }
             OracleNodeIr::CastingRestriction(r) => scoped.casting_restrictions.push(r.clone()),
             OracleNodeIr::CastingOption(o) => scoped.casting_options.push(o.clone()),
-            OracleNodeIr::Spell(_)
+            // The residual contributes through the ability id track, while a
+            // relation synthesis contributes solely through the replacement id
+            // track. Adding either here would double-count unit evidence.
+            OracleNodeIr::Unsupported { .. }
+            | OracleNodeIr::RelationSynthesis(_)
+            | OracleNodeIr::Spell(_)
             | OracleNodeIr::Trigger(_)
             | OracleNodeIr::Static(_)
             | OracleNodeIr::Replacement(_)
             | OracleNodeIr::PreLoweredSpell(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => {}
+            | OracleNodeIr::PreLoweredTrigger(_) => {}
         }
     }
     scoped

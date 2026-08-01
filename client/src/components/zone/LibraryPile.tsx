@@ -5,7 +5,6 @@ import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -84,8 +83,9 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  // `hoverProps` owns the long-press → sticky-preview gesture and swallows the
+  // click that follows it in the capture phase, so this component needs neither
+  // its own useLongPress nor a firedRef guard on the button.
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
@@ -116,14 +116,6 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
       setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
     }
   }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
-
-  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
-    useCallback(() => {
-      if (topObjectId == null || topCardName == null) return;
-      inspectObject(topObjectId as ObjectId);
-      setPreviewSticky(true);
-    }, [inspectObject, setPreviewSticky, topObjectId, topCardName]),
-  );
 
   if (count === 0) return null;
 
@@ -167,10 +159,6 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
       <button
         type="button"
         onClick={() => {
-          if (longPressFired.current) {
-            longPressFired.current = false;
-            return;
-          }
           // Prefer opening the viewer when the top is visible — the modal is
           // where play-from-top happens (mirrors graveyard/exile). Fall back to
           // direct cast only when no viewer is wired.
@@ -184,7 +172,6 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
         aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
         {...topHoverProps}
-        {...longPressHandlers}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay
             ? `border-amber-400 ${CASTABLE_AFFORDANCE_IDLE} cursor-pointer`

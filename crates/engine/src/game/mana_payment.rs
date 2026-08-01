@@ -35,18 +35,21 @@ const INFINITE_MANA_TYPES: [ManaType; 6] = [
 ];
 
 /// The six `ResourceAxis::Mana(_)` axes the infinite-mana debug toggle records in
-/// `GameState::unbounded_resources` (parallel to `INFINITE_MANA_TYPES`). Storing
-/// all six faithfully says "all six colors are unbounded"; the refill/keep gates
-/// trigger on ANY `Mana(_)` axis, so the byte-preserved top-up of all six colors
-/// is independent of exactly which mana axes are stored.
-pub(crate) const INFINITE_MANA_AXES: [ResourceAxis; 6] = [
-    ResourceAxis::Mana(ManaType::White),
-    ResourceAxis::Mana(ManaType::Blue),
-    ResourceAxis::Mana(ManaType::Black),
-    ResourceAxis::Mana(ManaType::Red),
-    ResourceAxis::Mana(ManaType::Green),
-    ResourceAxis::Mana(ManaType::Colorless),
-];
+/// `GameState::unbounded_resources` — each of the six `INFINITE_MANA_TYPES` wrapped
+/// as a mana axis, DERIVED so the two lists can never drift. Recording all six
+/// faithfully says "all six colors are unbounded"; `refill_infinite_mana` then tops
+/// up exactly the recorded colors (CR 106.1b + CR 106.4) — for this toggle, all six.
+pub(crate) const INFINITE_MANA_AXES: [ResourceAxis; 6] = {
+    // Wrap each mana type as its `Mana(_)` axis in a const context so a color can
+    // never be added to one list and silently forgotten in the other.
+    let mut axes = [ResourceAxis::Mana(ManaType::Colorless); 6];
+    let mut i = 0;
+    while i < INFINITE_MANA_TYPES.len() {
+        axes[i] = ResourceAxis::Mana(INFINITE_MANA_TYPES[i]);
+        i += 1;
+    }
+    axes
+};
 
 pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     state.transient_continuous_effects.iter().any(|effect| {
@@ -73,9 +76,10 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     })
 }
 
-/// Debug-only: top every player whose `GameState::unbounded_resources` entry
-/// contains any `ResourceAxis::Mana(_)` axis back up to `INFINITE_MANA_PER_TYPE`
-/// unrestricted, non-expiring units of each mana type.
+/// Debug/loop-detector: top every player whose `GameState::unbounded_resources`
+/// entry contains at least one `ResourceAxis::Mana(_)` axis back up to
+/// `INFINITE_MANA_PER_TYPE` unrestricted, non-expiring units of each mana type
+/// that entry records — and ONLY those types (CR 106.1b + CR 106.4).
 ///
 /// Idempotent — only the shortfall is added — and returns immediately when no
 /// player is flagged, so it is cheap to call after every action. Paired with the
@@ -89,29 +93,46 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
 /// NOT a rules-legal effect — a developer convenience gated behind the same
 /// debug-action permission as every other `DebugAction`.
 pub fn refill_infinite_mana(state: &mut GameState) {
-    // Flagged = players whose unbounded-resource set names ANY Mana axis. The
-    // per-player top-up below still seeds all six `INFINITE_MANA_TYPES` colors, so
-    // the body is byte-for-byte the pre-PR-6 behavior regardless of which mana
-    // colors are stored.
-    let flagged: Vec<PlayerId> = state
+    // Flagged = players whose unbounded-resource set names at least one Mana axis,
+    // paired with the exact mana type(s) that set records.
+    //
+    // CR 106.1b + CR 106.4: refill only the mana type(s) the loop's abilities
+    // actually produce — colorless ≠ colored, colors are not interchangeable.
+    // The debug toggle records all six `INFINITE_MANA_AXES`, so its color list is
+    // all six and its top-up stays byte-identical to the prior behavior. A combo
+    // loop detector that records a SUBSET (e.g. `[Mana(Colorless)]`) refills only
+    // that subset — colored mana no ability in the loop produced is never
+    // fabricated, and cannot be illegally spent on colored pips.
+    let flagged: Vec<(PlayerId, Vec<ManaType>)> = state
         .unbounded_resources
         .iter()
-        .filter(|(_, axes)| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_))))
-        .map(|(pid, _)| *pid)
+        .filter_map(|(pid, axes)| {
+            let colors: Vec<ManaType> = axes
+                .iter()
+                .filter_map(|a| match a {
+                    ResourceAxis::Mana(mt) => Some(*mt),
+                    _ => None,
+                })
+                .collect();
+            // Keep the "any Mana axis" gate: a player with no recorded mana color
+            // is not flagged for a mana top-up.
+            (!colors.is_empty()).then_some((*pid, colors))
+        })
         .collect();
     if flagged.is_empty() {
         return;
     }
-    for &player_id in &flagged {
+    for (player_id, colors) in &flagged {
+        let player_id = *player_id;
         let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
             continue;
         };
         // Read every per-color `have` count up front (immutable borrow), then
         // release the borrow before routing additions through
         // `state.add_mana_to_pool` (which needs `&mut state`).
-        let to_add: Vec<(ManaType, usize)> = INFINITE_MANA_TYPES
-            .into_iter()
-            .map(|color| {
+        let to_add: Vec<(ManaType, usize)> = colors
+            .iter()
+            .map(|&color| {
                 // Count only the units this top-up owns (unrestricted, non-expiring)
                 // so card-produced restricted/expiring mana never suppresses a refill.
                 let have = player
@@ -126,7 +147,7 @@ pub fn refill_infinite_mana(state: &mut GameState) {
         for (color, count) in to_add {
             for _ in 0..count {
                 // CR 118.3a: stamp pip ids so debug-refilled mana is pinnable too.
-                state.add_mana_to_pool(
+                let _ = state.add_mana_to_pool(
                     player_id,
                     ManaUnit::new(color, ObjectId(0), false, Vec::new()),
                 );
@@ -134,8 +155,8 @@ pub fn refill_infinite_mana(state: &mut GameState) {
         }
     }
     // Mark display dirty only after the mutable-player borrow above is released.
-    for &player_id in &flagged {
-        super::public_state::mark_public_state_player_dirty(state, player_id);
+    for (player_id, _) in &flagged {
+        super::public_state::mark_public_state_player_dirty(state, *player_id);
     }
     super::public_state::mark_mana_display_dirty(state);
 }
@@ -242,6 +263,64 @@ pub enum PaymentError {
     InvalidCost,
 }
 
+/// Typed failure while applying an already-selected exact pool removal.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub(crate) enum ExactManaRemovalError {
+    #[error("duplicate exact mana pip {0:?}")]
+    DuplicatePip(ManaPipId),
+    #[error("missing exact mana pip {0:?}")]
+    MissingPip(ManaPipId),
+    #[error("mismatched exact mana unit for pip {0:?}")]
+    MismatchedUnit(ManaPipId),
+}
+
+/// CR 118.3a: Apply a payment solver's exact selected units in consumption
+/// order. This is deliberately separate from selection: it never chooses a
+/// substitute unit when a recorded pip is absent or differs.
+pub(crate) fn remove_exact_mana_units(
+    pool: &mut ManaPool,
+    units: &[ManaUnit],
+) -> Result<(), ExactManaRemovalError> {
+    let mut seen = std::collections::HashSet::new();
+    for unit in units {
+        if unit.pip_id.0 != 0 && !seen.insert(unit.pip_id) {
+            return Err(ExactManaRemovalError::DuplicatePip(unit.pip_id));
+        }
+    }
+    // Validate against a scratch pool first, so a malformed replay command
+    // cannot partially debit a real pool. The final pass then performs the
+    // same exact semantic removals on the live pool; it never replaces it.
+    let mut validation_pool = pool.clone();
+    remove_exact_mana_units_once(&mut validation_pool, units)?;
+    remove_exact_mana_units_once(pool, units)
+}
+
+fn remove_exact_mana_units_once(
+    pool: &mut ManaPool,
+    units: &[ManaUnit],
+) -> Result<(), ExactManaRemovalError> {
+    for unit in units {
+        let position = pool
+            .mana
+            .iter()
+            .position(|candidate| candidate.pip_id == unit.pip_id && *candidate == *unit);
+        match position {
+            Some(position) => {
+                pool.mana.swap_remove(position);
+            }
+            None if pool
+                .mana
+                .iter()
+                .any(|candidate| candidate.pip_id == unit.pip_id) =>
+            {
+                return Err(ExactManaRemovalError::MismatchedUnit(unit.pip_id));
+            }
+            None => return Err(ExactManaRemovalError::MissingPip(unit.pip_id)),
+        }
+    }
+    Ok(())
+}
+
 /// Result of a Phyrexian mana payment that used life instead of mana (CR 107.4f).
 ///
 /// CR 107.4f: A Phyrexian mana symbol represents a cost that can be paid either
@@ -266,7 +345,7 @@ pub fn produce_mana(
     player_id: PlayerId,
     tapped_for_mana: bool,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     produce_mana_with_attributes(
         state,
         source_id,
@@ -277,7 +356,7 @@ pub fn produce_mana(
         &[],
         None,
         events,
-    );
+    )
 }
 
 /// Produce mana and add it to a player's mana pool, carrying spend restrictions,
@@ -299,7 +378,7 @@ pub fn produce_mana_with_attributes(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     let source_could_produce_two_or_more_colors =
         super::mana_sources::source_could_produce_two_or_more_colors(state, source_id, player_id);
     produce_mana_with_attributes_from_source_quality(
@@ -313,7 +392,7 @@ pub fn produce_mana_with_attributes(
         grants,
         expiry,
         events,
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,7 +407,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
@@ -341,7 +420,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             ..
         }) => (resolved, count),
         // CR 614.1: A fully-prevented mana production produces no mana.
-        ReplacementResult::Prevented => return,
+        ReplacementResult::Prevented => return Vec::new(),
         // CR 614.5: Mana-type replacements do not require a player choice; any
         // other outcome (including unexpected pipeline results) falls back to
         // the original type so mana production is never silently dropped.
@@ -351,6 +430,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana (payable for {S}).
     let source_is_snow = super::mana_sources::source_is_snow(state, source_id);
 
+    let mut produced = Vec::with_capacity(final_count as usize);
     for _ in 0..final_count {
         let unit = ManaUnit {
             color: final_mana_type,
@@ -364,7 +444,9 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         };
 
         // CR 118.3a: stamp a stable pip id on pool entry so the unit can be pinned.
-        state.add_mana_to_pool(player_id, unit);
+        if let Some(unit) = state.add_mana_to_pool(player_id, unit) {
+            produced.push(unit);
+        }
 
         events.push(GameEvent::ManaAdded {
             player_id,
@@ -376,6 +458,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     if final_count > 0 && has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
+    produced
 }
 
 /// Check if the mana pool can pay the given cost (CR 202.1a).
@@ -395,6 +478,31 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
     )
 }
 
+/// Candidate ordering mode for [`select_convoke_taps`]. CR 702.51a makes convoke a
+/// player *option* ("you MAY tap ..."), so both orderings pay the same cost legally —
+/// they only differ in WHICH untapped creatures are chosen when several qualify.
+///
+/// This is a private (`pub(crate)`) selector-mode switch, not a rules-bearing engine
+/// type: it expresses the real present distinction between the live/general canonical
+/// tap order and the loop-detection replay's fodder-first order, without letting a
+/// future live/AI/UI caller silently inherit the detection-only preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvokeTapOrder {
+    /// Lowest-ObjectId-per-color (the historical live/general default). Deterministic and
+    /// byte-unchanged from the pre-mode behavior; the pinned contract of the unit tests.
+    ///
+    /// Constructed only in tests today: the sole production caller (`resolve_pin(ConvokeTaps)`)
+    /// is a loop-replay artifact that uses `DetectionFodderFirst`. This variant is retained as
+    /// the API-complete default so the FIRST future live/AI/UI convoke-suggestion caller must
+    /// opt into an order explicitly rather than silently inherit the detection preference.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Canonical,
+    /// Reproduced fodder (token) creatures first, then lowest ObjectId within each class.
+    /// Used only by the CR 732.2a object-growth loop-detection replay so it taps the
+    /// disposable fodder it reproduces rather than a stable-partition engine permanent.
+    DetectionFodderFirst,
+}
+
 /// CR 601.2h + CR 702.51a/b: the SINGLE authority for choosing a deterministic,
 /// minimal convoke tap-set that covers the locked post-affinity `remaining_cost` from
 /// `player`'s current pool plus untapped creatures they control. Shares the convoke
@@ -403,19 +511,21 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
 /// eligibility path. Both `resolve_pin(ConvokeTaps)` (replay) and the loop-shortcut
 /// injector route through this function.
 ///
-/// Deterministic + minimal: for each colored pip the lowest-ObjectId untapped creature
-/// of that color is tapped (CR 702.51a — a colored convoke tap pays a matching colored
-/// pip); each residual generic pip is paid by the lowest-ObjectId untapped creature
-/// (colorless marker). `can_pay` (the same authority the real finalize uses) arbitrates
-/// after each tap, so the returned set is exactly sufficient. Returns `None` when no
-/// legal untapped-creature set can cover the cost (⇒ the replay raises
-/// `ReplayFailure::UnpayableConvoke`, CR 702.51b). Hybrid/Phyrexian/{X}/{C}-only pips
-/// that a colorless marker can't satisfy fail closed here (outside the deterministic
-/// convoke class the offer targets).
+/// Deterministic + minimal: for each colored pip an untapped creature of that color is
+/// tapped (CR 702.51a — a colored convoke tap pays a matching colored pip); each residual
+/// generic pip is paid by an untapped creature (colorless marker). `order` selects which
+/// qualifying creature is preferred within a color (see [`ConvokeTapOrder`]): `Canonical`
+/// takes the lowest ObjectId; `DetectionFodderFirst` prefers reproduced fodder tokens.
+/// `can_pay` (the same authority the real finalize uses) arbitrates after each tap, so the
+/// returned set is exactly sufficient. Returns `None` when no legal untapped-creature set
+/// can cover the cost (⇒ the replay raises `ReplayFailure::UnpayableConvoke`, CR 702.51b).
+/// Hybrid/Phyrexian/{X}/{C}-only pips that a colorless marker can't satisfy fail closed
+/// here (outside the deterministic convoke class the offer targets).
 pub(crate) fn select_convoke_taps(
     state: &GameState,
     player: PlayerId,
     remaining_cost: &ManaCost,
+    order: ConvokeTapOrder,
 ) -> Option<Vec<(ObjectId, ManaType)>> {
     let ManaCost::Cost { shards, .. } = remaining_cost else {
         // NoCost / unresolved placeholder: nothing to convoke.
@@ -431,7 +541,6 @@ pub(crate) fn select_convoke_taps(
     let mut taps: Vec<(ObjectId, ManaType)> = Vec::new();
     let mut used: Vec<ObjectId> = Vec::new();
 
-    // Canonical candidate order: lowest ObjectId first ⇒ reproducible replay.
     let mut candidates: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -445,7 +554,30 @@ pub(crate) fn select_convoke_taps(
         // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't convoke.
         .filter(|id| !crate::game::restrictions::object_cant_tap(state, *id))
         .collect();
-    candidates.sort_by_key(|id| id.0);
+    match order {
+        // CR 702.51b: canonical lowest-ObjectId order ⇒ reproducible live/general replay.
+        ConvokeTapOrder::Canonical => candidates.sort_by_key(|id| id.0),
+        // CR 702.51a + CR 732.2a: the object-growth loop-detection replay MAY tap any legal
+        // creature (convoke is optional), so it prefers the reproduced fodder tokens it
+        // recreates each period over a stable-partition engine permanent. Tapping a stable
+        // object would drift its `tapped` flag across the period, so
+        // `loop_states_cover_modulo_fodder_growth`'s `object_content_eq` (game_state.rs, the
+        // `tapped` compare) would fail and suppress an otherwise-valid infinite loop — the
+        // exact bug an UNTAPPED lower-ObjectId cost-reducer (e.g. B/G Witherbloom below the
+        // fodder Saprolings) triggered in live 4p play.
+        //
+        // `is_token` is a PROXY for "not in the stable partition": it handles the targeted
+        // class (reproduced token fodder + a nontoken engine) exactly. Out-of-class shapes (a
+        // token that is ITSELF the stable engine, or nontoken fodder) fall outside and stay
+        // fail-CLOSED — the sort merely reorders preference; `pick`'s `.find()` below still
+        // taps the engine when fodder can't cover a colored pip (no payability regression, the
+        // cover check just fails conservatively). Unknown/missing objects sort as nontoken
+        // (stable), the fail-closed direction.
+        ConvokeTapOrder::DetectionFodderFirst => candidates.sort_by_cached_key(|id| {
+            let is_fodder = state.objects.get(id).is_some_and(|o| o.is_token);
+            (!is_fodder, id.0)
+        }),
+    }
 
     let pick =
         |used: &[ObjectId], color: Option<crate::types::mana::ManaColor>| -> Option<ObjectId> {
@@ -1077,8 +1209,38 @@ pub fn pay_cost_with_demand_and_choices(
     // which makes the spend byte-identical to the pre-feature ordering.
     pins: &[ManaPipId],
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    let payment = select_mana_payment(
+        pool,
+        cost,
+        hand_demand,
+        spell,
+        any_color,
+        phyrexian_choices,
+        life_colors,
+        pins,
+    )?;
+    remove_exact_mana_units(pool, &payment.0).map_err(|_| PaymentError::InsufficientMana)?;
+    Ok(payment)
+}
+
+/// Resolve which exact units pay a mana cost without mutating the real pool.
+///
+/// The scratch solver remains the authority for all payment choices. Live
+/// `GameState` callers pass its result to the resolved-command applier, while
+/// detached preview pools may use [`pay_cost_with_demand_and_choices`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_mana_payment(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    hand_demand: Option<&ColorDemand>,
+    spell: Option<&PaymentContext<'_>>,
+    any_color: bool,
+    phyrexian_choices: Option<&[ShardChoice]>,
+    life_colors: crate::types::mana::LifePaymentColors,
+    pins: &[ManaPipId],
+) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     // CR 601.2h: Partial payments are not allowed. Spend from scratch pools so a
-    // failed attempt never leaks a partial payment into the caller's mana pool.
+    // failed attempt never leaks a partial payment into the caller's real pool.
     let mut scratch = pool.clone();
     match pay_cost_with_demand_and_choices_once(
         &mut scratch,
@@ -1090,10 +1252,7 @@ pub fn pay_cost_with_demand_and_choices(
         life_colors,
         pins,
     ) {
-        Ok(payment) => {
-            *pool = scratch;
-            Ok(payment)
-        }
+        Ok(payment) => Ok(payment),
         Err(PaymentError::InsufficientMana) if hand_demand.is_some() => {
             let mut fallback = pool.clone();
             match pay_cost_with_demand_and_choices_once(
@@ -1106,10 +1265,7 @@ pub fn pay_cost_with_demand_and_choices(
                 life_colors,
                 pins,
             ) {
-                Ok(payment) => {
-                    *pool = fallback;
-                    Ok(payment)
-                }
+                Ok(payment) => Ok(payment),
                 Err(error) => Err(error),
             }
         }
@@ -1890,13 +2046,24 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 /// Arisen Necropolis). Under such a spell-payment context, real pool mana is
 /// ineligible — only convoke/delve stand-in units may pay. Layered on top of the
 /// unit's own spend restrictions so both gates apply.
-fn ctx_permits_unit(ctx: &PaymentContext<'_>, unit: &ManaUnit) -> bool {
+/// CR 106.6: Shared eligibility predicate for a concrete mana unit in a typed
+/// payment context. The ability rider checks the unit's actual mana type before
+/// unit restrictions; cost permissions such as "spend as though" are applied
+/// later and cannot make an off-color unit satisfy an activation rider.
+pub(crate) fn mana_unit_permits_payment_context(unit: &ManaUnit, ctx: &PaymentContext<'_>) -> bool {
+    if !ctx.permits_actual_mana_type(unit.color) {
+        return false;
+    }
     if let PaymentContext::Spell(meta) = ctx {
         if meta.cant_spend_mana && !unit.is_convoke_payment() {
             return false;
         }
     }
     unit.restrictions.iter().all(|r| r.allows(ctx))
+}
+
+fn ctx_permits_unit(ctx: &PaymentContext<'_>, unit: &ManaUnit) -> bool {
+    mana_unit_permits_payment_context(unit, ctx)
 }
 
 /// `ctx_permits_unit` lifted over an optional context: no context means every
@@ -2512,7 +2679,7 @@ mod tests {
     use crate::types::game_state::LayersDirty;
     use crate::types::identifiers::CardId;
     use crate::types::identifiers::ObjectId;
-    use crate::types::mana::{ManaRestriction, SpellMeta};
+    use crate::types::mana::{ManaColor, ManaRestriction, SpellMeta};
     use crate::types::zones::Zone;
 
     /// The building-block predicate must classify each shape the parser can produce.
@@ -2647,6 +2814,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_removal_is_atomic_when_a_recorded_pip_is_missing() {
+        let present = rich_unit(ManaType::Blue, 1, 1);
+        let missing = rich_unit(ManaType::Green, 2, 2);
+        let mut pool = ManaPool {
+            mana: vec![present.clone()],
+        };
+        let before = fingerprint(&pool.mana);
+
+        assert_eq!(
+            remove_exact_mana_units(&mut pool, &[present, missing]),
+            Err(ExactManaRemovalError::MissingPip(ManaPipId(2)))
+        );
+        assert_eq!(fingerprint(&pool.mana), before);
+    }
+
     fn make_two_or_more_color_source_unit(color: ManaType) -> ManaUnit {
         ManaUnit {
             source_could_produce_two_or_more_colors: true,
@@ -2669,6 +2852,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana,
@@ -3668,6 +3852,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3692,6 +3877,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3742,6 +3928,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3765,6 +3952,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3809,6 +3997,7 @@ mod tests {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         assert!(can_pay_for_spell(
             &pool,
@@ -3824,6 +4013,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3861,20 +4051,16 @@ mod tests {
         .expect("Hydraulic Helper's spend restriction must parse");
         assert_eq!(
             ast,
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
                 ability: AbilityActivationScope::Any,
-            },
+            }],
             "negative nonartifact restriction must keep ability activation unrestricted"
         );
 
         // Lower through the real runtime resolver (state-independent for this variant).
         let state = GameState::new_two_player(42);
-        let runtime = crate::game::effects::mana::resolve_restrictions(
-            std::slice::from_ref(&ast),
-            &state,
-            ObjectId(1),
-        );
+        let runtime = crate::game::effects::mana::resolve_restrictions(&ast, &state, ObjectId(1));
 
         // The produced {U} carries the lowered restriction.
         let mut pool = ManaPool::default();
@@ -3902,6 +4088,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3928,6 +4115,8 @@ mod tests {
                     source_types: &creature_types,
                     source_subtypes: &no_subtypes,
                     ability_tag: None,
+                    mana_color_constraint:
+                        crate::types::mana::ActivationManaColorConstraint::Unrestricted,
                 }),
                 crate::types::mana::CostPermissionContext::default(),
             ),
@@ -3942,6 +4131,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4043,6 +4233,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4066,6 +4257,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4112,6 +4304,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4135,6 +4328,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4183,6 +4377,50 @@ mod tests {
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
+    }
+
+    /// CR 106.6: an activation's own chosen-color rider is checked against the
+    /// actual unit before any "spend as though" permission. A blue unit cannot
+    /// pay Throne of Eldraine's draw ability after red was chosen, even when an
+    /// outside effect would otherwise let blue mana pay a red cost.
+    #[test]
+    fn chosen_color_activation_rider_rejects_off_color_even_with_any_color() {
+        let source_types = vec!["Artifact".to_string()];
+        let source_subtypes = Vec::new();
+        let context = PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Only(
+                ManaColor::Red,
+            ),
+        };
+        let blue_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let as_though_any_color = crate::types::mana::CostPermissionContext {
+            any_color: true,
+            ..crate::types::mana::CostPermissionContext::default()
+        };
+        assert!(
+            !can_pay_for_spell(
+                &pool_with(&[(ManaType::Blue, 1)]),
+                &blue_cost,
+                Some(&context),
+                as_though_any_color,
+            ),
+            "an as-though permission must not change blue's actual mana color"
+        );
+        assert!(
+            can_pay_for_spell(
+                &pool_with(&[(ManaType::Red, 1)]),
+                &blue_cost,
+                Some(&context),
+                as_though_any_color,
+            ),
+            "a red unit remains eligible before the as-though permission matches the shard"
+        );
     }
 
     #[test]
@@ -4539,6 +4777,10 @@ mod tests {
                 "{color:?} seeded on enable"
             );
         }
+        assert!(
+            state.debug_infinite_mana.contains(&p0),
+            "SetInfiniteMana enable must record the CR 500.5 debug carve-out marker"
+        );
 
         apply_debug_action(
             &mut state,
@@ -4551,6 +4793,10 @@ mod tests {
         )
         .expect("disable infinite mana");
         assert!(!state.unbounded_resources.contains_key(&p0));
+        assert!(
+            !state.debug_infinite_mana.contains(&p0),
+            "SetInfiniteMana disable must remove the marker"
+        );
     }
 
     /// Mana byte-preservation regression (PR-6 lead item #2 + plan tests 2/3).
@@ -4591,6 +4837,80 @@ mod tests {
             "a non-mana unbounded axis must not trigger any mana top-up"
         );
     }
+
+    /// PLAN test 2 — subset-axis refill. A player whose only recorded mana axis is
+    /// `Mana(Colorless)` (the Basalt Monolith + Power Artifact infinite-COLORLESS
+    /// loop's stored certificate) must be topped up with COLORLESS ONLY — never the
+    /// five colors no ability in that loop produces (CR 106.1b + CR 106.4).
+    ///
+    /// REVERT-PROBE: restoring the pre-fix body (iterate `INFINITE_MANA_TYPES`
+    /// instead of the recorded `colors`) seeds all six colors → the
+    /// "no White/…/Green" assertions below FAIL. This test discriminates the fix.
+    #[test]
+    fn refill_infinite_mana_subset_axis_refills_only_recorded_color() {
+        let mut state = GameState::new_two_player(0);
+        let p0 = state.players[0].id;
+
+        // Record ONLY the colorless mana axis (the combo detector's real certificate).
+        state.mark_unbounded_loop(p0, &[ResourceAxis::Mana(ManaType::Colorless)]);
+        refill_infinite_mana(&mut state);
+
+        let count_of = |color: ManaType| {
+            state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .filter(|u| u.color == color)
+                .count()
+        };
+        assert_eq!(
+            count_of(ManaType::Colorless),
+            INFINITE_MANA_PER_TYPE,
+            "colorless topped up to the cap"
+        );
+        for color in [
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ] {
+            assert_eq!(
+                count_of(color),
+                0,
+                "{color:?} must NOT be fabricated for a colorless-only loop"
+            );
+        }
+    }
+
+    /// PLAN test 3 — debug-toggle regression guard. Recording all six
+    /// `INFINITE_MANA_AXES` (the developer infinite-mana toggle) must STILL top up
+    /// all six colors to the cap: the subset fix must not over-narrow the toggle.
+    ///
+    /// REVERT-PROBE: this test PASSES on both the pre-fix and post-fix bodies (both
+    /// produce all six for the all-six axis set) — it is the guard that the fix did
+    /// not regress the debug path, paired with the discriminating subset test above.
+    #[test]
+    fn refill_infinite_mana_all_six_axes_still_refills_all_colors() {
+        let mut state = GameState::new_two_player(0);
+        let p0 = state.players[0].id;
+
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        refill_infinite_mana(&mut state);
+
+        for color in INFINITE_MANA_TYPES {
+            let n = state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .filter(|u| u.color == color)
+                .count();
+            assert_eq!(
+                n, INFINITE_MANA_PER_TYPE,
+                "{color:?} still seeded to the cap for the all-six debug toggle"
+            );
+        }
+    }
 }
 
 /// PR-7 4d-ii — `select_convoke_taps` is the SINGLE convoke-selection authority shared by
@@ -4598,7 +4918,7 @@ mod tests {
 /// (canonical lowest-ObjectId-per-color, CR 702.51b) and fail-closed (`None` = UnpayableConvoke).
 #[cfg(test)]
 mod convoke_selection_tests {
-    use super::select_convoke_taps;
+    use super::{select_convoke_taps, ConvokeTapOrder};
     use crate::game::scenario::GameScenario;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
     use crate::types::phase::Phase;
@@ -4634,7 +4954,8 @@ mod convoke_selection_tests {
             shards: vec![ManaCostShard::Green],
             generic: 0,
         };
-        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
         assert_eq!(
             taps.len(),
             1,
@@ -4659,7 +4980,8 @@ mod convoke_selection_tests {
             shards: vec![ManaCostShard::Green],
             generic: 1,
         };
-        let taps = select_convoke_taps(&state, P0, &cost).expect("payable via convoke");
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
         assert_eq!(taps.len(), 2, "{{1}}{{G}} needs two taps");
         assert_eq!(
             taps[0],
@@ -4682,7 +5004,7 @@ mod convoke_selection_tests {
             generic: 0,
         };
         assert!(
-            select_convoke_taps(&state, P0, &cost).is_none(),
+            select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical).is_none(),
             "no untapped green creature ⇒ fail-closed None (UnpayableConvoke)"
         );
     }
@@ -4696,8 +5018,106 @@ mod convoke_selection_tests {
             generic: 2,
         };
         assert!(
-            select_convoke_taps(&state, P0, &cost).is_none(),
+            select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical).is_none(),
             "one creature can't cover {{2}} ⇒ fail-closed None"
+        );
+    }
+
+    /// Build P0 with one NONTOKEN green creature (added first ⇒ lowest ObjectId) plus
+    /// `n_tokens` green TOKEN creatures (added after ⇒ higher ids). Returns
+    /// `(state, nontoken_id, token_ids ascending)`. The is_token asymmetry is what the two
+    /// `ConvokeTapOrder` modes discriminate on.
+    fn mixed_token_board(
+        n_tokens: usize,
+    ) -> (
+        crate::types::game_state::GameState,
+        crate::types::identifiers::ObjectId,
+        Vec<crate::types::identifiers::ObjectId>,
+    ) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // The stable "engine" permanent — added first, so it holds the LOWEST ObjectId.
+        let nontoken = scenario.add_creature(P0, "Engine Creature", 1, 1).id();
+        let token_ids: Vec<_> = (0..n_tokens)
+            .map(|_| scenario.add_creature(P0, "Saproling", 1, 1).id())
+            .collect();
+        let mut runner = scenario.build();
+        {
+            let o = runner.state_mut().objects.get_mut(&nontoken).unwrap();
+            o.color = vec![ManaColor::Green];
+            o.is_token = false;
+        }
+        for &id in &token_ids {
+            let o = runner.state_mut().objects.get_mut(&id).unwrap();
+            o.color = vec![ManaColor::Green];
+            o.is_token = true;
+        }
+        (runner.state().clone(), nontoken, token_ids)
+    }
+
+    /// The MODE DISCRIMINATOR: on a board with a lower-ObjectId nontoken engine and higher-id
+    /// green fodder tokens, `Canonical` taps the nontoken (lowest id) while
+    /// `DetectionFodderFirst` taps a token — proving the enum's two variants diverge. This is
+    /// the seam that suppresses the CR 732.2a object-growth offer when it picks the engine.
+    /// Revert-probe: deleting the `DetectionFodderFirst` sort arm (falling back to lowest-id)
+    /// FLIPS `fodder` from the token to the nontoken ⇒ the `assert_ne!` + fodder assertion fail.
+    #[test]
+    fn fodder_first_prefers_token_over_lower_id_nontoken() {
+        let (state, nontoken, tokens) = mixed_token_board(2);
+        // Non-vacuity self-check: the nontoken engine is the LOWEST id, so the modes MUST
+        // diverge (a same-order fixture would make this discriminator vacuous).
+        assert!(
+            nontoken.0 < tokens[0].0,
+            "fixture: the nontoken engine must hold the lowest ObjectId ({} < {})",
+            nontoken.0,
+            tokens[0].0
+        );
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+
+        // Canonical: lowest ObjectId wins ⇒ taps the NONTOKEN engine (byte-unchanged behavior).
+        let canon = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::Canonical)
+            .expect("payable via convoke");
+        assert_eq!(
+            canon,
+            vec![(nontoken, ManaType::Green)],
+            "Canonical taps the lowest-id creature (the nontoken engine)"
+        );
+
+        // DetectionFodderFirst: fodder tokens preferred ⇒ taps the lowest-id TOKEN, never the
+        // lower-id nontoken engine.
+        let fodder = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::DetectionFodderFirst)
+            .expect("payable via convoke");
+        assert_eq!(
+            fodder,
+            vec![(tokens[0], ManaType::Green)],
+            "DetectionFodderFirst prefers a fodder token over the lower-id nontoken engine"
+        );
+        assert_ne!(
+            fodder, canon,
+            "the two modes MUST diverge on a mixed board (the mode discriminator)"
+        );
+    }
+
+    /// Fail-closed / preference-with-fallback: `DetectionFodderFirst` is a preference, not a
+    /// requirement. With ONLY a nontoken green creature (no fodder), it still pays via the
+    /// engine — no payability regression (CR 702.51a: any legal untapped creature may convoke).
+    #[test]
+    fn fodder_first_falls_back_to_nontoken_when_no_fodder() {
+        let (state, nontoken, tokens) = mixed_token_board(0);
+        assert!(tokens.is_empty(), "fixture: no fodder tokens present");
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+        let taps = select_convoke_taps(&state, P0, &cost, ConvokeTapOrder::DetectionFodderFirst)
+            .expect("fodder-first is preference-with-fallback: the nontoken still pays");
+        assert_eq!(
+            taps,
+            vec![(nontoken, ManaType::Green)],
+            "no fodder ⇒ fodder-first falls back to the nontoken (fail-closed, no payability loss)"
         );
     }
 }

@@ -695,9 +695,9 @@ pub(crate) fn put_component_into_zone(
 }
 
 /// CR 702.140c + CR 730.2a: Resolve the controller's top/bottom choice for a
-/// paused mutating creature spell. Consumes `state.pending_mutate_merge`, performs
-/// the merge, and returns the engine to priority. Errors if no merge is pending or
-/// the acting player is not the spell's controller.
+/// paused mutating creature spell. Consumes the active `MutateMerge` frame,
+/// performs the merge, and returns the engine to priority. Errors if no merge is
+/// pending or the acting player is not the spell's controller.
 pub fn handle_mutate_merge_choice(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -707,16 +707,18 @@ pub fn handle_mutate_merge_choice(
     use crate::game::engine::EngineError;
 
     let pending = state
-        .pending_mutate_merge
-        .take()
+        .active_mutate_merge_frame()
         .ok_or_else(|| EngineError::ActionNotAllowed("No mutate merge is pending".to_string()))?;
     if pending.controller != player {
-        // Restore the pending state so the correct player can still act.
-        state.pending_mutate_merge = Some(pending);
         return Err(EngineError::ActionNotAllowed(
             "Only the mutate spell's controller may choose the merge side".to_string(),
         ));
     }
+
+    let pending = state
+        .take_active_mutate_merge_frame()
+        .map_err(|error| EngineError::ActionNotAllowed(error.to_string()))?
+        .expect("active mutate-merge frame was checked before consuming it");
 
     merge_object_onto(state, pending.merging_id, pending.target_id, side, events);
 

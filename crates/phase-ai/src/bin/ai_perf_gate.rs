@@ -19,6 +19,12 @@
 //! child (emit one sample), repro-report (margin gate over saved runs), and
 //! parent gate (spawn K children, median, compare).
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -33,6 +39,13 @@ use phase_ai::duel_suite::perf::{
 
 const DEFAULT_BASELINE: &str = "crates/phase-ai/baselines/perf-baseline.json";
 const DEFAULT_CURRENT: &str = "target/ai-perf-gate-current.json";
+
+/// `run_perf_suite`'s AI search recurses deeper than the platform default
+/// thread stack on Windows (confirmed: every child overflows immediately
+/// after game start under this crate's release profile). Same root cause and
+/// fix as `ai_commander.rs`'s `GAME_THREAD_STACK_SIZE` / `duel_suite::run`'s
+/// identical spawn — this binary just never got the fix applied.
+const PERF_THREAD_STACK_SIZE: usize = 32 << 20;
 
 struct Args {
     data_root: PathBuf,
@@ -62,9 +75,22 @@ fn main() {
 
     // Branch 1 — child: load the DB, emit ONE single-trajectory sample to the
     // file, exit. Emits NOTHING on stdout (GAP 4) so the parent's stdout stays a
-    // clean table; diagnostics go to stderr only.
+    // clean table; diagnostics go to stderr only. Runs on a large-stack thread
+    // (see `PERF_THREAD_STACK_SIZE`) since the AI search recurses past the
+    // platform default; an unhandled panic there would otherwise unwind only
+    // the spawned thread and exit 0 silently, so a join failure is mapped to
+    // exit 101 (mirrors `ai_commander.rs`'s identical convention).
     if let Some(sample_path) = &args.emit_sample {
-        run_child_sample(&args.data_root, sample_path);
+        let data_root = args.data_root.clone();
+        let sample_path = sample_path.clone();
+        let handle = std::thread::Builder::new()
+            .name("ai-perf-gate-sample".to_string())
+            .stack_size(PERF_THREAD_STACK_SIZE)
+            .spawn(move || run_child_sample(&data_root, &sample_path))
+            .expect("failed to spawn perf-sample thread");
+        if handle.join().is_err() {
+            std::process::exit(101);
+        }
         return;
     }
 

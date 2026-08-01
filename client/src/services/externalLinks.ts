@@ -10,10 +10,16 @@
 //
 // Capture phase + closest("a") rather than per-callsite onClick handlers so
 // every existing and future external link in the app works without changes.
+// The release and preview origins stay inside a remote-origin shell so channel
+// navigation keeps its service worker and Tauri IPC context.
 
-import { isTauri } from "./sidecar";
+import { isBundledTauriOrigin, isTauri } from "./platform";
 
 const EXTERNAL_URL_RE = /^https?:\/\//i;
+const FIRST_PARTY_ORIGINS = new Set([
+  "https://phase-rs.dev",
+  "https://preview.phase-rs.dev",
+]);
 
 async function openWithShell(url: string): Promise<void> {
   const { open } = await import("@tauri-apps/plugin-shell");
@@ -37,6 +43,7 @@ export function installTauriExternalLinkHandler(): void {
 
       const href = anchor.getAttribute("href");
       if (!href || !EXTERNAL_URL_RE.test(href)) return;
+      if (!isBundledTauriOrigin() && FIRST_PARTY_ORIGINS.has(new URL(href).origin)) return;
 
       event.preventDefault();
       void openWithShell(href).catch((err: unknown) => {

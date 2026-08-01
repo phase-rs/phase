@@ -70,6 +70,8 @@
     "moveToSideboard": "Mover um {{name}} para o sideboard",
     "moveToMain": "Mover um {{name}} para o deck principal",
     "removeOne": "Remover um {{name}}",
+    "addOne": "Adicionar um {{name}}",
+    "copyLimit": "{{name}} está no limite de cópias",
     "makeCommander": "Tornar {{name}} o comandante",
     "makeCommanderTitle": "Tornar este o meu comandante",
     "chooseArtFor": "Escolher arte para {{name}}",

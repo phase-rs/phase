@@ -190,7 +190,7 @@ fn ashling_delayed_unless_pay_paid_keeps_token() {
         ManaType::Red,
         ManaType::Green,
     ] {
-        runner
+        let _ = runner
             .state_mut()
             .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
     }

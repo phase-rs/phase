@@ -66,7 +66,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
     // event context still readable, which is exactly what
     // `PostReplacementSourceController` reads below.
     state.last_effect_count = Some(1);
-    state.post_replacement_drains.install(
+    state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Dispatching,
             source: None,

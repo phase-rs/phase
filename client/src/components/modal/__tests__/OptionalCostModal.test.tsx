@@ -81,4 +81,42 @@ describe("OptionalCostModalContent (issue #454)", () => {
       data: { pay: false },
     });
   });
+
+  it("Gift origin uses localized promise copy from optionalCost.gift keys", () => {
+    const waitingFor: OptionalCostWaitingFor = {
+      type: "OptionalCostChoice",
+      data: {
+        player: 0,
+        cost: {
+          type: "Optional",
+          data: {
+            cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 0 } },
+            repeatable: false,
+          },
+        },
+        times_kicked: 0,
+        origin: "Gift",
+        gift_kind: { type: "Treasure" },
+        pending_cast: {} as OptionalCostWaitingFor["data"]["pending_cast"],
+      },
+    };
+    const dispatch = renderModal(waitingFor);
+
+    expect(screen.getByText("Promise a gift?")).toBeTruthy();
+    const payButton = screen.getByRole("button", { name: /promise a treasure/i });
+    const declineButton = screen.getByRole("button", {
+      name: /cast without promising/i,
+    });
+    fireEvent.click(payButton);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "DecideOptionalCost",
+      data: { pay: true },
+    });
+    dispatch.mockClear();
+    fireEvent.click(declineButton);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "DecideOptionalCost",
+      data: { pay: false },
+    });
+  });
 });

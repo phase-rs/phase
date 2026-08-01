@@ -5,11 +5,11 @@ use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
     CompanionDeclaration, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice,
-    MayTriggerAutoChoiceKey, ShardChoice, YieldScope, YieldTarget,
+    MayTriggerAutoChoiceKey, PriorityPassingMode, ShardChoice, YieldScope, YieldTarget,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::{ManaPipId, ManaType};
+use super::mana::{ManaPipId, ManaSourceSelection, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -199,6 +199,13 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 608.2d: The controller's choice of which opponent makes a resolving
+    /// "an opponent chooses …" zone selection, answering a pending
+    /// `WaitingFor::ChooseFromZoneOpponentChooser`. `opponent` must be one of
+    /// that prompt's `candidates`.
+    ChooseZoneOpponentChooser {
+        opponent: PlayerId,
+    },
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
@@ -209,6 +216,12 @@ pub enum GameAction {
     /// "of an opponent's choice" target slot. `opponent` must be one of that
     /// prompt's `candidates`.
     ChooseAnnouncingOpponent {
+        opponent: PlayerId,
+    },
+    /// CR 702.174a: The spell controller's answer to
+    /// `WaitingFor::ChooseGiftRecipient` — which opponent receives the promised
+    /// gift. `opponent` must be one of that prompt's `candidates`.
+    ChooseGiftRecipient {
         opponent: PlayerId,
     },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
@@ -241,8 +254,17 @@ pub enum GameAction {
         order: Vec<ObjectId>,
     },
     TapLandForMana {
-        object_id: ObjectId,
+        selection: ManaSourceSelection,
     },
+    /// CR 605.3a: Activate one exact engine-authored mana-source capability.
+    /// Unlike the legacy land-only action, this covers mana abilities on every
+    /// permanent type and preserves the selected output provenance.
+    ActivateManaSource {
+        selection: ManaSourceSelection,
+    },
+    /// Return from a sacrificial-mana choice to the exact saved payment state
+    /// without re-planning or mutating the mana pool.
+    BackToManaPayment,
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
     UntapLandForMana {
@@ -675,6 +697,11 @@ pub enum GameAction {
     SetPhaseStops {
         stops: Vec<super::phase::PhaseStop>,
     },
+    /// Set the acting player's standing priority-passing preference. Legal in
+    /// every `WaitingFor` state and actor-scoped, like `SetPhaseStops`.
+    SetPriorityPassingMode {
+        mode: PriorityPassingMode,
+    },
     /// CR 117.3d: Update the acting player's standing priority-yield preferences —
     /// a pre-committed decision to pass priority while a class of triggered
     /// ability is on the stack. Legal in any WaitingFor state and routed to the
@@ -884,6 +911,27 @@ pub enum GameAction {
     PrecastCopyShortcut {
         epoch: u64,
         response: PrecastCopyShortcutResponse,
+    },
+    /// CR 116.2c: Special action — pay a continuous effect's printed termination
+    /// cost to end it ("You may pay {W} to end this effect"). CR 116.1: special
+    /// actions don't use the stack and can't be responded to.
+    ///
+    /// `group` names the continuous effect ONE resolution created (see
+    /// [`crate::types::game_state::EndEffectPermission`]); it is a group key,
+    /// NOT a `TransientContinuousEffect::id`.
+    ///
+    /// `source_name` and `cost` are engine-authored presentation values. Clients
+    /// display them verbatim and echo them back; dispatch revalidates `group`
+    /// against live state and never trusts either echoed value.
+    ///
+    /// Appended at the END of this enum on purpose: `GameActionKind` derives
+    /// `PartialOrd, Ord`, so a mid-enum insertion would renumber later
+    /// discriminants and shift `cmp_stable` ordering (AI candidate ordering and
+    /// replay determinism).
+    EndContinuousEffect {
+        group: crate::types::game_state::EndEffectGroupId,
+        source_name: String,
+        cost: crate::types::mana::ManaCost,
     },
 }
 
@@ -1420,6 +1468,24 @@ impl GameAction {
         self.into()
     }
 
+    /// Whether this is an actor-scoped UI preference action.
+    ///
+    /// These mutations are legal in every `WaitingFor` state, do not change game
+    /// progression, and must not trigger auto-pass advancement at the engine
+    /// boundary. The authenticated actor is the only preference owner.
+    pub fn is_actor_scoped_preference(&self) -> bool {
+        matches!(
+            self,
+            GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::ReorderHand { .. }
+        )
+    }
+
     /// Issue #4878: allocation-free total order over `GameAction`, used for
     /// deterministic AI candidate / legal-action sorting. Orders by the
     /// `GameActionKind` discriminant first, then by payload fields, so equal
@@ -1440,13 +1506,28 @@ impl GameAction {
         matches!(
             self,
             GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
-                // action; classifying it here grants MP skip_legality acceptance and
-                // AI-exclusion via the single !is_mana_ability authority.
+                // action; classifying it here keeps it out of AI priority-action
+                // candidates via the single !is_mana_ability authority.
                 | GameAction::SpendPoolMana { .. }
                 | GameAction::UnspendPoolMana { .. }
         )
+    }
+
+    /// The cast payment preference carried by this action, if it is one of
+    /// the cast-family variants (CR 601.2g).
+    pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
+        match self {
+            GameAction::CastSpell { payment_mode, .. }
+            | GameAction::CastSpellForFree { payment_mode, .. }
+            | GameAction::CastSpellAsMiracle { payment_mode, .. }
+            | GameAction::CastSpellAsMadness { payment_mode, .. }
+            | GameAction::CastSpellAsSneak { payment_mode, .. }
+            | GameAction::CastSpellAsWebSlinging { payment_mode, .. } => Some(payment_mode),
+            _ => None,
+        }
     }
 
     /// Engine-side authoritative mapping from action → permanent it acts on.
@@ -1479,7 +1560,8 @@ impl GameAction {
             | GameAction::CastSpellAsMiracle { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
-            GameAction::TapLandForMana { object_id } => Some(*object_id),
+            GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
+            GameAction::ActivateManaSource { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1517,6 +1599,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
+            | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
@@ -1556,14 +1639,17 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseZoneOpponentChooser { .. }
             | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAnnouncingOpponent { .. }
+            | GameAction::ChooseGiftRecipient { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
@@ -1593,6 +1679,11 @@ impl GameAction {
             | GameAction::RespondToShortcut { .. }
             | GameAction::DeclineShortcut
             | GameAction::PrecastCopyShortcut { .. }
+            // CR 116.2c: the payload names a continuous-effect GROUP, not a
+            // permanent — a global action with no source object (frontend
+            // Pattern A). The Licid that installed the effect is not addressed
+            // by this action.
+            | GameAction::EndContinuousEffect { .. }
             | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
@@ -1713,6 +1804,23 @@ mod tests {
     }
 
     #[test]
+    fn set_priority_passing_mode_roundtrips_with_bounded_scalar_payload() {
+        let action = GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "SetPriorityPassingMode",
+                "data": { "mode": "SkipLowUseWindows" }
+            })
+        );
+        assert_eq!(serde_json::from_value::<GameAction>(json).unwrap(), action);
+        assert_eq!(action.source_object(), None);
+    }
+
+    #[test]
     fn source_object_for_every_permanent_action_variant() {
         let oid = ObjectId(7);
         let cid = CardId(1);
@@ -1765,7 +1873,26 @@ mod tests {
                 },
                 Some(oid),
             ),
-            (GameAction::TapLandForMana { object_id: oid }, Some(oid)),
+            (
+                GameAction::TapLandForMana {
+                    selection: crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef {
+                            object_id: oid,
+                            incarnation: 0,
+                        },
+                        ability_index: None,
+                        mana_type: crate::types::mana::ManaType::Green,
+                        output: crate::types::mana::ManaSourceOutput::Concrete(
+                            crate::types::mana::ManaType::Green,
+                        ),
+                        atomic_combination: None,
+                        restrictions: Vec::new(),
+                        penalty: crate::types::mana::ManaSourcePenalty::None,
+                        taps_for_mana: Vec::new(),
+                    },
+                },
+                Some(oid),
+            ),
             (GameAction::UntapLandForMana { object_id: oid }, Some(oid)),
             (
                 GameAction::Equip {
@@ -1828,7 +1955,22 @@ mod tests {
             ),
             (GameAction::CancelCast, None),
             (GameAction::CompanionToHand, None),
+            // CR 116.2c: the group key is not an ObjectId — no source object.
+            (
+                GameAction::EndContinuousEffect {
+                    group: crate::types::game_state::EndEffectGroupId(1),
+                    source_name: "Calming Licid".to_string(),
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                None,
+            ),
             (GameAction::CancelAutoPass, None),
+            (
+                GameAction::SetPriorityPassingMode {
+                    mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
+                },
+                None,
+            ),
         ];
         for (action, expected) in cases {
             assert_eq!(

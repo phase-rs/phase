@@ -209,10 +209,7 @@ mod tests {
             action: GameAction::SelectTargets {
                 targets: vec![target],
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Target),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);

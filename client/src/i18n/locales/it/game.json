@@ -5,6 +5,7 @@
     "cantActivateDuring": "Non può essere attivata ora",
     "prohibited": "L'attivazione di questa abilità è proibita"
   },
+  "manaSourceSelection": { "title": "Scegli una fonte di mana", "description": "Questa abilità di mana richiede di sacrificare un permanente.", "sacrifice": "Sacrifica", "back": "Torna al pagamento del mana", "unknownSource": "Fonte di mana" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -122,6 +123,7 @@
     "blockWithNoneConfirm": "Tocca di nuovo: Blocca con nessuno",
     "selectAttackerForBlocker": "Seleziona l'attaccante contro cui questo bloccante deve difendere",
     "companionToHand": "Compagno in mano",
+    "endContinuousEffect": "Termina l'effetto di {{source}} —",
     "resolve": "Risolvi",
     "resolveTooltip": "Passa la priorità così l'oggetto in cima alla pila può risolversi se anche tutti i giocatori passano. Scorciatoia: Spazio.",
     "resolveAll": "Risolvi tutto",
@@ -248,6 +250,7 @@
     "target": "Bersaglio",
     "copy": "Copia",
     "copyTooltip": "Copia pedina di una carta reale",
+    "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
@@ -373,7 +376,14 @@
     "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
     "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
-    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase attuale: {{phase}}. Apri le impostazioni degli stop di fase.",
+    "sheetTitle": "Fasi del turno",
+    "sheetSubtitle": "Tocca un passo per cambiare quando il passaggio automatico si ferma lì.",
+    "scopeShortOff": "Disattivato",
+    "scopeShortAllTurns": "Tutti i turni",
+    "scopeShortOwnTurn": "I tuoi turni",
+    "scopeShortOpponentsTurns": "Turni avversari"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -413,6 +423,7 @@
   "counterTooltip": {
     "summary_one": "1 segnalino {{label}}\n{{description}}",
     "summary_other": "{{count}} segnalini {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ segnalini {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Ogni segnalino +1/+1 dà +1/+1 al permanente.",
       "m1m1": "Ogni segnalino -1/-1 dà -1/-1 al permanente.",
@@ -491,13 +502,24 @@
     "clickToFocus": "clicca per mettere a fuoco"
   },
   "manaPool": {
+    "onlyForSpell": "Spendi solo per lanciare magie",
     "onlyForSpellType": "Spendi solo per lanciare magie di un tipo specifico",
     "onlyForCreatureType": "Spendi solo per lanciare una magia creatura del tipo scelto",
     "onlyForTypeSpellsOrAbilities": "Spendi solo su magie o abilità di un tipo specifico",
+    "onlyForTaggedActivation": "Spendi solo per attivare abilità di un tipo specifico",
     "onlyForSpellWithKeywordKind": "Spendi solo per lanciare magie con una parola chiave specifica",
     "onlyForSpellWithKeywordKindFromZone": "Spendi solo per lanciare magie con parola chiave da un cimitero",
+    "onlyForSpellWithManaValue": "Spendi solo per lanciare magie che soddisfano un requisito di valore di mana",
+    "onlyForSpellMatchingCostCriteria": "Spendi solo per lanciare magie che soddisfano un requisito di costo",
+    "onlyForSpellWithColorCount": "Spendi solo per lanciare magie che soddisfano un requisito sul numero di colori",
+    "onlyForSpellColor": "Spendi solo per lanciare magie del colore scelto",
+    "onlyForSpellFromZone": "Spendi solo per lanciare magie da una zona consentita",
+    "onlyForFaceDownSpell": "Spendi solo per lanciare magie a faccia in giù",
     "onlyForActivation": "Spendi solo per attivare abilità",
     "onlyForXCosts": "Spendi solo su costi che includono {X}",
+    "onlyForAny": "Spendi solo per uno degli usi elencati",
+    "onlyForSpecialAction": "Spendi solo per un'azione speciale specifica",
+    "impossible": "Questo mana non può essere speso",
     "convokePayment": "Pagamento di Convocare",
     "grantsProperty": "Concede una proprietà alla magia",
     "grantCantBeCountered": "Spendi per questa magia per renderla impossibile da neutralizzare"
@@ -576,6 +598,15 @@
     "resourceMana": "mana",
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
+    "loopCollapseTitleTokens": "Scegli quante pedine creare",
+    "loopCollapseTitleCounters": "Scegli quante volte aggiungere segnalini",
+    "loopCollapseTitleLife": "Scegli quante volte guadagnare punti vita",
+    "loopCollapseTitleMixed": "Scegli quante volte ripetere il ciclo",
+    "loopCollapseAmountTokens_one": "Crea {{count}} pedina",
+    "loopCollapseAmountTokens_other": "Crea {{count}} pedine",
+    "loopCollapseAmountCounters": "Aggiungi segnalini {{value}}×",
+    "loopCollapseAmountLife": "Guadagna punti vita {{value}}×",
+    "loopCollapseAmountMixed": "Ripeti il ciclo {{value}}×",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",
@@ -636,6 +667,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Deve bloccare {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -982,6 +1014,33 @@
       "subtitleActivate": "Attivare questa abilità?",
       "subtitlePlay": "Scegli come giocare questa carta",
       "subtitleChoose": "Scegli un'abilità da attivare"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Tappa per mana",
+      "tapFor": "Tappa per {{mana}}",
+      "onlyForSpell": "Solo per magie.",
+      "onlyForSpellType": "Solo per magie {{spellType}}.",
+      "onlyForCreatureType": "Solo per magie {{creatureType}}.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Solo per magie {{spellType}} o abilità di {{spellType}}.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Solo per magie o abilità {{spellType}}.",
+      "onlyForActivation": "Solo per attivare abilità.",
+      "onlyForTaggedActivation": "Solo per attivare abilità {{tag}}.",
+      "onlyForXCosts": "Solo per costi che contengono X.",
+      "onlyForSpellWithKeywordKind": "Solo per magie con {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Solo per magie con {{keyword}} lanciate da {{zone}}.",
+      "onlyForSpellWithManaValue": "Solo per magie con valore di mana {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Solo per magie {{spellType}} che soddisfano {{criteria}}.",
+      "manaValueCriterion": "valore di mana {{comparator}} {{value}}",
+      "hasXInCostCriterion": "una X nel loro costo",
+      "onlyForSpellWithColorCount": "Solo per magie con {{comparator}} {{count}} colori.",
+      "onlyForSpellColor": "Solo per magie del colore {{color}}.",
+      "onlyForSpellFromZone": "Solo per magie {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Solo per magie a faccia in giù.",
+      "onlyForAny": "Solo per uno di questi usi: {{restrictions}}",
+      "onlyForSpecialAction": "Solo per l'azione speciale {{action}}.",
+      "impossible": "Questo mana non può essere speso.",
+      "convokePayment": "Solo per questo pagamento di convocazione.",
+      "anySpell": "qualsiasi"
     },
     "defiler": {
       "title": "Riduzione del costo di Defiler",
@@ -1684,9 +1743,30 @@
     "targetCreature": "il bersaglio creatura",
     "targetChoice": "questa scelta del bersaglio"
   },
+  "giftRecipient": {
+    "title": "Scegli il destinatario del dono",
+    "subtitle": "Scegli quale avversario riceve il dono promesso."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettere un dono?",
+      "pay": "Prometti {{gift}}",
+      "decline": "Lancia senza promettere",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Cibo",
+        "tappedFish": "un Pesce TAPpato"
+      }
+    }
+  },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",
     "subtitle": "Scegli quale avversario si scontrerà con te."
+  },
+  "zoneOpponentChooser": {
+    "title": "Scegli avversario",
+    "subtitle": "Scegli quale avversario effettua la scelta."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1765,6 +1845,13 @@
     "variantBestow": "Lancia con Conferire",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
+    "variantMutate": "Lancia con Mutate",
+    "variantAwaken": "Lancia con Risveglio",
+    "variantCleave": "Lancia con Fendere",
+    "variantImpending": "Lancia con Incombere",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancia con Prototipo",
+    "variantFaceDown": "Lancia a faccia in giù",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {
@@ -2057,6 +2144,7 @@
     "fromSideboard": "Dalla sideboard"
   },
   "phaseName": {
+    "Untap": "STAP",
     "Upkeep": "Mantenimento",
     "Draw": "Pesca",
     "PreCombatMain": "Fase principale 1",

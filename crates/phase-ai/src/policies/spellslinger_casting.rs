@@ -271,10 +271,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         }
     }
 
@@ -445,7 +442,7 @@ mod tests {
             source_id: ObjectId(999),
             controller: AI,
             kind: StackEntryKind::Spell {
-                ability: Some(dummy_ability),
+                ability: Some(Box::new(dummy_ability)),
                 card_id: CardId(999),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
@@ -643,10 +640,7 @@ mod tests {
         let decision = decision();
         let candidate = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Pass),
         };
         let ctx = PolicyContext {
             state: &state,

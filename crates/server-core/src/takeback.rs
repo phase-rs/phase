@@ -60,18 +60,24 @@ pub enum TakebackOutcome {
 
 impl GameSession {
     /// Records the current authoritative state as a takeback checkpoint,
-    /// tagged with the player about to act — to be called immediately
-    /// before that player's action is applied. Caps retention at
+    /// tagged with the player about to act. Caps retention at
     /// [`MAX_TAKEBACK_HISTORY`] (oldest dropped first).
     ///
     /// Tagging by actor (rather than just "most recent action") is what lets
     /// `request_takeback` find *this player's* last action even when other
     /// players have acted since — see its doc comment.
     pub fn push_takeback_snapshot(&mut self, actor: PlayerId) {
+        self.push_takeback_state(actor, self.state.clone());
+    }
+
+    /// Records the pre-action state for an action that has already succeeded.
+    /// Keeping the state explicit lets the session apply through the engine
+    /// first, so rejected attempts never become undo points.
+    pub fn push_takeback_state(&mut self, actor: PlayerId, state: GameState) {
         if self.takeback_history.len() >= MAX_TAKEBACK_HISTORY {
             self.takeback_history.pop_front();
         }
-        self.takeback_history.push_back((actor, self.state.clone()));
+        self.takeback_history.push_back((actor, state));
     }
 
     /// Human (non-AI) seats in this session, in seat order. AI seats never

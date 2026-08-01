@@ -4,6 +4,7 @@ import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { CompanionInfo } from "../../adapter/types.ts";
+import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -18,6 +19,8 @@ interface CompanionFanCardProps {
   theme: ZoneTheme;
   rotation: number;
   arcOffset: number;
+  restingY: number;
+  hoverY: number;
   marginLeft: string | number;
   zIndex: number;
 }
@@ -38,6 +41,8 @@ const CompanionFanCard = memo(function CompanionFanCard({
   theme,
   rotation,
   arcOffset,
+  restingY,
+  hoverY,
   marginLeft,
   zIndex,
 }: CompanionFanCardProps) {
@@ -54,10 +59,10 @@ const CompanionFanCard = memo(function CompanionFanCard({
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 40 }}
-      animate={{ opacity: 1, y: 30 + arcOffset, rotate: rotation }}
+      initial={{ opacity: 0, y: restingY + 10 }}
+      animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: 20 + arcOffset, scale: 1.08, zIndex: 30 }}
+      whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
       transition={{ duration: 0.25, layout: { duration: 0.15, delay: 0 } }}
       drag={canActivate}
@@ -97,6 +102,7 @@ const CompanionFanCard = memo(function CompanionFanCard({
         {src ? (
           <img
             src={src}
+            {...getCardImageSrcSetProps(src)}
             alt={cardName}
             draggable={false}
             className="!h-[var(--hand-card-h)] !w-[var(--hand-card-w)] object-cover"

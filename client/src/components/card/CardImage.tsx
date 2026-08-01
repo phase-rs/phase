@@ -6,7 +6,9 @@ import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
 interface CardImageProps {
@@ -75,7 +77,14 @@ export function CardImage({
   // face up or a DFC transforming, and would otherwise stay latched on the text
   // tile forever. Mirrors `CardPreview.tsx`'s `useEffect(… , [src])`.
   useEffect(() => setImageError(false), [src]);
-  const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
+  // Only resolve rules text when the art lookup has definitively failed. On the
+  // first render `src` is null for every card while useCardImage is loading; an
+  // eager fallback lookup here used to make all seven mulligan cards initialize
+  // card-data queries even though their artwork resolved a moment later.
+  const showArtFallback = !faceDown && !isLoading && (imageError || !src);
+  const fallbackData = useEngineCardData(
+    showArtFallback && oracleText == null ? cardName : null,
+  );
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
@@ -104,8 +113,6 @@ export function CardImage({
   //   - `imageError`: the resolved `<img>` failed to load.
   // Both render the card/token name (and Oracle text when known) so every artless
   // card or token — not just one hard-coded name — stays identifiable.
-  const showArtFallback = !faceDown && (imageError || !src);
-
   const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
   const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
@@ -124,6 +131,7 @@ export function CardImage({
       ) : (
         <img
           src={renderedSrc}
+          {...getCardImageSrcSetProps(renderedSrc)}
           alt={renderedAlt}
           draggable={false}
           onError={() => setImageError(true)}
@@ -131,14 +139,7 @@ export function CardImage({
           style={borderStyle ?? { border: "1px solid #4b5563" }}
         />
       )}
-      {unimplementedMechanics && unimplementedMechanics.length > 0 && (
-        <span
-          className="absolute top-0.5 left-0.5 bg-amber-500 text-black text-[8px] font-bold rounded-sm px-0.5 leading-tight"
-          title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
-        >
-          !
-        </span>
-      )}
+      <UnimplementedMechanicsBadge mechanics={unimplementedMechanics} variant="overlay" />
       {tapIndicator && (
         <span
           className="absolute top-1 right-1 flex items-center justify-center rounded-full bg-black/70 p-1 shadow-md ring-1 ring-white/20"

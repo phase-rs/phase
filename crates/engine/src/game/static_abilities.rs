@@ -105,6 +105,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
     registry.insert(StaticMode::CantGainLife, handle_rule_mod);
     registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
+    registry.insert(StaticMode::UnspentManaLossCausesLifeLoss, handle_rule_mod);
     registry.insert(StaticMode::MustAttack, handle_rule_mod);
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
@@ -193,6 +194,14 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
+    // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
+    // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
+    // Nullary, so it is registry-keyable (unlike the data-carrying
+    // `MustAttackPlayer`). Runtime enforcement lives in combat.rs. The registry
+    // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
+    // creature this grafts onto — it is load-bearing for the client, not
+    // decoration.
+    registry.insert(StaticMode::MustAttackAwayFromSource, handle_rule_mod);
     // CR 506.5 + CR 508.1c + CR 509.1b: CombatAlone — parameterized "alone"
     // restriction. Runtime enforcement lives in combat.rs.
     registry.insert(
@@ -1234,6 +1243,20 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
+}
+
+/// CR 106.4 + CR 119.3 + CR 604.1: Whether losing unspent mana causes this
+/// player to lose the same amount of life. This is an existence query so
+/// multiple active Yurlok-class statics do not multiply the result.
+pub fn player_unspent_mana_loss_causes_life_loss(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::UnspentManaLossCausesLifeLoss,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
 }
 
 /// CR 702.11b + CR 702.11e: Check if `player_id` may target creatures as though

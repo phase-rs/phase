@@ -45,7 +45,11 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
         PlayerId(0),
     );
     ability.optional = true;
-    state.pending_optional_effect = Some(Box::new(ability));
+    state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
+        ability: Box::new(ability),
+        trigger_event: None,
+        trigger_match_count: None,
+    });
 
     let accept = GameAction::DecideOptionalEffectAndRemember {
         choice: AutoMayChoice::Accept,

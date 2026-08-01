@@ -120,13 +120,16 @@ pub fn resolve(
             ability.source_id,
             ability.controller,
         );
-        state.delayed_triggers.push(DelayedTrigger {
-            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: sacrifice,
-            controller: ability.controller,
-            source_id: ability.source_id,
-            one_shot: true,
-        });
+        crate::game::triggers::install_delayed_trigger(
+            state,
+            DelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                ability: Box::new(sacrifice),
+                controller: ability.controller,
+                source_id: ability.source_id,
+                one_shot: true,
+            },
+        );
     }
 
     events.push(GameEvent::EffectResolved {

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 
 import { useUiStore } from "../stores/uiStore.ts";
 
@@ -8,8 +8,9 @@ import { useUiStore } from "../stores/uiStore.ts";
  * animations (tap rotation, attack slide, layout transitions) move elements
  * out from under the cursor without firing onMouseLeave.
  *
- * Uses `document.elementFromPoint()` on a 300ms interval to verify the pointer
- * is still over an element with `[data-card-hover]`.
+ * On a 300ms interval it verifies, via the browser's own `:hover` state, that
+ * the pointer is still over an element with `[data-card-hover]` — robust to the
+ * stale JS-tracked pointer that sparse remote-desktop pointer streams produce.
  *
  * When `previewSticky` is true (set by long-press on touch devices), the
  * interval-based dismiss is skipped. A delayed capture-phase pointer listener
@@ -18,28 +19,17 @@ import { useUiStore } from "../stores/uiStore.ts";
 export function usePreviewDismiss() {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const previewSticky = useUiStore((s) => s.previewSticky);
+  const altHeld = useUiStore((s) => s.altHeld);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
   const hoverObject = useUiStore((s) => s.hoverObject);
-  const pointerRef = useRef({ x: 0, y: 0 });
 
-  // Track pointer position (only while preview is active, mouse only)
+  // Mouse: periodically verify the pointer is still over a card-hover element.
+  // Skipped when the preview is sticky (touch-initiated) or Alt-pinned (frozen
+  // for reading): a pinned preview must not vanish while the user moves off the
+  // card to click "Report a Problem" or scroll rulings. Alt-off or a click
+  // outside (the pointerdown-outside effect below) still dismisses it.
   useEffect(() => {
-    if (inspectedObjectId == null) return;
-
-    function onMove(e: PointerEvent) {
-      // Only track mouse pointer, not touch — touch uses sticky dismiss
-      if (e.pointerType === "touch") return;
-      pointerRef.current = { x: e.clientX, y: e.clientY };
-    }
-
-    document.addEventListener("pointermove", onMove, { passive: true });
-    return () => document.removeEventListener("pointermove", onMove);
-  }, [inspectedObjectId]);
-
-  // Mouse: periodically verify the pointer is still over a card-hover element
-  // Skipped when preview is sticky (touch-initiated)
-  useEffect(() => {
-    if (inspectedObjectId == null || previewSticky) return;
+    if (inspectedObjectId == null || previewSticky || altHeld) return;
 
     let skipFirst = true;
 
@@ -48,21 +38,26 @@ export function usePreviewDismiss() {
         skipFirst = false;
         return;
       }
-      const { x, y } = pointerRef.current;
-      if (x === 0 && y === 0) return;
-
-      const el = document.elementFromPoint(x, y);
-      if (!el) return;
-
-      const isOverCard = el.closest("[data-card-hover]") !== null;
-      if (!isOverCard) {
+      // Ask the browser for the element it currently considers hovered rather
+      // than sampling elementFromPoint() against a JS-tracked pointer. That
+      // tracked coordinate is only as fresh as the last `pointermove`, and over
+      // sparse/coalesced pointer streams (remote-desktop / RDP webviews) it goes
+      // stale a few px off the card while the OS cursor is genuinely still on
+      // it — so a single elementFromPoint sample spuriously dismissed the
+      // just-shown preview. `:hover` is driven by the engine's own continuous
+      // hit-test and stays correct with no pointermove event at all. It matches
+      // the interactive info/parse panel too (also `[data-card-hover]`), and
+      // pointer-events-none surfaces (the preview image) never match it — the
+      // same "over a card or its info panel" test the old sample performed.
+      const stillOverTarget = document.querySelector("[data-card-hover]:hover");
+      if (stillOverTarget == null) {
         dismissPreview();
         hoverObject(null);
       }
     }, 300);
 
     return () => clearInterval(id);
-  }, [inspectedObjectId, previewSticky, dismissPreview, hoverObject]);
+  }, [inspectedObjectId, previewSticky, altHeld, dismissPreview, hoverObject]);
 
   // Any later pointer interaction outside a card or the preview dismisses it.
   // Registering after the current event lets the long-press/click that opened

@@ -1,18 +1,26 @@
 use crate::types::ability::{
     AbilityKind, ContinuousModification, CopyCountStatus, Duration, Effect, EffectKind, FilterProp,
-    KeywordAction, ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode,
+    KeywordAction, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
+    SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef,
+    TargetSelectionMode, TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
+    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
+    ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
+    ResolvedStackRemovalCommand, ResolvedStackRemovalReplayInvariantError,
+    ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -24,6 +32,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    let source_ref = state
+        .objects
+        .get(&entry.source_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
     // CR 701.27f: an activated or triggered ability of a permanent may
     // transform that permanent only if it has not transformed/converted since
     // the ability was put onto the stack. Spells and keyword actions do not
@@ -51,10 +63,454 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
             }
         }
     }
+    // CR 400.7 + CR 509.1c: source-referential force-block instructions bind
+    // their exact source at the common stack boundary, covering activated and
+    // other nontriggered stack abilities as well as normal triggered paths.
+    if let Some(ability) = entry.ability_mut() {
+        ability.bind_force_block_source_recursive(source_ref);
+    }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
     });
+    // CR 733: journal the settled push after every source-referential stamp
+    // above has been written into the entry, so the record carries the stamped
+    // values themselves rather than the state they were derived from.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Put);
     state.stack.push_back(entry);
+}
+
+/// CR 707.10: Put a *copy* of a spell or ability onto the stack.
+///
+/// This is the copy-family sibling of [`push_to_stack`], not a wrapper around
+/// it. Putting an object onto the stack (CR 405.1 / CR 601.2a) and copying one
+/// onto it (CR 707.10) agree that exactly one `StackPushed` is emitted, but
+/// they disagree on the two source-referential stamps, so they are separate
+/// authorities rather than one funnel:
+///
+/// * CR 701.27f generation — a copy captures the source's generation at
+///   *copy-creation* time and must overwrite whatever the copied ability
+///   inherited from the original's earlier stack push. [`push_to_stack`]
+///   deliberately guards its stamp with `is_none()` (delayed triggered
+///   abilities carry a creation-time generation that firing must not clobber);
+///   applying that guard here would leave the copy comparing against the
+///   *original's* generation instead of its own.
+/// * Force-block binding — deliberately NOT re-bound here. A copied ability
+///   already carries the `force_block_attacker` its original was bound to
+///   (`ResolvedAbility` is cloned wholesale by the copy effects), and that
+///   binding came from the trigger's captured `trigger_source` provenance in
+///   `triggers::bind_force_block_attacker_recursive`. Calling
+///   `bind_force_block_source_recursive` here would overwrite that exact
+///   choice-time referent with a fresh live `state.objects` lookup — a global
+///   rescan where CR 707.10b says the copy has the same source as the original.
+///   Do not add it.
+pub(crate) fn push_copy_to_stack(
+    state: &mut GameState,
+    mut entry: StackEntry,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 701.27f: an activated or triggered ability of a permanent may transform
+    // that permanent only if it hasn't transformed since the ability was put
+    // onto the stack. Copying such an ability puts a NEW ability onto the stack,
+    // so the copy compares against the source at copy-creation time rather than
+    // the original ability's earlier stack-entry time. Spell copies are outside
+    // the rule entirely — CR 701.27f covers only "an activated or triggered
+    // ability of a permanent" — so this stamp is inert for spell-copy callers.
+    if matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+    ) {
+        let count = state
+            .objects
+            .get(&entry.source_id)
+            .filter(|object| object.back_face.is_some())
+            .map(|object| object.transformation_count);
+        if let Some(ability) = entry.ability_mut() {
+            ability.set_source_transformation_count_recursive(count);
+        }
+    }
+    events.push(GameEvent::StackPushed {
+        object_id: entry.id,
+    });
+    // CR 733: same journal point as [`push_to_stack`]. The copy's deliberately
+    // different stamping is already baked into `entry`, so this records the same
+    // operand set under a different origin rather than a sibling command.
+    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Copy);
+    state.stack.push_back(entry);
+}
+
+/// Records one settled stack push for both stack authorities.
+///
+/// CR 405.2: an object goes on top of everything already on the stack, so the
+/// index it will occupy is the current depth. Reading that here — before either
+/// caller's `push_back` — is the one piece of shared logic the two authorities
+/// could otherwise get out of step on.
+fn journal_stack_push(state: &mut GameState, entry: &StackEntry, origin: ResolvedStackPushOrigin) {
+    let resulting_position = state.stack.len();
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedStackPushCommand {
+        entry: Box::new(entry.clone()),
+        origin,
+        resulting_position,
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_stack_push(command)
+        .expect("resolved stack push must have a live journal cause");
+}
+
+/// Installs one already-resolved stack push verbatim.
+///
+/// CR 405.1 / CR 707.10: the recorded entry is pushed exactly as it was
+/// recorded. Nothing is restamped — the CR 701.27f generation, the CR 400.7
+/// incarnation, and the CR 509.1c force-block referent all travel inside the
+/// entry, so replay never repeats the live `state.objects` lookups that produced
+/// them. Re-deriving the force-block binding in particular would swap a
+/// choice-time referent for a global rescan (see [`push_copy_to_stack`]).
+///
+/// Deliberately does NOT require the source object to exist: the ordinary path
+/// tolerates a missing source (synthetic game-rule triggers push with
+/// `ObjectId(0)`), so a source-existence precondition would reject pushes the
+/// engine legitimately performs.
+///
+/// `StackDepthMismatch` is a deliberate fail-closed canary, not a bug to route
+/// around. Stack POPS are not journaled yet (CR 608.1 resolve-pop, CR 603.3c/d
+/// abort-pop, CR 701.6a counter-removal, CR 601.2a cast-abort), so once any
+/// un-journaled removal runs, the replayed depth diverges from every later
+/// recorded position and this check refuses instead of installing an entry
+/// somewhere the recording never described. Do not weaken it to make a replay
+/// pass; see [`ResolvedStackPushCommand`] for the scheduled gap.
+pub fn apply_resolved_stack_push(
+    state: &mut GameState,
+    command: &ResolvedStackPushCommand,
+) -> Result<(), ResolvedStackPushReplayInvariantError> {
+    if state.stack.len() != command.resulting_position {
+        return Err(ResolvedStackPushReplayInvariantError::StackDepthMismatch {
+            expected: command.resulting_position,
+            found: state.stack.len(),
+        });
+    }
+    if state.stack.iter().any(|entry| entry.id == command.entry.id) {
+        return Err(ResolvedStackPushReplayInvariantError::DuplicateStackEntry(
+            command.entry.id,
+        ));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.entry.controller)
+    {
+        return Err(ResolvedStackPushReplayInvariantError::UnknownController(
+            command.entry.controller,
+        ));
+    }
+
+    state.stack.push_back(command.entry.as_ref().clone());
+    Ok(())
+}
+
+/// Installs one already-resolved CR 601.2i cast finalization verbatim.
+///
+/// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
+/// back exactly as they were recorded. Nothing is re-derived — in particular the
+/// entry is located by its recorded CR 405.2 position rather than by repeating
+/// the authority's last-match scan, and `distinct_colors_spent` is taken from
+/// the snapshot rather than re-read from the object's `colors_spent_to_cast`,
+/// which a replayed predecessor need not still agree with.
+///
+/// Fails closed on any disagreement with the predecessor state: a position past
+/// the stack depth, a different entry at that position, a pre-finalize entry
+/// that is not the one recorded, or different pre-existing paid facts.
+pub fn apply_resolved_stack_entry_finalize(
+    state: &mut GameState,
+    command: &ResolvedStackEntryFinalizeCommand,
+) -> Result<(), ResolvedStackEntryFinalizeReplayInvariantError> {
+    let depth = state.stack.len();
+    let entry = state.stack.get(command.entry_position).ok_or(
+        ResolvedStackEntryFinalizeReplayInvariantError::PositionOutOfRange {
+            position: command.entry_position,
+            depth,
+        },
+    )?;
+    if entry.id != command.object {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryIdentityMismatch {
+                position: command.entry_position,
+                expected: command.object,
+                found: entry.id,
+            },
+        );
+    }
+    if entry.kind != *command.expected_old_kind {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryKindMismatch(
+                command.entry_position,
+            ),
+        );
+    }
+    // CR 601.2i settles the entry retag and the paid-facts snapshot together, so
+    // the snapshot precondition is checked BEFORE either is installed — a replay
+    // must not leave a finalized entry behind when the snapshot side is the half
+    // that disagrees.
+    if state.stack_paid_facts.get(&command.object) != command.expected_old_paid_facts.as_deref() {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::PaidFactsMismatch(command.object),
+        );
+    }
+
+    state
+        .stack
+        .get_mut(command.entry_position)
+        .expect("the entry was just read at this position")
+        .kind = command.resulting_kind.as_ref().clone();
+    state.stack_paid_facts.insert(
+        command.object,
+        command.resulting_paid_facts.as_ref().clone(),
+    );
+    Ok(())
+}
+
+/// Everything one stack removal settles: the entry plus the per-entry side-table
+/// rows keyed on it.
+///
+/// The rows are returned rather than discarded because the resolution pop
+/// consumes both — the paid snapshot feeds cost-dependent resolution and the
+/// batch feeds CR 603.7c event context. Callers that only need the entry drop
+/// the rest.
+pub(crate) struct PoppedStackEntry {
+    pub entry: StackEntry,
+    pub paid_facts: Option<StackPaidSnapshot>,
+    pub trigger_event_batch: Option<Vec<GameEvent>>,
+}
+
+/// CR 405.2: removes one object from the stack at a known index.
+///
+/// The single authority for every one-entry stack removal — the CR 405.5
+/// resolution pop and the drain loops (batched resolution, inert no-op batches,
+/// CR 724.1b stack exile) via [`pop_top_stack_entry`], the CR 701.6a counter,
+/// and the CR 601.2a / CR 601.2i cast rollbacks. Each call removes exactly one
+/// object, so a drain of N entries is N removals rather than one bulk mutation.
+///
+/// Both side tables are dropped here rather than by the callers because they are
+/// keyed on the entry and settle WITH the removal: dropping the entry but
+/// leaving `stack_paid_facts` or `stack_trigger_event_batches` behind would
+/// strand rows against an id no longer on the stack. The counter and rollback
+/// sites previously dropped only `stack_paid_facts` (and the CR 601.2a reject
+/// dropped neither), so routing them here also closes those leaks.
+///
+/// NOT used by [`pop_uncommitted_pending_trigger_entry`], which performs the
+/// same mutation. That is deliberate: the CR 603.3d removal is a distinct family
+/// with its own record, and routing it through this authority would journal one
+/// mutation twice, so a replay would remove two entries where execution removed
+/// one.
+pub(crate) fn remove_stack_entry_at(
+    state: &mut GameState,
+    index: usize,
+) -> Option<PoppedStackEntry> {
+    // `im::Vector::remove` panics out of range rather than returning `Option`,
+    // so the bound is checked here rather than leaned on.
+    if index >= state.stack.len() {
+        return None;
+    }
+    let entry = state.stack.remove(index);
+    let paid_facts = state.stack_paid_facts.remove(&entry.id);
+    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+
+    // CR 733: journal once ALL THREE removals have settled, so the record
+    // describes a stack the entry has already left. An out-of-range index is the
+    // one case that journals nothing — `?` returns above, because no mutation
+    // happened at all.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_removal(ResolvedStackRemovalCommand {
+            entry: Box::new(entry.clone()),
+            index,
+            resulting_depth: state.stack.len(),
+            cause,
+        })
+        .expect("resolved stack removal must have a live journal cause");
+
+    Some(PoppedStackEntry {
+        entry,
+        paid_facts,
+        trigger_event_batch,
+    })
+}
+
+/// CR 405.2: removes the topmost object from the stack.
+///
+/// A thin wrapper over [`remove_stack_entry_at`] — the top of an N-deep stack is
+/// index N-1 — kept because the resolution and drain callers have no index to
+/// pass and reading `remove_stack_entry_at(state, state.stack.len() - 1)` at
+/// each of them would obscure that they are simply resolving the top object.
+pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
+    remove_stack_entry_at(state, state.stack.len().checked_sub(1)?)
+}
+
+/// Replays one already-resolved CR 405.2 stack removal.
+///
+/// Installs the recorded removal with nothing re-derived: the entry is verified
+/// at the RECORDED index rather than located by a fresh scan, which matters
+/// because the production sites find it with predicates that can match a
+/// different entry on a diverged stack. All preconditions are checked BEFORE any
+/// mutation, so a rejected replay leaves the stack and both side tables
+/// untouched.
+pub fn apply_resolved_stack_removal(
+    state: &mut GameState,
+    command: &ResolvedStackRemovalCommand,
+) -> Result<(), ResolvedStackRemovalReplayInvariantError> {
+    // CR 405.2: the predecessor must be exactly one deeper than the record.
+    let expected_depth = command.resulting_depth + 1;
+    if state.stack.len() != expected_depth {
+        return Err(ResolvedStackRemovalReplayInvariantError::DepthMismatch {
+            expected: expected_depth,
+            found: state.stack.len(),
+        });
+    }
+    let Some(found) = state.stack.get(command.index) else {
+        return Err(ResolvedStackRemovalReplayInvariantError::IndexOutOfRange {
+            index: command.index,
+            depth: state.stack.len(),
+        });
+    };
+    // Compared WHOLE rather than by id: an applier that matched on `id` alone
+    // would discard a divergent object that merely reused the identifier.
+    if found != command.entry.as_ref() {
+        return Err(ResolvedStackRemovalReplayInvariantError::RemovedEntryMismatch);
+    }
+
+    // In range: the `get` above returned `Some`, so this cannot panic.
+    let entry = state.stack.remove(command.index);
+    state.stack_paid_facts.remove(&entry.id);
+    state.stack_trigger_event_batches.remove(&entry.id);
+    Ok(())
+}
+
+/// CR 603.3d: removes an uncommitted triggered ability from the stack.
+///
+/// The "push first, choose second" invariant (see
+/// [`GameState::pending_trigger_entry`]) puts a triggered ability on the stack
+/// BEFORE its choices are gathered, so the entry is live while a `WaitingFor`
+/// fills its slots. CR 603.3d: "If a choice is required when the triggered
+/// ability goes on the stack but no legal choices can be made for it, or if a
+/// rule or a continuous effect otherwise makes the ability illegal, the ability
+/// is simply removed from the stack." This is the single authority for that
+/// removal.
+///
+/// The two side tables are cleared here rather than by the callers because they
+/// are keyed on the entry and settle WITH the pop — a removal that dropped the
+/// entry but left `stack_paid_facts` or `stack_trigger_event_batches` behind
+/// would strand rows against an id no longer on the stack.
+///
+/// Guarded on the entry still being topmost: the cursor can outlive the entry
+/// when another path already removed it, and popping unconditionally would then
+/// discard an unrelated stack object.
+///
+/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
+/// piece of construction state owned by
+/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
+/// clears it.
+pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+    let Some(entry_id) = state.pending_trigger_entry.take() else {
+        // No cursor: nothing was consumed and nothing settled, so there is no
+        // mutation to journal.
+        return;
+    };
+    let removed = (state.stack.back().map(|e| e.id) == Some(entry_id))
+        .then(|| {
+            let entry = state.stack.pop_back().expect("the entry was just observed");
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+            entry
+        })
+        .map(Box::new);
+
+    // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
+    // `.take()` above is unconditional, so a guard that declines to pop still
+    // consumed the cursor — recording only the popping case would leave a replay
+    // of the other holding a `pending_trigger_entry` the real execution cleared.
+    let cause = state.current_or_begin_rules_execution_node();
+    let command = ResolvedUncommittedTriggerRemovalCommand {
+        consumed_entry_id: entry_id,
+        removed,
+        resulting_depth: state.stack.len(),
+        cause,
+    };
+    state
+        .resolved_rules_journal
+        .record_uncommitted_trigger_removal(command)
+        .expect("resolved uncommitted trigger removal must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.3d removal verbatim.
+///
+/// Nothing is re-derived: the entry is compared WHOLE against the recorded one
+/// rather than matched by id, so a replay whose stack top merely shares an id
+/// fails closed instead of discarding a different object. The two side tables are
+/// dropped by the recorded entry's own id.
+///
+/// Both recorded outcomes are honoured. `removed: None` means the original
+/// execution consumed the cursor without popping, so this refuses to pop — and
+/// asserts the predecessor agrees, because a replay whose top IS that entry would
+/// otherwise silently diverge from the execution being replayed.
+pub fn apply_resolved_uncommitted_trigger_removal(
+    state: &mut GameState,
+    command: &ResolvedUncommittedTriggerRemovalCommand,
+) -> Result<(), ResolvedUncommittedTriggerRemovalReplayInvariantError> {
+    if state.pending_trigger_entry != Some(command.consumed_entry_id) {
+        return Err(
+            ResolvedUncommittedTriggerRemovalReplayInvariantError::CursorMismatch {
+                expected: command.consumed_entry_id,
+                found: state.pending_trigger_entry,
+            },
+        );
+    }
+    let top_id = state.stack.back().map(|e| e.id);
+    match command.removed.as_deref() {
+        Some(recorded) => {
+            if state.stack.len() != command.resulting_depth + 1 {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth + 1,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if state.stack.back() != Some(recorded) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::RemovedEntryMismatch,
+                );
+            }
+        }
+        None => {
+            if state.stack.len() != command.resulting_depth {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::DepthMismatch {
+                        expected: command.resulting_depth,
+                        found: state.stack.len(),
+                    },
+                );
+            }
+            if top_id == Some(command.consumed_entry_id) {
+                return Err(
+                    ResolvedUncommittedTriggerRemovalReplayInvariantError::UnexpectedRemovableEntry(
+                        command.consumed_entry_id,
+                    ),
+                );
+            }
+        }
+    }
+
+    state.pending_trigger_entry = None;
+    if command.removed.is_some() {
+        state.stack.pop_back();
+        state.stack_paid_facts.remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+    }
+    Ok(())
 }
 
 /// The ability currently represented by a stack entry for presentation.
@@ -238,6 +694,58 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
     }
 }
 
+/// CR 608.3 + CR 400.7d: Snapshot cast-link / target facts for a permanent spell
+/// paused mid-resolution (delivery-tail `NeedsChoice`, replacement-choice
+/// `NeedsChoice`, or CallerEpilogue `CopyTargetChoice`). Single authority so a
+/// new cast-metadata field cannot be threaded into only two of three stash sites.
+fn pending_spell_resolution_snapshot(
+    state: &GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    actual_mana_spent: u32,
+    spell_targets: &[TargetRef],
+) -> PendingSpellResolution {
+    let obj = state.objects.get(&entry.id);
+    let cast_from_zone = ability
+        .and_then(|a| a.context.cast_from_zone)
+        .or_else(|| obj.and_then(|o| o.cast_from_zone));
+    let cast_timing_permission =
+        obj.and_then(|o| o.cast_timing_permission.map(|(permission, _)| permission));
+    let kickers_paid = ability
+        .map(|a| a.context.kickers_paid.clone())
+        .unwrap_or_else(|| obj.map(|o| o.kickers_paid.clone()).unwrap_or_default());
+    let additional_cost_payment_count = ability
+        .map(|a| a.context.additional_cost_payment_count)
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payment_count)
+                .unwrap_or_default()
+        });
+    let additional_cost_payments = ability
+        .map(|a| a.context.additional_cost_payments.clone())
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payments.clone())
+                .unwrap_or_default()
+        });
+    let convoked_creatures = obj
+        .map(|o| o.convoked_creatures.clone())
+        .unwrap_or_default();
+    PendingSpellResolution {
+        object_id: entry.id,
+        controller: entry.controller,
+        casting_variant,
+        cast_from_zone,
+        cast_controller: Some(entry.controller),
+        cast_timing_permission,
+        spell_targets: spell_targets.to_vec(),
+        actual_mana_spent,
+        kickers_paid,
+        additional_cost_payment_count,
+        additional_cost_payments,
+        convoked_creatures,
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -277,11 +785,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.announced_source_x = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
-    let entry = match state.stack.pop_back() {
-        Some(e) => e,
-        None => return,
+    let Some(PoppedStackEntry {
+        entry,
+        paid_facts: paid_snapshot,
+        trigger_event_batch,
+    }) = pop_top_stack_entry(state)
+    else {
+        return;
     };
-    let paid_snapshot = state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -295,8 +806,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         return;
     }
-
-    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
 
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
@@ -368,12 +877,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::ActivatedAbility { ability, .. } => {
             (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
-        StackEntryKind::TriggeredAbility { ability, .. } => (
-            Some(ResolvedAbility::clone(ability)),
-            false,
-            CastingVariant::Normal,
-            0,
-        ),
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
+        }
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
@@ -402,6 +908,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .flatten()
             }) {
                 ability.set_scoped_player_recursive(pid);
+            }
+        }
+    }
+
+    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
+    // they control and their graveyard" (Strategic Betrayal). The spell targets
+    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
+    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
+    // filter must resolve its acting/choosing player against the resolved single
+    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
+    // scoped-player stamp above: bind `scoped_player` from the ability's lone
+    // `TargetRef::Player` before the change_zone choosers run at resolution.
+    if let Some(ability) = ability.as_mut() {
+        if ability.scoped_player.is_none() {
+            let single_player_target = ability
+                .targets
+                .iter()
+                .filter(|target| matches!(target, TargetRef::Player(_)))
+                .count()
+                == 1;
+            if single_player_target
+                && crate::game::effects::ability_uses_relative_controller_scoped(ability)
+            {
+                let actor = ability.target_player();
+                ability.set_scoped_player_recursive(actor);
             }
         }
     }
@@ -439,10 +970,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // Capture targets for Aura attachment after resolution
+    // Capture targets for Aura attachment after resolution. Prefer the full
+    // chain flatten so Enchant targets assigned onto an Aura placeholder are
+    // not missed when only a nested sink holds them.
     let spell_targets = ability
         .as_ref()
-        .map(|a| a.targets.clone())
+        .map(|a| {
+            let flat = flatten_targets_in_chain(a);
+            if flat.is_empty() {
+                a.targets.clone()
+            } else {
+                flat
+            }
+        })
         .unwrap_or_default();
 
     // CR 702.103e: As a bestowed Aura spell begins resolving, if its target is
@@ -512,7 +1052,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             Some(target_id) => {
                 // CR 702.140c: pause for the top/bottom choice. The merging spell
                 // (`entry.id`) has already been popped from the stack.
-                state.pending_mutate_merge = Some(crate::types::game_state::PendingMutateMerge {
+                state.push_mutate_merge_frame(crate::types::resolution::PendingMutateMerge {
                     merging_id: entry.id,
                     target_id,
                     controller: entry.controller,
@@ -727,7 +1267,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_epic {
             if let Some(spell_ability) = ability.clone() {
-                super::effects::epic::arm_epic(state, entry.id, entry.controller, spell_ability);
+                super::effects::epic::arm_epic(state, entry.id, entry.controller, *spell_ability);
             }
         }
     }
@@ -884,6 +1424,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // mutable permission list is casting-time authorization, not
             // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
+                // CR 107.3m + CR 707.10: a resolving copied spell has no new
+                // payment snapshot, but inherits the original spell's chosen
+                // X on its stack object. Off-stack entry paths pass `None`.
+                let resolving_spell_x = paid_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.x_value)
+                    .or(obj.cost_x_paid);
                 let cast_transformed = paid_snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.cast_transformed);
@@ -908,11 +1455,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // replacement pipeline sees the correct counter count.
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
                     (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        resolving_spell_x,
                         back.defense,
                         &back.card_types,
                     ),
-                    _ => super::printed_cards::intrinsic_etb_counters(obj),
+                    _ => super::printed_cards::intrinsic_etb_counters(obj, resolving_spell_x),
                 };
                 if !intrinsic.is_empty() {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -969,11 +1518,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
-            let convoked_creatures = state
-                .objects
-                .get(&entry.id)
-                .map(|obj| obj.convoked_creatures.clone())
-                .unwrap_or_default();
             // CR 702.33d + CR 400.7d + CR 603.4: Normalize the authoritative
             // cast-link provenance onto the stack object BEFORE `replace_event`,
             // so the pipeline's `CastLinkSnapshot` (captured inside
@@ -987,6 +1531,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if let Some(ability) = ability.as_ref() {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.kickers_paid = ability.context.kickers_paid.clone();
+                    obj.gift_recipient = ability.context.gift_recipient;
                     obj.additional_cost_payment_count =
                         ability.context.additional_cost_payment_count;
                     obj.additional_cost_payments = ability.context.additional_cost_payments.clone();
@@ -1004,11 +1549,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ability.context.cast_controller.or(Some(entry.controller));
                 }
             }
-            let cast_timing_permission = state
-                .objects
-                .get(&entry.id)
-                .and_then(|obj| obj.cast_timing_permission.map(|(permission, _)| permission));
-
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -1065,12 +1605,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 events,
                             ) {
                                 zone_pipeline::ZoneDeliveryResult::Done => {}
-                                // CR 614.1c / CR 616.1: the delivery tail parked a
-                                // counter-replacement pause and stashed the
-                                // remaining tail; surface it without running the
-                                // caller epilogue (the parked tail carries
-                                // `CallerEpilogue` and the resume path owns it).
+                                // CR 614.1c / CR 616.1 / CR 614.12a: the delivery
+                                // tail parked a mid-entry choice (CopyTargetChoice,
+                                // NamedChoice, counter branch, …) and stashed the
+                                // remaining tail. Surface it without running the
+                                // caller epilogue — including CR 608.3c Aura attach,
+                                // which has not run yet.
+                                //
+                                // CR 608.3c + CR 400.7d: stash PendingSpellResolution
+                                // so the choice-answer resume can complete Aura
+                                // attachment / cast-link stamps — mirrors the
+                                // ReplacementResult::NeedsChoice arm below.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                        state,
+                                        &entry,
+                                        ability.as_deref(),
+                                        casting_variant,
+                                        actual_mana_spent,
+                                        &spell_targets,
+                                    ));
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });
@@ -1161,22 +1715,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             events,
                         );
                     }
-                    // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
-                    // Siege protector / Tribute opponent-choice prompt that was stashed
-                    // by `apply_single_replacement` while resolving this ZoneChange).
-                    // Sets `state.waiting_for` to the resulting prompt, if any — the
-                    // caller's post-stack resolution checks waiting_for before returning
-                    // priority. Without this drain the choice would be silently dropped.
-                    if state.has_post_replacement_drain() {
-                        state.clear_post_replacement_source();
-                        let _ = super::engine_replacement::apply_pending_post_replacement_effect(
-                            state,
-                            Some(entry.id),
-                            None,
-                            Some(crate::types::replacements::ReplacementEvent::Moved),
-                            events,
-                        );
-                    }
+                    // CR 614.12a post-replacement drain runs AFTER CR 608.3c Aura
+                    // attach below — PersistChosenAttribute needs `attached_to`
+                    // before the choice is answered (mirrors dig/CR 303.4f).
                 }
                 super::replacement::ReplacementResult::Prevented => {
                     // CR 608.3e: Permanent spell's ETB was fully prevented —
@@ -1216,61 +1757,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     // A replacement needs player choice (e.g., Clone "enter as a copy").
                     // Store context so handle_replacement_choice can complete post-resolution.
-                    let cast_from_zone = ability
-                        .as_ref()
-                        .and_then(|a| a.context.cast_from_zone)
-                        .or_else(|| state.objects.get(&entry.id).and_then(|o| o.cast_from_zone));
                     // CR 702.33d + CR 400.7d: Use the authoritative kicker payments
                     // (resolving spell's `SpellContext` when present, else the stack
                     // object's stamped value) so placeholder permanent spells with
                     // `ability == None` are not silently de-kicked when a replacement
                     // needs a player choice. `engine_replacement` restores this onto
                     // the permanent unconditionally after the choice resolves.
-                    let kickers_paid = ability
-                        .as_ref()
-                        .map(|a| a.context.kickers_paid.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.kickers_paid.clone())
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payment_count = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payment_count)
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payment_count)
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payments = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payments.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payments.clone())
-                                .unwrap_or_default()
-                        });
-                    state.pending_spell_resolution =
-                        Some(crate::types::game_state::PendingSpellResolution {
-                            object_id: entry.id,
-                            controller: entry.controller,
-                            casting_variant,
-                            cast_from_zone,
-                            cast_controller: Some(entry.controller),
-                            cast_timing_permission,
-                            spell_targets: spell_targets.clone(),
-                            actual_mana_spent,
-                            kickers_paid,
-                            additional_cost_payment_count,
-                            additional_cost_payments,
-                            convoked_creatures,
-                        });
+                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                        state,
+                        &entry,
+                        ability.as_deref(),
+                        casting_variant,
+                        actual_mana_spent,
+                        &spell_targets,
+                    ));
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
                     // Emit StackResolved now — the spell has left the stack even though
@@ -1435,6 +1935,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Dead) legally accepts a graveyard host. A now-illegal target
                     // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
                     // at the next checkpoint.
+                    //
+                    // CR 608.3c / CR 303.4a: the host is the spell's chosen
+                    // target — never re-consult the Enchant filter (CR 303.4f
+                    // non-spell entry) when that target is missing.
                     Some(crate::types::ability::TargetRef::Object(target_id))
                         if crate::game::sba::is_valid_attachment_target(
                             state, entry.id, *target_id,
@@ -1457,6 +1961,53 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
+                    }
+                }
+            }
+
+            // CR 614.12a: Drain mandatory replacement post-effects (Siege /
+            // Tribute opponent-choice, Metamorphic ChoosePermanent
+            // CopyTargetChoice, …) stashed while resolving this permanent's
+            // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
+            // this site owns the prompt — AFTER CR 608.3c Aura attach above so
+            // the Aura is hosted before SBAs / the copy-choice answer, while
+            // `PendingSpellResolution.spell_targets` still carries the cast
+            // target for the PersistChosenAttribute resume (CR 608.3c /
+            // CR 303.4a). Do not push SpellResolution on top of an
+            // AbilityContinuation (Tribute/Siege resume is top-only).
+            if state.has_post_replacement_drain() {
+                state.clear_post_replacement_source();
+                if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
+                    state,
+                    Some(entry.id),
+                    None,
+                    Some(crate::types::replacements::ReplacementEvent::Moved),
+                    events,
+                ) {
+                    match wf {
+                        // CR 608.3c + CR 614.12a: stash the Aura spell's chosen
+                        // host for the copy-choice answer path, then surface the
+                        // prompt. Continue the cast-variant epilogue (same as
+                        // Tribute NamedChoice) so resolve_top settles normally;
+                        // the answer path still prefers spell_targets.
+                        WaitingFor::CopyTargetChoice { .. } => {
+                            state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                state,
+                                &entry,
+                                ability.as_deref(),
+                                casting_variant,
+                                actual_mana_spent,
+                                &spell_targets,
+                            ));
+                            state.waiting_for = wf;
+                        }
+                        WaitingFor::Priority { .. } => {}
+                        other => {
+                            // Tribute / Siege NamedChoice — surface the prompt
+                            // and continue the caller epilogue. Do not push
+                            // SpellResolution on top of an AbilityContinuation.
+                            state.waiting_for = other;
+                        }
                     }
                 }
             }
@@ -1903,6 +2454,28 @@ pub fn resolve_next_with_limit(
                 }
             }
         }
+        if let Some(run_len) = fixed_controller_gain_life_run_len(state) {
+            let run_len = run_len.min(max_consumed);
+            if run_len >= 2 {
+                crate::game::perf_counters::record_stack_batch_candidate();
+                if let Some(consumed) =
+                    resolve_proven_fixed_controller_gain_life_batch(state, events, run_len)
+                {
+                    return consumed;
+                }
+            }
+        }
+        if let Some(run_len) = fixed_opponent_lose_life_run_len(state) {
+            let run_len = run_len.min(max_consumed);
+            if run_len >= 2 {
+                crate::game::perf_counters::record_stack_batch_candidate();
+                if let Some(consumed) =
+                    resolve_proven_fixed_opponent_lose_life_batch(state, events, run_len)
+                {
+                    return consumed;
+                }
+            }
+        }
         if let Some(run_len) = batch_run_len(state) {
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
@@ -1952,19 +2525,26 @@ pub fn resolve_next_with_limit(
     1
 }
 
-/// CR 117.4 + CR 608.2 + CR 704.3: Resolve a finite run of identical
-/// self-counter triggers only after proving that every skipped priority
-/// checkpoint is inert. The proof runs the exact sequential resolution path on
-/// a clone, including the real post-action pipeline after each entry. If any
-/// checkpoint creates events, pushes triggers, pauses, or otherwise consumes
-/// observable work, this returns `None` and the caller falls back to one-entry
-/// stack resolution.
-fn resolve_proven_self_counter_batch(
+/// Optional post-resolution invariant checked after each `resolve_top` and the
+/// subsequent post-action pipeline. Shared settled/event/stack checks always
+/// run; class-specific proofs add only what their effect mutates.
+enum InertTriggerBatchPipelineInvariant {
+    /// Pipeline must leave battlefield counters unchanged (self-counter class).
+    UnchangedBattlefieldCounters,
+}
+
+/// CR 117.4 + CR 117.5 + CR 608.2 + CR 704.3: Shared authority for proving a
+/// contiguous inert triggered-ability run may skip priority. Runs the exact
+/// sequential `resolve_top` → post-action-pipeline path on a clone; refuses
+/// when any checkpoint creates events, pushes triggers, pauses, or fails the
+/// optional class invariant. Callers specialize only run-key / candidate shape.
+fn resolve_proven_inert_trigger_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     run_len: u32,
+    pipeline_invariant: Option<InertTriggerBatchPipelineInvariant>,
 ) -> Option<u32> {
-    if !self_counter_batch_state_is_settled(state) {
+    if !inert_trigger_batch_state_is_settled(state) {
         return None;
     }
 
@@ -1978,6 +2558,7 @@ fn resolve_proven_self_counter_batch(
     for expected_consumed in 1..=run_len as usize {
         let event_start = proof_events.len();
         let stack_before = proof.stack.len();
+        // CR 608.2: each ability still resolves individually via `resolve_top`.
         resolve_top(&mut proof, &mut proof_events);
         if stack_before.saturating_sub(proof.stack.len()) != 1 {
             return None;
@@ -1988,7 +2569,14 @@ fn resolve_proven_self_counter_batch(
 
         let events_after_resolution = proof_events.len();
         let stack_after_resolution = proof.stack.len();
-        let counters_after_resolution = battlefield_counter_snapshot(&proof);
+        let counters_after_resolution = matches!(
+            pipeline_invariant,
+            Some(InertTriggerBatchPipelineInvariant::UnchangedBattlefieldCounters)
+        )
+        .then(|| battlefield_counter_snapshot(&proof));
+        // CR 117.5 + CR 704.3 + CR 603.3b: full priority checkpoint after each
+        // resolution; refuse when the effect would enqueue observers or other
+        // non-inert checkpoint work.
         let wf = super::engine_priority::run_post_action_pipeline_from(
             &mut proof,
             &mut proof_events,
@@ -2002,9 +2590,10 @@ fn resolve_proven_self_counter_batch(
             || !matches!(proof.waiting_for, WaitingFor::Priority { .. })
             || proof_events.len() != events_after_resolution
             || proof.stack.len() != stack_after_resolution
-            || battlefield_counter_snapshot(&proof) != counters_after_resolution
+            || counters_after_resolution
+                .is_some_and(|before| battlefield_counter_snapshot(&proof) != before)
             || initial_len.saturating_sub(proof.stack.len()) != expected_consumed
-            || !self_counter_batch_state_is_settled(&proof)
+            || !inert_trigger_batch_state_is_settled(&proof)
         {
             return None;
         }
@@ -2017,6 +2606,21 @@ fn resolve_proven_self_counter_batch(
     crate::game::perf_counters::record_stack_batch_plan();
     crate::game::perf_counters::record_stack_batched_entries(run_len);
     Some(run_len)
+}
+
+/// CR 117.4 + CR 608.2 + CR 704.3: Self-counter class — shared inert proof plus
+/// an unchanged-battlefield-counters pipeline invariant.
+fn resolve_proven_self_counter_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    resolve_proven_inert_trigger_batch(
+        state,
+        events,
+        run_len,
+        Some(InertTriggerBatchPipelineInvariant::UnchangedBattlefieldCounters),
+    )
 }
 
 fn battlefield_counter_snapshot(
@@ -2048,7 +2652,7 @@ fn consumed_trigger_event_occurrences(
         .collect()
 }
 
-fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
+fn inert_trigger_batch_state_is_settled(state: &GameState) -> bool {
     state.pending_replacement.is_none()
         && state.pending_trigger.is_none()
         && state.pending_trigger_event_batch.is_empty()
@@ -2059,23 +2663,7 @@ fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
         && state.current_trigger_events.is_empty()
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
-        && state.pending_continuation.is_none()
-        && state.pending_repeat_iteration.is_none()
-        && state.pending_repeated_optional_payment.is_none()
-        && state.pending_repeat_until.is_none()
-        && state.pending_change_zone_iteration.is_none()
-        && state.pending_copy_token_resolution.is_none()
-        && state.pending_vote_ballot_iteration.is_none()
-        && state.pending_per_player_zone_choice.is_none()
-        && state.pending_per_category_zone_choice.is_none()
-        && state.pending_batch_deliveries.is_none()
-        && state.pending_proliferate_actions.is_none()
-        && state.pending_counter_additions.is_none()
-        && state.pending_counter_moves.is_none()
-        && state.pending_optional_effect.is_none()
-        && state.pending_optional_trigger_event.is_none()
-        && state.pending_optional_trigger_match_count.is_none()
-        && state.pending_choose_zone_trigger_context.is_none()
+        && state.resolution_stack.is_empty()
         && state.pending_miracle_offers.is_empty()
         && state.pending_paradigm_remaining_offers.is_none()
         && state.pending_damage_replacements.is_empty()
@@ -2157,6 +2745,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        force_block_attacker: _,
         controller: _,
         original_controller,
         scoped_player,
@@ -2197,6 +2786,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         repeat_until,
         replacement_applied: _,
         sub_link,
+        sibling_condition,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -2262,6 +2852,383 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
+        && modal.is_none()
+        && mode_abilities.is_empty()
+        && parent_target_missing_reason.is_none()
+}
+
+/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
+/// controller GainLife class — shared inert proof; life-gain observer refusal
+/// is covered by the common event/settled checkpoint checks (CR 119.9).
+fn resolve_proven_fixed_controller_gain_life_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    resolve_proven_inert_trigger_batch(state, events, run_len, None)
+}
+
+struct FixedControllerGainLifeRunKey<'a> {
+    controller: PlayerId,
+    ability: &'a ResolvedAbility,
+    paid: Option<&'a StackPaidSnapshot>,
+}
+
+/// CR 603.3b + CR 608.2: Length of the top contiguous run of identical
+/// triggered abilities that grant a fixed amount of life to their controller.
+/// Keyed `SourceIndependent` with inert provenance ignored so distinct ETB
+/// life-gain sources (issue #5946) can share one run when interleaved.
+/// Compares each adjacent entry against a single top key without cloning
+/// abilities on the trigger-storm path.
+fn fixed_controller_gain_life_run_len(state: &GameState) -> Option<u32> {
+    let top = state.stack.back()?;
+    let top_key = fixed_controller_gain_life_run_key(state, top)?;
+    let mut len = 1u32;
+    for entry in state.stack.iter().rev().skip(1) {
+        match fixed_controller_gain_life_run_key(state, entry) {
+            Some(key)
+                if key.controller == top_key.controller
+                    && key.paid == top_key.paid
+                    && inert_trigger_abilities_eq_ignoring_provenance(
+                        key.ability,
+                        top_key.ability,
+                    ) =>
+            {
+                len += 1
+            }
+            _ => break,
+        }
+    }
+    Some(len)
+}
+
+fn fixed_controller_gain_life_run_key<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> Option<FixedControllerGainLifeRunKey<'a>> {
+    let StackEntryKind::TriggeredAbility {
+        source_id: _,
+        ability,
+        condition,
+        trigger_event: _,
+        description: _,
+        source_name: _,
+        subject_match_count: _,
+        die_result: _,
+    } = &entry.kind
+    else {
+        return None;
+    };
+
+    if condition.is_some()
+        || !flatten_targets_in_chain(ability).is_empty()
+        || !fixed_controller_gain_life_ability_is_batch_candidate(ability)
+    {
+        return None;
+    }
+
+    Some(FixedControllerGainLifeRunKey {
+        controller: entry.controller,
+        ability,
+        paid: state.stack_paid_facts.get(&entry.id),
+    })
+}
+
+fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
+    let ResolvedAbility {
+        effect,
+        targets,
+        source_id: _,
+        source_incarnation: _,
+        trigger_source: _,
+        trigger_definition_ref: _,
+        force_block_attacker: _,
+        controller: _,
+        original_controller: _,
+        scoped_player,
+        kind,
+        sub_ability,
+        else_ability,
+        duration,
+        condition,
+        context: _,
+        optional_targeting,
+        optional,
+        optional_for,
+        multi_target,
+        target_constraints,
+        target_choice_timing,
+        description: _,
+        selected_mode_labels,
+        repeat_for,
+        min_x_value,
+        announced_x,
+        cant_be_copied,
+        copy_count_status,
+        forward_result,
+        unless_pay,
+        distribution,
+        player_scope,
+        starting_with,
+        chosen_x,
+        cost_paid_object,
+        cost_paid_object_ids,
+        effect_context_object,
+        amassed_army_object,
+        ability_index: _,
+        may_trigger_origin: _,
+        target_selection_mode,
+        target_chooser,
+        chosen_players,
+        repeat_until,
+        replacement_applied: _,
+        sub_link,
+        sibling_condition,
+        modal,
+        mode_abilities,
+        parent_target_missing_reason,
+    } = ability;
+
+    let fixed_controller_gain_life = matches!(
+        effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { .. },
+            player: TargetFilter::Controller,
+        }
+    );
+
+    fixed_controller_gain_life
+        && targets.is_empty()
+        && scoped_player.is_none()
+        && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
+        && sub_ability.is_none()
+        && else_ability.is_none()
+        && duration.is_none()
+        && condition.is_none()
+        && !*optional_targeting
+        && !*optional
+        && optional_for.is_none()
+        && multi_target.is_none()
+        && target_constraints.is_empty()
+        && *target_choice_timing == TargetChoiceTiming::Stack
+        && selected_mode_labels.is_empty()
+        && repeat_for.is_none()
+        && *min_x_value == 0
+        && announced_x.is_none()
+        && !*cant_be_copied
+        && *copy_count_status == CopyCountStatus::Pending
+        && !*forward_result
+        && unless_pay.is_none()
+        && distribution.is_none()
+        && player_scope.is_none()
+        && starting_with.is_none()
+        && chosen_x.is_none()
+        && cost_paid_object.is_none()
+        && cost_paid_object_ids.is_empty()
+        && effect_context_object.is_none()
+        && amassed_army_object.is_none()
+        && *target_selection_mode == TargetSelectionMode::Chosen
+        && target_chooser.is_none()
+        && chosen_players.is_empty()
+        && repeat_until.is_none()
+        && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
+        && modal.is_none()
+        && mode_abilities.is_empty()
+        && parent_target_missing_reason.is_none()
+}
+
+/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
+/// opponent life-loss class — shared inert proof; life-loss observer refusal
+/// is covered by the common event/settled checkpoint checks.
+fn resolve_proven_fixed_opponent_lose_life_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_len: u32,
+) -> Option<u32> {
+    resolve_proven_inert_trigger_batch(state, events, run_len, None)
+}
+
+struct FixedOpponentLoseLifeRunKey<'a> {
+    controller: PlayerId,
+    ability: &'a ResolvedAbility,
+    condition: Option<&'a TriggerCondition>,
+    paid: Option<&'a StackPaidSnapshot>,
+}
+
+/// CR 603.3b + CR 603.4 + CR 608.2: Length of the top contiguous run of
+/// identical triggered abilities that make each opponent lose a fixed amount
+/// of life. Equal intervening-if conditions are admitted because the shared
+/// clone proof rechecks every entry at resolution time before committing.
+/// Source provenance is inert for this effect shape, so distinct sources can
+/// share one run when all resolution-relevant fields agree.
+fn fixed_opponent_lose_life_run_len(state: &GameState) -> Option<u32> {
+    let top = state.stack.back()?;
+    let top_key = fixed_opponent_lose_life_run_key(state, top)?;
+    let mut len = 1u32;
+    for entry in state.stack.iter().rev().skip(1) {
+        match fixed_opponent_lose_life_run_key(state, entry) {
+            Some(key)
+                if key.controller == top_key.controller
+                    && key.condition == top_key.condition
+                    && key.paid == top_key.paid
+                    && inert_trigger_abilities_eq_ignoring_provenance(
+                        key.ability,
+                        top_key.ability,
+                    ) =>
+            {
+                len += 1
+            }
+            _ => break,
+        }
+    }
+    Some(len)
+}
+
+fn fixed_opponent_lose_life_run_key<'a>(
+    state: &'a GameState,
+    entry: &'a StackEntry,
+) -> Option<FixedOpponentLoseLifeRunKey<'a>> {
+    let StackEntryKind::TriggeredAbility {
+        source_id: _,
+        ability,
+        condition,
+        trigger_event: _,
+        description: _,
+        source_name: _,
+        subject_match_count: _,
+        die_result: _,
+    } = &entry.kind
+    else {
+        return None;
+    };
+
+    if !flatten_targets_in_chain(ability).is_empty()
+        || !fixed_opponent_lose_life_ability_is_batch_candidate(ability)
+    {
+        return None;
+    }
+
+    Some(FixedOpponentLoseLifeRunKey {
+        controller: entry.controller,
+        ability,
+        condition: condition.as_ref(),
+        paid: state.stack_paid_facts.get(&entry.id),
+    })
+}
+
+fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
+    let ResolvedAbility {
+        effect,
+        targets,
+        source_id: _,
+        source_incarnation: _,
+        trigger_source: _,
+        trigger_definition_ref: _,
+        force_block_attacker: _,
+        controller: _,
+        original_controller: _,
+        scoped_player,
+        kind,
+        sub_ability,
+        else_ability,
+        duration,
+        condition,
+        context: _,
+        optional_targeting,
+        optional,
+        optional_for,
+        multi_target,
+        target_constraints,
+        target_choice_timing,
+        description: _,
+        selected_mode_labels,
+        repeat_for,
+        min_x_value,
+        announced_x,
+        cant_be_copied,
+        copy_count_status,
+        forward_result,
+        unless_pay,
+        distribution,
+        player_scope,
+        starting_with,
+        chosen_x,
+        cost_paid_object,
+        cost_paid_object_ids,
+        effect_context_object,
+        amassed_army_object,
+        ability_index: _,
+        may_trigger_origin: _,
+        target_selection_mode,
+        target_chooser,
+        chosen_players,
+        repeat_until,
+        replacement_applied: _,
+        sub_link,
+        sibling_condition,
+        modal,
+        mode_abilities,
+        parent_target_missing_reason,
+    } = ability;
+
+    let fixed_opponent_lose_life = matches!(
+        effect,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { .. },
+            target: None,
+        }
+    );
+
+    fixed_opponent_lose_life
+        && targets.is_empty()
+        && scoped_player.is_none()
+        && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
+        && sub_ability.is_none()
+        && else_ability.is_none()
+        && duration.is_none()
+        && condition.is_none()
+        && !*optional_targeting
+        && !*optional
+        && optional_for.is_none()
+        && multi_target.is_none()
+        && target_constraints.is_empty()
+        && *target_choice_timing == TargetChoiceTiming::Stack
+        && selected_mode_labels.is_empty()
+        && repeat_for.is_none()
+        && *min_x_value == 0
+        && announced_x.is_none()
+        && !*cant_be_copied
+        && *copy_count_status == CopyCountStatus::Pending
+        && !*forward_result
+        && unless_pay.is_none()
+        && distribution.is_none()
+        && *player_scope == Some(PlayerFilter::Opponent)
+        && starting_with.is_none()
+        && chosen_x.is_none()
+        && cost_paid_object.is_none()
+        && cost_paid_object_ids.is_empty()
+        && effect_context_object.is_none()
+        && amassed_army_object.is_none()
+        && *target_selection_mode == TargetSelectionMode::Chosen
+        && target_chooser.is_none()
+        && chosen_players.is_empty()
+        && repeat_until.is_none()
+        && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -2294,18 +3261,15 @@ fn resolve_batched(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
-    // Pop the run's entries (resolution order is back-to-front), cleaning the
-    // per-entry side tables exactly as `resolve_top` does for a single entry.
+    // Pop the run's entries (resolution order is back-to-front) through the same
+    // authority `resolve_top` uses for a single entry, so the per-entry side
+    // tables settle with each removal.
     let mut popped = Vec::with_capacity(consumed as usize);
     for _ in 0..consumed {
-        match state.stack.pop_back() {
-            Some(entry) => {
-                state.stack_paid_facts.remove(&entry.id);
-                state.stack_trigger_event_batches.remove(&entry.id);
-                popped.push(entry);
-            }
-            None => break,
-        }
+        let Some(removed) = pop_top_stack_entry(state) else {
+            break;
+        };
+        popped.push(removed.entry);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -2631,13 +3595,11 @@ fn resolve_inert_noop_batch(
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
-        let Some(entry) = state.stack.pop_back() else {
+        let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        state.stack_paid_facts.remove(&entry.id);
-        state.stack_trigger_event_batches.remove(&entry.id);
         events.push(GameEvent::StackResolved {
-            object_id: entry.id,
+            object_id: removed.entry.id,
         });
     }
     consumed
@@ -2761,6 +3723,179 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
         .else_ability
         .map(|alt| Box::new(normalize_ability_source(&alt)));
     out
+}
+
+/// Non-allocating structural equality for `SourceIndependent` inert-trigger run
+/// identity (issue #5946). Ignores provenance stamps and `source_id` that vary
+/// across distinct ETB sources; recursively compares sub/else chains the same
+/// way. Exhaustive field disposition so new `ResolvedAbility` fields cannot
+/// silently drop out of run identity.
+fn inert_trigger_abilities_eq_ignoring_provenance(
+    a: &ResolvedAbility,
+    b: &ResolvedAbility,
+) -> bool {
+    let ResolvedAbility {
+        effect: a_effect,
+        targets: a_targets,
+        source_id: _,
+        source_incarnation: _,
+        trigger_source: _,
+        trigger_definition_ref: _,
+        force_block_attacker: a_force_block_attacker,
+        controller: a_controller,
+        original_controller: _,
+        scoped_player: a_scoped_player,
+        kind: a_kind,
+        sub_ability: a_sub_ability,
+        else_ability: a_else_ability,
+        duration: a_duration,
+        condition: a_condition,
+        context: a_context,
+        optional_targeting: a_optional_targeting,
+        optional: a_optional,
+        optional_for: a_optional_for,
+        multi_target: a_multi_target,
+        target_constraints: a_target_constraints,
+        target_choice_timing: a_target_choice_timing,
+        description: _,
+        selected_mode_labels: a_selected_mode_labels,
+        repeat_for: a_repeat_for,
+        min_x_value: a_min_x_value,
+        announced_x: a_announced_x,
+        cant_be_copied: a_cant_be_copied,
+        copy_count_status: a_copy_count_status,
+        forward_result: a_forward_result,
+        unless_pay: a_unless_pay,
+        distribution: a_distribution,
+        player_scope: a_player_scope,
+        starting_with: a_starting_with,
+        chosen_x: a_chosen_x,
+        cost_paid_object: a_cost_paid_object,
+        cost_paid_object_ids: a_cost_paid_object_ids,
+        effect_context_object: a_effect_context_object,
+        amassed_army_object: a_amassed_army_object,
+        ability_index: _,
+        may_trigger_origin: _,
+        target_selection_mode: a_target_selection_mode,
+        target_chooser: a_target_chooser,
+        chosen_players: a_chosen_players,
+        repeat_until: a_repeat_until,
+        replacement_applied: a_replacement_applied,
+        sub_link: a_sub_link,
+        sibling_condition: a_sibling_condition,
+        modal: a_modal,
+        mode_abilities: a_mode_abilities,
+        parent_target_missing_reason: a_parent_target_missing_reason,
+    } = a;
+    let ResolvedAbility {
+        effect: b_effect,
+        targets: b_targets,
+        source_id: _,
+        source_incarnation: _,
+        trigger_source: _,
+        trigger_definition_ref: _,
+        force_block_attacker: b_force_block_attacker,
+        controller: b_controller,
+        original_controller: _,
+        scoped_player: b_scoped_player,
+        kind: b_kind,
+        sub_ability: b_sub_ability,
+        else_ability: b_else_ability,
+        duration: b_duration,
+        condition: b_condition,
+        context: b_context,
+        optional_targeting: b_optional_targeting,
+        optional: b_optional,
+        optional_for: b_optional_for,
+        multi_target: b_multi_target,
+        target_constraints: b_target_constraints,
+        target_choice_timing: b_target_choice_timing,
+        description: _,
+        selected_mode_labels: b_selected_mode_labels,
+        repeat_for: b_repeat_for,
+        min_x_value: b_min_x_value,
+        announced_x: b_announced_x,
+        cant_be_copied: b_cant_be_copied,
+        copy_count_status: b_copy_count_status,
+        forward_result: b_forward_result,
+        unless_pay: b_unless_pay,
+        distribution: b_distribution,
+        player_scope: b_player_scope,
+        starting_with: b_starting_with,
+        chosen_x: b_chosen_x,
+        cost_paid_object: b_cost_paid_object,
+        cost_paid_object_ids: b_cost_paid_object_ids,
+        effect_context_object: b_effect_context_object,
+        amassed_army_object: b_amassed_army_object,
+        ability_index: _,
+        may_trigger_origin: _,
+        target_selection_mode: b_target_selection_mode,
+        target_chooser: b_target_chooser,
+        chosen_players: b_chosen_players,
+        repeat_until: b_repeat_until,
+        replacement_applied: b_replacement_applied,
+        sub_link: b_sub_link,
+        sibling_condition: b_sibling_condition,
+        modal: b_modal,
+        mode_abilities: b_mode_abilities,
+        parent_target_missing_reason: b_parent_target_missing_reason,
+    } = b;
+
+    a_effect == b_effect
+        && a_targets == b_targets
+        && a_force_block_attacker == b_force_block_attacker
+        && a_controller == b_controller
+        && a_scoped_player == b_scoped_player
+        && a_kind == b_kind
+        && match (a_sub_ability, b_sub_ability) {
+            (None, None) => true,
+            (Some(a_sub), Some(b_sub)) => {
+                inert_trigger_abilities_eq_ignoring_provenance(a_sub, b_sub)
+            }
+            _ => false,
+        }
+        && match (a_else_ability, b_else_ability) {
+            (None, None) => true,
+            (Some(a_else), Some(b_else)) => {
+                inert_trigger_abilities_eq_ignoring_provenance(a_else, b_else)
+            }
+            _ => false,
+        }
+        && a_duration == b_duration
+        && a_condition == b_condition
+        && a_context == b_context
+        && a_optional_targeting == b_optional_targeting
+        && a_optional == b_optional
+        && a_optional_for == b_optional_for
+        && a_multi_target == b_multi_target
+        && a_target_constraints == b_target_constraints
+        && a_target_choice_timing == b_target_choice_timing
+        && a_selected_mode_labels == b_selected_mode_labels
+        && a_repeat_for == b_repeat_for
+        && a_min_x_value == b_min_x_value
+        && a_announced_x == b_announced_x
+        && a_cant_be_copied == b_cant_be_copied
+        && a_copy_count_status == b_copy_count_status
+        && a_forward_result == b_forward_result
+        && a_unless_pay == b_unless_pay
+        && a_distribution == b_distribution
+        && a_player_scope == b_player_scope
+        && a_starting_with == b_starting_with
+        && a_chosen_x == b_chosen_x
+        && a_cost_paid_object == b_cost_paid_object
+        && a_cost_paid_object_ids == b_cost_paid_object_ids
+        && a_effect_context_object == b_effect_context_object
+        && a_amassed_army_object == b_amassed_army_object
+        && a_target_selection_mode == b_target_selection_mode
+        && a_target_chooser == b_target_chooser
+        && a_chosen_players == b_chosen_players
+        && a_repeat_until == b_repeat_until
+        && a_replacement_applied == b_replacement_applied
+        && a_sub_link == b_sub_link
+        && a_sibling_condition == b_sibling_condition
+        && a_modal == b_modal
+        && a_mode_abilities == b_mode_abilities
+        && a_parent_target_missing_reason == b_parent_target_missing_reason
 }
 
 /// Build the run key for an entry, or `None` if the entry is not a candidate
@@ -3123,15 +4258,16 @@ pub(crate) fn create_warp_delayed_trigger(
         );
     }
 
-    state
-        .delayed_triggers
-        .push(crate::types::game_state::DelayedTrigger {
+    super::triggers::install_delayed_trigger(
+        state,
+        crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: delayed_ability,
+            ability: Box::new(delayed_ability),
             controller,
             source_id: object_id,
             one_shot: true,
-        });
+        },
+    );
 }
 
 #[cfg(test)]
@@ -3181,7 +4317,7 @@ mod tests {
         let entry = StackEntry {
             kind: StackEntryKind::Spell {
                 card_id: CardId(10),
-                ability: Some(final_ability),
+                ability: Some(Box::new(final_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -3335,6 +4471,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty,
+            printed_loyalty: None,
             defense,
             card_types,
             mana_cost: Default::default(),
@@ -3387,7 +4524,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -3487,11 +4624,11 @@ mod tests {
         });
         state.pending_trigger_entry = Some(entry_id);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
             controller: PlayerId(0),
             condition: None,
-            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            ability: Box::new(state.stack.back().unwrap().ability().unwrap().clone()),
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3502,7 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -3571,7 +4708,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(102),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -3838,7 +4975,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(724),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4159,7 +5296,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4750,7 +5887,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -4781,7 +5918,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::GraveyardPermission {
                     source: ObjectId(999),
                     frequency: crate::types::statics::CastFrequency::OncePerTurn,
@@ -4886,7 +6023,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -5205,7 +6342,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
-                    ability: Some(ability),
+                    ability: Some(Box::new(ability)),
                     casting_variant: CastingVariant::Normal,
                     actual_mana_spent: 0,
                 },
@@ -5257,7 +6394,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(modal_ability.clone()),
+                ability: Some(Box::new(modal_ability.clone())),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 3,
             },
@@ -5304,7 +6441,7 @@ mod tests {
         };
         state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(modal_ability),
+            ability: Some(Box::new(modal_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 3,
         };
@@ -5470,7 +6607,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(300),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5572,7 +6709,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(900),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5622,7 +6759,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(901),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5744,17 +6881,19 @@ mod tests {
     mod batch_resolve {
         // Driver internals under test (the stack module).
         use super::super::{
-            batch_run_len, effects, observers_are_batch_safe, resolve_next,
-            resolve_next_with_limit, resolve_top, self_counter_run_len,
+            batch_run_len, effects, fixed_controller_gain_life_run_len,
+            fixed_opponent_lose_life_run_len, inert_trigger_batch_state_is_settled,
+            observers_are_batch_safe, resolve_next, resolve_next_with_limit, resolve_top,
+            self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
         use crate::game::triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{
-            AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp, PtValue,
-            QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition,
-            TriggerDefinition, TypeFilter, TypedFilter,
+            AbilityCondition, AbilityDefinition, Comparator, Duration, Effect, FilterProp,
+            PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+            TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
         };
         use crate::types::card_type::CoreType;
         use crate::types::counter::CounterType;
@@ -5764,6 +6903,7 @@ mod tests {
         use crate::types::mana::ManaColor;
         use crate::types::player::PlayerId;
         use crate::types::proposed_event::TokenSpec;
+        use crate::types::resolution::PendingProliferateActions;
         use crate::types::triggers::TriggerMode;
         use crate::types::zones::Zone;
         use std::sync::Arc;
@@ -6152,6 +7292,90 @@ mod tests {
             });
         }
 
+        fn fixed_controller_gain_life_effect() -> Effect {
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            }
+        }
+
+        fn push_fixed_controller_gain_life_trigger(
+            state: &mut GameState,
+            source: ObjectId,
+            trigger_event: GameEvent,
+        ) {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let mut ability = ResolvedAbility::new(
+                fixed_controller_gain_life_effect(),
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.description = Some("you gain 1 life".to_string());
+            ability.ability_index = Some(0);
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: Some(trigger_event),
+                    description: Some("Whenever a creature enters, you gain 1 life.".to_string()),
+                    source_name: state.objects[&source].name.clone(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            });
+        }
+
+        fn fixed_opponent_lose_life_effect() -> Effect {
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            }
+        }
+
+        fn push_fixed_opponent_lose_life_trigger(
+            state: &mut GameState,
+            source: ObjectId,
+            trigger_event: GameEvent,
+            condition: Option<TriggerCondition>,
+            source_incarnation: Option<u64>,
+        ) {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let mut ability = ResolvedAbility::new(
+                fixed_opponent_lose_life_effect(),
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.player_scope = Some(PlayerFilter::Opponent);
+            ability.description = Some("each opponent loses 2 life".to_string());
+            ability.ability_index = Some(0);
+            ability.source_incarnation = source_incarnation;
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition,
+                    trigger_event: Some(trigger_event),
+                    description: Some(
+                        "Whenever a creature dies, each opponent loses 2 life.".to_string(),
+                    ),
+                    source_name: state.objects[&source].name.clone(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            });
+        }
+
         fn life_event(player_id: PlayerId, amount: i32) -> GameEvent {
             GameEvent::LifeChanged { player_id, amount }
         }
@@ -6315,6 +7539,21 @@ mod tests {
         }
 
         #[test]
+        fn self_counter_batch_requires_an_empty_resolution_stack() {
+            let mut state = setup();
+            state.push_proliferate_frame(PendingProliferateActions {
+                actor: PlayerId(0),
+                source_id: ObjectId(9_501),
+                remaining: 1,
+            });
+
+            assert!(
+                !inert_trigger_batch_state_is_settled(&state),
+                "an active resolution frame makes a skipped priority checkpoint observable"
+            );
+        }
+
+        #[test]
         fn self_counter_batch_refuses_when_checkpoint_annihilates_counters() {
             crate::game::perf_counters::reset();
             let mut state = setup();
@@ -6380,6 +7619,250 @@ mod tests {
             assert_eq!(
                 consumed, 1,
                 "CounterAdded observer must make the clone checkpoint non-inert"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
+            );
+        }
+
+        #[test]
+        fn fixed_controller_gain_life_triggers_batch_with_production_stamps() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source_a = add_self_counter_source(&mut state, "Bogwater Lumaret A");
+            let source_b = add_self_counter_source(&mut state, "Bogwater Lumaret B");
+            let etb = life_event(PlayerId(0), 0);
+            push_fixed_controller_gain_life_trigger(&mut state, source_a, etb.clone());
+            push_fixed_controller_gain_life_trigger(&mut state, source_b, etb.clone());
+            push_fixed_controller_gain_life_trigger(&mut state, source_b, etb);
+
+            assert_eq!(
+                fixed_controller_gain_life_run_len(&state),
+                Some(3),
+                "SourceIndependent fixed GainLife run should ignore distinct sources"
+            );
+
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert_eq!(state.players[0].life, life_before + 3);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
+        #[test]
+        fn fixed_controller_gain_life_batch_refuses_when_life_gained_observer_fires() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Bogwater Lumaret");
+            let observer = create_object(
+                &mut state,
+                CardId(9_600),
+                PlayerId(0),
+                "Life Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trig = TriggerDefinition::new(TriggerMode::LifeGained).execute(
+                    AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ),
+                );
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            let etb = life_event(PlayerId(0), 0);
+            push_fixed_controller_gain_life_trigger(&mut state, source, etb.clone());
+            push_fixed_controller_gain_life_trigger(&mut state, source, etb);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "CR 119.9 life-gained observers must force single-entry fallback"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_lose_life_triggers_batch_across_sources_with_equal_conditions() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source_a = add_self_counter_source(&mut state, "Hearthhull A");
+            let source_b = add_self_counter_source(&mut state, "Hearthhull B");
+            let condition = TriggerCondition::LifeTotalGE { minimum: 1 };
+            let trigger_event = life_event(PlayerId(0), 0);
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source_a,
+                trigger_event.clone(),
+                Some(condition.clone()),
+                Some(1),
+            );
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source_b,
+                trigger_event.clone(),
+                Some(condition.clone()),
+                Some(2),
+            );
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source_a,
+                trigger_event,
+                Some(condition),
+                Some(3),
+            );
+
+            assert_eq!(
+                fixed_opponent_lose_life_run_len(&state),
+                Some(3),
+                "fixed opponent life loss should ignore inert source provenance"
+            );
+
+            let life_before = state.players[1].life;
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert_eq!(state.players[1].life, life_before - 6);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_lose_life_batch_rechecks_intervening_if_at_resolution() {
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Hearthhull");
+            let condition = TriggerCondition::LifeTotalGE { minimum: 20 };
+            let trigger_event = life_event(PlayerId(0), 0);
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event.clone(),
+                Some(condition.clone()),
+                None,
+            );
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event,
+                Some(condition),
+                None,
+            );
+            state.players[0].life = 19;
+
+            let opponent_life_before = state.players[1].life;
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 2);
+            assert_eq!(state.players[1].life, opponent_life_before);
+            assert!(state.stack.is_empty());
+        }
+
+        #[test]
+        fn fixed_opponent_lose_life_batch_stops_at_different_intervening_if() {
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Hearthhull");
+            let trigger_event = life_event(PlayerId(0), 0);
+            let lower_condition = TriggerCondition::LifeTotalGE { minimum: 2 };
+            let top_condition = TriggerCondition::LifeTotalGE { minimum: 1 };
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event.clone(),
+                Some(lower_condition),
+                None,
+            );
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event.clone(),
+                Some(top_condition.clone()),
+                None,
+            );
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event,
+                Some(top_condition),
+                None,
+            );
+
+            assert_eq!(
+                fixed_opponent_lose_life_run_len(&state),
+                Some(2),
+                "a distinct intervening-if must end the contiguous batch"
+            );
+
+            let mut events = Vec::new();
+            assert_eq!(resolve_next(&mut state, &mut events), 2);
+            assert_eq!(state.stack.len(), 1);
+        }
+
+        #[test]
+        fn fixed_opponent_lose_life_batch_refuses_when_life_lost_observer_fires() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Hearthhull");
+            let observer = create_object(
+                &mut state,
+                CardId(9_601),
+                PlayerId(0),
+                "Loss Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trig =
+                    TriggerDefinition::new(TriggerMode::LifeLost).execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::NoOp,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                obj.trigger_definitions.push(trig);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            let trigger_event = life_event(PlayerId(0), 0);
+            push_fixed_opponent_lose_life_trigger(
+                &mut state,
+                source,
+                trigger_event.clone(),
+                None,
+                None,
+            );
+            push_fixed_opponent_lose_life_trigger(&mut state, source, trigger_event, None, None);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "life-lost observers must force single-entry fallback"
             );
             assert_eq!(
                 crate::game::perf_counters::snapshot().stack_batched_entries,
@@ -9603,7 +11086,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

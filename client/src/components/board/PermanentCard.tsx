@@ -11,11 +11,12 @@ import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
@@ -109,10 +110,15 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
       </span>
       <GameplayTooltip>
         {blocked.map((entry, i) => {
-          const abilityName =
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the host
+          // object so the badge reads the card's name, not a raw tilde.
+          const rawAbilityName =
             entry.ability_index < obj.abilities.length
               ? obj.abilities[entry.ability_index]?.description
               : undefined;
+          const abilityName = rawAbilityName
+            ? renderDescription(rawAbilityName, obj.name)
+            : undefined;
           const names = (entry.sources ?? [])
             .map((id) => objects?.[String(id)]?.name)
             .filter((n): n is string => !!n);
@@ -126,6 +132,27 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
             </span>
           );
         })}
+      </GameplayTooltip>
+    </span>
+  );
+}
+
+// CR 509.1b: compact display of the engine-authored temporary evasion marker.
+// The component only renders the derived map and resolves a supplied public
+// source object for its tooltip; it never determines whether blocking is legal.
+function CantBeBlockedBadge({ sourceName }: { sourceName?: string }) {
+  const { t } = useTranslation("game");
+  return (
+    <span className="group absolute bottom-1 left-1/2 z-30 inline-flex -translate-x-1/2">
+      <span
+        className="flex items-center rounded bg-cyan-600/90 px-1 py-0.5 text-[10px] font-bold text-cyan-50 shadow ring-1 ring-cyan-200/60"
+        aria-label={t("permanent.cantBeBlocked")}
+      >
+        <span aria-hidden>↯</span>
+      </span>
+      <GameplayTooltip>
+        {t("permanent.cantBeBlocked")}
+        {sourceName ? ` ${t("preview.fromSource", { source: sourceName })}` : ""}
       </GameplayTooltip>
     </span>
   );
@@ -249,7 +276,6 @@ export const PermanentCard = memo(function PermanentCard({
 }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
-  const canHover = useCanHover();
   const playerId = usePlayerId();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -258,6 +284,17 @@ export const PermanentCard = memo(function PermanentCard({
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
   );
+  const temporaryCantBeBlockedSourceId = useGameStore(
+    (s) => s.gameState?.derived?.temporary_cant_be_blocked?.[String(objectId)],
+  );
+  // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
+  // copiable values. Engine-classified because a copy of a permanent lives in a
+  // Layer 1a continuous effect, not on the object — and the copy overrides
+  // `printed_ref` too, so a copy is pixel-identical to its source here.
+  const isCopiedPermanent = useGameStore((s) =>
+    (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
+  );
+  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -305,7 +342,6 @@ export const PermanentCard = memo(function PermanentCard({
     incomingAttackerCounts,
     manaTappableObjectIds,
     selectableManaCostCreatureIds,
-    selectableSacrificeObjectIds,
     undoableTapObjectIds,
     validAttackerIds,
     validTargetObjectIds,
@@ -390,21 +426,6 @@ export const PermanentCard = memo(function PermanentCard({
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  // On touch-only devices, skip mouse events — synthesized mouseenter from touch fires
-  // inspectObject every touch, opening the full-screen MobilePreviewOverlay
-  // and blocking combat interactions (blocker/attacker selection).
-  const handleMouseEnter = useCallback(() => {
-    if (isMobile || !canHover) return;
-    hoverObject(objectId); inspectObject(objectId);
-  }, [canHover, hoverObject, inspectObject, isMobile, objectId]);
-
-  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (isMobile || !canHover) return;
-    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
-    hoverObject(nextObjectId);
-    inspectObject(nextObjectId);
-  }, [canHover, hoverObject, inspectObject, isMobile]);
-
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
@@ -413,15 +434,51 @@ export const PermanentCard = memo(function PermanentCard({
     }, [inspectObject, setPreviewSticky, objectId]),
   );
 
+  // Gate on the event's own `pointerType`, not on a `(any-hover: hover)` media
+  // query. The hazard is a touch-synthesized enter — it fires inspectObject on
+  // every touch, opening the full-screen MobilePreviewOverlay and blocking
+  // combat interactions (blocker/attacker selection) — and `pointerType`
+  // reports that per-event. Capability metadata lies on hosts that still
+  // deliver honest pointer events: a remote-desktop session advertises no
+  // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
+  // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.pointerType === "touch") return;
+    hoverObject(objectId); inspectObject(objectId);
+  }, [hoverObject, inspectObject, isMobile, objectId]);
+
+  // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
+  // this handler wins the key collision in the spread below, so dropping the
+  // delegation would leave the long-press timer running after the pointer
+  // slides off the card.
+  const cancelLongPress = longPressHandlers.onPointerLeave;
+  const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    cancelLongPress(event);
+    if (isMobile || event.pointerType === "touch") return;
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
+
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const interactionAttachmentFan = useMemo(
+    () =>
+      viewerInteraction?.attachmentFans[objectId] ?? null,
+    [objectId, viewerInteraction],
+  );
 
-  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
+  const showAttachmentFan = useCallback(() => {
     dismissPreview();
     setAttachmentFanHost(objectId);
   }, [dismissPreview, objectId, setAttachmentFanHost]);
+
+  const openAttachmentFan = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    showAttachmentFan();
+  }, [showAttachmentFan]);
 
   if (!obj) return null;
 
@@ -438,31 +495,10 @@ export const PermanentCard = memo(function PermanentCard({
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  // CR 301.5 / CR 303.4: An attached Equipment/Aura is an independent permanent
-  // that can be a valid target, an activation source (re-equip), or a board
-  // choice in its own right. Collapsed behind its host it is unreachable —
-  // clicks land on the host instead, so a "put a counter on target nonland
-  // permanent you control" trigger lands on the creature rather than the chosen
-  // Equipment, and an attached Equipment can't be re-activated to move it. Open
-  // a host's attachments whenever any of them is actionable in the current
-  // waiting state so each is independently clickable without requiring a hover.
-  const attachmentsActionable =
-    obj.attachments.length > 0
-    && obj.attachments.some(
-      (id) =>
-        validTargetObjectIds.has(id)
-        || activatableObjectIds.has(id)
-        || manaTappableObjectIds.has(id)
-        || boardChoiceObjectIds.has(id)
-        || selectableSacrificeObjectIds.has(id)
-        || selectableManaCostCreatureIds.has(id)
-        // An attachment tapped for mana that can still be untapped (undo) is
-        // itself actionable — keep it expanded so the undo affordance stays
-        // clickable. `undoableTapObjectIds` is already gated upstream
-        // (GameBoard `undoLegal`) to the states whose engine match arms accept
-        // the untap, so no extra state check is needed here.
-        || undoableTapObjectIds.has(id),
-    );
+  // The viewer-scoped engine projection owns both the direct-attachment
+  // relationship and whether one is actionable for this interaction. The
+  // board must not rediscover either fact from the raw snapshot.
+  const attachmentsActionable = interactionAttachmentFan !== null;
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
@@ -541,7 +577,22 @@ export const PermanentCard = memo(function PermanentCard({
   // CR 708.2: a face-down permanent has no characteristics other than those
   // its face-down rule grants, so never surface "Copy" on it — that would leak
   // that it's a token-copy (matches the `!face_down` guard on the keyword strip).
-  const isCopy = obj.is_token === true && obj.display_source !== "Token" && !obj.face_down;
+  // Two independent ways a permanent is a copy, unioned so the badge covers the
+  // whole class rather than only the token half (issue #5932):
+  //   - a token minted as a copy (`is_token` + card art), and
+  //   - a real card under a live copy effect (`copied_permanents`) — Clone,
+  //     Phantasmal Image, Vesuvan Doppelganger. These were previously missed
+  //     entirely, so two Reveillarks were indistinguishable on the board.
+  // CR 708.2: the face-down guard leads, so it covers BOTH sources — a
+  // face-down permanent has only the characteristics its face-down rules grant,
+  // and surfacing "Copy" on one would leak what it really is.
+  const isCopy =
+    !obj.face_down
+    && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
+  const temporaryCantBeBlockedSourceName =
+    temporaryCantBeBlockedSourceId == null
+      ? undefined
+      : gameObjects?.[String(temporaryCantBeBlockedSourceId)]?.name;
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
@@ -622,6 +673,12 @@ export const PermanentCard = memo(function PermanentCard({
       });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      showAttachmentFan();
     } else if (isActivatable) {
       const o = useGameStore.getState().gameState?.objects[objectId];
       // Read the engine-provided action list for this permanent — the mapping
@@ -723,9 +780,9 @@ export const PermanentCard = memo(function PermanentCard({
       }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
       onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
       {isManaPaymentPreviewSource && (
         <div
@@ -904,8 +961,16 @@ export const PermanentCard = memo(function PermanentCard({
           <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
             {counters.map(([type, count]) => {
               const iconClass = counterIconClass(type);
+              // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+              // counter unboundedly — render ∞ instead of the (still-finite) real count.
+              const isUnbounded = unboundedCounterTypes.includes(type);
               return (
-                <CounterTooltip key={type} type={type} count={count}>
+                <CounterTooltip
+                  key={type}
+                  type={type}
+                  count={count}
+                  isUnbounded={isUnbounded}
+                >
                   <span
                     className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                   >
@@ -916,7 +981,7 @@ export const PermanentCard = memo(function PermanentCard({
                         label={formatCounterType(type)}
                       />
                     )}
-                    {formatCounterType(type)} x{count}
+                    {formatCounterType(type)} {isUnbounded ? "∞" : `x${count}`}
                   </span>
                 </CounterTooltip>
               );
@@ -1012,6 +1077,10 @@ export const PermanentCard = memo(function PermanentCard({
         >
           {t("permanent.copy")}
         </div>
+      )}
+
+      {temporaryCantBeBlockedSourceId !== undefined && (
+        <CantBeBlockedBadge sourceName={temporaryCantBeBlockedSourceName} />
       )}
 
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.

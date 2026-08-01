@@ -8,11 +8,5 @@ expression: "&diagnostics"
     "text": "it's attacking",
     "parser": "deal-damage",
     "line_index": 0
-  },
-  {
-    "type": "IgnoredRemainder",
-    "text": "it's attacking",
-    "parser": "deal-damage",
-    "line_index": 0
   }
 ]

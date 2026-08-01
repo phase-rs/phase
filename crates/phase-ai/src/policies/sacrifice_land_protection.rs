@@ -156,6 +156,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost {
@@ -204,10 +205,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
@@ -284,6 +282,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::You),
                 )),
                 duration: None,
+                end_cost: None,
             },
         );
         ability.cost = Some(AbilityCost::Tap);
@@ -410,7 +409,7 @@ mod tests {
             controller: opp,
             kind: StackEntryKind::Spell {
                 card_id: CardId(99),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -488,10 +487,7 @@ mod tests {
                 source_id: id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },

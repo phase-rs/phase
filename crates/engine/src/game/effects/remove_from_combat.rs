@@ -1,6 +1,11 @@
+use crate::game::combat::CombatParticipation;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::resolved_commands::{
+    ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
+};
 
 /// CR 506.4: Remove a creature from combat — it stops being an attacking,
 /// blocking, blocked, and/or unblocked creature.
@@ -46,29 +51,20 @@ pub fn resolve(
 /// Reusable building block for any code that needs to remove a permanent from combat
 /// (regeneration, effect resolution, controller change, etc.).
 pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::identifiers::ObjectId) {
-    let mut attacker_removed = false;
-    if let Some(ref mut combat) = state.combat {
-        // Remove as attacker
-        let attackers_before = combat.attackers.len();
-        combat.attackers.retain(|a| a.object_id != oid);
-        attacker_removed = combat.attackers.len() != attackers_before;
-        // Drop attacker-keyed forward assignments (oid was blocking nobody as a key,
-        // but was an attacker with blockers assigned to it).
-        combat.blocker_assignments.remove(&oid);
-        // Remove as blocker from all remaining attacker assignments
-        for blockers in combat.blocker_assignments.values_mut() {
-            blockers.retain(|b| *b != oid);
-        }
-        // Remove reverse lookup when oid was a blocker
-        combat.blocker_to_attacker.remove(&oid);
-        // Prune oid from every blocker's attacker list (oid was an attacker)
-        combat.blocker_to_attacker.retain(|_, attackers| {
-            attackers.retain(|id| *id != oid);
-            !attackers.is_empty()
-        });
-        // Remove any pending damage assignments for this object
-        combat.damage_assignments.remove(&oid);
+    // CR 733: read the exact roles being pruned BEFORE the prune, so the journal
+    // records what this removal actually did. An object holding no combat role
+    // prunes nothing and is not recorded.
+    let participation = CombatParticipation::capture(state, oid);
+    if participation.is_empty() {
+        return;
     }
+    let reference = state
+        .objects
+        .get(&oid)
+        .map(ObjectIncarnationRef::from_object);
+
+    let attacker_removed = crate::game::combat::prune_object_from_combat(state, oid);
+
     // CR 506.4 + CR 613.1f: a creature removed from combat stops being attacking,
     // so a granted "while attacking" keyword (deathtouch/lifelink via
     // FilterProp::Attacking { defender: None }, Layer 6) must be revoked immediately. Mark dirty only
@@ -77,6 +73,29 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
     if attacker_removed {
         state.layers_dirty.mark_full();
     }
+
+    if let Some(reference) = reference {
+        record_combat_membership_removal(state, reference, participation);
+    }
+}
+
+/// CR 733: Journals one settled CR 506.4 removal through its owning family.
+fn record_combat_membership_removal(
+    state: &mut GameState,
+    object: ObjectIncarnationRef,
+    expected_participation: CombatParticipation,
+) {
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_combat_membership(ResolvedCombatMembershipCommand {
+            object,
+            edit: ResolvedCombatMembershipEdit::Remove {
+                expected_participation,
+            },
+            cause,
+        })
+        .expect("resolved combat removal must have a live journal cause");
 }
 
 #[cfg(test)]

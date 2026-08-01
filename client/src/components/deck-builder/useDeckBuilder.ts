@@ -34,7 +34,9 @@ import {
   commanderPartnerCandidates,
   companionCandidates,
   isCardCommanderEligibleForFormat,
+  maxDeckCopies,
   signatureSpellSelectionPolicy,
+  type DeckCopyLimit,
 } from "../../services/engineRuntime";
 
 const PRECON_PREFIX = "[Pre-built] ";
@@ -332,6 +334,89 @@ export function useDeckBuilder({
       });
     },
     [],
+  );
+
+  // CR 100.4a: the copy limit applies to the main deck, sideboard, and command
+  // zone combined, so the increment gate counts every slot a card can occupy.
+  const combinedCopyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const add = (name: string, n: number) =>
+      counts.set(name, (counts.get(name) ?? 0) + n);
+    for (const entry of deck.main) add(entry.name, entry.count);
+    for (const entry of deck.sideboard) add(entry.name, entry.count);
+    for (const name of commanders) add(name, 1);
+    for (const name of deck.signature_spell ?? []) add(name, 1);
+    if (deck.companion) add(deck.companion, 1);
+    return counts;
+  }, [deck, commanders]);
+
+  // Distinct names currently in the partition, as a stable key — the ceiling
+  // for a (name, format) pair never changes, so this only refetches when the
+  // set of names or the format actually changes, not on every count edit.
+  const copyLimitKey = useMemo(
+    () =>
+      [
+        ...new Set([...deck.main, ...deck.sideboard].map((entry) => entry.name)),
+      ]
+        .sort()
+        .join("|"),
+    [deck.main, deck.sideboard],
+  );
+
+  // CR 100.2a / CR 903.5b: the ceiling is engine-resolved per card and format
+  // (basic-land exemption, printed overrides like Relentless Rats or Seven
+  // Dwarves, four-of vs singleton default). The builder never re-derives it.
+  const [copyLimits, setCopyLimits] = useState<Map<string, DeckCopyLimit>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    const names = copyLimitKey ? copyLimitKey.split("|") : [];
+    if (names.length === 0) {
+      setCopyLimits(new Map());
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      names.map(async (name) => [name, await maxDeckCopies(name, format)] as const),
+    )
+      .then((results) => {
+        if (!cancelled) setCopyLimits(new Map(results));
+      })
+      .catch(() => {
+        // WASM may not be loaded yet; an empty map leaves increments open and
+        // the engine's compatibility warnings still flag any real violation.
+        if (!cancelled) setCopyLimits(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [copyLimitKey, format]);
+
+  const canIncrement = useCallback(
+    (name: string) => {
+      const limit = copyLimits.get(name);
+      if (!limit || limit.type === "Unlimited") return true;
+      return (combinedCopyCounts.get(name) ?? 0) < limit.data;
+    },
+    [copyLimits, combinedCopyCounts],
+  );
+
+  const handleIncrementCard = useCallback(
+    (name: string, section: "main" | "sideboard") => {
+      if (!canIncrement(name)) return;
+      setDirty(true);
+      setDeck((prev) => {
+        const entries = prev[section];
+        if (!entries.some((e) => e.name === name)) return prev;
+        return {
+          ...prev,
+          [section]: entries.map((e) =>
+            e.name === name ? { ...e, count: e.count + 1 } : e,
+          ),
+        };
+      });
+    },
+    [canIncrement],
   );
 
   const handleMoveCard = useCallback(
@@ -750,6 +835,8 @@ export function useDeckBuilder({
     handleAddCard,
     handleAddCardByName,
     handleRemoveCard,
+    handleIncrementCard,
+    canIncrement,
     handleMoveCard,
     handleImport,
     handleSave,

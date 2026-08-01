@@ -138,17 +138,15 @@ fn susan_foreman_planeswalk_arranges_planar_deck_then_rotates() {
         Some(active_id),
         "planeswalk must not happen before arrange completes"
     );
-    assert!(
-        state.pending_continuation.is_some(),
-        "Planeswalk sub must be stashed while arrange pauses, got {:?}",
-        state.pending_continuation
+    let continuation = state.active_ability_continuation().expect(
+        "Planeswalk sub must be stashed while arrange pauses as the active continuation frame",
     );
-    match &state.pending_continuation.as_ref().unwrap().chain.effect {
+    match &continuation.chain.effect {
         Effect::Planeswalk => {}
         other => panic!("expected stashed Planeswalk continuation, got {other:?}"),
     }
     assert!(
-        !is_planar_ability_source(state.pending_continuation.as_ref().unwrap().chain.source_id),
+        !is_planar_ability_source(continuation.chain.source_id),
         "stashed planeswalk must not re-enter planar-die replacement"
     );
 
@@ -236,18 +234,11 @@ fn susan_chained_planeswalk_does_not_reapply_susan_but_planeswalks() {
     let WaitingFor::ArrangePlanarDeckTopChoice { .. } = state.waiting_for.clone() else {
         panic!("expected arrange pause, got {:?}", state.waiting_for);
     };
+    let continuation = state
+        .active_ability_continuation()
+        .expect("chained Planeswalk must be stashed as the active continuation frame");
     assert!(
-        state.pending_continuation.is_some(),
-        "chained Planeswalk must be stashed"
-    );
-    assert!(
-        !state
-            .pending_continuation
-            .as_ref()
-            .unwrap()
-            .chain
-            .replacement_applied
-            .is_empty(),
+        !continuation.chain.replacement_applied.is_empty(),
         "Susan's applied key must seed the chained planeswalk"
     );
 

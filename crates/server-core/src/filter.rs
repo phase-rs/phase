@@ -34,6 +34,7 @@ mod tests {
     use engine::types::game_state::{ActiveLibrarySearch, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
+    use engine::types::resolution::PendingProliferateActions;
     use engine::types::zones::Zone;
     use proptest::prelude::*;
 
@@ -92,6 +93,24 @@ mod tests {
         );
 
         state
+    }
+
+    #[test]
+    fn server_snapshot_omits_internal_resolution_frames() {
+        let mut state = GameState::new_two_player(42);
+        state.push_proliferate_frame(PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_505),
+            remaining: 1,
+        });
+
+        let filtered = filter_state_for_player(&state, PlayerId(1));
+
+        assert!(filtered.resolution_stack.is_empty());
+        assert!(
+            !state.resolution_stack.is_empty(),
+            "server filtering must not mutate its authoritative session state"
+        );
     }
 
     #[test]
@@ -361,6 +380,7 @@ mod tests {
             is_cost_payment: false,
             library_position: None,
             enters_modified_if: None,
+            duration: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
@@ -468,7 +488,7 @@ mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -693,7 +713,7 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
-        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger = Some(Box::new(ctx.pending.clone()));
         state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
 
         // Controller view: payload intact, batch intact.

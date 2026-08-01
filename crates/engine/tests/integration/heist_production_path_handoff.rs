@@ -443,7 +443,7 @@ fn heist_look_step_does_not_drain_when_library_has_no_nonlands() {
         "Heist must not raise a choice when the opponent has no nonlands",
     );
     assert!(
-        state.pending_continuation.is_none(),
+        state.active_ability_continuation().is_none(),
         "Heist must not stash a continuation when there is nothing to choose",
     );
     assert!(

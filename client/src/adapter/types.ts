@@ -1,4 +1,9 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  InteractionActionId,
+  InteractionSubmission,
+  ViewerInteraction,
+} from "./generated/interaction";
 
 // ── Identifiers ──────────────────────────────────────────────────────────
 
@@ -322,7 +327,7 @@ export interface MeldSelection {
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
   | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
-  | { kind: "MustBlock"; sources?: ObjectId[] }
+  | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
 
@@ -371,6 +376,9 @@ export interface PhaseStop {
   phase: Phase;
   scope: PhaseStopScope;
 }
+
+/** Standing engine preference for ordinary priority recommendations. */
+export type PriorityPassingMode = "Standard" | "SkipLowUseWindows";
 
 export type Zone =
   | "Library"
@@ -480,21 +488,99 @@ export type ManaPip =
 // keyword enum — serialized as a bare keyword string (e.g. "Flashback").
 export type KeywordKind = string;
 
+export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
+
+export type AbilityActivationScope = "OfSpellType" | "Any";
+
+export type AbilityTag = {
+  type:
+    | "Boast"
+    | "Evolve"
+    | "Exhaust"
+    | "Outlast"
+    | "Cycling"
+    | "Backup"
+    | "PowerUp"
+    | "Equip"
+    | "Augment";
+};
+
+export type ZoneSpendPolarity = "From" | "NotFrom";
+
+export type ZoneSpend =
+  | Zone
+  | { zone: Zone; polarity?: ZoneSpendPolarity };
+
+export type SpellCostCriterion =
+  | { ManaValue: { comparator: Comparator; value: number } }
+  | "HasXInCost";
+
+export type SpecialAction =
+  | "CompanionToHand"
+  | "UnlockDoor"
+  | "Plot"
+  | "TurnFaceUp"
+  | "RollPlanarDie"
+  // CR 116.2c: pay a continuous effect's printed termination cost to end it.
+  | "EndContinuousEffect";
+
 export type ManaRestriction =
+  // "Spend this mana only to cast spells."
+  | "OnlyForSpell"
   // "Spend this mana only to cast creature/artifact spells."
   | { OnlyForSpellType: string }
   // "Spend this mana only to cast a creature spell of the chosen type."
   | { OnlyForCreatureType: string }
   // "Spend this mana only to cast creature spells or activate creature abilities."
-  | { OnlyForTypeSpellsOrAbilities: string }
+  | {
+      OnlyForTypeSpellsOrAbilities: {
+        spell_type: string;
+        ability: AbilityActivationScope;
+      };
+    }
+  // "Spend this mana only to activate an ability with the named engine tag."
+  | { OnlyForTaggedActivation: AbilityTag }
   // "Spend this mana only to cast spells with flashback."
   | { OnlyForSpellWithKeywordKind: KeywordKind }
   // "Spend this mana only to cast spells with flashback from a graveyard."
   | { OnlyForSpellWithKeywordKindFromZone: [KeywordKind, Zone] }
+  // "Spend this mana only to cast a spell whose mana value meets the threshold."
+  | {
+      OnlyForSpellWithManaValue: {
+        comparator: Comparator;
+        value: number;
+      };
+    }
+  // "Spend this mana only to cast a spell matching one of the cost criteria."
+  | {
+      OnlyForSpellMatchingCostCriteria: {
+        spell_type?: string;
+        criteria: SpellCostCriterion[];
+      };
+    }
+  // "Spend this mana only to cast a spell whose color count meets the threshold."
+  | {
+      OnlyForSpellWithColorCount: {
+        comparator: Comparator;
+        count: number;
+      };
+    }
+  // "Spend this mana only to cast spells of the source's chosen color."
+  | { OnlyForSpellColor: ManaColor }
+  // "Spend this mana only to cast a spell from, or not from, the named zone."
+  | { OnlyForSpellFromZone: ZoneSpend }
+  // "Spend this mana only to cast a face-down spell."
+  | "OnlyForFaceDownSpell"
   // "Spend this mana only to activate abilities."
   | "OnlyForActivation"
   // "Spend this mana only on costs that include {X}."
   | "OnlyForXCosts"
+  // "Spend this mana only on a payment satisfying any nested restriction."
+  | { OnlyForAny: ManaRestriction[] }
+  // "Spend this mana only on the named special action."
+  | { OnlyForSpecialAction: SpecialAction }
+  // A source-dependent restriction could not resolve its required choice.
+  | "Impossible"
   // Internal convoke-tap marker — never surfaced to the player.
   | "ConvokePayment";
 
@@ -567,9 +653,13 @@ export type CastingVariant =
   | { type: "Foretell" }
   | { type: "Overload" }
   | { type: "Bestow" }
+  | { type: "Mutate" }
   | { type: "Awaken" }
   | { type: "Cleave" }
+  | { type: "Impending" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Prototype" }
+  | { type: "FaceDown" }
   | { type: "Freerunning" }
   | { type: "Fuse" };
 
@@ -578,7 +668,10 @@ export interface CastingVariantChoiceOption {
   mana_cost: ManaCost;
 }
 
-export type CastPaymentMode = { type: "Auto" } | { type: "Manual" };
+export type CastPaymentMode =
+  | { type: "Auto" }
+  | { type: "AutoExceptSacrificialMana" }
+  | { type: "Manual" };
 
 export type UnlessCost =
   | { type: "Fixed"; cost: ManaCost }
@@ -1016,6 +1109,16 @@ export interface GameObject {
     abilities: SerializedAbility[];
     color: ManaColor[];
     printed_ref?: PrintedRef | null;
+    /**
+     * Engine-owned discriminant for what this stored half actually IS. The
+     * `back_face` slot is shared by several printed layouts, so its presence
+     * alone does NOT mean the object is double-faced: CR 710 Kamigawa flip
+     * cards park their alternative (bottom) half here, and Adventure/Omen
+     * cards park their alternative spell here. Only `"Transform"`, `"Modal"`,
+     * and `"Meld"` are real second faces (CR 712). Absent when the engine has
+     * no layout to report.
+     */
+    layout_kind?: LayoutKind | null;
   } | null;
   /**
    * CR 702.143c-d: Whether this card in exile is foretold. Its owner may look
@@ -1030,9 +1133,57 @@ export interface PrintedRef {
   face_name: string;
 }
 
+/**
+ * Mirror of the engine's `types::card::LayoutKind` (serialized as its plain
+ * variant name). Describes the printed layout that produced an object's stored
+ * `back_face`.
+ */
+export type LayoutKind =
+  | "Single"
+  | "Split"
+  | "Flip"
+  | "Transform"
+  | "Meld"
+  | "Adventure"
+  | "Modal"
+  | "Omen"
+  | "Prepare";
+
 export interface ObjectIncarnationRef {
   object_id: ObjectId;
   incarnation: number;
+}
+
+export type ManaSourcePenalty =
+  | "None"
+  | "HasIrreversibleContinuation"
+  | { DealsDamageOnResolution: { fixed_amount: number | null } }
+  | { PaysLifeOnActivation: { fixed_amount: number | null } }
+  | "Sacrifices";
+
+export type ManaSourceOutput =
+  | { type: "Concrete"; data: ManaType }
+  | { type: "DeferredColorChoice" };
+
+export type ProductionOverride =
+  | { type: "SingleColor"; data: ManaType }
+  | { type: "Combination"; data: ManaType[] };
+
+export interface TapsForManaSelection {
+  source: ObjectIncarnationRef;
+  occurrence: TriggerDefinitionOccurrenceRef;
+  production_override: ProductionOverride;
+}
+
+export interface ManaSourceSelection {
+  source: ObjectIncarnationRef;
+  ability_index: number | null;
+  mana_type: ManaType;
+  output: ManaSourceOutput;
+  atomic_combination: ManaType[] | null;
+  restrictions: ManaRestriction[];
+  penalty: ManaSourcePenalty;
+  taps_for_mana: TapsForManaSelection[];
 }
 
 export interface CopyEffectInstanceRef {
@@ -1474,6 +1625,13 @@ export type CastOfferKind =
       filter: TargetFilter;
       zones: Zone[];
       exile_instead_of_graveyard?: boolean;
+      // CR 406.6: source of the granting ability (engine serde-default;
+      // absent in payloads predating the field).
+      source?: ObjectId;
+      // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
+      // Nassari); omitted when empty (no batch restriction). Display-only
+      // pass-through — the modal renders `candidates`.
+      member_pool?: ObjectId[];
     };
 
 // CR 103.5b: Which declare-point action a pending BottomCards obligation
@@ -1509,6 +1667,7 @@ export type WaitingFor =
       };
     }
   | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
+  | { type: "ManaSourceSelection"; data: { player: PlayerId; options: ManaSourceSelection[]; convoke_mode?: ConvokeMode } }
   | {
       type: "ChooseXValue";
       data: {
@@ -1526,7 +1685,7 @@ export type WaitingFor =
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
-  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
+  | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
@@ -1545,7 +1704,7 @@ export type WaitingFor =
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
-  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
+  | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
@@ -1554,7 +1713,7 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
   | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
@@ -1679,7 +1838,11 @@ export type WaitingFor =
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
+  // picks WHICH opponent makes the choice before the zone choice is presented.
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
@@ -2031,7 +2194,9 @@ export type GameAction =
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
-  | { type: "TapLandForMana"; data: { object_id: ObjectId } }
+  | { type: "TapLandForMana"; data: { selection: ManaSourceSelection } }
+  | { type: "ActivateManaSource"; data: { selection: ManaSourceSelection } }
+  | { type: "BackToManaPayment" }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
   | { type: "SpendPoolMana"; data: { pip_id: number } }
@@ -2101,6 +2266,13 @@ export type GameAction =
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
+  // CR 116.2c: special action — pay a continuous effect's printed termination
+  // cost to end it. `group` is an engine-minted group key (see
+  // `EndEffectPermission`), NOT a `TransientContinuousEffect.id`.
+  | {
+      type: "EndContinuousEffect";
+      data: { group: number; source_name: string; cost: ManaCost };
+    }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "GraveyardPaidCastChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
@@ -2112,8 +2284,11 @@ export type GameAction =
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  // CR 608.2d: answer to ChooseFromZoneOpponentChooser — which opponent will choose.
+  | { type: "ChooseZoneOpponentChooser"; data: { opponent: PlayerId } }
   | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }
   | { type: "ChooseAnnouncingOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChooseGiftRecipient"; data: { opponent: PlayerId } }
   | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
   | { type: "CommitAssistPayment"; data: { generic: number } }
   | {
@@ -2126,6 +2301,7 @@ export type GameAction =
     }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
+  | { type: "SetPriorityPassingMode"; data: { mode: PriorityPassingMode } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
   // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
@@ -2183,11 +2359,22 @@ export type ShardChoice =
   | { type: "PayMana" }
   | { type: "PayLife" };
 
+// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
+// into — a display-only label so the prompt names the correct axis.
+export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
+
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } }
+  // CR 107.3f + CR 118.1 + CR 118.12: `base_cost` is the UNCONCRETIZED mana
+  // cost (still carrying the X shard alongside any colored/generic pips,
+  // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
+  // full result, so colored requirements are never dropped (#6410).
+  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
   | { type: "Counters" }
-  | { type: "Speed" };
+  | { type: "Speed" }
+  // CR 732.2a: not a resource payment — the finite count an accepted
+  // object-growth loop shortcut collapses into (display-only; the engine mints).
+  | { type: "LoopCollapse"; data: { axis: LoopCollapseAxis } };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -2248,6 +2435,8 @@ export type GameEvent =
   | { type: "BecomesTarget"; data: { target: TargetRef; source_id: ObjectId } }
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
   | { type: "Transformed"; data: { object_id: ObjectId } }
+  // CR 710.4: a Kamigawa flip permanent flipped to its alternative face.
+  | { type: "Flipped"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
@@ -2298,7 +2487,14 @@ export type GameEvent =
   // CR 705: a coin was flipped. `won` is whether the flipping player won the flip
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
-  | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } };
+  | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
+  // CR 116.2c: a player took the special action of paying a continuous effect's
+  // printed termination cost. `group` is the engine-minted group key;
+  // `source_id` is the permanent whose resolution installed the effect.
+  | {
+      type: "ContinuousEffectEnded";
+      data: { group: number; source_id: ObjectId; player: PlayerId };
+    };
 
 // ── Game State ───────────────────────────────────────────────────────────
 
@@ -2496,6 +2692,7 @@ export type DecisionPointKind =
   | { Targets: { legal_targets: TargetRef[] } }
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
+  | { ManaColor: { color: ManaColor } }
   | "MayChoice"
   | "UnlessBreak";
 
@@ -2541,7 +2738,13 @@ export interface TurnOrderSlotView {
   player: PlayerId;
   slot_index: number;
   turns_from_now: number;
+  turn_number: number;
+  is_viewer?: boolean;
+  is_starting_player?: boolean;
 }
+
+/** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
+export type BlockerAssignmentPair = [ObjectId, ObjectId];
 
 /**
  * Engine-authored projections computed at each state snapshot. Rides
@@ -2558,6 +2761,28 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /**
+   * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
+   * recipient ObjectId-as-string. A null value means the grant remains live
+   * while its source is not a public, phased-in battlefield object, so the UI
+   * shows the badge without naming an unavailable source.
+  */
+  temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+
+  /**
+   * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
+   * renders these directly rather than deciding which combat relations are
+   * visible from raw combat state. Omitted when no creature is blocking.
+   */
+  blocker_assignment_pairs?: BlockerAssignmentPair[];
+  /**
+   * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
+   * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
+   * Doppelganger). Such a permanent renders identically to what it copied, so
+   * the engine classifies it here rather than leaving the client to guess.
+   * Face-down permanents are excluded per CR 708.2. Absent when empty.
+   */
+  copied_permanents?: ObjectId[];
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**
@@ -2614,6 +2839,8 @@ export interface DerivedViews {
    * intentional when extra turns put the same player in multiple slots.
    */
   turn_order?: TurnOrderSlotView[];
+  /** One-based projected turn position for the current viewer. */
+  viewer_turn_number?: number;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
@@ -2621,6 +2848,25 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
    */
   unbounded_resources?: UnboundedResourceView[];
+  /**
+   * CR 732.2a / CR 110.1: battlefield object IDs forming an accepted object-growth
+   * loop's "∞ pile" (the winning controller's tapped fodder-class members). Engine-
+   * authored membership — the FE renders `∞` (not `×N`) on any battlefield group
+   * whose members are all in this set, and never re-derives which objects are the pile.
+   * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
+   */
+  unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
+   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
+   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
+   * pumps unboundedly. Each value string matches the object's `counters` map key
+   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
+   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
+   * when no counter-growth loop is active. Mirrors
+   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   */
+  unbounded_counters?: Record<string, string[]>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -2692,6 +2938,7 @@ export interface GameState {
   combat: CombatState | null;
   waiting_for: WaitingFor;
   has_pending_cast: boolean;
+  allows_cancel_cast?: boolean;
   /**
    * CR 601.2f: The locked-in pending cast (cost, ability, object) while the
    * caster is mid-cast. Present during ManaPayment / cost-choice WaitingFor
@@ -2806,6 +3053,7 @@ export interface GameState {
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
   phase_stops?: Record<number, PhaseStop[]>;
+  priority_passing_modes?: Record<number, PriorityPassingMode>;
   /** CR 117.3d: the viewer's standing priority-yield preferences. */
   priority_yields?: PriorityYield[];
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
@@ -2917,6 +3165,20 @@ export interface TransientContinuousEffect {
   /** `ContinuousModification` payloads — opaque to the display layer; the
    *  FE only inspects the discriminant + a small subset of fields. */
   modifications: ContinuousModification[];
+  /** CR 116.2c: engine-provided standing permission to end this effect by
+   *  paying a cost, as a special action. Absent when the effect has no printed
+   *  termination permission. Display-only: the FE interpolates `cost` into a
+   *  label and echoes `group` back in the action — it never derives either. */
+  end_permission?: EndEffectPermission;
+}
+
+/**
+ * CR 116.2c: mirrors `engine::types::game_state::EndEffectPermission`.
+ * `group` names every transient effect one resolution installed.
+ */
+export interface EndEffectPermission {
+  group: number;
+  cost: ManaCost;
 }
 
 /**
@@ -2991,8 +3253,10 @@ export const AdapterErrorCode = {
    * original dispatch.
    */
   ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
+  UNSUPPORTED: "UNSUPPORTED",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
+  DECK_REJECTED: "DECK_REJECTED",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
@@ -3006,6 +3270,13 @@ export const AdapterErrorCode = {
    * correctly refused a stale action. Dispatch treats it as a no-op rather
    * than surfacing it as a crash.
    */
+  /**
+   * The engine refused the submitted action. Long used as a bare string literal
+   * by the remote adapters; registered here so `actionRejectionError` — and any
+   * future caller — can reference it type-safely. Same wire value, so existing
+   * string comparisons are unaffected.
+   */
+  ACTION_REJECTED: "ACTION_REJECTED",
   STALE_ACTION: "STALE_ACTION",
 } as const;
 
@@ -3031,6 +3302,71 @@ export function isStaleActionMessage(message: string): boolean {
 }
 
 /**
+ * Transport-neutral test for "the engine rejected this action, but nothing
+ * changed and nothing needs recovering". Single authority for what counts as a
+ * benign stale rejection, so every transport agrees.
+ */
+export function isStaleRejectionMessage(message: string): boolean {
+  return isStaleActionMessage(message) || isStaleReorderMessage(message);
+}
+
+/**
+ * Build the `AdapterError` for an engine action rejection, classified the same
+ * way regardless of which transport delivered it.
+ *
+ * The rejection reason originates in the ENGINE, so its classification cannot
+ * depend on whether the verdict arrived from a local WASM call, a WebSocket
+ * server, or a P2P host. Routing every rejection path through here is what lets
+ * `dispatchAction` suppress the benign stale race (issue #5913) for remote
+ * players too, instead of only for the local-WASM seat.
+ *
+ * Stale rejections are NOT recoverable-by-retry: the action is void and the
+ * caller should drop it, not re-submit. Every other rejection stays a
+ * recoverable `ACTION_REJECTED` so existing retry/surface behavior is unchanged.
+ */
+export function actionRejectionError(reason: string): AdapterError {
+  return isStaleRejectionMessage(reason)
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
+    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+}
+
+/**
+ * Detect the engine's rejection of a `ReorderHand` whose order no longer names
+ * the current hand. `apply_action` formats
+ * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
+ * `Engine error: ReorderHand: expected ...` and returns it BEFORE mutating any
+ * player state, so — exactly like the actor-authorization rejections above —
+ * nothing changed and there is nothing to recover.
+ *
+ * This is the benign client/engine desync behind issue #5913: a drag computes
+ * its order against the hand as displayed, but a draw or discard can land in
+ * the engine while the client store still holds the pre-animation snapshot
+ * (`dispatch.ts` commits only AFTER the animation window). The client cannot
+ * predict that divergence — the store it would check against is the stale one —
+ * so the honest place to absorb it is here, on the engine's own verdict.
+ *
+ * Hand order carries no game-rules meaning (CR 402.3), so a dropped reorder
+ * costs the player nothing beyond re-dragging.
+ *
+ * Covers BOTH staleness rejections `apply_action` can raise, because a hand can
+ * go stale two ways in the same window:
+ *   - the count changed (a draw or a discard alone) — "expected {n} ids, got
+ *     {m}", a prefix match since the message embeds the counts;
+ *   - the count held but the ids moved (a discard AND a draw) — "order is not a
+ *     permutation of the current hand", matched exactly.
+ *
+ * Deliberately NOT covered: "ReorderHand: actor ... is not a valid player
+ * index". That one means the caller submitted a nonsense seat, which is a real
+ * bug and must keep surfacing.
+ */
+export function isStaleReorderMessage(message: string): boolean {
+  return (
+    message.startsWith("Engine error: ReorderHand: expected ") ||
+    message === "Engine error: ReorderHand: order is not a permutation of the current hand"
+  );
+}
+
+/**
  * Transport-agnostic interface for communicating with the game engine.
  * Phase 1: WasmAdapter (direct WASM calls)
  * Tauri desktop uses the same WasmAdapter path as browser local gameplay.
@@ -3052,9 +3388,22 @@ export interface StuckDecisionDiagnostic {
   stuckPlayers: number[];
 }
 
+/** Engine-authored object-action identity shared with interaction surfaces. */
+export type ObjectAction = GameAction & { interactionActionId?: InteractionActionId };
+
+/** Engine-authored CR 116.2c action shape, including display name and cost. */
+export type EndContinuousEffectOffer = Extract<
+  GameAction,
+  { type: "EndContinuousEffect" }
+>;
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
+  /** Ordered pay-to-end offers projected by the engine for direct rendering. */
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
+  /** Exact engine-authored actions for the deterministic mana-payment shortcut. */
+  manaPaymentShortcutActions?: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts?: Record<string, ManaCost>;
   /**
@@ -3063,9 +3412,11 @@ export interface LegalActionsResult {
    * for "what can I do with this card?" lookups instead of inferring action
    * availability from objects.
    */
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
+  viewerInteraction?: ViewerInteraction;
 }
 
 /**
@@ -3080,8 +3431,10 @@ export interface ViewerSnapshot {
   state: GameState;
   actions: GameAction[];
   autoPassRecommended: boolean;
+  endContinuousEffectOffers?: EndContinuousEffectOffer[];
+  manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
@@ -3090,6 +3443,7 @@ export interface ViewerSnapshot {
    * carry this field, so the snapshot copy is a deliberate parity placeholder.
    */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  viewerInteraction?: ViewerInteraction;
 }
 
 export interface BatchResolveResult {
@@ -3154,17 +3508,28 @@ export function nextSnapshotSeq(): number {
 export const EMPTY_LEGAL_ACTIONS: LegalActionsResult = {
   actions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
+  manaPaymentShortcutActions: [],
 };
 
-/**
- * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
- * WASM export, serialized as a tagged union). `full` means the game's card
- * universe is not statically bounded (today: Momir) and AI workers must load the
- * full database; `subset` carries the minimal card-data JSON for this game.
- */
+/** An exact action from the engine-owned finite domain for one AI decision. */
+export interface AiActionProposal {
+  token: string;
+  semanticOwner: PlayerId;
+  actor: PlayerId;
+  action: GameAction;
+}
+
+/** Result of the engine-owned game-scoped AI worker card-data build. */
 export type AiCardSubsetResult =
   | { kind: "full" }
   | { kind: "subset"; json: string; count: number };
+
+/** Result of submitting an opaque AI proposal to its issuing authority. */
+export type AiProposalSubmission =
+  | { status: "applied"; result: SubmitResult }
+  | { status: "stale"; reason: string }
+  | { status: "rejected"; reason: string };
 
 export interface EngineAdapter {
   initialize(): Promise<void>;
@@ -3183,6 +3548,8 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /** Submit an opaque response from the engine's current interaction projection. */
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.
@@ -3199,7 +3566,10 @@ export interface EngineAdapter {
    * genuinely need one half in isolation.
    */
   getSnapshot(): Promise<EngineSnapshot>;
-  getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
+  /** Returns an opaque, exact member of the current engine-issued decision domain. */
+  getAiActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
+  /** Applies a proposal only if its authority token and exact action remain current. */
+  submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],
@@ -3219,4 +3589,24 @@ export interface EngineAdapter {
    * Pure — no game state, no side effects. Safe to call on every deck edit.
    */
   estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
+}
+
+/**
+ * Optional transport capability for a whole-match concession. This is a
+ * capability rather than a route-mode policy: the UI may offer it only when
+ * the installed adapter explicitly vouches that it can bind the request to an
+ * authenticated match session. P2P installs it only for a pod-issued draft
+ * match binding; ordinary P2P rooms intentionally do not expose it.
+ */
+export interface MatchConcedeCapability {
+  readonly supportsMatchConcede: true;
+  sendMatchConcede(): void;
+}
+
+export function supportsMatchConcede(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & MatchConcedeCapability {
+  return adapter !== null
+    && (adapter as Partial<MatchConcedeCapability>).supportsMatchConcede === true
+    && typeof (adapter as Partial<MatchConcedeCapability>).sendMatchConcede === "function";
 }

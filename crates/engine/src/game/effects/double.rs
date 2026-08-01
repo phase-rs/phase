@@ -129,7 +129,7 @@ fn resolve_double_counters(
 /// If life < 0: lose life equal to |current total| (new total = 2x negative).
 /// If life == 0: no change.
 ///
-/// Routes the gain/loss through `apply_life_gain` / `apply_damage_life_loss`
+/// Routes the gain/loss through `apply_life_gain` / `apply_life_loss`
 /// so the same replacement-pipeline and can't-gain / can't-lose short-circuits
 /// that govern all other life-change events apply here too (CR 119.7 + 119.8).
 fn resolve_double_life(
@@ -149,20 +149,28 @@ fn resolve_double_life(
 
     if current_life > 0 {
         // CR 701.10d: Gain life equal to current total.
-        let _ = crate::game::effects::life::apply_life_gain(
+        if crate::game::effects::life::apply_life_gain(
             state,
             player_id,
             current_life as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     } else if current_life < 0 {
         // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
-        let _ = crate::game::effects::life::apply_damage_life_loss(
+        if crate::game::effects::life::apply_life_loss(
             state,
             player_id,
             (-current_life) as u32,
             events,
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     }
     // life == 0: no change.
 
@@ -222,7 +230,7 @@ fn resolve_double_mana(
     for (mana_type, count) in mana_to_add {
         for _ in 0..count {
             // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 player_id,
                 ManaUnit {
                     color: mana_type,
@@ -322,6 +330,7 @@ mod tests {
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -359,6 +368,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
@@ -457,8 +467,7 @@ mod tests {
             crate::types::game_state::WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining double-counter additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -713,7 +722,7 @@ mod tests {
         // Add 3 red mana to player 0's pool
         let p0 = state.players[0].id;
         for _ in 0..3 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 p0,
                 ManaUnit {
                     color: ManaType::Red,

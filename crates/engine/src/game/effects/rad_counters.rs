@@ -7,6 +7,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerCounterKind;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
 /// CR 728.1: Resolve the inherent rad counter triggered ability.
@@ -66,7 +67,7 @@ pub fn resolve(
             let ids: Vec<_> = library_before.into_iter().take(final_count).collect();
             // CR 616.1: a per-card Moved ordering choice parks the prompt
             // (`state.waiting_for` set, `pending_replacement` holding the
-            // paused card's move, tail in `pending_batch_deliveries`). Bail
+            // paused card's move, tail in the active BatchDelivery frame). Bail
             // like `mill::resolve` does: continuing into the life-loss loop
             // would propose `LifeLoss` replacement events while the parked
             // choice is pending and could overwrite `pending_replacement`,
@@ -133,20 +134,29 @@ pub fn resolve(
         // CR 728.1: Remove one rad counter per nonland card milled.
         // This happens regardless of whether life loss was prevented or
         // deferred to a replacement choice.
-        let player = state
+        let current_rad = state
             .players
-            .iter_mut()
+            .iter()
             .find(|p| p.id == player_id)
-            .ok_or(EffectError::PlayerNotFound)?;
-        let current_rad = player.player_counter(&PlayerCounterKind::Rad);
+            .ok_or(EffectError::PlayerNotFound)?
+            .player_counter(&PlayerCounterKind::Rad);
         let to_remove = nonland_count.min(current_rad);
-        player.remove_player_counters(&PlayerCounterKind::Rad, to_remove);
-
-        events.push(GameEvent::PlayerCounterChanged {
-            player: player_id,
-            counter_kind: PlayerCounterKind::Rad,
-            delta: -(to_remove as i32),
-        });
+        if to_remove > 0 {
+            state
+                .resolve_and_apply_player_edit(
+                    player_id,
+                    ResolvedPlayerEdit::Counter {
+                        kind: PlayerCounterKind::Rad,
+                        delta: -(to_remove as i32),
+                    },
+                )
+                .expect("the captured rad-counter removal must satisfy its precondition");
+            events.push(GameEvent::PlayerCounterChanged {
+                player: player_id,
+                counter_kind: PlayerCounterKind::Rad,
+                delta: -(to_remove as i32),
+            });
+        }
     }
 
     events.push(GameEvent::EffectResolved {

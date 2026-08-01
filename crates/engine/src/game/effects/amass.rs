@@ -149,8 +149,9 @@ pub(crate) fn finalize_amass(
     // CR 701.47c + CR 608.2c: Chained reflexive continuations may have been
     // stashed before a replacement choice finished. Stamp them with the final
     // post-replacement Army snapshot before they resume.
-    if let Some(continuation) = state.pending_continuation.as_mut() {
-        continuation
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame
+            .pending
             .chain
             .set_amassed_army_object_recursive(snapshot.clone());
     }

@@ -44,8 +44,19 @@ pub fn resolve(
     // chosen object. This ordering is mandatory: running the contextual bind
     // first would pre-empt the tracked-set rewrite and break the "those cards"
     // cards.
+    // CR 603.7: Prefer the active nonempty resolution-chain set, then the latest
+    // nonempty published set. An empty chain id (stale pre-choice publish) must
+    // not shadow a later nonempty set (Storm Herald delayed exile).
     let tracked_set_id = if uses_tracked_set {
-        crate::game::targeting::latest_tracked_set_id(state)
+        state
+            .chain_tracked_set_id
+            .filter(|id| {
+                state
+                    .tracked_object_sets
+                    .get(id)
+                    .is_some_and(|objects| !objects.is_empty())
+            })
+            .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
     } else {
         None
     };
@@ -127,7 +138,7 @@ pub fn resolve(
         )
         .map(|t| vec![t])
         .unwrap_or_default()
-    } else if super::effect_refs_parent_target(&delayed_ability.effect) {
+    } else if super::ability_refs_parent_target(&delayed_ability) {
         parent_target_snapshot(state, ability)
     } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
@@ -152,6 +163,15 @@ pub fn resolve(
     // After this call, the delayed ability chain holds no parent context refs.
     snapshot_parent_dependent_quantities_in_ability_chain(&mut delayed_ability, state, ability);
 
+    // CR 603.7c: freeze a `LastCreated` reference to the tokens just snapshotted
+    // into `targets`, so a per-win loop that overwrites `last_created_token_ids`
+    // (Mirror March #5966) does not make every per-win delayed exile re-resolve
+    // to only the final win's token at end-step. Must run while the effect still
+    // reads `LastCreated` and before `targets` is consumed downstream.
+    if !snapshot_targets.is_empty() && effect_references_last_created(&delayed_ability.effect) {
+        rebind_last_created_to_parent_target(&mut delayed_ability.effect);
+    }
+
     delayed_ability.targets = snapshot_targets;
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
@@ -161,13 +181,28 @@ pub fn resolve(
     // and activated-ability sources may not already carry trigger provenance;
     // capture their current incarnation at creation rather than later rebinding
     // the stored ObjectId. CR 400.7.
+    //
+    // CR 400.7 + CR 603.7c: when the delayed ability's source is still the same
+    // ObjectId, refresh zone + incarnation to that object's creation-time
+    // location. The parent trigger often latched while the source was on the
+    // battlefield (Gift of Immortality's dies trigger), but SBAs may already
+    // have moved that Aura to the graveyard (bumping incarnation) before the
+    // delayed return is created. SelfRef resolution requires a zone+incarnation
+    // match (`source_is_current_via_zone_match`); keeping the BF/pre-move stamp
+    // would make the end-step SelfRef ChangeZone no-op.
     let source_context = ability.trigger_source.clone().or_else(|| {
         state
             .objects
             .get(&ability.source_id)
             .map(|source| super::super::triggers::trigger_source_context_for_latch(state, source))
     });
-    if let Some(source_context) = source_context {
+    if let Some(mut source_context) = source_context {
+        if source_context.identity.reference.object_id == delayed_ability.source_id {
+            if let Some(obj) = state.objects.get(&delayed_ability.source_id) {
+                source_context.identity.expected_zone = obj.zone;
+                source_context.identity.reference.incarnation = obj.incarnation;
+            }
+        }
         delayed_ability.set_trigger_source_recursive(source_context);
     }
 
@@ -190,13 +225,16 @@ pub fn resolve(
         condition,
         crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition,
-        ability: delayed_ability,
-        controller: ability.controller,
-        source_id: ability.source_id,
-        one_shot,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition,
+            ability: Box::new(delayed_ability),
+            controller: ability.controller,
+            source_id: ability.source_id,
+            one_shot,
+        },
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreateDelayedTrigger,
@@ -236,6 +274,24 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
         return ability.targets.clone();
     }
 
+    // CR 603.3d + CR 115.6 + CR 608.2c (issue #5901): When the resolving root
+    // chain DECLARED a chooseable target slot — a `multi_target` bound ("any
+    // number of target noncreature artifacts", Depthshaker Titan) or an
+    // optional "up to one target" slot — reaching this point means the player
+    // legally chose ZERO targets: triggered-ability targets are chosen while
+    // putting the ability on the stack, and such an ability may allow zero
+    // targets. The ParentTarget anaphor ("them"/"it") refers to that empty
+    // chosen set, so the delayed trigger has no subject. Falling through to the
+    // triggering-source fallback instead bound the trigger's own event source
+    // — the Titan sacrificed ITSELF at the next end step.
+    // The fallback below remains for slotless parents (a dies/LTB trigger's
+    // "exile it at end of turn", where "it" genuinely names the event source).
+    if chain_declares_chooseable_target_slots(crate::game::targeting::resolving_root_ability(
+        state, ability,
+    )) {
+        return Vec::new();
+    }
+
     crate::game::targeting::resolve_event_context_target(
         state,
         &TargetFilter::TriggeringSource,
@@ -243,6 +299,26 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
     )
     .map(|target| vec![target])
     .unwrap_or_default()
+}
+
+/// True when any link of the chain declares a target slot whose selection may
+/// legally be empty: a `multi_target` bound ("any number of target ...") or
+/// `optional_targeting` ("up to one target ..."). CR 115.6 permits zero
+/// targets; CR 603.3d governs the target choice for triggered abilities. Used
+/// by [`parent_target_snapshot`] to distinguish "slots were declared but zero
+/// were chosen" (referent = empty set) from "no slots exist at all" (referent
+/// = the creation event's source object).
+fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
+    ability.multi_target.is_some()
+        || ability.optional_targeting
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
 }
 
 fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
@@ -276,6 +352,41 @@ fn stamp_triggering_source_origins_in_definition_chain(
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         stamp_triggering_source_origins_in_definition_chain(else_ability, expected);
+    }
+}
+
+/// CR 603.7c: Rebind a delayed effect's `TargetFilter::LastCreated` target to
+/// `ParentTarget`, freezing it to the tokens snapshotted into the delayed
+/// ability's `targets` at creation time (this is called only after those
+/// `targets` are populated from `last_created_token_ids`). `LastCreated`
+/// resolves live against `state.last_created_token_ids` when the trigger fires
+/// (targeting.rs), which is wrong for a per-win loop (Mirror March #5966) that
+/// overwrites that vector every win — at end-step every per-win delayed exile
+/// would re-resolve to only the final win's token. `ParentTarget` instead reads
+/// the delayed ability's own snapshotted `targets`, so each delayed exile binds
+/// to the token created in its own iteration. Recurses into nested
+/// `CreateDelayedTrigger` definition chains.
+fn rebind_last_created_to_parent_target(effect: &mut Effect) {
+    match effect {
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
+            if matches!(target, TargetFilter::LastCreated) =>
+        {
+            *target = TargetFilter::ParentTarget;
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            rebind_last_created_to_parent_target_in_chain(effect);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_last_created_to_parent_target_in_chain(ability: &mut AbilityDefinition) {
+    rebind_last_created_to_parent_target(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
+        rebind_last_created_to_parent_target_in_chain(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        rebind_last_created_to_parent_target_in_chain(else_ability);
     }
 }
 
@@ -686,11 +797,14 @@ fn snapshot_quantity_ref(
         } => {
             let filter_ctx =
                 crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            // Latch routing is identity-gated inside the resolver: it engages
+            // only if the parent's target IS the latched trigger source.
             crate::game::quantity::resolve_mana_spent_to_cast_metric(
                 state,
                 target_object_id,
                 metric,
                 &filter_ctx,
+                ability.trigger_source.as_ref(),
             )
             .or(Some(0))
         }

@@ -141,21 +141,38 @@ pub fn resolve(
         .collect::<Vec<_>>();
     let raw_keep_count = raw_keep_num.min(cards.len());
 
-    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
-    // player selection — the sub_ability condition decides whether to take it. Set
-    // last_revealed_ids so RevealedHasCardType can evaluate, then return without
-    // creating a DigChoice interaction.
-    if raw_keep_count == 0 && !is_reveal {
+    // CR 701.20e / CR 701.20a: Pure-peek pattern (keep_count = 0): "look at" /
+    // "reveal the top N" with no player selection on this step — a following
+    // ForEachCategory / LastRevealed move decides disposition (Portent of
+    // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
+    // reveals) then return without creating a DigChoice interaction.
+    if raw_keep_count == 0 {
         state.last_revealed_ids = cards.clone();
-        // CR 701.20e: "look at" privately reveals the cards to the looking
-        // player. The looker is the ability controller (e.g. Delver of Secrets'
-        // "look at the top card of your library"). Record the looker-scoped peek
-        // window so `filter_state_for_viewer` keeps these cards visible to the
-        // looker — and only the looker — through any subsequent "you may reveal
-        // that card" optional decision, instead of leaving the looking player to
-        // choose blind.
-        state.private_look_ids = cards.clone();
-        state.private_look_player = Some(ability.controller);
+        if is_reveal {
+            // CR 701.20a: public reveal — show to all players.
+            for &card_id in &cards {
+                state.revealed_cards.insert(card_id);
+            }
+            let card_names: Vec<String> = cards
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player: ability.controller,
+                card_ids: cards.clone(),
+                card_names,
+            });
+        } else {
+            // CR 701.20e: "look at" privately reveals the cards to the looking
+            // player. The looker is the ability controller (e.g. Delver of Secrets'
+            // "look at the top card of your library"). Record the looker-scoped peek
+            // window so `filter_state_for_viewer` keeps these cards visible to the
+            // looker — and only the looker — through any subsequent "you may reveal
+            // that card" optional decision, instead of leaving the looking player to
+            // choose blind.
+            state.private_look_ids = cards.clone();
+            state.private_look_player = Some(ability.controller);
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -951,7 +968,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
-        state.pending_continuation = Some(PendingContinuation::new(
+        state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
@@ -1233,7 +1250,7 @@ mod tests {
             use_lki: false,
             subject_slot: None,
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
@@ -1299,7 +1316,7 @@ mod tests {
         gain_life.condition = Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(
@@ -1365,7 +1382,7 @@ mod tests {
         gain_life.condition = Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
 
         let mut events = Vec::new();
         let outcome = handle_resolution_choice(

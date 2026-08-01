@@ -184,7 +184,7 @@ fn s1_bonecache_runtime_false_when_neither_disjunct() {
     // Only 2 cards left the graveyard this turn, no Food sacrificed.
     for &m in &motes[..2] {
         let rec = push_gy_left(runner.state(), m);
-        runner.state_mut().zone_changes_this_turn.push(rec);
+        runner.state_mut().zone_changes_this_turn.push_back(rec);
     }
     assert!(
         !condition_gate_ok(runner.state(), overseer),
@@ -198,7 +198,7 @@ fn s1_bonecache_runtime_true_via_graveyard_disjunct() {
     let mut runner = scenario.build();
     for &m in &motes {
         let rec = push_gy_left(runner.state(), m);
-        runner.state_mut().zone_changes_this_turn.push(rec);
+        runner.state_mut().zone_changes_this_turn.push_back(rec);
     }
     assert!(
         condition_gate_ok(runner.state(), overseer),
@@ -214,7 +214,10 @@ fn s1_bonecache_runtime_true_via_food_disjunct() {
     let mut runner = scenario.build();
     make_food(runner.state_mut(), food);
     let rec = push_sacrificed(runner.state(), food);
-    runner.state_mut().sacrificed_permanents_this_turn.push(rec);
+    runner
+        .state_mut()
+        .sacrificed_permanents_this_turn
+        .push_back(rec);
     assert!(
         condition_gate_ok(runner.state(), overseer),
         "a sacrificed Food this turn must satisfy the second disjunct"

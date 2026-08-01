@@ -146,7 +146,6 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       const validBlockerIds = new Set(waitingFor.data.valid_blocker_ids);
       const eligibleIds = group.ids.filter((id) =>
         validBlockerIds.has(id)
-        && !blockerAssignments.has(id)
         && (waitingFor.data.valid_block_targets[id]?.length ?? 0) > 0,
       );
       return eligibleIds.length > 0 ? { mode: "blockers", eligibleIds } : null;
@@ -211,6 +210,20 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           : "";
 
   if (renderMode === "single") {
+    // SHOULD-FIX #1 (singleton trap): getGroupRenderMode returns "single" for
+    // count <= 1, which normally renders no count badge. The ∞ semantics are
+    // COUNT-INDEPENDENT (an accepted object-growth pile is ∞ regardless of how many
+    // members are currently visible), so a single-member pile must still show ∞.
+    if (group.isUnboundedPile) {
+      return (
+        <div className="relative">
+          <PermanentCard objectId={group.ids[0]} />
+          <span className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500">
+            ∞
+          </span>
+        </div>
+      );
+    }
     return <PermanentCard objectId={group.ids[0]} />;
   }
 
@@ -230,7 +243,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           aria-label={t("permanent.collapseGroup", { name: group.name })}
           title={t("permanent.collapseGroup", { name: group.name })}
         >
-          {group.count}
+          {group.isUnboundedPile ? "∞" : group.count}
         </button>
       </div>
     );
@@ -261,7 +274,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           className="absolute -left-3 -top-3 z-40 flex h-8 min-w-8 items-center justify-center rounded-full bg-black px-1.5 text-sm font-extrabold text-white ring-2 ring-white/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
           aria-label={t("permanent.expandGroup", { name: group.name })}
         >
-          ×{group.count}
+          {group.isUnboundedPile ? "∞" : `×${group.count}`}
         </button>
         {canOpenPicker && (
           <button
@@ -350,7 +363,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         }`}
         aria-label={`Expand ${group.name} group`}
       >
-        {group.count}
+        {group.isUnboundedPile ? "∞" : group.count}
       </button>
     </div>
   );

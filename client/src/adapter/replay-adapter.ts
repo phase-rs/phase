@@ -83,7 +83,13 @@ export class ReplayAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return { actions: [], autoPassRecommended: false, spellCosts: {}, legalActionsByObject: {} };
+    return {
+      actions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+      spellCosts: {},
+      legalActionsByObject: {},
+    };
   }
 
   /** Same "no single current state" contract as `getState` — the Replay Viewer
@@ -92,10 +98,6 @@ export class ReplayAdapter implements EngineAdapter {
     return Promise.reject(
       new Error("ReplayAdapter has no single current state — call seek(index) instead"),
     );
-  }
-
-  getAiAction(): Promise<GameAction | null> {
-    return Promise.resolve(null);
   }
 
   restoreState(): void {

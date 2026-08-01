@@ -14,7 +14,7 @@ wasm-opt = false
 crate-type = ["cdylib"]
 
 [dependencies]
-engine = { path = "../engine" }
+engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
 rand = "0.9"
@@ -30,4 +30,4 @@ js-sys = "0.3"
 [dev-dependencies]
 # Unit tests place objects with the raw zone API, which is sealed in production
 # builds; dev-dependencies never reach the shipped WASM artifact.
-engine = { path = "../engine", features = ["test-support"] }
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }

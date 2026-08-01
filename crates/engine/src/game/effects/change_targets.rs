@@ -271,7 +271,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(aura_spell_ability),
+                ability: Some(Box::new(aura_spell_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -379,7 +379,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(aura_spell_ability),
+                ability: Some(Box::new(aura_spell_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -432,7 +432,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(4),
-                ability: Some(bb_ability),
+                ability: Some(Box::new(bb_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -533,7 +533,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(tap_ability),
+                ability: Some(Box::new(tap_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -614,7 +614,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(targetless_ability),
+                ability: Some(Box::new(targetless_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -708,7 +708,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
                 card_id: CardId(3),
-                ability: Some(destroy_ability),
+                ability: Some(Box::new(destroy_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

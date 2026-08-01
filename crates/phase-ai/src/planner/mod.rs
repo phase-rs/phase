@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use engine::ai_support::{
-    build_decision_context, AiDecisionContext, CandidateAction, TacticalClass,
+    build_decision_context, classify_payment_continuation, witness_payment_continuation,
+    AiDecisionContext, CandidateAction, PaymentContinuationState, TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -26,6 +27,99 @@ use crate::policies::PolicyRegistry;
 pub struct RankedCandidate {
     pub candidate: CandidateAction,
     pub score: f64,
+    pub(crate) payment_successor: Option<GameState>,
+}
+
+impl RankedCandidate {
+    pub fn new(candidate: CandidateAction, score: f64) -> Self {
+        Self {
+            candidate,
+            score,
+            payment_successor: None,
+        }
+    }
+
+    pub(crate) fn with_payment_successor(
+        candidate: CandidateAction,
+        score: f64,
+        state: GameState,
+    ) -> Self {
+        Self {
+            candidate,
+            score,
+            payment_successor: Some(state),
+        }
+    }
+}
+
+/// A raw engine candidate plus the first reducer successor already witnessed
+/// for an affiliated payment root. This stays private to planning: the engine
+/// owns both the carrier classification and the finalization proof.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedCandidate {
+    pub candidate: CandidateAction,
+    pub payment_successor: Option<GameState>,
+}
+
+/// Fail closed for affiliated payment states before ranking or width limits.
+///
+/// The accepted successor is retained so a planning edge does not apply its
+/// first reducer action once for the witness and again for search.
+pub(crate) fn prepare_payment_candidates(
+    state: &GameState,
+    candidates: impl IntoIterator<Item = CandidateAction>,
+) -> Vec<PreparedCandidate> {
+    match classify_payment_continuation(state) {
+        PaymentContinuationState::NotAffiliated => candidates
+            .into_iter()
+            .map(|candidate| PreparedCandidate {
+                candidate,
+                payment_successor: None,
+            })
+            .collect(),
+        PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
+        PaymentContinuationState::Affiliated(_) => candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                witness_payment_continuation(state, &candidate.action).map(|accepted| {
+                    PreparedCandidate {
+                        candidate,
+                        payment_successor: Some(accepted.state),
+                    }
+                })
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn rank_prepared_candidates<F>(
+    candidates: impl IntoIterator<Item = PreparedCandidate>,
+    mut scorer: F,
+    limit: usize,
+) -> Vec<RankedCandidate>
+where
+    F: FnMut(&CandidateAction) -> f64,
+{
+    let mut ranked: Vec<RankedCandidate> = candidates
+        .into_iter()
+        .map(|prepared| {
+            let score = scorer(&prepared.candidate);
+            match prepared.payment_successor {
+                Some(state) => {
+                    RankedCandidate::with_payment_successor(prepared.candidate, score, state)
+                }
+                None => RankedCandidate::new(prepared.candidate, score),
+            }
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
+    });
+    ranked.truncate(limit);
+    ranked
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +170,7 @@ impl SearchBudget {
 pub struct PolicyPrior {
     pub candidate: CandidateAction,
     pub prior: f64,
+    pub(crate) payment_successor: Option<GameState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -178,8 +273,18 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
     // Delayed triggers (pending future effects)
     state.delayed_triggers.len().hash(&mut hasher);
 
-    // Pending state (continuations, replacements, triggers affect game flow)
-    state.pending_continuation.is_some().hash(&mut hasher);
+    // Pending state (resolution frames, replacements, triggers affect game
+    // flow). The typed stack may retain an ability continuation below its
+    // active prompt, so nonempty stacks hash their full ordered wire shape
+    // rather than inspecting a non-top frame. The overwhelmingly common empty
+    // stack stays allocation-free on this hot cache-key path.
+    let has_resolution_frames = !state.resolution_stack.is_empty();
+    has_resolution_frames.hash(&mut hasher);
+    if has_resolution_frames {
+        let resolution_stack = serde_json::to_value(&state.resolution_stack)
+            .expect("resolution stack serializes for the planner cache key");
+        hash_json_value(&resolution_stack, &mut hasher);
+    }
     state.pending_replacement.is_some().hash(&mut hasher);
     state.pending_trigger.is_some().hash(&mut hasher);
 
@@ -700,14 +805,25 @@ impl<'a> PlannerServices<'a> {
                 // search.rs:1956/2205 and the sibling fix in `rank_candidates`.
                 .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
-        priors
-            .into_iter()
-            .filter_map(|prior| {
-                let sim = self.apply_candidate(state, &prior.candidate)?;
-                Some((prior.prior, sim))
-            })
-            .take(sample_count)
-            .collect()
+        // Bounded rewrite of the terminal `filter_map(...).take(sample_count)`:
+        // stop on the sample cap OR once the wall-clock deadline is blown, while
+        // preserving legality backfill exactly (an illegal candidate is skipped
+        // WITHOUT consuming a sample slot). Byte-identical to the old iterator
+        // when the deadline is live — same set of applied candidates, same order,
+        // same result — because `deadline.expired()` is always false then.
+        let mut out = Vec::with_capacity(sample_count);
+        for prior in priors {
+            if out.len() == sample_count || self.deadline.expired() {
+                break;
+            }
+            let sim = prior
+                .payment_successor
+                .or_else(|| self.apply_candidate(state, &prior.candidate));
+            if let Some(sim) = sim {
+                out.push((prior.prior, sim));
+            }
+        }
+        out
     }
 
     pub fn evaluate_state(&self, state: &GameState) -> f64 {
@@ -913,6 +1029,21 @@ impl<'a> PlannerServices<'a> {
 
         let mut sim = state.clone();
         for _ in 0..MAX_QUIESCE_STEPS {
+            // Search wall-clock bound (CR-agnostic): once the deadline is blown,
+            // stop resolving the stack. A single quiesce can otherwise run up to
+            // MAX_QUIESCE_STEPS uninterruptible applies (e.g. a finite
+            // mega-cascade resolution) after the budget has expired, because the
+            // callers only check the deadline at entry. Returning the
+            // partially-quiesced state to the cheap leaf evaluator is the same
+            // approximation the deadline makes elsewhere. This breaks AFTER the
+            // crossing apply (at loop-top on the next iteration), so quiesce is
+            // bounded to at most one in-flight apply past expiry. It does NOT
+            // bound intra-step cost inside `deterministic_choice` (Case 3); low
+            // risk because the Ugin cascade resolves via Case 1 forced-pass.
+            if self.deadline.expired() {
+                break;
+            }
+
             if matches!(sim.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
@@ -1071,17 +1202,28 @@ impl<'a> PlannerServices<'a> {
         // (`apply_candidate` → None), mirroring the beam path. This removes one
         // clone-and-apply-per-candidate probe (`state_clone_for_legality`).
         let ctx = self.build_decision_context(state);
+        let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
+        let mut priors = self.policy_priors(
+            state,
+            &ctx,
+            &candidates
+                .iter()
+                .map(|prepared| prepared.candidate.clone())
+                .collect::<Vec<_>>(),
+            scoring_player,
+            SearchDepth::Lookahead,
+        );
+        for prior in &mut priors {
+            prior.payment_successor = candidates
+                .iter()
+                .find(|prepared| prepared.candidate.action == prior.candidate.action)
+                .and_then(|prepared| prepared.payment_successor.clone());
+        }
         PlannerEvaluation {
             // Rollout leaf: every node reached here is deep lookahead, never the
             // committed decision, so board-wide/affordability policies self-gate.
-            priors: self.policy_priors(
-                state,
-                &ctx,
-                &ctx.candidates,
-                scoring_player,
-                SearchDepth::Lookahead,
-            ),
+            priors,
             value: self.evaluate_for_planner(state),
         }
     }
@@ -1134,6 +1276,13 @@ impl<'a> PlannerServices<'a> {
         let continuations =
             self.sample_backfilled_continuations(state, evaluation.priors, sample_count);
         if continuations.is_empty() {
+            return self.quiesced_leaf_eval(state);
+        }
+        // CR-agnostic: if the budget was blown while sampling continuations,
+        // short-circuit to the cheap leaf eval instead of descending the rollout
+        // tree. Closes the post-sampling path the reporter flagged; the top-of-
+        // function guard covers a deadline already expired on entry.
+        if self.deadline.expired() {
             return self.quiesced_leaf_eval(state);
         }
         let is_maximizing = rollout_player == self.ai_player;
@@ -1203,15 +1352,16 @@ impl BeamContinuationPlanner {
         // path (planner_evaluation → sample_backfilled_continuations) applies the
         // same skip: illegal candidates are dropped when apply_candidate returns
         // None during backfill sampling, not by an upfront clone-per-candidate probe.
-        if ctx.candidates.is_empty() {
+        let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
+        if candidates.is_empty() {
             return services.evaluate_state_quiesced(state);
         }
 
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
-        let mut ranked = rank_candidates(
-            ctx.candidates.clone(),
+        let mut ranked = rank_prepared_candidates(
+            candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
             // the decision root, so move-ordering scoring runs in lookahead.
             |candidate| {
@@ -1245,7 +1395,11 @@ impl BeamContinuationPlanner {
             if services.deadline.expired() {
                 break;
             }
-            let Some(sim) = services.apply_candidate(state, &ranked.candidate) else {
+            let Some(sim) = ranked
+                .payment_successor
+                .clone()
+                .or_else(|| services.apply_candidate(state, &ranked.candidate))
+            else {
                 continue;
             };
             let value = self.search_value(&sim, depth - 1, ply + 1, alpha, beta, services, budget)
@@ -1317,27 +1471,25 @@ pub fn rank_candidates<F>(
 where
     F: FnMut(&CandidateAction) -> f64,
 {
-    let mut ranked: Vec<RankedCandidate> = candidates
-        .into_iter()
-        .map(|candidate| RankedCandidate {
-            score: scorer(&candidate),
+    rank_prepared_candidates(
+        candidates.into_iter().map(|candidate| PreparedCandidate {
             candidate,
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Issue #4878: without this tie-break, equal-score candidates fall
-            // back to `ranked`'s pre-sort (enumeration) order, which is not
-            // guaranteed stable across processes — mirrors search.rs:1956/2205.
-            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
-    });
-    ranked.truncate(limit);
-    ranked
+            payment_successor: None,
+        }),
+        |candidate| scorer(candidate),
+        limit,
+    )
 }
 
 pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option<GameState> {
+    match classify_payment_continuation(state) {
+        PaymentContinuationState::Affiliated(_) => {
+            return witness_payment_continuation(state, &candidate.action)
+                .map(|accepted| accepted.state);
+        }
+        PaymentContinuationState::UnsupportedAffiliated(_) => return None,
+        PaymentContinuationState::NotAffiliated => {}
+    }
     let mut sim = state.clone();
     apply_as_current_for_simulation(&mut sim, candidate.action.clone()).ok()?;
     Some(sim)
@@ -1357,7 +1509,9 @@ mod tests {
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::{CommanderDamageEntry, StackEntry, StackEntryKind, WaitingFor};
+    use engine::types::game_state::{
+        CommanderDamageEntry, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::WardCost;
     use engine::types::mana::ManaColor;
@@ -1428,12 +1582,41 @@ mod tests {
 
     /// Serve reconstruction ≡ planner leaf eval. The harvested `FeatureRow`
     /// weighted by the archetype-adjusted weights the planner actually applies,
-    /// plus the TWO serve-time carve-outs (`energy_offset`, `threat_adjustment`),
-    /// must equal `evaluate_with_strategy` to 1e-9. This pins the train/serve
-    /// invariant: a future `evaluate_with_strategy` term without a matching
-    /// `FeatureRow` field would break this identity loudly. Runs a reach-guard
-    /// pair — one config where `threat_adjustment` is provably nonzero, one where
-    /// it is zero — and asserts the energy term is non-vacuous (`p0.energy > 0`).
+    /// plus the THREE serve-time carve-outs (`energy_offset`,
+    /// `mana_development_offset`, `threat_adjustment`), must equal
+    /// `evaluate_with_strategy` to 1e-9. Runs a reach-guard pair — one config
+    /// where `threat_adjustment` is provably nonzero, one where it is zero — and
+    /// asserts both fixed offsets are non-vacuous (`p0.energy > 0`, and p0
+    /// controls a mana source).
+    ///
+    /// # What this test does and does NOT guarantee
+    ///
+    /// It previously claimed that "a future `evaluate_with_strategy` term without
+    /// a matching `FeatureRow` field would break this identity loudly". **That was
+    /// false as stated**, and the correction matters because the false version
+    /// invited exactly the mistake it appeared to prevent. This test compares two
+    /// numbers on ONE fixture: a new term that happens to be `0.0` here leaves the
+    /// identity holding while the harvested vector silently omits it. The
+    /// guarantee was fixture-dependent, not structural — which is why this unit had
+    /// to add a tapped land to make its own term non-zero.
+    ///
+    /// The structural half now lives in the type system rather than here:
+    ///
+    /// - A term added to **`EvalFeatures`** is caught at compile time. Both
+    ///   `FeatureRow::extract` and `EvaluationBreakdown::total` destructure
+    ///   exhaustively with no `..`, so a new field is an **E0027** rather than a
+    ///   silent drop. This is the shape every term in this unit takes.
+    /// - A term added **directly in `evaluate_with_strategy`** — as
+    ///   `threat_adjustment` is — has no such tie and remains **fixture-dependent**.
+    ///   Nothing forces it onto `FeatureRow`, so if it is zero on this fixture the
+    ///   omission still passes silently. Anyone adding one must extend this
+    ///   fixture to make it provably non-zero, exactly as the `threat_adjustment`
+    ///   reach-guard pair below already does.
+    ///
+    /// State the narrower true guarantee rather than the broad false one: this
+    /// test pins the *arithmetic* of the identity; the compiler pins the
+    /// *completeness* of the `EvalFeatures` half; nothing yet pins the
+    /// completeness of the `evaluate_with_strategy` half.
     #[test]
     fn serve_reconstruction_equals_planner_leaf_eval() {
         use crate::context::AiContext;
@@ -1488,6 +1671,25 @@ mod tests {
             obj.toughness = Some(toughness);
         }
 
+        // Exactly one TAPPED land for p0. It does double duty: `available_mana`
+        // filters `&& !obj.tapped`, so `available_mana(p0)` stays 0 and the
+        // `ai_mana <= 1` counter-tapout reach-guard above is preserved exactly —
+        // while `is_intrinsic_mana_source` deliberately ignores tapped state, so
+        // `mana_development_offset` becomes non-vacuous. Bind the `CardId` before
+        // the `&mut state` borrow (an explicit `&mut` in a free-function argument
+        // list is not a two-phase borrow — inlining it is E0502).
+        let land_card_id = CardId(state.next_object_id);
+        let land_id = create_object(
+            &mut state,
+            land_card_id,
+            PlayerId(0),
+            "Tapped Land".to_string(),
+            Zone::Battlefield,
+        );
+        let land = state.objects.get_mut(&land_id).unwrap();
+        land.card_types.core_types.push(CoreType::Land);
+        land.tapped = true;
+
         let config = create_config(AiDifficulty::Hard, Platform::Native);
         let policies = crate::policies::PolicyRegistry::shared();
 
@@ -1516,12 +1718,19 @@ mod tests {
         let row = FeatureRow::extract(&state, &services.context.session, PlayerId(0))
             .expect("mid-game state is non-terminal");
         let threat_adj = services.threat_adjustment(&state);
-        let reconstructed = row.weighted_total(weights) + row.energy_offset + threat_adj;
+        let reconstructed = row.weighted_total(weights)
+            + row.energy_offset
+            + row.mana_development_offset
+            + threat_adj;
         let planner_eval = services.evaluate_with_strategy(&state);
 
         assert!(
             row.energy_offset > 0.0,
             "energy term must be non-vacuous (p0.energy > 0)"
+        );
+        assert!(
+            row.mana_development_offset > 0.0,
+            "mana-development term must be non-vacuous (p0 controls a tapped land)"
         );
         assert!(
             threat_adj.abs() > 0.0,
@@ -1545,7 +1754,9 @@ mod tests {
         let row_none = FeatureRow::extract(&state, &services_none.context.session, PlayerId(0))
             .expect("non-terminal");
         let threat_adj_none = services_none.threat_adjustment(&state);
-        let reconstructed_none = row_none.weighted_total(weights_none) + row_none.energy_offset;
+        let reconstructed_none = row_none.weighted_total(weights_none)
+            + row_none.energy_offset
+            + row_none.mana_development_offset;
         let planner_eval_none = services_none.evaluate_with_strategy(&state);
 
         assert_eq!(
@@ -1643,19 +1854,13 @@ mod tests {
         let candidates = vec![
             CandidateAction {
                 action: GameAction::PassPriority,
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Pass,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
             },
             CandidateAction {
                 action: GameAction::MulliganDecision {
                     choice: MulliganChoice::Keep,
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
         ];
 
@@ -1684,19 +1889,13 @@ mod tests {
     fn rank_candidates_ties_break_by_cmp_stable_not_encounter_order() {
         let pass = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
         let mulligan = CandidateAction {
             action: GameAction::MulliganDecision {
                 choice: MulliganChoice::Keep,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let tied_scorer = |_candidate: &CandidateAction| 1.0;
 
@@ -1781,6 +1980,26 @@ mod tests {
     }
 
     #[test]
+    fn quick_state_hash_distinguishes_typed_resolution_stack() {
+        let state = make_state();
+        let mut suspended = state.clone();
+        let continuation = PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(0),
+                PlayerId(0),
+            )),
+            &suspended,
+        );
+        suspended.park_ability_continuation(continuation);
+
+        // Revert-failing: omitting the ordered typed frame stack aliases an
+        // active resolution with an otherwise identical priority state.
+        assert_ne!(quick_state_hash(&state), quick_state_hash(&suspended));
+    }
+
+    #[test]
     fn planner_services_produce_positive_normalized_priors() {
         let state = make_state();
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -1806,19 +2025,13 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(engine::types::ability::TargetRef::Player(PlayerId(0))),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             },
             CandidateAction {
                 action: GameAction::ChooseTarget {
                     target: Some(engine::types::ability::TargetRef::Player(PlayerId(1))),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             },
         ];
 
@@ -1850,8 +2063,10 @@ mod tests {
         assert_eq!(quiesced.players[0].hand.len(), state.players[0].hand.len());
     }
 
-    #[test]
-    fn quiesce_resolves_creature_spell_on_stack() {
+    /// A state with a single Grizzly Bears creature spell on the stack, priced so
+    /// only `PassPriority` is legal for both players — so `quiesce` Case 1 resolves
+    /// it in one apply. Shared by the resolution test and the deadline-bound tests.
+    fn creature_spell_on_stack_state() -> GameState {
         use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
         use engine::types::mana::{ManaCost, ManaCostShard};
 
@@ -1904,8 +2119,14 @@ mod tests {
             },
         });
 
+        state
+    }
+
+    #[test]
+    fn quiesce_resolves_creature_spell_on_stack() {
         // Both players have priority, only PassPriority is legal
         // (creature spell on stack, no instant-speed responses available)
+        let state = creature_spell_on_stack_state();
         let battlefield_before = state.battlefield.len();
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -1925,6 +2146,65 @@ mod tests {
             "Creature should have entered the battlefield: before={}, after={}",
             battlefield_before,
             quiesced.battlefield.len()
+        );
+    }
+
+    /// V1: `quiesce` must break at loop top once the search deadline is blown,
+    /// leaving the resolvable stack UNCHANGED. Paired with a live-deadline
+    /// positive that DOES resolve, so the negative is non-vacuous. Deleting the
+    /// `if self.deadline.expired() { break; }` guard makes the negative fail.
+    #[test]
+    fn quiesce_honors_expired_deadline() {
+        let state = creature_spell_on_stack_state();
+        let stack_before = state.stack.len();
+        assert!(stack_before > 0, "fixture must have a non-empty stack");
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Refinement V1/V2: the deadline lives on PlannerServices and is HONORED
+        // only in non-measurement mode. `with_deadline` force-overrides any
+        // injected deadline to `none()` under measurement, which would make the
+        // guard inert and the negative assertion vacuous.
+        assert!(
+            !config.execution_mode.is_measurement(),
+            "config must be non-measurement so the injected deadline is honored"
+        );
+        let policies = PolicyRegistry::default();
+
+        // Positive reach-guard (non-vacuity): a live deadline resolves the stack.
+        let live = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::none()),
+        );
+        let resolved = live.quiesce(&state);
+        assert!(
+            resolved.stack.len() < stack_before,
+            "non-vacuity: quiesce with a live deadline must resolve the stack \
+             (before={stack_before}, after={})",
+            resolved.stack.len()
+        );
+
+        // Negative (the fix): an expired deadline leaves the stack untouched.
+        let expired = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::after(0)),
+        );
+        // Witness: the deadline is genuinely expired before quiesce runs, so a
+        // pass is not a broken probe that never entered the loop body.
+        assert!(
+            expired.deadline.expired(),
+            "witness: the injected deadline must be expired so the guard fires"
+        );
+        let unchanged = expired.quiesce(&state);
+        assert_eq!(
+            unchanged.stack.len(),
+            stack_before,
+            "revert-failing: quiesce must break at loop top on an expired deadline"
         );
     }
 
@@ -2077,17 +2357,11 @@ mod tests {
                 source_id: ObjectId(99999),
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Utility,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
         let legal = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
 
         // Reach-guards: prove the fixtures take the intended apply branch.
@@ -2103,10 +2377,12 @@ mod tests {
         let illegal_prior = PolicyPrior {
             candidate: illegal.clone(),
             prior: 0.9,
+            payment_successor: None,
         };
         let legal_prior = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.1,
+            payment_successor: None,
         };
 
         // sample_count=1: the high-prior illegal candidate is backfilled past, and
@@ -2131,10 +2407,12 @@ mod tests {
         let legal_a = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.2,
+            payment_successor: None,
         };
         let legal_b = PolicyPrior {
             candidate: legal.clone(),
             prior: 0.15,
+            payment_successor: None,
         };
         let two = services.sample_backfilled_continuations(
             &state,
@@ -2162,6 +2440,49 @@ mod tests {
                 )
                 .is_empty(),
             "all-illegal priors yield no continuations"
+        );
+    }
+
+    #[test]
+    fn retained_payment_successor_bypasses_inapplicable_rollout_fallback() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let fallback = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
+        };
+        assert!(
+            services.apply_candidate(&state, &fallback).is_none(),
+            "reach-guard: the hostile fallback cannot be applied at this root"
+        );
+        let retained = services
+            .apply_candidate(
+                &state,
+                &CandidateAction {
+                    action: GameAction::PassPriority,
+                    metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+                },
+            )
+            .expect("reach-guard: a concrete retained successor exists");
+        let sampled = services.sample_backfilled_continuations(
+            &state,
+            vec![PolicyPrior {
+                candidate: fallback,
+                prior: 1.0,
+                payment_successor: Some(retained.clone()),
+            }],
+            1,
+        );
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(
+            quick_state_hash(&sampled[0].1),
+            quick_state_hash(&retained),
+            "rollout consumes the witnessed successor instead of retrying its hostile fallback"
         );
     }
 
@@ -2214,6 +2535,66 @@ mod tests {
             perf_counters::snapshot().state_clone_for_legality,
             0,
             "rollout_estimate must not clone-and-apply per candidate for legality"
+        );
+    }
+
+    /// V2: `sample_backfilled_continuations` must apply ZERO continuations once
+    /// the deadline is blown (Edit 2), and `rollout_estimate` must still return a
+    /// finite leaf estimate. Paired with a live-deadline positive that DOES sample,
+    /// so the negative is non-vacuous. Reverting Edit 2 makes the negative fail.
+    #[test]
+    fn sampling_honors_expired_deadline() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert!(
+            !config.execution_mode.is_measurement(),
+            "config must be non-measurement so the injected deadline is honored"
+        );
+        let policies = PolicyRegistry::default();
+
+        // Reach-guard (non-vacuity): with a LIVE deadline, sampling produces
+        // continuations, so the expired-deadline empty result is meaningful.
+        let mut live = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let eval = live.planner_evaluation(&state);
+        assert!(
+            !eval.priors.is_empty(),
+            "reach-guard: planner_evaluation must produce priors"
+        );
+        let sample_count = live.config.search.rollout_samples.max(1) as usize;
+        let live_conts =
+            live.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        assert!(
+            !live_conts.is_empty(),
+            "non-vacuity: a live deadline must sample at least one continuation"
+        );
+
+        // Negative (the fix): an expired deadline applies zero continuations.
+        let mut expired = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::after(0)),
+        );
+        assert!(
+            expired.deadline.expired(),
+            "witness: the injected deadline must be expired so the guard fires"
+        );
+        let empty =
+            expired.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        assert!(
+            empty.is_empty(),
+            "revert-failing (Edit 2): sample_backfilled_continuations must apply \
+             zero continuations once the deadline is blown, got {}",
+            empty.len()
+        );
+
+        // rollout_estimate short-circuits to the leaf eval under an expired
+        // deadline (top-of-function guard subsumes Edit 3 under static expiry).
+        let v = expired.rollout_estimate(&state, 3);
+        assert!(
+            v.is_finite(),
+            "rollout_estimate must return a finite leaf estimate under an expired deadline"
         );
     }
 
@@ -2338,7 +2719,7 @@ mod tests {
             controller: ctrl,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: src,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], src, ctrl),
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], src, ctrl)),
             },
         });
         let mut b = a.clone();
@@ -2676,16 +3057,13 @@ mod tests {
     // ---- U2: move ordering (killers) + witness counters ----
 
     fn ranked_candidate(action: GameAction, score: f64) -> RankedCandidate {
-        RankedCandidate {
-            candidate: CandidateAction {
+        RankedCandidate::new(
+            CandidateAction {
                 action,
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Pass,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
             },
             score,
-        }
+        )
     }
 
     // V1: a beta cutoff records the cutting move as the ply's primary killer.

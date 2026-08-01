@@ -545,6 +545,19 @@ class TestSupportBoundaryTests(unittest.TestCase):
         source = '#[cfg(test)]\npub mod scenario;\npub mod scenario_db;\n'
         self.assertEqual(test_support_modules(source), set())
 
+    def test_dual_declared_production_module_is_not_test_support(self) -> None:
+        # The cfg pair gates *visibility*, not existence: `zones` compiles into
+        # production builds as `pub(crate)`. It must not be excluded.
+        source = (
+            '#[cfg(any(test, feature = "test-support"))]\n'
+            'pub mod zones;\n'
+            '#[cfg(not(any(test, feature = "test-support")))]\n'
+            'pub(crate) mod zones;\n'
+            '#[cfg(any(test, feature = "test-support"))]\n'
+            'pub mod scenario;\n'
+        )
+        self.assertEqual(test_support_modules(source), {"scenario"})
+
     def test_scenarios_are_not_a_basename_whitelist(self) -> None:
         self.assertNotIn("scenario.rs", TEST_SUPPORT_FILES)
         self.assertNotIn("scenario_db.rs", TEST_SUPPORT_FILES)

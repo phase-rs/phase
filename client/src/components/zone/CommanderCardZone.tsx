@@ -45,8 +45,13 @@ export function CommanderCardZone({ playerId, splitOverview = false }: Commander
 
   if (commanders.length === 0) return null;
 
+  // Lay the leaders out horizontally (commander(s) + any Oathbreaker signature
+  // spell, and partner/background pairs) rather than stacking them. A vertical
+  // stack doubles the command dock's height, and the middle row is
+  // `items-stretch`, so that height propagates to the whole battlefield row and
+  // breaks the layout globally. A row keeps the dock one card tall.
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-row items-end gap-1">
       {commanders.map((cmd) => (
         <CommanderCard key={cmd.id} commander={cmd} splitOverview={splitOverview} />
       ))}

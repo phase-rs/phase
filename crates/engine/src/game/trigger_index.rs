@@ -594,6 +594,13 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
         GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        // CR 116.2c + CR 116.1: no printed trigger condition matches "a
+        // continuous effect ended". The special action doesn't use the stack, and
+        // any consequential board change (a Licid reverting to a creature and
+        // being unattached under CR 704.5p) emits its OWN indexed event.
+        // Explicitly inert rather than absent, so a future trigger family must
+        // classify it.
+        GameEvent::ContinuousEffectEnded { .. } => {}
         GameEvent::AttackersDeclared { .. } => push(TriggerEventKey::Attacks),
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
@@ -611,6 +618,15 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
+        // CR 701.27b (by analogy): transforming and turning a permanent face
+        // up/down are distinct game actions that don't share triggers even
+        // though they use the same physical action; flipping is likewise its
+        // own game action. No printed flip card has a trigger that fires on
+        // flipping (a design fact about the card pool, not a CR statement).
+        // Deliberately dispatches NO trigger key — folding it into
+        // `FaceOrTransform` would consult transform/face-change triggers for an
+        // event none of them can match.
+        GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
@@ -803,8 +819,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
         | EffectKind::ExileTop
+        | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::ChoosePermanent
         | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect
@@ -931,6 +949,12 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // action; its own `EffectResolved` dispatches no trigger key.
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
+        // No printed flip card has a trigger that fires on flipping (a design
+        // fact about the card pool, not a CR statement), so — mirroring
+        // `Transform` above — this effect's `EffectResolved` dispatches no key;
+        // `GameEvent::Flipped` is a log/display notification and dispatches no
+        // key either.
+        | EffectKind::FlipPermanent
         | EffectKind::TurnFaceUp
         // CR 701.27b: a turned-face-down permanent fires any face-down trigger
         // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's
@@ -1082,6 +1106,19 @@ impl TriggerIndex {
             }
         }
         state.trigger_index = fresh;
+    }
+}
+
+/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
+/// before a consult. The layer pipeline remains the authoritative rebuild path
+/// for live granted and removed definitions; this only restores the empty
+/// derived index after deserialize when battlefield state is already present.
+pub fn ensure_ready(state: &mut GameState) {
+    if state.trigger_index.by_key.is_empty()
+        && state.trigger_index.unclassified.is_empty()
+        && !state.battlefield.is_empty()
+    {
+        TriggerIndex::rebuild_from_battlefield(state);
     }
 }
 
@@ -1282,6 +1319,94 @@ mod tests {
             before,
             object.trigger_definition_ref(&object.trigger_definitions[0]),
             "index rebuild is classification-only and must not reallocate trigger identity"
+        );
+    }
+
+    #[test]
+    fn ensure_ready_rebuilds_deserialized_taps_for_mana_index() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(78);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(78),
+            PlayerId(0),
+            "Deserialized Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        let mut restored: GameState = serde_json::from_value(serialized).expect("state restores");
+        assert!(restored.trigger_index.by_key.is_empty());
+        assert!(restored.trigger_index.unclassified.is_empty());
+
+        ensure_ready(&mut restored);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(79),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        assert_eq!(
+            candidates_for_event(&restored, &event).as_slice(),
+            &[object_id],
+            "the first post-deserialize inline-mana consult must restore its candidate"
+        );
+    }
+
+    #[test]
+    fn tapped_for_mana_candidates_exclude_irrelevant_battlefield_objects() {
+        let mut state = GameState::new_two_player(42);
+        for id in 0..64 {
+            let object_id = ObjectId(id);
+            state.objects.insert(
+                object_id,
+                GameObject::new(
+                    object_id,
+                    CardId(id),
+                    PlayerId(0),
+                    format!("Irrelevant {id}"),
+                    Zone::Battlefield,
+                ),
+            );
+            state.battlefield.push_back(object_id);
+        }
+        let relevant = [ObjectId(100), ObjectId(101)];
+        for object_id in relevant {
+            let mut object = GameObject::new(
+                object_id,
+                CardId(object_id.0),
+                PlayerId(0),
+                format!("Mana Trigger {}", object_id.0),
+                Zone::Battlefield,
+            );
+            object.base_trigger_definitions =
+                std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+            object.materialize_base_trigger_definitions();
+            state.objects.insert(object_id, object);
+            state.battlefield.push_back(object_id);
+        }
+        TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(999),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        };
+        let candidates = candidates_for_event(&state, &event);
+
+        assert_eq!(state.battlefield.len(), 66);
+        assert_eq!(candidates.as_slice(), &relevant);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "only TapsForMana candidates are visited"
         );
     }
 }

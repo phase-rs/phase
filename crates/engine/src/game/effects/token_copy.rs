@@ -1,13 +1,14 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{DisplaySource, GameObject};
 use crate::game::layers::{compute_current_copiable_values, has_active_copy_layer_effects};
-use crate::game::printed_cards::{install_copiable_values_as_base, intrinsic_copiable_values};
+use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition,
     TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
+use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
@@ -16,9 +17,12 @@ use crate::types::game_state::{
     GameState, LiminalEntry, PendingCopyTokenBatch, PendingCopyTokenResolution,
     PendingCounterPostAction, PendingLiminalEntryResume,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
     CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+};
+use crate::types::resolved_commands::{
+    ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
 };
 use crate::types::zones::Zone;
 use std::collections::VecDeque;
@@ -263,9 +267,13 @@ pub(crate) fn drain_pending_copy_token_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    if let Some(pending) = state.pending_copy_token_resolution.take() {
-        drain_copy_token_resolution(state, pending, events);
-    }
+    let Some(pending) = state
+        .take_active_copy_token()
+        .expect("copy-token drain may consume only the active CopyToken frame")
+    else {
+        return;
+    };
+    drain_copy_token_resolution(state, pending, events);
 }
 
 fn drain_copy_token_resolution(
@@ -277,6 +285,7 @@ fn drain_copy_token_resolution(
         if batch.count == 0 {
             continue;
         }
+        let stack_depth_before_batch = state.resolution_stack.len();
         let spec = super::token::copy_probe_spec_for(
             batch.copy.source_id,
             batch.copy.controller,
@@ -312,7 +321,7 @@ fn drain_copy_token_resolution(
                     pending
                         .created_ids
                         .extend(state.last_created_token_ids.clone());
-                    state.pending_copy_token_resolution = Some(pending);
+                    park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                     return;
                 }
                 pending
@@ -321,7 +330,7 @@ fn drain_copy_token_resolution(
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
             crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
-                state.pending_copy_token_resolution = Some(pending);
+                park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return;
@@ -340,6 +349,25 @@ fn drain_copy_token_resolution(
         source_id: pending.source_id,
         subject: None,
     });
+}
+
+/// Park a copy-token owner as the direct paused frame, or below the complete
+/// child stack its batch raised. The captured boundary preserves the actual
+/// parent/child relationship without searching for a buried CopyToken frame.
+fn park_copy_token_after_current_batch(
+    state: &mut GameState,
+    pending: PendingCopyTokenResolution,
+    stack_depth_before_batch: usize,
+) {
+    match state.resolution_stack.len().cmp(&stack_depth_before_batch) {
+        std::cmp::Ordering::Less => {
+            panic!("copy-token batch removed a parent frame before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_copy_token(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_copy_token_parent_at_child_boundary(pending, stack_depth_before_batch)
+            .expect("copy-token parent must be inserted below its complete child stack"),
+    }
 }
 
 /// CR 601.2f + CR 603.4: Triggers gated on a cast-time additional-cost payment
@@ -449,7 +477,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
     let CopyTokenSpec {
-        values,
+        mut values,
         display_source,
         printed_ref,
         token_image_ref,
@@ -464,8 +492,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     let name = values.name.clone();
     let mut created_ids = initial_created_ids;
     created_ids.reserve(final_count as usize);
-    let copied_loyalty =
-        copy_starting_loyalty_override(&additional_modifications).or(values.loyalty);
+    if let Some(loyalty) = copy_starting_loyalty_override(&additional_modifications) {
+        values.loyalty = Some(loyalty);
+        values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
+    }
+    let copied_loyalty = values.loyalty;
 
     // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
     // enters with loyalty counters equal to the copied loyalty, except a copy
@@ -493,37 +524,50 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             .chain(enter_with_counters.iter().cloned())
             .collect();
 
+    // Liminal choice is loop-invariant; compute once so the terminal drain below
+    // can mirror the former continue_liminal_copy_token_batch tail for this path.
+    let liminal_immediate =
+        copy_token_modifications_are_liminal_immediate(&additional_modifications)
+            && etb_counters.is_empty();
+
     for index in 0..final_count {
-        if copy_token_modifications_are_liminal_immediate(&additional_modifications)
-            && etb_counters.is_empty()
-        {
+        if liminal_immediate {
             let (token_id, mut token) =
                 super::token::reserve_liminal_token_object(state, token_owner, name.clone());
             let entry_timestamp = state.next_timestamp();
 
-            token.is_token = true;
-            super::token::apply_copiable_values_to_liminal_object(
-                &mut token,
-                &values,
+            let copy_spec = Box::new(CopyTokenSpec {
+                values: values.clone(),
                 display_source,
-                printed_ref.clone(),
-                token_image_ref.clone(),
-            );
-            for kw in &extra_keywords {
-                if !token.keywords.contains(kw) {
-                    token.keywords.push(kw.clone());
+                printed_ref: printed_ref.clone(),
+                token_image_ref: token_image_ref.clone(),
+                extra_keywords: extra_keywords.clone(),
+                additional_modifications: additional_modifications.clone(),
+                tapped,
+                enters_attacking,
+                sacrifice_at: sacrifice_at.clone(),
+                source_id,
+                controller,
+            });
+            // CR 707.9b/9c: this seam only runs when every exception is
+            // stampable onto copiable values before entry, so the body is
+            // complete here and the CR 733 record can replay it exactly.
+            let body_modifications = if additional_modifications.is_empty() {
+                ResolvedCopyBodyModifications::NoExceptions
+            } else {
+                ResolvedCopyBodyModifications::Folded {
+                    modifications: additional_modifications.clone(),
+                    all_creature_types: state.all_creature_types.clone(),
                 }
-                if !token.base_keywords.contains(kw) {
-                    token.base_keywords.push(kw.clone());
-                }
-            }
-            apply_immediate_copy_token_modifications_to_object(
+            };
+            super::token::materialize_token_copy_body(
                 &mut token,
-                &additional_modifications,
-                &state.all_creature_types,
+                &copy_spec,
+                &body_modifications,
+                state.turn_number,
+                entry_timestamp,
+                enter_tapped.resolve(tapped),
             );
-            token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
-            token.tapped = enter_tapped.resolve(tapped);
             state.liminal_entries.insert(
                 token_id,
                 LiminalEntry {
@@ -536,19 +580,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
                     created_ids: created_ids.clone(),
-                    copy_resume: Some(Box::new(CopyTokenSpec {
-                        values: values.clone(),
-                        display_source,
-                        printed_ref: printed_ref.clone(),
-                        token_image_ref: token_image_ref.clone(),
-                        extra_keywords: extra_keywords.clone(),
-                        additional_modifications: additional_modifications.clone(),
-                        tapped,
-                        enters_attacking,
-                        sacrifice_at: sacrifice_at.clone(),
-                        source_id,
-                        controller,
-                    })),
+                    copy_resume: Some(copy_spec),
                     spec_resume: None,
                     enter_tapped,
                     enter_with_counters: Vec::new(),
@@ -589,20 +621,16 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                             };
                         }
                     }
-                    if !super::token::commit_liminal_token_entry_and_continue_copy_batch(
-                        state, event, events,
-                    ) {
+                    if !super::token::commit_liminal_copy_token_entry(state, event, events) {
                         created_ids = state.last_created_token_ids.clone();
                         return CopyTokenApplyStatus {
                             created_ids,
                             completion: CopyTokenApplyCompletion::Paused,
                         };
                     }
+                    // CR 707.2: this copy committed; iterate to the next token in the
+                    // batch (O(1) stack). Terminal drain runs once after the loop.
                     created_ids = state.last_created_token_ids.clone();
-                    return CopyTokenApplyStatus {
-                        created_ids,
-                        completion: CopyTokenApplyCompletion::Completed,
-                    };
                 }
                 crate::game::replacement::ReplacementResult::Prevented => {
                     state.liminal_entries.remove(&token_id);
@@ -632,36 +660,69 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // timestamp. Drawn before the `get_mut` (`next_timestamp` takes `&mut self`).
         let entry_timestamp = state.next_timestamp();
 
-        let token = state.objects.get_mut(&token_id).unwrap();
-        token.is_token = true;
-        token.display_source = display_source;
-        token.printed_ref = printed_ref.clone();
-        token.base_printed_ref = printed_ref.clone();
-        // CR 111.1 + CR 707.2: when copying a true token, carry its exact token
-        // art pointer so the copy resolves the same art (not a name fallback).
-        token.token_image_ref = token_image_ref.clone();
-        install_copiable_values_as_base(token, &values);
-        token.base_loyalty = copied_loyalty;
-        token.loyalty = copied_loyalty;
-        // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted
-        // below via `extra_keywords` (Twinflame, etc.) is folded in at query
-        // time by `has_summoning_sickness`.
-        token.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
+        let copy_spec = Box::new(CopyTokenSpec {
+            values: values.clone(),
+            display_source,
+            printed_ref: printed_ref.clone(),
+            token_image_ref: token_image_ref.clone(),
+            extra_keywords: extra_keywords.clone(),
+            additional_modifications: additional_modifications.clone(),
+            tapped,
+            enters_attacking,
+            sacrifice_at: sacrifice_at.clone(),
+            source_id,
+            controller,
+        });
+        // CR 707.9: unlike the liminal seam, this one applies its exceptions
+        // AFTER the birth through `apply_token_modifications`, which is pausable,
+        // state-level, and has no resolved family of its own yet. Mark them so
+        // replay refuses instead of installing a body that is missing them.
+        let body_modifications = if additional_modifications.is_empty() {
+            ResolvedCopyBodyModifications::NoExceptions
+        } else {
+            ResolvedCopyBodyModifications::DeferredToUnjournaledSeam {
+                modifications: additional_modifications.clone(),
+            }
+        };
+        let resulting_tapped = enter_tapped.resolve(tapped);
+        let turn_number = state.turn_number;
+        // `install_copiable_values_as_base` already seeds `loyalty`/`base_loyalty`
+        // from `values.loyalty` (CR 306.5b), which is what `copied_loyalty` is,
+        // so the shared body needs no separate loyalty seed.
+        let created_reference = state.objects.get_mut(&token_id).map(|token| {
+            super::token::materialize_token_copy_body(
+                token,
+                &copy_spec,
+                &body_modifications,
+                turn_number,
+                entry_timestamp,
+                resulting_tapped,
+            );
+            ObjectIncarnationRef::from_object(token)
+        });
 
-        // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
-        // keywords on top of the copied characteristics. Twinflame's haste
-        // copies are the canonical case. Idempotent under repeats.
-        for kw in &extra_keywords {
-            if !token.keywords.contains(kw) {
-                token.keywords.push(kw.clone());
-            }
-            if !token.base_keywords.contains(kw) {
-                token.base_keywords.push(kw.clone());
-            }
+        // CR 733: journal the settled copy birth, after the body borrow ends.
+        if let Some(object) = created_reference {
+            let cause = state.current_or_begin_rules_execution_node();
+            let command = ResolvedTokenCreationCommand {
+                object,
+                owner: token_owner,
+                entry_timestamp,
+                entry_turn: turn_number,
+                body: ResolvedTokenBody::Copy {
+                    copy: copy_spec.clone(),
+                    modifications: body_modifications,
+                },
+                resulting_tapped,
+                resulting_next_object_id: state.next_object_id,
+                cause,
+            };
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved copy-token creation must have a live journal cause");
         }
 
-        token.tapped = enter_tapped.resolve(tapped);
-        let _ = token;
         let finalization = CopyTokenFinalization {
             name: name.clone(),
             enters_attacking,
@@ -681,19 +742,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     state,
                     vec![PendingCounterPostAction::ContinueCopyTokenCreation {
                         owner: token_owner,
-                        copy: Box::new(CopyTokenSpec {
-                            values: values.clone(),
-                            display_source,
-                            printed_ref: printed_ref.clone(),
-                            token_image_ref: token_image_ref.clone(),
-                            extra_keywords: extra_keywords.clone(),
-                            additional_modifications: additional_modifications.clone(),
-                            tapped,
-                            enters_attacking,
-                            sacrifice_at: sacrifice_at.clone(),
-                            source_id,
-                            controller,
-                        }),
+                        copy: copy_spec.clone(),
                         enter_tapped,
                         enter_with_counters: enter_with_counters.clone(),
                         remaining_count,
@@ -813,6 +862,45 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         created_ids.push(token_id);
     }
 
+    if liminal_immediate {
+        // CR 603.7 + CR 701.36a: terminal step of the iterative liminal batch —
+        // set the created-token id ledger and emit the batch's final
+        // EffectResolved through the pending drain, exactly as the former
+        // continue_liminal_copy_token_batch None / remaining==0 arm did.
+        state.waiting_for = crate::types::game_state::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        let created_ids_for_pending = state.last_created_token_ids.clone();
+        if let Some(pending) = state.active_copy_token_mut() {
+            pending.created_ids = created_ids_for_pending;
+        }
+        if state.active_copy_token().is_some() {
+            drain_pending_copy_token_resolution(state, events);
+        }
+        created_ids = state.last_created_token_ids.clone();
+
+        // C1: do NOT hardcode Completed. Reproduce the replaced
+        // continue_liminal_copy_token_batch tail (old ~1196-1197): the whole
+        // (possibly multi-batch) resolution is done only if nothing remains
+        // pending or we've settled back to Priority; otherwise a later batch is
+        // waiting on a CR 616.1 replacement choice, so report Paused and let the
+        // caller resume rather than double-drain it (token_copy::resolve builds a
+        // multi-batch VecDeque when copy_source_ids.len() > 1).
+        let completion = if state.active_copy_token().is_none()
+            || matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ) {
+            CopyTokenApplyCompletion::Completed
+        } else {
+            CopyTokenApplyCompletion::Paused
+        };
+        return CopyTokenApplyStatus {
+            created_ids,
+            completion,
+        };
+    }
+
     CopyTokenApplyStatus {
         created_ids,
         completion: CopyTokenApplyCompletion::Completed,
@@ -887,7 +975,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         source_id,
     });
     state.last_created_token_ids.push(token_id);
-    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+    if let Some(pending) = state.active_copy_token_mut() {
         pending.created_ids.push(token_id);
     }
     true
@@ -1239,6 +1327,8 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_loyalty = Some(*value);
                     token.loyalty = Some(*value);
+                    token.base_printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
+                    token.printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
                 }
             }
             // CR 707.9a + CR 603.1: "except it has \"<triggered ability>\""
@@ -1250,8 +1340,7 @@ fn apply_token_modifications(
             // as their source.
             ContinuousModification::GrantTrigger { trigger } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.trigger_definitions.push((**trigger).clone());
-                    Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                    token.push_printed_trigger((**trigger).clone());
                 }
             }
             // CR 707.9a: "except it has \"<activated/static ability>\"" — the
@@ -1427,10 +1516,11 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
             ContinuousModification::SetStartingLoyalty { value } => {
                 token.base_loyalty = Some(*value);
                 token.loyalty = Some(*value);
+                token.base_printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
+                token.printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
             }
             ContinuousModification::GrantTrigger { trigger } => {
-                token.trigger_definitions.push((**trigger).clone());
-                Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                token.push_printed_trigger((**trigger).clone());
             }
             ContinuousModification::GrantAbility { definition } => {
                 Arc::make_mut(&mut token.abilities).push((**definition).clone());
@@ -1521,6 +1611,7 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::triggers::TriggerMode;
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
@@ -2047,6 +2138,24 @@ mod tests {
         assert!(
             state.last_created_token_ids.is_empty(),
             "no copy token should be created before the replacement choice resolves"
+        );
+        assert!(
+            state.active_copy_token().is_some(),
+            "the replacement prompt must be owned by the active CopyToken frame"
+        );
+
+        let wire = ResolutionStateWire::from_game_state(state);
+        let serialized = serde_json::to_value(&wire).expect("CopyToken prompt serializes as v2");
+        assert!(
+            serialized.get("pending_copy_token_resolution").is_none(),
+            "v2 CopyToken prompts must not emit the removed v1 field"
+        );
+        let mut state = serde_json::from_value::<ResolutionStateWire>(serialized)
+            .expect("v2 CopyToken prompt roundtrips")
+            .into_game_state();
+        assert!(
+            state.active_copy_token().is_some(),
+            "roundtripped prompt keeps CopyToken as the active typed owner"
         );
 
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
@@ -3875,6 +3984,33 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::CopyToken, FrameKind::CounterAdditions],
+            "a counter-replacement pause must keep CopyToken below its active counter child"
+        );
+        assert!(
+            state.active_copy_token().is_none(),
+            "top-only access must not search through the active counter child"
+        );
+        let serialized = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("nested CopyToken counter prompt serializes as v2");
+        let mut state = serde_json::from_value::<ResolutionStateWire>(serialized)
+            .expect("nested CopyToken counter prompt roundtrips")
+            .into_game_state();
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(crate::types::resolution::ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::CopyToken, FrameKind::CounterAdditions],
+            "v2 must preserve the CopyToken parent beneath its counter child"
+        );
 
         let mut choice_events = Vec::new();
         for _ in 0..2 {
@@ -4101,6 +4237,8 @@ mod tests {
         let token_id = ObjectId(state.next_object_id - 1);
         let token = &state.objects[&token_id];
         assert_eq!(token.base_loyalty, Some(1));
+        assert_eq!(token.printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
+        assert_eq!(token.base_printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
         assert_eq!(
             token.counters.get(&CounterType::Loyalty).copied(),
             Some(1),
