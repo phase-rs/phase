@@ -30125,9 +30125,9 @@ fn suffix_condition_with_otherwise_integration() {
 /// opponent's graveyard is in ITS OWNER's graveyard.
 ///
 /// REVERT-FAILING ASSERTION: `enters_under == Some(ParentTargetOwner)`. Before
-/// the fix the clause was dropped entirely and this field was `None`, which
-/// makes the permanent enter under the CASTER's control (CR 110.2a's default) —
-/// the exact defect #6691 reports.
+/// the fix the clause was dropped entirely and this field was `None`, the
+/// existing no-override carrier. It therefore could not preserve Jailbreak's
+/// explicitly named owner-controller — the exact defect #6691 reports.
 #[test]
 fn jailbreak_enters_under_their_control_binds_to_the_owner() {
     // Verbatim Oracle text (client/public/card-data.json).
@@ -30200,9 +30200,9 @@ fn under_your_control_still_binds_to_you_after_the_collapse() {
     }
 }
 
-/// CR 110.2 (docs/MagicCompRules.txt:616): the owner forms restate the default,
-/// so they must still produce NO override — and specifically must not be
-/// misread as the third-person `TheirAnaphor` (the B3 trap).
+/// CR 110.2 (docs/MagicCompRules.txt:616): owner forms use the existing
+/// per-moved-object-owner carrier (`None`), rather than a player override, and
+/// specifically must not be misread as the third-person `TheirAnaphor` (B3).
 #[test]
 fn owner_forms_still_produce_no_controller_override() {
     for text in [
@@ -30228,8 +30228,8 @@ fn owner_forms_still_produce_no_controller_override() {
 ///
 /// REVERT-FAILING ASSERTION: the effect is the `change_zone_enters_under_anaphor`
 /// gap. Before the fix this parsed to a `ChangeZone` with `enters_under: None`,
-/// i.e. the permanent entered under the caster's control while the card
-/// reported as fully supported.
+/// the existing no-override carrier, while the card reported as fully
+/// supported despite losing its explicitly printed controller.
 #[test]
 fn unbindable_anaphor_fails_closed_instead_of_defaulting() {
     // `TargetFilter::Any`-style filter with NO ownership NP and no relative
@@ -30286,6 +30286,65 @@ fn unbindable_search_destination_removes_move_and_attachment() {
             Effect::ChangeZone { .. } | Effect::Attach { .. }
         )),
         "no executable move or attachment may survive beside the gap: {def:#?}"
+    );
+}
+
+/// CR 110.2a reach guard for the paired fail-closed SearchDestination case:
+/// a bindable clause must still assemble the production SearchLibrary →
+/// ChangeZone → Attach path. This prevents the negative regression above from
+/// passing because the search-destination continuation stopped assembling.
+#[test]
+fn bindable_search_destination_keeps_move_and_attachment() {
+    let def = parse_effect_chain(
+        "Search your library for an Aura card, put it onto the battlefield under your control \
+         attached to target creature, then shuffle.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain = Vec::new();
+    collect_chain_defs(&def, &mut chain);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::SearchLibrary { .. }),
+        "the bindable sibling must begin at its SearchLibrary production entry: {def:#?}"
+    );
+    assert!(
+        chain
+            .iter()
+            .all(|definition| !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })),
+        "the bindable sibling must reach SearchDestination assembly: {def:#?}"
+    );
+    let search_index = chain
+        .iter()
+        .position(|definition| matches!(definition.effect.as_ref(), Effect::SearchLibrary { .. }))
+        .expect("the bindable sibling must retain its SearchLibrary production entry");
+    assert_eq!(
+        search_index, 0,
+        "the SearchLibrary production entry must precede the destination chain: {def:#?}"
+    );
+    let attachment_index = chain
+        .iter()
+        .position(|definition| {
+            definition.forward_result
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        enters_under: Some(ControllerRef::You),
+                        ..
+                    }
+                )
+                && matches!(
+                    definition
+                        .sub_ability
+                        .as_deref()
+                        .map(|sub| sub.effect.as_ref()),
+                    Some(Effect::Attach { .. })
+                )
+        })
+        .expect("the bindable SearchDestination must retain its move and attachment");
+    assert!(
+        search_index < attachment_index,
+        "SearchLibrary must precede its battlefield move and attachment: {def:#?}"
     );
 }
 

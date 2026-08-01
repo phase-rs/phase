@@ -2055,8 +2055,8 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
-                        // CR 110.1 (docs/MagicCompRules.txt:614): only
-                        // permanents have a controller.
+                        // CR 110.2 (docs/MagicCompRules.txt:616): controller
+                        // semantics apply only while an object is a permanent.
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
@@ -2083,8 +2083,8 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
-                        // CR 110.1 (docs/MagicCompRules.txt:614): only
-                        // permanents have a controller.
+                        // CR 110.2 (docs/MagicCompRules.txt:616): controller
+                        // semantics apply only while an object is a permanent.
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
@@ -2334,8 +2334,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         } => {
             // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. A printed
             // control clause whose antecedent could not be named must NOT
-            // collapse into the CR 110.2 default — that would put the permanent
-            // under the wrong player's control while the card reported as fully
+            // collapse into the existing no-override carrier — that loses the
+            // explicitly printed controller while the card reports as fully
             // supported.
             if let Some(p) = enters_under.unbound_possessor() {
                 return Effect::unimplemented(

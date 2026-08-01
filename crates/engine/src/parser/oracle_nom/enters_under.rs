@@ -18,11 +18,11 @@
 //! Before this module the four rewired seams each recognized a *different*
 //! hand-picked subset of the spellings by literal comparison, and every
 //! third-person form (`"under their control"`, `"under that player's
-//! control"`) was silently dropped — the permanent then entered under the
-//! resolving player's control (CR 110.2a's default), which is the wrong
-//! player. Collapsing the spellings into one grammar makes the dropped forms
-//! either *bound* (when an antecedent is nameable) or *honestly unsupported*
-//! (when it is not) — never silently wrong.
+//! control"`) was silently dropped into the existing no-override carrier. That
+//! carrier cannot preserve an explicitly named third-person controller.
+//! Collapsing the spellings into one grammar makes the dropped forms either
+//! *bound* (when an antecedent is nameable) or *honestly unsupported* (when it
+//! is not) — never silently wrong.
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -49,7 +49,8 @@ pub(crate) enum ControlClausePossessor {
     /// resolving player.
     You,
     /// CR 110.2 (docs/MagicCompRules.txt:616): `"under its/their/his/her
-    /// owner's control"` — restates the default, so it is not an override.
+    /// owner's control"` — explicitly names the moved object's owner. The
+    /// existing `None` carrier preserves that per-object owner at resolution.
     Owner,
     /// CR 608.2c (docs/MagicCompRules.txt:2793): a bare third-person plural
     /// anaphor, `"under their control"`. Needs an antecedent.
@@ -311,7 +312,7 @@ fn filter_names_third_person_owner(filter: &TargetFilter) -> bool {
 /// | possessor | antecedent | result | CR |
 /// |---|---|---|---|
 /// | `You` | any | `Override(You)` | 109.5 (:610) |
-/// | `Owner` | any | `Default` | 110.2 (:616) |
+/// | `Owner` | any | `Default` | 110.2 (:616), encoded as per-object owner |
 /// | `TheirAnaphor` | `MovedObjectOwner` | `Override(ParentTargetOwner)` | 400.1+400.3+404.1+108.3 |
 /// | `TheirAnaphor` | `ContextPlayer(r)` | `Override(r)` | 608.2c |
 /// | `TheirAnaphor` | `Unnameable` | `UnboundAnaphor` | fail closed |
@@ -330,10 +331,12 @@ pub(crate) fn bind_control_clause(
         return EntersUnderSpec::Default;
     };
     match (possessor, antecedent) {
-        // CR 109.5 (:610): "you"/"your" is the object's controller — an
-        // explicit override of the CR 110.2 default.
+        // CR 109.5 (:610): "you"/"your" names the resolving player as an
+        // explicit battlefield-entry controller.
         (ControlClausePossessor::You, _) => EntersUnderSpec::Override(ControllerRef::You),
-        // CR 110.2 (:616): restating the default is not "stating otherwise".
+        // CR 110.2 (:616): `Default` is the existing IR spelling for the
+        // resolver's per-moved-object owner behavior. It must not be collapsed
+        // to the CR 110.2a instructed-player default.
         (ControlClausePossessor::Owner, _) => EntersUnderSpec::Default,
         // CR 400.1 (:1933) + CR 400.3 (:1937) + CR 404.1 (:2030) + CR 108.3
         // (:564): a card in a graveyard is in ITS OWNER'S graveyard, so the

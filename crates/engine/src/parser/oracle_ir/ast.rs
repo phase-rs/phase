@@ -220,13 +220,13 @@ pub(crate) enum PredicateAst {
 /// CR 110.2a (docs/MagicCompRules.txt:618): the resolved battlefield-entry
 /// controller for a zone change, as the IR carries it.
 ///
-/// Three states, not two: `Default` (the effect states nothing otherwise, so CR
-/// 110.2's owner/putting-player default stands), `Override` (a bound
-/// controller), and `UnboundAnaphor` — a control clause that WAS printed but
-/// whose antecedent the parser cannot name. The third state is what keeps a
-/// dropped `"under their control"` from silently degrading into `Default`,
-/// which would put the permanent under the wrong player's control; the lowering
-/// sites turn it into an honest `Effect::unimplemented` instead.
+/// Three states, not two: `Default` (no explicit controller override in the
+/// IR; lowering carries it as `None` to the existing resolver), `Override` (a
+/// bound controller), and `UnboundAnaphor` — a control clause that WAS printed
+/// but whose antecedent the parser cannot name. The third state is what keeps a
+/// dropped `"under their control"` from silently degrading into the existing
+/// fallback representation; the lowering sites turn it into an honest
+/// `Effect::unimplemented` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub(crate) enum EntersUnderSpec {
     #[default]
@@ -238,8 +238,8 @@ pub(crate) enum EntersUnderSpec {
 }
 
 impl EntersUnderSpec {
-    /// The bound controller, or `None` for both the CR 110.2 default and an
-    /// unbound anaphor. Callers that can fail closed MUST check
+    /// The bound controller, or `None` for both no-override and an unbound
+    /// anaphor. Callers that can fail closed MUST check
     /// [`Self::unbound_possessor`] first — this method deliberately collapses
     /// the two `None` cases so the guard has to be written explicitly.
     pub(crate) fn as_controller_ref(&self) -> Option<ControllerRef> {
@@ -266,8 +266,8 @@ pub(crate) enum ContinuationAst {
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
-        /// controller for the searched card. `Default` keeps the CR 110.2
-        /// owner/putting-player default; `UnboundAnaphor` fails closed.
+        /// controller for the searched card. `Default` lowers through the
+        /// existing no-override carrier; `UnboundAnaphor` fails closed.
         enters_under: EntersUnderSpec,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
@@ -1033,7 +1033,7 @@ pub(crate) enum TargetedImperativeAst {
         enter_transformed: bool,
         /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
         /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` leaves the CR 110.2 default standing;
+        /// from `r`; `Default` lowers through the existing no-override carrier;
         /// `UnboundAnaphor` marks a printed control clause whose antecedent
         /// could not be named, and the lowering site turns it into an honest
         /// `Effect::unimplemented` rather than a silently-wrong controller.
@@ -1421,7 +1421,7 @@ pub(crate) enum PutImperativeAst {
         target: TargetFilter,
         /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
         /// controller. `Override(r)` routes the object to the player resolved
-        /// from `r`; `Default` leaves the CR 110.2 default standing;
+        /// from `r`; `Default` lowers through the existing no-override carrier;
         /// `UnboundAnaphor` marks a printed control clause whose antecedent
         /// could not be named, and the lowering site turns it into an honest
         /// `Effect::unimplemented` rather than a silently-wrong controller.
