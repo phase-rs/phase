@@ -17,7 +17,7 @@ use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributio
 
 #[test]
 fn source_counter_quantity_ref_rebinds_to_recipient() {
-    let counter_type = Some(CounterType::PlusOnePlusOne);
+    let counter_type = Some(CounterType::Plus1Plus1);
     assert_eq!(
         super::shared::rebind_source_object_quantity_ref_to_recipient(QuantityRef::CountersOn {
             scope: ObjectScope::Source,
