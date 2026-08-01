@@ -733,6 +733,8 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters the battlefield tapped",
     "enters tapped",
     "enters untapped",
+    "enter the battlefield untapped",
+    "enters the battlefield untapped",
     "enters prepared",
     "enter as a copy of",
     "enter tapped as a copy of",
@@ -779,16 +781,6 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
     }
 
     if lower.trim_end_matches('.').ends_with(" enter untapped") {
-        return true;
-    }
-
-    // CR 614.1c: the untapped-entry counterpart is templated the same short-vs-
-    // long way as the tapped form above (Vigorous Farming: "Lands you control
-    // enter the battlefield untapped.").
-    if lower
-        .trim_end_matches('.')
-        .ends_with(" enter the battlefield untapped")
-    {
         return true;
     }
 

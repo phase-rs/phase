@@ -536,6 +536,46 @@ fn spelunking_etb_put_cave_gains_life_conditionally() {
     );
 }
 
+/// CR 614.1c: the fully spelled external-entry untapped form must travel
+/// through document classification into a battlefield-entry replacement. This
+/// is intentionally a `parse_oracle_text` test rather than a direct suffix
+/// helper test: reverting the classifier route leaves Vigorous Farming as an
+/// unimplemented line and no replacement reaches the runtime card definition.
+#[test]
+fn vigorous_farming_long_untapped_entry_reaches_replacement_pipeline() {
+    let parsed = parse_oracle_text(
+        "Lands you control enter the battlefield untapped.",
+        "Vigorous Farming",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.abilities.is_empty(),
+        "the replacement line must not fall through as a spell ability: {:#?}",
+        parsed.abilities
+    );
+    let replacement = parsed
+        .replacements
+        .first()
+        .expect("long-form untapped entry must produce a replacement definition");
+    assert!(
+        matches!(
+            replacement
+                .execute
+                .as_deref()
+                .map(|definition| definition.effect.as_ref()),
+            Some(Effect::SetTapState {
+                state: TapStateChange::Untap,
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+            })
+        ),
+        "the replacement must install the normal entry-untap payload: {replacement:#?}"
+    );
+}
+
 /// CR 207.2c + CR 602.1: an activated ability may carry an italic ability-word
 /// label before its cost ("Mental Organism — Pay 3 life: ~ connives" —
 /// M.O.D.O.K.). The ability word has no rules meaning, so `find_activated_colon`

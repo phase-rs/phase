@@ -5302,35 +5302,7 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                 )
             })
         })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            // CR 614.1c: the untapped-entry counterpart is templated the same
-            // short-vs-long way as the tapped form above (Vigorous Farming:
-            // "Lands you control enter the battlefield untapped.").
-            stripped
-                .strip_suffix(" enter the battlefield untapped")
-                .map(|subject| {
-                    (
-                        subject,
-                        ExternalEntryKind::Plain {
-                            enters_tapped: false,
-                        },
-                    )
-                })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped
-                .strip_suffix(" enters the battlefield untapped")
-                .map(|subject| {
-                    (
-                        subject,
-                        ExternalEntryKind::Plain {
-                            enters_tapped: false,
-                        },
-                    )
-                })
-        })
+        .or_else(|| parse_external_entry_untapped_long_suffix(stripped))
         .or_else(|| {
             // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
             stripped.strip_suffix(" enter untapped").map(|subject| {
@@ -5353,6 +5325,31 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                 )
             })
         })
+}
+
+/// CR 614.1c: Parse the long external-entry untapped form. The subject is a
+/// type phrase of arbitrary length, so capture it before a factored verb axis
+/// and require the suffix to consume the full line.
+fn parse_external_entry_untapped_long_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
+    type VE<'a> = OracleError<'a>;
+    let (_, subject) = terminated(
+        pair(
+            take_until::<_, _, VE>(" enter"),
+            alt((
+                tag(" enter the battlefield untapped"),
+                tag(" enters the battlefield untapped"),
+            )),
+        ),
+        eof::<&str, VE<'_>>,
+    )
+    .parse(input)
+    .ok()?;
+    Some((
+        subject.0,
+        ExternalEntryKind::Plain {
+            enters_tapped: false,
+        },
+    ))
 }
 
 fn build_external_entry_replacement(
