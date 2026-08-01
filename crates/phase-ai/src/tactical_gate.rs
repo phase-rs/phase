@@ -5,9 +5,10 @@ use engine::game::combat::AttackTarget;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -151,6 +152,31 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
             }
         }
         GameAction::ChooseTarget { target: None } => GateDecision::Allow,
+        // CR 702.51a (Convoke) / CR 702.126a (Improvise) / Waterbend: a
+        // dual-purpose permanent's Colorless convoke-family marker must not be
+        // taken while a sibling candidate for the SAME object could still pay
+        // an outstanding colored pip via its native mana ability — spending
+        // the Colorless marker first permanently strands that pip and
+        // dead-ends `ManaPayment` (the Metallic Rebuke bug:
+        // `search::fallback_action`'s "can_cast_object_now has a gap" panic).
+        // Zero-cost dominance, not a scoring preference: the native ability
+        // can always still cover the trailing generic slot afterward.
+        GameAction::TapForConvoke {
+            object_id,
+            mana_type: ManaType::Colorless,
+        } => {
+            if matches!(ctx.decision.waiting_for, WaitingFor::ManaPayment { .. })
+                && crate::mana_colors::convoke_native_tap_still_demanded(
+                    ctx.state,
+                    &ctx.decision.candidates,
+                    *object_id,
+                )
+            {
+                GateDecision::Reject
+            } else {
+                GateDecision::Allow
+            }
+        }
         GameAction::SelectTargets { targets } => {
             for target in targets {
                 if let Some(rejection) = reject_futile_target(ctx, target) {
@@ -1157,5 +1183,448 @@ mod tests {
         assert_eq!(gate_for(7, 7), GateDecision::Reject);
         assert_ne!(gate_for(8, 7), GateDecision::Reject);
         assert_ne!(gate_for(4, 3), GateDecision::Reject);
+    }
+
+    /// Build an Improvise `ManaPayment` decision context: a `TapForConvoke`
+    /// Colorless candidate for `object_id`, plus whatever sibling candidates
+    /// the caller supplies for that same dual-purpose permanent.
+    fn improvise_mana_payment_decision(
+        sibling_candidates: Vec<CandidateAction>,
+        object_id: ObjectId,
+    ) -> AiDecisionContext {
+        let mut candidates = vec![CandidateAction {
+            action: GameAction::TapForConvoke {
+                object_id,
+                mana_type: ManaType::Colorless,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Mana),
+        }];
+        candidates.extend(sibling_candidates);
+        AiDecisionContext {
+            waiting_for: WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: Some(engine::types::game_state::ConvokeMode::Improvise),
+            },
+            candidates,
+        }
+    }
+
+    fn native_blue_tap_candidate(object_id: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::TapLandForMana {
+                selection: engine::types::mana::ManaSourceSelection {
+                    source: engine::types::identifiers::ObjectIncarnationRef {
+                        object_id,
+                        incarnation: 0,
+                    },
+                    ability_index: None,
+                    mana_type: ManaType::Blue,
+                    output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Blue),
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: engine::types::mana::ManaSourcePenalty::None,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Mana),
+        }
+    }
+
+    fn convoke_candidate_ctx<'a>(
+        state: &'a GameState,
+        decision: &'a AiDecisionContext,
+        config: &'a crate::config::AiConfig,
+        context: &'a AiContext,
+    ) -> PolicyContext<'a> {
+        PolicyContext {
+            state,
+            decision,
+            candidate: &decision.candidates[0],
+            ai_player: P0,
+            config,
+            context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        }
+    }
+
+    /// CR 702.51a + CR 702.126a: a dual-purpose permanent (an artifact land
+    /// producing {U} natively) must not be tapped for its Colorless Improvise
+    /// marker while the pending cast's {U} pip is still outstanding — that
+    /// would strand the pip and dead-end `ManaPayment` (the Metallic Rebuke
+    /// bug: crates/phase-ai/src/search.rs's `fallback_action` panic).
+    #[test]
+    fn rejects_convoke_colorless_tap_when_native_ability_still_covers_colored_demand() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(900),
+            CardId(900),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(900),
+                P0,
+            ),
+            ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Blue],
+                generic: 2,
+            },
+        )));
+        let object_id = ObjectId(901);
+        let decision =
+            improvise_mana_payment_decision(vec![native_blue_tap_candidate(object_id)], object_id);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = convoke_candidate_ctx(&state, &decision, &config, &context);
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// The sibling native-ability tap for the same permanent must stay
+    /// `Allow` — the fix removes only the redundant Colorless path, not the
+    /// source's usability.
+    #[test]
+    fn allows_native_tap_when_colorless_marker_is_gated() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(900),
+            CardId(900),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(900),
+                P0,
+            ),
+            ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Blue],
+                generic: 2,
+            },
+        )));
+        let object_id = ObjectId(901);
+        let decision =
+            improvise_mana_payment_decision(vec![native_blue_tap_candidate(object_id)], object_id);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &decision.candidates[1],
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
+    }
+
+    /// Once colored demand is satisfied (a generic-only remaining cost), the
+    /// Colorless marker is fine again — this isn't a blanket ban on
+    /// Improvise/Convoke for dual-purpose permanents.
+    #[test]
+    fn allows_convoke_colorless_tap_once_colored_demand_is_satisfied() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(900),
+            CardId(900),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(900),
+                P0,
+            ),
+            ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 3,
+            },
+        )));
+        let object_id = ObjectId(901);
+        let decision =
+            improvise_mana_payment_decision(vec![native_blue_tap_candidate(object_id)], object_id);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = convoke_candidate_ctx(&state, &decision, &config, &context);
+        assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
+    }
+
+    /// A permanent with no sibling native colored option (a plain
+    /// non-mana-producing artifact) is unaffected by the gate — it's scoped
+    /// to true tap-channel dominance, not all Colorless taps.
+    #[test]
+    fn allows_convoke_colorless_tap_on_permanent_with_no_native_colored_option() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(900),
+            CardId(900),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(900),
+                P0,
+            ),
+            ManaCost::Cost {
+                shards: vec![engine::types::mana::ManaCostShard::Blue],
+                generic: 2,
+            },
+        )));
+        let object_id = ObjectId(901);
+        let decision = improvise_mana_payment_decision(Vec::new(), object_id);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = convoke_candidate_ctx(&state, &decision, &config, &context);
+        assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
+    }
+
+    /// CR 702.51a: the production Convoke candidate path (`mana_payment_actions`
+    /// via `candidate_actions_broad`) offers a Colorless marker AND a matching
+    /// colored marker for the same creature when its color is in the cost. The
+    /// Improvise-only tests above build a synthetic native-mana sibling and
+    /// never exercise this real Convoke-generated pair -- confirmed missing by
+    /// review on #6840: `sibling_native_tap_pays_demand` didn't recognize a
+    /// colored `TapForConvoke` on the same object as a dominating sibling, so a
+    /// real Convoke spell with a colored pip could still dead-end.
+    #[test]
+    fn rejects_convoke_colorless_tap_when_real_convoke_colored_sibling_covers_demand() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario.add_creature(P0, "Convoke Creature", 2, 2).id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.objects.get_mut(&creature).unwrap().color =
+                vec![engine::types::mana::ManaColor::Blue];
+            state.pending_cast = Some(Box::new(PendingCast::new(
+                ObjectId(900),
+                CardId(900),
+                ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(900),
+                    P0,
+                ),
+                ManaCost::Cost {
+                    shards: vec![engine::types::mana::ManaCostShard::Blue],
+                    generic: 1,
+                },
+            )));
+            state.waiting_for = WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: Some(engine::types::game_state::ConvokeMode::Convoke),
+            };
+        }
+        let state = runner.state();
+        let candidates = engine::ai_support::candidate_actions_broad(state);
+        let colorless = candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id,
+                        mana_type: ManaType::Colorless,
+                    } if object_id == creature
+                )
+            })
+            .expect("production candidate path must offer the Colorless convoke tap")
+            .clone();
+        let colored = candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id,
+                        mana_type: ManaType::Blue,
+                    } if object_id == creature
+                )
+            })
+            .expect("production candidate path must offer the matching colored convoke tap")
+            .clone();
+
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+
+        let colorless_ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&colorless_ctx), GateDecision::Reject);
+
+        let colored_ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colored,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&colored_ctx), GateDecision::Allow);
+    }
+
+    /// Builds an Improvise-eligible artifact with one `Activated` mana ability
+    /// producing Blue under the given `cost`, plus a `{1}{U}` pending cast, and
+    /// returns the production `ManaPayment` candidates
+    /// (`candidate_actions_broad` -> `mana_payment_actions`) for it.
+    fn improvise_artifact_with_mana_ability_candidates(
+        cost: Option<engine::types::ability::AbilityCost>,
+    ) -> (
+        engine::game::scenario::GameRunner,
+        ObjectId,
+        Vec<CandidateAction>,
+    ) {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario.add_creature(P0, "Improvise Artifact", 0, 0).id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            let obj = state.objects.get_mut(&artifact).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut mana_ability = engine::types::ability::AbilityDefinition::new(
+                engine::types::ability::AbilityKind::Activated,
+                Effect::Mana {
+                    produced: engine::types::ability::ManaProduction::Fixed {
+                        colors: vec![engine::types::mana::ManaColor::Blue],
+                        contribution: engine::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            mana_ability.cost = cost;
+            std::sync::Arc::make_mut(&mut obj.abilities).push(mana_ability);
+
+            state.pending_cast = Some(Box::new(PendingCast::new(
+                ObjectId(900),
+                CardId(900),
+                ResolvedAbility::new(
+                    Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(900),
+                    P0,
+                ),
+                ManaCost::Cost {
+                    shards: vec![engine::types::mana::ManaCostShard::Blue],
+                    generic: 1,
+                },
+            )));
+            state.waiting_for = WaitingFor::ManaPayment {
+                player: P0,
+                convoke_mode: Some(engine::types::game_state::ConvokeMode::Improvise),
+            };
+        }
+        let candidates = engine::ai_support::candidate_actions_broad(runner.state());
+        (runner, artifact, candidates)
+    }
+
+    fn find_colorless_convoke_candidate(
+        candidates: &[CandidateAction],
+        object_id: ObjectId,
+    ) -> CandidateAction {
+        candidates
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::TapForConvoke {
+                        object_id: o,
+                        mana_type: ManaType::Colorless,
+                    } if o == object_id
+                )
+            })
+            .expect("production candidate path must offer the Colorless convoke tap")
+            .clone()
+    }
+
+    /// Review finding on #6840: a tapless mana ability (e.g. a
+    /// sacrifice-based one) on the SAME permanent as the Colorless Improvise
+    /// marker does not compete for the tap -- both can legally be used in the
+    /// same payment (Colorless first, then sacrifice the permanent for its
+    /// ability), so it must not gate the Colorless action. Drives the real
+    /// production `ManaPayment` candidate set, not a synthetic sibling.
+    #[test]
+    fn allows_colorless_improvise_tap_when_sibling_mana_ability_is_tapless() {
+        let (runner, artifact, candidates) = improvise_artifact_with_mana_ability_candidates(Some(
+            engine::types::ability::AbilityCost::Sacrifice(
+                engine::types::ability::SacrificeCost::count(TargetFilter::Any, 1),
+            ),
+        ));
+        let state = runner.state();
+        let colorless = find_colorless_convoke_candidate(&candidates, artifact);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Allow);
+    }
+
+    /// Regression guard for the fix above: a genuine tap-cost native mana
+    /// ability on the same permanent still gates the Colorless marker, via
+    /// the real production candidate path.
+    #[test]
+    fn rejects_colorless_improvise_tap_when_sibling_mana_ability_taps() {
+        let (runner, artifact, candidates) = improvise_artifact_with_mana_ability_candidates(Some(
+            engine::types::ability::AbilityCost::Tap,
+        ));
+        let state = runner.state();
+        let colorless = find_colorless_convoke_candidate(&candidates, artifact);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &colorless,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
     }
 }

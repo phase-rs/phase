@@ -1329,6 +1329,73 @@ impl ManaActivationGates {
     }
 }
 
+/// CR 305.6: builds the minimal synthetic `AbilityDefinition` (Tap cost,
+/// `Effect::Mana`) standing in for a land's INTRINSIC "{T}: Add [mana
+/// symbol]" ability — the ability every land with a basic land type has
+/// whether or not any `AbilityDefinition` object represents it. Used so a
+/// legality check's `kind`/`exemption`/cost axes (e.g. Damping Matrix's
+/// "unless they're mana abilities" carve-out) evaluate identically to how
+/// they would against a real, printed mana ability.
+fn intrinsic_land_mana_ability_definition(color: ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
+}
+
+/// CR 305.6 + CR 602.5: Is a land's basic-land-type INTRINSIC mana ability
+/// currently blocked — by ANY of the gates a printed mana ability would be
+/// checked against? `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for a land with no
+/// `AbilityDefinition` object at all (Urborg/Blood-Moon-class grants), but
+/// CR 305.6's intrinsic ability is still an activated mana ability, so every
+/// gate `mana_ability_ready_without_simulation_gated` applies to a real one —
+/// phased-out (CR 702.26b), detained (CR 701.35a), zone (CR 113.6), tapped/
+/// can't-tap (CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b), summoning sickness
+/// (CR 302.6), CantBeActivated/CantActivateDuring (CR 602.5), static
+/// activation restrictions (CR 604/605.3b) — must apply to it too. Routes the
+/// synthetic definition through that SAME single-authority readiness check
+/// rather than re-implementing any subset of it: the function takes an
+/// `AbilityDefinition` by reference and never indexes `obj.abilities`, so a
+/// synthesized definition with no real storage slot is exactly as valid an
+/// input as a printed one. `ability_index: 0` is inert here — the intrinsic
+/// ability carries empty `activation_restrictions` (so `ability_index` is
+/// never read by that check) and a bare `Tap` cost (whose payability check
+/// doesn't consult it either).
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+    gates: Option<&ManaActivationGates>,
+) -> bool {
+    let ability_def = intrinsic_land_mana_ability_definition(color);
+    let ready = match gates {
+        Some(gates) => mana_ability_ready_without_simulation_gated(
+            state,
+            controller,
+            object_id,
+            0,
+            &ability_def,
+            gates,
+        ),
+        None => {
+            mana_ability_ready_without_simulation(state, controller, object_id, 0, &ability_def)
+        }
+    };
+    !ready
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
@@ -1386,8 +1453,8 @@ fn mana_ability_ready_without_simulation_gated(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
-    // CR 701.26a + CR 508.1f: a "can't become tapped" source (e.g. a goaded mana
-    // dork) can't activate a tap-cost mana ability. A {Q} untap-cost ability is
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b: a "can't become tapped"
+    // source can't pay a tap-cost mana ability. A {Q} untap-cost ability is
     // unaffected — untapping is governed by `StaticMode::CantUntap`.
     if mana_sources::has_tap_component(&ability_def.cost)
         && crate::game::restrictions::object_cant_tap(state, source_id)
@@ -2755,6 +2822,18 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             player,
             ManaAbilityResume::ManaPayment {
                 outer_player,
+                convoke_mode,
+            },
+        )),
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => Ok(resume_waiting_for(
+            player,
+            ManaAbilityResume::ManaSourceSelection {
+                player,
+                options,
                 convoke_mode,
             },
         )),
@@ -4156,6 +4235,15 @@ pub(crate) fn resume_waiting_for(
             convoke_mode,
         } => WaitingFor::ManaPayment {
             player: outer_player.unwrap_or(mana_source_controller),
+            convoke_mode,
+        },
+        ManaAbilityResume::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode,
+        } => WaitingFor::ManaSourceSelection {
+            player,
+            options,
             convoke_mode,
         },
         ManaAbilityResume::UnlessPayment {
@@ -10011,6 +10099,170 @@ mod tests {
         assert!(
             !can_activate_mana_ability_now(&state, player, land, 0, &def),
             "Gemstone Mine must not be activatable when it has no mining counters"
+        );
+    }
+
+    // Issue #6507 integration follow-up: `make_gemstone_mine` above omits the
+    // trailing "If there are no mining counters on this land, sacrifice it."
+    // sub-ability entirely, so it never exercised the reported bug or its fix
+    // through the real activation pipeline — only the parser-level AST shape
+    // is covered by `oracle::tests::gemstone_mine_conditional_sacrifice_binds_to_self_ref`.
+    // This fixture mirrors the actual end-to-end parsed shape (mana effect +
+    // conditional `Sacrifice { target: SelfRef }` sub-ability gated on zero
+    // mining counters) so activation itself proves the fix: mana is produced
+    // regardless, and the land is sacrificed only on the activation that
+    // removes its LAST counter.
+    fn make_gemstone_mine_with_sacrifice_sub_ability(
+        state: &mut GameState,
+        player: PlayerId,
+        initial_mining_counters: u32,
+    ) -> ObjectId {
+        let land = create_object(
+            state,
+            CardId(8003),
+            player,
+            "Gemstone Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        let mining_key = crate::types::counter::parse_counter_type("MINING");
+        obj.counters.insert(mining_key, initial_mining_counters);
+
+        let sacrifice_if_depleted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        )
+        .condition(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic("mining".to_string())),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Generic("mining".to_string())),
+                    target: None,
+                    selection: crate::types::ability::CounterCostSelection::SingleObject,
+                },
+            ],
+        })
+        .sub_ability(sacrifice_if_depleted);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        land
+    }
+
+    #[test]
+    fn gemstone_mine_survives_activation_with_counters_remaining() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine_with_sacrifice_sub_ability(&mut state, player, 2);
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            land,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .expect("Gemstone Mine activation must not fail with counters present");
+
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1,
+            "mana must be produced regardless of the trailing conditional sacrifice"
+        );
+        assert!(
+            state.battlefield.contains(&land),
+            "Gemstone Mine must remain on the battlefield while a mining counter remains after activation"
+        );
+    }
+
+    #[test]
+    fn gemstone_mine_sacrifices_itself_on_last_counter_removed() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = make_gemstone_mine_with_sacrifice_sub_ability(&mut state, player, 1);
+
+        let def = state
+            .objects
+            .get(&land)
+            .unwrap()
+            .abilities
+            .first()
+            .cloned()
+            .unwrap();
+        let mut events = Vec::new();
+        resolve_mana_ability(
+            &mut state,
+            land,
+            player,
+            &def,
+            &mut events,
+            Some(ProductionOverride::SingleColor(ManaType::Green)),
+        )
+        .expect("Gemstone Mine activation must not fail on its last counter");
+
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1,
+            "mana must still be produced on the activation that empties the last counter"
+        );
+        assert!(
+            !state.battlefield.contains(&land),
+            "Gemstone Mine must be sacrificed once its last mining counter is removed (issue #6507)"
+        );
+        assert!(
+            state.players[player.0 as usize].graveyard.contains(&land),
+            "the sacrificed Gemstone Mine must land in its controller's graveyard"
         );
     }
 

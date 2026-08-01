@@ -249,10 +249,6 @@ export class ServerDraftAdapter implements EngineAdapter {
     return this.snapshot.state;
   }
 
-  getAiAction(): GameAction | null {
-    return null;
-  }
-
   async getLegalActions(): Promise<LegalActionsResult> {
     return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
   }

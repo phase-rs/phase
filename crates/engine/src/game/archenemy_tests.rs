@@ -18,7 +18,7 @@ use super::archenemy::{
     abandon, active_schemes, check_scheme_abandon_sba, is_scheme_object, set_in_motion, top_scheme,
 };
 use super::engine::apply_as_current;
-use super::triggers::{DeferredTrigger, PendingTrigger, PendingTriggerDispatchOrigin};
+use super::triggers::{PendingTrigger, PendingTriggerContext};
 use crate::database::synthesis::synthesize_archenemy;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, StaticDefinition,
@@ -492,11 +492,9 @@ fn deferred_scheme_trigger_blocks_abandon() {
         subject_match_count: None,
         die_result: None,
     };
-    state.deferred_triggers.push(DeferredTrigger {
-        pending,
-        trigger_events: vec![],
-        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-    });
+    state
+        .deferred_triggers
+        .push(PendingTriggerContext::single(pending));
     assert!(
         state
             .deferred_triggers

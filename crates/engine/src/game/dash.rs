@@ -71,6 +71,7 @@ pub(crate) fn install_dash_riders(
             controller,
             source_id: object_id,
             one_shot: true,
+            provenance: None,
         },
     );
 }

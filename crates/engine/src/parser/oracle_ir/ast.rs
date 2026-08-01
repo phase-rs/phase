@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
@@ -216,14 +217,58 @@ pub(crate) enum PredicateAst {
     },
 }
 
+/// CR 110.2a (docs/MagicCompRules.txt:618): the resolved battlefield-entry
+/// controller for a zone change, as the IR carries it.
+///
+/// Three states, not two: `Default` (no explicit controller override in the
+/// IR; lowering carries it as `None` to the existing resolver), `Override` (a
+/// bound controller), and `UnboundAnaphor` — a control clause that WAS printed
+/// but whose antecedent the parser cannot name. The third state is what keeps a
+/// dropped `"under their control"` from silently degrading into the existing
+/// fallback representation; the lowering sites turn it into an honest
+/// `Effect::unimplemented` instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub(crate) enum EntersUnderSpec {
+    #[default]
+    Default,
+    Override(ControllerRef),
+    /// Carries the possessor so a lowering site with no text in scope
+    /// (`lower_put_ast`) can still emit a verbatim printed fragment.
+    UnboundAnaphor(ControlClausePossessor),
+}
+
+impl EntersUnderSpec {
+    /// The bound controller, or `None` for both no-override and an unbound
+    /// anaphor. Callers that can fail closed MUST check
+    /// [`Self::unbound_possessor`] first — this method deliberately collapses
+    /// the two `None` cases so the guard has to be written explicitly.
+    pub(crate) fn as_controller_ref(&self) -> Option<ControllerRef> {
+        match self {
+            EntersUnderSpec::Override(r) => Some(r.clone()),
+            EntersUnderSpec::Default | EntersUnderSpec::UnboundAnaphor(_) => None,
+        }
+    }
+
+    /// `Some(possessor)` exactly when a control clause was printed but could not
+    /// be bound — the fail-closed signal.
+    pub(crate) fn unbound_possessor(&self) -> Option<ControlClausePossessor> {
+        match self {
+            EntersUnderSpec::UnboundAnaphor(p) => Some(*p),
+            EntersUnderSpec::Default | EntersUnderSpec::Override(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
         destination: Zone,
         /// CR 701.23a: When true, the searched card enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 110.2a: Some(You) when the card enters "under your control"; None keeps the ChangeZone default (owner's control).
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for the searched card. `Default` lowers through the
+        /// existing no-override carrier; `UnboundAnaphor` fails closed.
+        enters_under: EntersUnderSpec,
         /// CR 701.23a: When true, the searched card is revealed before it moves.
         reveal: bool,
         /// When `Some`, the found card enters attached to this host filter.
@@ -986,10 +1031,13 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
-        /// to the player resolved from `ref`. `None` leaves the object under
-        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller. `Override(r)` routes the object to the player resolved
+        /// from `r`; `Default` lowers through the existing no-override carrier;
+        /// `UnboundAnaphor` marks a printed control clause whose antecedent
+        /// could not be named, and the lowering site turns it into an honest
+        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        enters_under: EntersUnderSpec,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
         /// CR 508.4: "tapped and attacking" — enters attacking.
@@ -1002,6 +1050,12 @@ pub(crate) enum TargetedImperativeAst {
         /// a Forest land."). Lowered to a default vanilla-2/2 `face_down_profile`,
         /// refined by a trailing "It's a <type>" `FaceDownProfileSpec`.
         face_down: bool,
+        /// CR 701.3a + CR 303.4f/i: Optional "attached to <host>" rider on the
+        /// return (Gift of Immortality, Next of Kin, Lynde). When set, lowering
+        /// nests `Effect::Attach { SelfRef → host }` under the ChangeZone with
+        /// `forward_result` so the Aura enters attached and skips the CR 303.4f
+        /// host-choice consult.
+        attach_host: Option<TargetFilter>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -1030,9 +1084,10 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
-        /// CR 110.2a: Controller override for mass returns to the battlefield.
-        /// `None` preserves default controller assignment.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for mass returns. `Default` preserves default controller
+        /// assignment; `UnboundAnaphor` fails closed at the lowering site.
+        enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 122.1 + CR 122.1h: Counters placed on each returned object as it
         /// enters the battlefield (e.g. "return each creature card from your
@@ -1364,10 +1419,13 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
-        /// to the player resolved from `ref`. `None` leaves the object under
-        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller. `Override(r)` routes the object to the player resolved
+        /// from `r`; `Default` lowers through the existing no-override carrier;
+        /// `UnboundAnaphor` marks a printed control clause whose antecedent
+        /// could not be named, and the lowering site turns it into an honest
+        /// `Effect::unimplemented` rather than a silently-wrong controller.
+        enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 701.28c: "transformed" — enters with its back face up.
@@ -1394,7 +1452,9 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        enters_under: Option<ControllerRef>,
+        /// CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry
+        /// controller for the moved population. `UnboundAnaphor` fails closed.
+        enters_under: EntersUnderSpec,
         enter_tapped: bool,
         /// CR 401.4: Specific library placement for mass library moves.
         /// `Some` suppresses the default library shuffle and places each moved
@@ -1877,6 +1937,11 @@ pub(crate) enum OracleBlockAst {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ModeAst {
     pub(crate) raw: String,
+    /// Verbatim mode text before any structural distribution rewrite.
+    pub(crate) source_text: String,
+    /// Absolute Oracle line for a collected block bullet. Inline `; or` modes
+    /// have no independent printed line.
+    pub(crate) source_line: Option<usize>,
     pub(crate) label: Option<String>,
     pub(crate) body: String,
     /// Per-mode additional cost (Spree). None for standard `\u{2022}` modes.

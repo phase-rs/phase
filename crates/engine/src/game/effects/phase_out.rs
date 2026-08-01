@@ -427,6 +427,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            provenance: None,
         });
         assert_eq!(state.delayed_triggers.len(), 2);
 

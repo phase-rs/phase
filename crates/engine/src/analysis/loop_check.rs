@@ -463,11 +463,51 @@ pub(crate) fn live_mandatory_loop_winner(
 /// (the one non-faller) is. A transient intra-cycle dip that recovers to a
 /// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
-/// Per-resolution granularity IS SBA granularity here (CR 704.3 checks whenever a
-/// player would get priority, between resolutions), and consecutive ring frames are
-/// consecutive resolutions (a non-sampling beat clears the ring), so requiring
-/// `life[winner]` non-decreasing across the matched window (prior frame → every
-/// subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
+/// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
+/// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
+/// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
+/// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
+/// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
+/// CR 903.9a / CR 704.5j / CR 310.10 / CR 703.1 + CR 117.3a). The invariant this guard
+/// actually needs is weaker and true:
+/// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
+/// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
+/// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
+/// forced-cascade window and therefore samples or clears. The retained windows are
+/// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
+/// three:
+/// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
+/// CR 310.10) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
+/// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
+/// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
+/// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
+/// it is a life change that the very next CR 704.3 check (a `Priority` window) observes;
+/// the TURN-BASED members (CR 703.1 + CR 117.3a — untap CR 502.3, declare attackers
+/// CR 508.1/508.1g, declare blockers CR 509.1, cleanup discard CR 514.1) precede the
+/// step's own grant of priority (CR 508.2 is the explicit case), and the DECLARATION
+/// itself moves no life: untapping, declaring, exerting/enlisting and discarding change
+/// no life, and anything that WOULD (an attack trigger) uses the stack and therefore
+/// resolves at an observed `Priority` beat.
+/// That is a claim about the declaration only, and the two life-moving neighbours it
+/// deliberately excludes are why the class is drawn where it is:
+/// * CR 508.1h / CR 509.1d put the declaration's COSTS in a separate sub-step
+///   ("Costs may include paying mana, tapping permanents, sacrificing permanents,
+///   discarding cards, and so on"), and a Phyrexian symbol in an attack or block tax is
+///   paid with 2 life (CR 107.4f) — measured in-code: `engine_combat::handle_pay_combat_tax`
+///   pays through `casting::pay_unless_cost`, which settles `life_payments` via
+///   `life_costs::pay_life_as_cost`. So declaring CAN move life, at
+///   `WaitingFor::CombatTaxPayment` — which is deliberately NOT a member and therefore
+///   clears the ring.
+/// * `AssignCombatDamage` / `AssignBlockerDamage` are likewise NOT members despite being
+///   turn-based (CR 510.1c / CR 510.1d): CR 510.2 deals the assigned damage with no
+///   intervening priority. That window-keyed exclusion is necessary but NOT sufficient,
+///   because the window opens only for a damage DIVISION choice — an unblocked attacker
+///   deals CR 510.2 damage with no window at all. The sufficient guard is event-keyed:
+///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
+///   `game::combat_damage::apply_combat_damage`.
+///
+/// So requiring `life[winner]` non-decreasing across the matched window (prior frame →
+/// every subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
 /// is correctly unreachable (a non-faller never crosses a loss SBA).
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
     let mut prev: Option<i32> = None;
@@ -589,6 +629,13 @@ mod tests {
     fn pid(n: u8) -> PlayerId {
         PlayerId(n)
     }
+
+    // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
+    // the retained class, over both priority seats — is asserted by
+    // `types::game_state::forced_cascade_window_tests::forced_cascade_window_class`, which
+    // covers it strictly more completely (thirteen members and eight non-members, including both
+    // `Priority` seats). A second weaker row here would only be a place for the two to
+    // drift apart.
 
     fn battlefield_creature(state: &mut GameState, id: u64, controller: u8) -> ObjectId {
         let oid = ObjectId(id);

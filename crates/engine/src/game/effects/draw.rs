@@ -46,6 +46,87 @@ pub fn can_draw_at_least_one(state: &GameState, player_id: crate::types::player:
     replacement::proposed_draw_survives_replacement(state, &proposed)
 }
 
+/// Exact delivery fact for one fully specified draw instruction.
+///
+/// This is deliberately a tactical, engine-internal result rather than state
+/// carried over the wire: library contents, draw restrictions, replacement
+/// candidates, and any continuation choice are all facts of the supplied state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawDeliveryPreview {
+    /// The cloned instruction retired normally and its draw-sequence frame
+    /// recorded this many actual Library-to-Hand deliveries.
+    Exact { delivered: u32 },
+    /// The instruction parked at a player-owned decision, including a choice
+    /// raised by a mandatory replacement's continuation.
+    Unknown,
+}
+
+/// Preview the exact delivery count of one draw instruction without mutating
+/// the supplied game state.
+///
+/// CR 121.2 + CR 121.2b: a multi-card instruction is a sequence of individual
+/// draws and may partially complete, so the completed frame's accumulated
+/// delivery—not the requested count—is the only exact result.
+///
+/// CR 121.6b + CR 614.11a: replacement work must finish before the sequence
+/// resumes. A replacement continuation may therefore park on an ordinary
+/// prompt (for example `SearchChoice`) even when the replacement itself was
+/// mandatory; that remains `Unknown` rather than an assumed zero delivery.
+///
+/// CR 614.6: a fully settled prevention or non-draw substitution is instead
+/// `Exact { delivered: 0 }`. CR 614.11 requires reaching replacement processing
+/// even with an empty library, so this function must not short-circuit on
+/// library size. CR 616.1 likewise makes competing-replacement ordering
+/// `Unknown`, never an engine-selected branch.
+pub fn preview_draw_delivery(
+    state: &GameState,
+    player: crate::types::player::PlayerId,
+    requested: u32,
+) -> DrawDeliveryPreview {
+    let mut preview_state = state.clone();
+    let mut events = Vec::new();
+
+    match start_draw_sequence_with_origin_outcome(
+        &mut preview_state,
+        player,
+        requested,
+        HashSet::new(),
+        DrawSequenceOrigin::Plain,
+        &mut events,
+    ) {
+        DrawSequenceOutcome::Completed { delivered, .. }
+            if matches!(
+                preview_state.waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ) =>
+        {
+            DrawDeliveryPreview::Exact { delivered }
+        }
+        DrawSequenceOutcome::Completed { .. } | DrawSequenceOutcome::Parked(_) => {
+            DrawDeliveryPreview::Unknown
+        }
+    }
+}
+
+/// Private completion carrier for the draw-sequence owner. Live callers retain
+/// the historical [`ReplacementResult`] API; the preview alone needs the
+/// instruction-owned accumulated count before the completed frame is retired.
+enum DrawSequenceOutcome {
+    Completed {
+        result: ReplacementResult,
+        delivered: u32,
+    },
+    Parked(ReplacementResult),
+}
+
+impl DrawSequenceOutcome {
+    fn into_replacement_result(self) -> ReplacementResult {
+        match self {
+            Self::Completed { result, .. } | Self::Parked(result) => result,
+        }
+    }
+}
+
 pub(crate) fn allowed_draw_count(
     state: &GameState,
     player_id: crate::types::player::PlayerId,
@@ -250,8 +331,20 @@ pub(crate) fn start_draw_sequence_with_origin(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
+    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, events)
+        .into_replacement_result()
+}
+
+fn start_draw_sequence_with_origin_outcome(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    origin: DrawSequenceOrigin,
+    events: &mut Vec<GameEvent>,
+) -> DrawSequenceOutcome {
     let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
-    resume_draw_sequence(state, frame_id, events)
+    resume_draw_sequence_outcome(state, frame_id, events)
 }
 
 /// CR 121.6b: The single post-pause driver for a draw instruction — "if an effect
@@ -283,6 +376,14 @@ pub(crate) fn resume_draw_sequence(
     frame_id: crate::types::game_state::DrawSequenceFrameId,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
+    resume_draw_sequence_outcome(state, frame_id, events).into_replacement_result()
+}
+
+fn resume_draw_sequence_outcome(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    events: &mut Vec<GameEvent>,
+) -> DrawSequenceOutcome {
     loop {
         // Take the next owed unit off the cursor BEFORE attempting it, so a park
         // mid-attempt leaves the frame recording the units AFTER this one. The
@@ -293,7 +394,7 @@ pub(crate) fn resume_draw_sequence(
                 "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
                  instruction is still above it, or the frame was already popped"
             );
-            return ReplacementResult::Prevented;
+            return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
         };
         if frame.remaining == 0 {
             break;
@@ -325,24 +426,24 @@ pub(crate) fn resume_draw_sequence(
                     .active_draw_sequence()
                     .is_none_or(|frame| frame.frame_id != frame_id)
                 {
-                    return ReplacementResult::NeedsChoice(
+                    return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
                         state
                             .waiting_for
                             .acting_player()
                             .unwrap_or(state.active_player),
-                    );
+                    ));
                 }
             }
             // The frame stays parked on the stack; the choice resumes it.
             ReplacementResult::NeedsChoice(waiting_player) => {
-                return ReplacementResult::NeedsChoice(waiting_player);
+                return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(waiting_player));
             }
         }
     }
 
     let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
-        return ReplacementResult::Prevented;
+        return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
     state.last_effect_count = Some(frame.accumulated as i32);
     match frame.origin {
@@ -381,11 +482,14 @@ pub(crate) fn resume_draw_sequence(
         }
     }
 
-    ReplacementResult::Execute(ProposedEvent::Draw {
-        player_id: frame.player,
-        count: 0,
-        applied: HashSet::new(),
-    })
+    DrawSequenceOutcome::Completed {
+        result: ReplacementResult::Execute(ProposedEvent::Draw {
+            player_id: frame.player,
+            count: 0,
+            applied: HashSet::new(),
+        }),
+        delivered: frame.accumulated,
+    }
 }
 
 /// CR 614.5: Propose a draw while preserving replacements already applied to

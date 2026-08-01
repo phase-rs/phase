@@ -96,7 +96,8 @@ pub fn resolve(
     // token (escalates to a full pass if it sources effects, carries
     // counters, etc.).
     crate::game::layers::mark_layers_entered(state, obj_id);
-    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+    // CR 403.3 battlefield-entry bookkeeping is done by `record_zone_change` below —
+    // recording it here too would double-count `battlefield_entries_this_turn`.
     crate::game::restrictions::record_token_created(state, obj_id);
 
     // CR 603.6a: The Incubator token enters the battlefield as a zone change
@@ -109,14 +110,21 @@ pub fn resolve(
     // triggers (issue #4238). Mirrors
     // `token.rs::apply_create_token_after_replacement_with_created_ids` and
     // `conjure.rs`'s identical fix for the same bug class.
-    let zone_change_record = state
+    //
+    // CR 400.7 + CR 603.2c: route the record through `restrictions::record_zone_change` — the
+    // single authority that assigns this turn's zone-change index — and write the assigned index
+    // back onto the emitted record. `snapshot_for_zone_change` leaves it at its `0` placeholder,
+    // and the batched zone-change replay guard (`triggers.rs`) dedups on
+    // `(definition_ref, turn_zone_change_index)` read off the EVENT, so an unrouted record aliases
+    // this Incubator onto occurrence `0` and a `batched: true` ETB trigger that already fired for
+    // another entry this turn is swallowed. Same shape as `merge.rs` and `token.rs`.
+    let mut zone_change_record = state
         .objects
         .get(&obj_id)
         .expect("incubator token was just created")
         .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-    state
-        .zone_changes_this_turn
-        .push_back(zone_change_record.clone());
+    zone_change_record.turn_zone_change_index =
+        crate::game::restrictions::record_zone_change(state, zone_change_record.clone());
     events.push(GameEvent::ZoneChanged {
         object_id: obj_id,
         from: None,

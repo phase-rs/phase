@@ -9,7 +9,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::{OracleDocIr, OracleNodeIr};
 use crate::parser::oracle_ir::trigger::TriggerNodeIr;
 use crate::types::ability::MultiTargetSpec;
-use crate::types::ability::{Effect, TargetChoiceTiming, TriggerCondition};
+use crate::types::ability::{
+    AbilityCost, ActivationRestriction, Effect, TargetChoiceTiming, TriggerCondition,
+};
 use crate::types::game_state::DistributionUnit;
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {
@@ -932,6 +934,156 @@ fn jace_the_mind_sculptor() {
     insta::assert_json_snapshot!("jace_the_mind_sculptor_lowered", &lowered);
 }
 
+/// CR 606.3 + CR 606.5 + CR 107.3a: a `[−X]` loyalty header remains native
+/// document IR, preserving its chosen-X loyalty-counter cost and sorcery-speed
+/// activation envelope until the sole lowering seam.
+#[test]
+fn chandra_nalaar_minus_x_loyalty_is_ir_native() {
+    let (ir, lowered) = parse_two_layer(
+        "[−X]: Chandra Nalaar deals X damage to target creature.",
+        "Chandra Nalaar",
+        &["Planeswalker"],
+        &["Chandra Nalaar", "Chandra"],
+    );
+
+    assert_eq!(ir.items.len(), 1);
+    let OracleNodeIr::Spell(ability) = &ir.items[0].node else {
+        panic!(
+            "expected native loyalty spell IR, got {:?}",
+            ir.items[0].node
+        );
+    };
+    assert!(matches!(
+        ability.shell.cost.as_ref(),
+        Some(AbilityCost::RemoveCounter {
+            count: crate::types::ability::REMOVE_COUNTER_COST_X,
+            counter_type: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Loyalty
+            ),
+            target: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        ability.shell.description.as_deref(),
+        Some("[−X]: ~ deals X damage to target creature.")
+    );
+    assert_eq!(
+        ability.shell.activation_restrictions,
+        vec![ActivationRestriction::AsSorcery]
+    );
+    assert_eq!(lowered.abilities.len(), 1);
+    assert!(matches!(
+        lowered.abilities[0].cost.as_ref(),
+        Some(AbilityCost::RemoveCounter {
+            count: crate::types::ability::REMOVE_COUNTER_COST_X,
+            counter_type: crate::types::counter::CounterMatch::OfType(
+                crate::types::counter::CounterType::Loyalty
+            ),
+            target: None,
+            ..
+        })
+    ));
+
+    insta::assert_json_snapshot!("chandra_nalaar_minus_x_loyalty_ir", &ir);
+    insta::assert_json_snapshot!("chandra_nalaar_minus_x_loyalty_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
+// Spell temporal delayed triggers
+// ---------------------------------------------------------------------------
+
+/// CR 603.7a-c: spell-only temporal trigger lines stay as native document IR
+/// until the sole lowering seam. The Pact payload remains a deliberately
+/// lowered boxed ability inside the outer delayed-trigger clause.
+#[test]
+fn temporal_delayed_trigger_spell_router_is_ir_native() {
+    // The three established grammar representatives remain the stable IR/lowered
+    // snapshot fixtures. The direct `Whenever … this turn` arm uses the same
+    // structural assertions without a fourth snapshot pair.
+    let cases = [
+        (
+            None,
+            "Whenever you cast a creature spell this turn, draw a card.",
+            "Glimpse of Nature",
+            &["Sorcery"][..],
+        ),
+        (
+            Some((
+                "pact_of_negation_temporal_ir",
+                "pact_of_negation_temporal_lowered",
+            )),
+            "At the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.",
+            "Pact of Negation",
+            &["Instant"][..],
+        ),
+        (
+            Some((
+                "full_throttle_temporal_ir",
+                "full_throttle_temporal_lowered",
+            )),
+            "At the beginning of each combat this turn, untap all creatures that attacked this turn.",
+            "Full Throttle",
+            &["Sorcery"][..],
+        ),
+        (
+            Some((
+                "galvanic_iteration_temporal_ir",
+                "galvanic_iteration_temporal_lowered",
+            )),
+            "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+            "Galvanic Iteration",
+            &["Instant"][..],
+        ),
+    ];
+
+    for (snapshots, oracle_text, card_name, types) in cases {
+        let (ir, lowered) = parse_two_layer(oracle_text, card_name, types, &[]);
+        assert_eq!(
+            ir.items.len(),
+            1,
+            "{card_name}: one source line emits one item"
+        );
+        let OracleNodeIr::Spell(ability) = &ir.items[0].node else {
+            panic!("{card_name}: expected native temporal spell IR");
+        };
+        assert!(matches!(
+            &ability.body.clauses[0].parsed.effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+        assert_eq!(
+            lowered.abilities.len(),
+            1,
+            "{card_name}: one lowered ability"
+        );
+        assert!(matches!(
+            lowered.abilities[0].effect.as_ref(),
+            Effect::CreateDelayedTrigger { .. }
+        ));
+
+        if card_name == "Pact of Negation" {
+            let Effect::CreateDelayedTrigger { effect, .. } =
+                &ability.body.clauses[0].parsed.effect
+            else {
+                unreachable!("checked above");
+            };
+            assert!(matches!(
+                effect.kind,
+                crate::types::ability::AbilityKind::Spell
+            ));
+        }
+
+        if let Some((ir_snapshot, lowered_snapshot)) = snapshots {
+            insta::with_settings!({ snapshot_suffix => ir_snapshot }, {
+                insta::assert_json_snapshot!("temporal_delayed_trigger", &ir);
+            });
+            insta::with_settings!({ snapshot_suffix => lowered_snapshot }, {
+                insta::assert_json_snapshot!("temporal_delayed_trigger", &lowered);
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Equipment / Vehicles
 // ---------------------------------------------------------------------------
@@ -946,6 +1098,18 @@ fn short_sword() {
     );
     insta::assert_json_snapshot!("short_sword_ir", &ir);
     insta::assert_json_snapshot!("short_sword_lowered", &lowered);
+}
+
+#[test]
+fn abraxas_named_equip() {
+    let (ir, lowered) = parse_two_layer(
+        "Abraxas — Equip {3}",
+        "Named Equip",
+        &["Artifact"],
+        &["Equipment"],
+    );
+    insta::assert_json_snapshot!("abraxas_named_equip_ir", &ir);
+    insta::assert_json_snapshot!("abraxas_named_equip_lowered", &lowered);
 }
 
 #[test]

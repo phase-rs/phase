@@ -19,6 +19,7 @@ import type {
   ObjectId,
   SerializedAbilityCost,
 } from "../adapter/types";
+import { supportsMatchConcede } from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -71,7 +72,7 @@ import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
-import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
@@ -347,6 +348,7 @@ export function GamePage() {
     {},
   );
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+  const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
@@ -422,6 +424,17 @@ export function GamePage() {
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
+        break;
+      case "terminalDelivery":
+        clearPromptOverlayState();
+        if (gameId) clearGame(gameId);
+        setTerminalReason(event.delivery.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "emoteReceived":
         setReceivedEmote(event.emote);
@@ -640,6 +653,17 @@ export function GamePage() {
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
         break;
+      case "terminalResult":
+        clearPromptOverlayState();
+        if (gameId) void clearGame(gameId);
+        setTerminalReason(event.result.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.result.display.winner } },
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "deckRejected":
         navigate("/multiplayer", {
           state: {
@@ -751,6 +775,7 @@ export function GamePage() {
         receivedEmote={receivedEmote}
         timerRemaining={timerRemaining}
         gameStartedAt={gameStartedAt}
+        terminalReason={terminalReason}
         pendingTakeback={pendingTakeback}
         onCloseTakebackDialog={() => setPendingTakeback(null)}
         disconnectChoice={disconnectChoice}
@@ -788,6 +813,7 @@ interface GamePageContentProps {
   receivedEmote: string | null;
   timerRemaining: Record<number, number>;
   gameStartedAt: number | null;
+  terminalReason: string | null;
   pendingTakeback: { requester: number; requesterName: string } | null;
   onCloseTakebackDialog: () => void;
   // 3-4p P2P additions
@@ -819,6 +845,7 @@ function GamePageContent({
   receivedEmote,
   timerRemaining,
   gameStartedAt,
+  terminalReason,
   pendingTakeback,
   onCloseTakebackDialog,
   disconnectChoice,
@@ -840,6 +867,9 @@ function GamePageContent({
   const focusedGridTemplateRows = useResolvedGridRows();
   const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
+  const isBestOfThree = gameState?.match_config?.match_type === "Bo3";
+  const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const submitIntergameCommand = useMultiplayerDraftStore((s) => s.submitIntergameCommand);
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
@@ -981,6 +1011,13 @@ function GamePageContent({
       } else if ("sendConcede" in adapter && typeof adapter.sendConcede === "function") {
         void (adapter.sendConcede as () => void | Promise<void>)();
       }
+    }
+    onHideConcedeDialog();
+  }, [adapter, onHideConcedeDialog]);
+
+  const handleMatchConcede = useCallback(() => {
+    if (supportsMatchConcede(adapter)) {
+      adapter.sendMatchConcede();
     }
     onHideConcedeDialog();
   }, [adapter, onHideConcedeDialog]);
@@ -1173,22 +1210,30 @@ function GamePageContent({
 
   const handleSubmitSideboard = useCallback(
     (main: DeckCardCount[], sideboard: DeckCardCount[]) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "SubmitSideboard", main, sideboard });
+        return;
+      }
       dispatch({
         type: "SubmitSideboard",
         data: { main, sideboard },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
   const handleChoosePlayDraw = useCallback(
     (playFirst: boolean) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "ChoosePlayDraw", playFirst });
+        return;
+      }
       dispatch({
         type: "ChoosePlayDraw",
         data: { play_first: playFirst },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
 
@@ -1770,6 +1815,8 @@ function GamePageContent({
         {waitingFor != null &&
           MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <ManaPaymentUI />}
+        {waitingFor?.type === "ManaSourceSelection" &&
+          canActForWaitingState && <ManaSourceSelectionUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
         {waitingFor?.type === "PayAmountChoice" &&
@@ -2033,7 +2080,16 @@ function GamePageContent({
         <>
           <ConcedeDialog
             isOpen={showConcedeDialog}
-            onConfirm={handleConcede}
+            gameAction={{
+              kind: "game",
+              consequence: isBestOfThree ? "best-of-three-game" : "ordinary-game",
+              onConfirm: handleConcede,
+            }}
+            matchAction={
+              supportsMatchConcede(adapter) && isBestOfThree
+                ? { kind: "match", onConfirm: handleMatchConcede }
+                : undefined
+            }
             onCancel={onHideConcedeDialog}
           />
           <TakebackRequestDialog
@@ -2074,6 +2130,7 @@ function GamePageContent({
           mode={mode}
           isOnlineMode={isOnlineMode}
           gameStartedAt={gameStartedAt}
+          terminalReason={terminalReason}
         />
       )}
 
@@ -2643,11 +2700,13 @@ function GameOverScreen({
   mode,
   isOnlineMode = false,
   gameStartedAt,
+  terminalReason,
 }: {
   winner: number | null;
   mode: string | null;
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
+  terminalReason?: string | null;
 }) {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -2772,6 +2831,7 @@ function GameOverScreen({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
           >
+            {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
             <p className="text-base text-gray-200 sm:text-lg">
               <Trans
                 i18nKey="gamePage.gameOver.lifeSummary"

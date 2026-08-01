@@ -15,6 +15,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 web-time = "1"
 rayon = { version = "1", optional = true }
 
+# Native-binary throughput lever (pod-lab loop-3 Q5). Target-gated, not a
+# plain [dependencies] entry: `engine-wasm`/`draft-wasm` both depend on this
+# crate's lib for their wasm32 builds, which are explicitly size-tuned
+# (`opt-level = 'z'`, the #6313 25 MiB pages-deploy guard) -- an ungated
+# entry would pull mimalloc's C sources into those builds too. `[[bin]]`
+# targets are never part of that wasm-bindgen graph, so no further per-bin
+# cfg is needed once the dependency itself is scoped here.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = "0.1"
+
 [features]
 tune = ["rayon"]
 # Scenario-backed benchmark binaries are opt-in: build them with

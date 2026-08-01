@@ -29,6 +29,7 @@
     "logDefault": "Registro predeterminado",
     "spellPayment": "Pago de hechizos",
     "manualManaPayment": "Pago manual de maná para hechizos",
+    "spellPaymentOptions": { "auto": "Automático", "autoExceptSacrificialMana": "Preguntar antes de sacrificar", "manual": "Manual" },
     "nativeEngine": "Usar el motor nativo para partidas locales y multijugador alojado",
     "nativeEngineDescription": "Usa el motor descargado para partidas locales contra IA y partidas que alojes mediante una sala. Los invitados siguen conectándose mediante la conexión punto a punto de la sala. Usa el motor integrado cuando no está disponible.",
     "boardBackground": "Fondo del tablero",

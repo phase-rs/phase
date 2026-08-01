@@ -28,6 +28,10 @@ pub struct RankedCandidate {
     pub candidate: CandidateAction,
     pub score: f64,
     pub(crate) payment_successor: Option<GameState>,
+    /// A reducer-certified downstream evaluation that reaches beyond the
+    /// ordinary one-action root simulation. It is an alternative continuation
+    /// witness, not a tactical policy score.
+    pub(crate) continuation_witness: Option<f64>,
 }
 
 impl RankedCandidate {
@@ -36,6 +40,7 @@ impl RankedCandidate {
             candidate,
             score,
             payment_successor: None,
+            continuation_witness: None,
         }
     }
 
@@ -48,7 +53,31 @@ impl RankedCandidate {
             candidate,
             score,
             payment_successor: Some(state),
+            continuation_witness: None,
         }
+    }
+
+    pub(crate) fn with_continuation_witness(mut self, value: f64) -> Self {
+        self.continuation_witness = value.is_finite().then_some(value);
+        self
+    }
+
+    /// Preserve any proven continuation through the existing tactical-score
+    /// beam order. The terminal witness is deliberately not scaled here: beam
+    /// truncation must not discard a reducer-proven route before search can
+    /// compare it with an ordinary continuation.
+    pub(crate) fn beam_priority(&self) -> f64 {
+        self.continuation_witness
+            .filter(|witness| witness.is_finite())
+            .map_or(self.score, |witness| self.score.max(witness))
+    }
+
+    pub(crate) fn root_score(&self, tactical_weight: f64) -> f64 {
+        self.continuation_witness
+            .filter(|witness| witness.is_finite())
+            .map_or(self.score * tactical_weight, |witness| {
+                (self.score * tactical_weight).max(witness)
+            })
     }
 }
 

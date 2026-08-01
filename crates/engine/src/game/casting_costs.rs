@@ -396,7 +396,14 @@ pub(crate) fn handle_decide_additional_cost(
             )
         })
     {
-        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+        return handle_decide_repeatable_additional_cost(
+            state,
+            player,
+            pending,
+            additional_cost,
+            pay,
+            events,
+        );
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
@@ -410,7 +417,14 @@ pub(crate) fn handle_decide_additional_cost(
             }),
             _,
         ) => {
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         (None, AdditionalCost::Kicker { .. }) => {
             let mut pending = pending;
@@ -426,11 +440,19 @@ pub(crate) fn handle_decide_additional_cost(
         ) => {
             let mut pending = pending;
             pending.additional_cost_flow = Some(additional_cost.clone());
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         _ => {}
     }
 
+    let pending_before = pending.clone();
     let cost_source = pending.additional_cost_source;
     let current_instance = pending.additional_cost_queue.first().cloned();
     let mut ability = pending.ability;
@@ -619,6 +641,17 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     if let Some(cost) = cost_to_pay {
+        if matches!(cost, AbilityCost::PayLife { .. }) {
+            super::life_safety::begin_optional_additional_cost_attempt(
+                state,
+                player,
+                &pending_before,
+                additional_cost,
+                pay,
+                &cost,
+                &updated_pending,
+            );
+        }
         pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
@@ -965,9 +998,11 @@ fn handle_decide_repeatable_additional_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
+    additional_cost: &AdditionalCost,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let pending_before = pending.clone();
     let queued_instance = pending.additional_cost_queue.first().cloned();
     let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
     let queued_origin_ordinal = queued_instance
@@ -1001,6 +1036,17 @@ fn handle_decide_repeatable_additional_cost(
             .ability
             .context
             .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+    }
+    if matches!(cost, AbilityCost::PayLife { .. }) {
+        super::life_safety::begin_optional_additional_cost_attempt(
+            state,
+            player,
+            &pending_before,
+            additional_cost,
+            pay,
+            &cost,
+            &pending,
+        );
     }
     pay_additional_cost(state, player, cost, pending, events)
 }
@@ -6693,6 +6739,13 @@ pub(crate) fn handle_defiler_payment(
     let mut cost = pending.cost.clone();
 
     if pay {
+        super::life_safety::begin_defiler_payment_attempt(
+            state,
+            player,
+            &pending,
+            life_cost,
+            mana_reduction,
+        );
         // CR 118.3b + CR 119.4 + CR 119.8: Defiler's optional life payment is a
         // cost — route through the single-authority helper so the replacement
         // pipeline and CantLoseLife lock are honored. If the cost can't be paid
@@ -8654,6 +8707,26 @@ pub(super) fn pay_and_push_adventure(
     }
 
     state.pending_cast = Some(Box::new(pending));
+    if payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
+        auto_tap_non_sacrificial_mana_sources(state, player, cost, events, object_id);
+        if pending_cost_is_payable_from_pool(state, player) {
+            return finalize_automatic_mana_payment(state, player, events);
+        }
+        let options = super::mana_sources::activatable_mana_source_selections(state, player)
+            .into_iter()
+            .filter(|selection| {
+                selection.penalty == super::mana_sources::ManaSourcePenalty::Sacrifices
+            })
+            .collect::<Vec<_>>();
+        if options.is_empty() {
+            return enter_payment_step(state, player, None, events);
+        }
+        return Ok(WaitingFor::ManaSourceSelection {
+            player,
+            options,
+            convoke_mode: None,
+        });
+    }
     finalize_automatic_mana_payment(state, player, events)
 }
 
@@ -9983,17 +10056,13 @@ fn handle_resolution_cast_success(
             remaining_mv_budget,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
             source,
             member_pool,
         } => {
-            if exile_instead_of_graveyard {
-                // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
-                apply_spell_graveyard_replacement_rider(
-                    state,
-                    cast_object,
-                    SpellStackToGraveyardReplacement::Exile,
-                );
+            if let Some(destination) = graveyard_replacement.clone() {
+                // CR 614.1a: Carry the exact printed replacement destination.
+                apply_spell_graveyard_replacement_rider(state, cast_object, destination);
             }
             let casts_left = remaining_casts.saturating_sub(1);
             // CR 202.3: shrink the shared budget by what was actually spent on
@@ -10028,7 +10097,7 @@ fn handle_resolution_cast_success(
                     remaining_mv_budget: budget_left,
                     filter,
                     zones,
-                    exile_instead_of_graveyard,
+                    graveyard_replacement,
                     source,
                     member_pool,
                 },
@@ -10375,6 +10444,7 @@ pub(super) fn auto_tap_mana_sources_excluding(
         None,
         None,
         None,
+        None,
     );
 }
 
@@ -10416,6 +10486,7 @@ pub(super) fn auto_tap_mana_sources_with_context_and_resume(
         deprioritize_source,
         payment_context,
         &HashSet::new(),
+        None,
         resume,
         None,
     );
@@ -10432,6 +10503,7 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding_and_resume(
     deprioritize_source: Option<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
     excluded_sources: &HashSet<ObjectId>,
+    excluded_penalty: Option<mana_sources::ManaSourcePenalty>,
     resume: Option<&ManaAbilityResume>,
     parent: Option<&ManaAbilityCostParent>,
 ) {
@@ -10442,6 +10514,7 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding_and_resume(
         events,
         deprioritize_source,
         excluded_sources,
+        excluded_penalty,
         payment_context,
         None,
         None,
@@ -10466,12 +10539,70 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding(
         events,
         deprioritize_source,
         excluded_sources,
+        None,
         payment_context,
         None,
         None,
         None,
         None,
     );
+}
+
+/// CR 601.2g-h + CR 605.3b: Apply the existing automatic planner while
+/// excluding sacrificial activation rows. This is the safe first leg of
+/// `AutoExceptSacrificialMana`; the caller retains the pending cast and offers
+/// the excluded capabilities explicitly if this leg cannot finish payment.
+pub(super) fn auto_tap_non_sacrificial_mana_sources(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    source_id: ObjectId,
+) {
+    let spell_meta = super::casting::build_spell_meta(state, player, source_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    auto_tap_mana_sources_inner(
+        state,
+        player,
+        cost,
+        events,
+        Some(source_id),
+        &HashSet::new(),
+        Some(mana_sources::ManaSourcePenalty::Sacrifices),
+        spell_ctx.as_ref(),
+        None,
+        None,
+        None,
+        None,
+    );
+}
+
+pub(super) fn pending_cost_is_payable_from_pool(state: &GameState, player: PlayerId) -> bool {
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    let spell_meta = super::casting::build_spell_meta(state, player, pending.object_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+        state,
+        player,
+        Some(pending.object_id),
+        spell_ctx.as_ref(),
+    );
+    let permissions =
+        super::static_abilities::build_cost_permission_context(state, player, any_color);
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .is_some_and(|candidate| {
+            mana_payment::can_pay_for_spell(
+                &candidate.mana_pool,
+                &pending.cost,
+                spell_ctx.as_ref(),
+                permissions,
+            )
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -10503,7 +10634,7 @@ pub(super) fn build_auto_tap_source_cache(
     crate::game::perf_counters::record_auto_tap_source_cache_build();
     AutoTapSourceCache {
         player,
-        sources: collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new()),
+        sources: collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None),
     }
 }
 
@@ -10525,6 +10656,7 @@ pub(super) fn auto_tap_mana_sources_with_context_excluding_cached(
         events,
         deprioritize_source,
         excluded_sources,
+        None,
         payment_context,
         None,
         source_cache,
@@ -10538,6 +10670,7 @@ fn collect_sorted_auto_tap_source_options(
     player: PlayerId,
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
+    excluded_penalty: Option<mana_sources::ManaSourcePenalty>,
 ) -> Vec<ManaSourceOption> {
     use crate::types::card_type::{CoreType, Supertype};
 
@@ -10593,6 +10726,7 @@ fn collect_sorted_auto_tap_source_options(
             }
         })
         .flatten()
+        .filter(|option| excluded_penalty.is_none_or(|penalty| option.penalty != penalty))
         .collect();
 
     // CR 605.3b: Auto-tap sort key. Tier layout (the enum factors the two
@@ -10675,11 +10809,13 @@ fn cached_auto_tap_sources<'a>(
     player: PlayerId,
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
+    excluded_penalty: Option<mana_sources::ManaSourcePenalty>,
     sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
 ) -> Option<&'a [ManaSourceOption]> {
     let cache = source_cache?;
     if cache.is_for_player(player)
         && excluded_sources.is_empty()
+        && excluded_penalty.is_none()
         && sub_cost_demand.is_none()
         && deprioritize_source.is_none_or(|source_id| !cache.contains_source(source_id))
     {
@@ -10699,6 +10835,7 @@ fn auto_tap_mana_sources_inner(
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
+    excluded_penalty: Option<mana_sources::ManaSourcePenalty>,
     payment_context: Option<&PaymentContext<'_>>,
     sub_cost_demand: Option<&crate::game::mana_payment::ColorDemand>,
     source_cache: Option<&AutoTapSourceCache>,
@@ -10756,6 +10893,7 @@ fn auto_tap_mana_sources_inner(
         player,
         deprioritize_source,
         excluded_sources,
+        excluded_penalty,
         sub_cost_demand,
     ) {
         cached
@@ -10765,6 +10903,7 @@ fn auto_tap_mana_sources_inner(
             player,
             deprioritize_source,
             excluded_sources,
+            excluded_penalty,
         );
         &available_buf
     };
@@ -11111,6 +11250,7 @@ fn auto_tap_mana_sources_inner(
                         events,
                         Some(option.object_id),
                         excluded,
+                        excluded_penalty,
                         Some(&activation_ctx),
                         demand.as_ref(),
                         None,
@@ -12871,6 +13011,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
             Some(source_id),
             payment_context,
             excluded_sources,
+            None,
             resume,
             None,
         );

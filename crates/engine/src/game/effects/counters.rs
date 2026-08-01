@@ -586,6 +586,7 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
+                    provenance: None,
                 };
                 crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
             }

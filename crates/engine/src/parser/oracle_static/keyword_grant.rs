@@ -1758,7 +1758,7 @@ pub(crate) fn push_grant_clause_modifications(
     // equip {0}") is the equip activated ability — not an inert AddKeyword.
     // Mirrors `classify_quoted_inner`'s pre-keyword equip dispatch.
     if nom_tag_lower(&part_lower, &part_lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(part_trimmed) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(part_trimmed) {
             modifications.push(ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             });
@@ -1910,7 +1910,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // `starts_with` guard is required — without it any quoted line would be
     // mis-parsed as equip.
     if nom_tag_lower(&lower, &lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(&ability_text) {
+        if let Some(ability) = super::oracle::try_parse_equip_lowered(&ability_text) {
             return vec![ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             }];

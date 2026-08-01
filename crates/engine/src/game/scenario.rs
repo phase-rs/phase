@@ -1704,6 +1704,7 @@ impl GameRunner {
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
@@ -2475,6 +2476,16 @@ impl<'a> SpellCast<'a> {
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
                     act_collect(runner, GameAction::PassPriority, &mut events)?;
                 }
+                WaitingFor::ManaSourceSelection { options, .. } => {
+                    let selection = options.first().cloned().unwrap_or_else(|| {
+                        panic!("ManaSourceSelection must offer at least one source")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ActivateManaSource { selection },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
                     pending_cast,
@@ -2724,6 +2735,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
     // borrow-free match. Kept in sync with `GameRunner::waiting_for_kind`.
     match waiting {
         WaitingFor::ManaPayment { .. } => "ManaPayment",
+        WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
         WaitingFor::ChooseXValue { .. } => "ChooseXValue",
         WaitingFor::TargetSelection { .. } => "TargetSelection",
         WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",

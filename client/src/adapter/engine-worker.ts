@@ -12,10 +12,10 @@ import init, {
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
-  get_ai_action,
-  get_ai_fallback_action,
+  get_ai_action_proposal,
+  get_ai_action_proposal_from_scores,
   get_ai_scored_candidates,
-  select_action_from_scores,
+  submit_ai_action_proposal,
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
@@ -44,7 +44,7 @@ import init, {
   get_card_rulings,
 } from "@wasm/engine";
 
-import type { GameAction } from "./types";
+import type { AiActionProposal, GameAction } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 
@@ -72,22 +72,10 @@ type EngineRequest =
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
-  | { type: "getAiAction"; id: number; difficulty: string; playerId: number }
-  | { type: "getAiFallbackAction"; id: number }
-  | {
-      type: "getAiScoredCandidates";
-      id: number;
-      difficulty: string;
-      playerId: number;
-      seed: number;
-    }
-  | {
-      type: "selectActionFromScores";
-      id: number;
-      scoresJson: string;
-      difficulty: string;
-      seed: number;
-    }
+  | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
+  | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
+  | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
@@ -176,13 +164,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "buildAiCardSubset": {
         if (!cardDbLoaded) {
-          error(
-            msg.id,
-            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
-          );
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
           break;
         }
-        // Returns the serialized AiCardSubsetResult tagged union as a string.
         result(msg.id, build_ai_card_subset());
         break;
       }
@@ -383,35 +367,37 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
-      case "getAiAction": {
-        const aiResult = get_ai_action(msg.difficulty, msg.playerId);
-        result(msg.id, aiResult ?? null);
-        break;
-      }
-
-      case "getAiFallbackAction": {
-        const fallback = get_ai_fallback_action();
-        result(msg.id, fallback ?? null);
+      case "getAiActionProposal": {
+        const proposal = get_ai_action_proposal(msg.difficulty, msg.playerId);
+        result(msg.id, proposal ?? null);
         break;
       }
 
       case "getAiScoredCandidates": {
-        const scored = get_ai_scored_candidates(
-          msg.difficulty,
-          msg.playerId,
-          BigInt(msg.seed),
-        );
-        result(msg.id, scored ?? []);
+        result(msg.id, get_ai_scored_candidates(msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? []);
         break;
       }
 
-      case "selectActionFromScores": {
-        const selected = select_action_from_scores(
-          msg.scoresJson,
-          msg.difficulty,
-          BigInt(msg.seed),
+      case "getAiActionProposalFromScores": {
+        result(
+          msg.id,
+          get_ai_action_proposal_from_scores(
+            msg.scoresJson,
+            msg.difficulty,
+            msg.playerId,
+            BigInt(msg.seed),
+          ) ?? null,
         );
-        result(msg.id, selected ?? null);
+        break;
+      }
+
+      case "submitAiActionProposal": {
+        const outcome = submit_ai_action_proposal(
+          msg.proposal.token,
+          msg.proposal.actor,
+          msg.proposal.action,
+        );
+        result(msg.id, outcome);
         break;
       }
 

@@ -423,6 +423,11 @@ fn effect_pay_cost_mana_resume(
     if let WaitingFor::ManaPayment {
         player,
         convoke_mode,
+    }
+    | WaitingFor::ManaSourceSelection {
+        player,
+        convoke_mode,
+        ..
     } = &state.waiting_for
     {
         return Some(ManaAbilityResume::ManaPayment {

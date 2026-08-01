@@ -92,7 +92,9 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
     match &state.waiting_for {
         // CR 601.2g–h: during the ordinary mana-payment window, the visible
         // payer and live pending cast jointly identify the payment root.
-        WaitingFor::ManaPayment { player, .. } => classify_global_root(state, *player),
+        WaitingFor::ManaPayment { player, .. } | WaitingFor::ManaSourceSelection { player, .. } => {
+            classify_global_root(state, *player)
+        }
         // CR 601.2f–h: submitting Phyrexian choices remains part of the same
         // cost payment. The prompt's object must agree with the announced root.
         WaitingFor::PhyrexianPayment {
@@ -442,6 +444,15 @@ fn classify_deferred_life_root(
                     PaymentContinuationUnsupported::PayerMismatch,
                 )
             }
+            ManaAbilityResume::ManaSourceSelection {
+                player: selection_player,
+                ..
+            } if selection_player == player => classify_global_root(state, *player),
+            ManaAbilityResume::ManaSourceSelection { .. } => {
+                PaymentContinuationState::UnsupportedAffiliated(
+                    PaymentContinuationUnsupported::PayerMismatch,
+                )
+            }
             ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => {
                 PaymentContinuationState::UnsupportedAffiliated(
@@ -532,6 +543,9 @@ fn record_root_from_resume(
         ManaAbilityResume::ManaPayment {
             outer_player: None, ..
         } => return Err(PaymentContinuationUnsupported::MissingOuterPayer),
+        ManaAbilityResume::ManaSourceSelection { player, .. } => {
+            Some(root_from_global(state, *player)?)
+        }
         ManaAbilityResume::PhyrexianCastPayment { caster, .. } => {
             Some(root_from_global(state, *caster)?)
         }

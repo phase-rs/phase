@@ -453,12 +453,33 @@ pub(super) fn drain_pending_phase_transition_progress(
                 state.waiting_for = WaitingFor::PayAmountChoice {
                     player: controller,
                     resource: PayableResource::LoopCollapse { axis },
-                    // CR 732.2a: any finite count (incl. 0 — a legal collapse-to-
-                    // nothing; the ∞ still ends). `max` reuses the engine's loop
-                    // safety bound; the AI branch offers only N=1 so the wide range
-                    // never enters search. Tapped tokens carry no lethal driver.
+                    // ENGINE TOLERANCE, NOT A RULES ENTITLEMENT — no CR licenses this, and
+                    // none is cited: CR 732.2c says the shortcut "is taken" at the accepted
+                    // count and the game simply advances to that ending point, so there is no
+                    // re-choice and strictly `min` and `max` would both be the accepted N.
+                    // `min: 0` is unchanged from BASE and kept as a deliberate NEVER-OVER-
+                    // DELIVER fail-safe, not as wedge-avoidance — `min == max == N` is already
+                    // a single legal answer, so a narrow range could not wedge the boundary.
+                    // What 0 buys is a floor the engine can always honor: collapsing to
+                    // nothing is strictly less than what the table agreed to, so no batching
+                    // or replay imprecision below it can ever materialize growth nobody
+                    // accepted. Tapped tokens carry no lethal driver, so 0 is also never a
+                    // hidden win-denial.
                     min: 0,
-                    max: crate::game::engine::MAX_SHORTCUT_CYCLES,
+                    // CR 732.2c: the shortcut was TAKEN at the count every player
+                    // accepted, so the collapse may not exceed it — re-asking with the
+                    // engine-wide safety bound would let the controller run a longer
+                    // sequence than the one the table agreed to. `MAX_SHORTCUT_CYCLES`
+                    // remains the defensive fallback for a stash with no recorded bound.
+                    // `materialize_fixed_shortcut` writes the bound in lockstep with the
+                    // registration that creates the stash, so on current code the only
+                    // bound-less stash is one deserialized from a save written before the
+                    // bound was tracked.
+                    max: state
+                        .pending_materialization_count
+                        .get(&controller)
+                        .copied()
+                        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES),
                     accumulated: 0,
                     source_id: ObjectId(0),
                     pending_mana_ability: None,

@@ -2,77 +2,59 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AiWorkerPool } from "../ai-worker-pool";
 
-const mockWorkers = Array.from({ length: 2 }, () => ({
-  initialize: vi.fn().mockResolvedValue(undefined),
-  loadCardDbFromUrl: vi.fn().mockResolvedValue(100),
-  restoreState: vi.fn().mockResolvedValue(undefined),
-  getAiScoredCandidates: vi.fn(),
-  dispose: vi.fn(),
+const workerHarness = vi.hoisted(() => ({
+  workers: Array.from({ length: 2 }, () => ({
+    initialize: vi.fn().mockResolvedValue(undefined),
+    loadCardDb: vi.fn().mockResolvedValue(1),
+    loadCardDbFromUrl: vi.fn().mockResolvedValue(1),
+    restoreState: vi.fn().mockResolvedValue(undefined),
+    getAiScoredCandidates: vi.fn(),
+    dispose: vi.fn(),
+  })),
+  nextWorker: 0,
 }));
-
-let workerIndex = 0;
-let workerConstructorErrorAt: number | null = null;
+const { workers } = workerHarness;
 
 vi.mock("../engine-worker-client", () => ({
-  EngineWorkerClient: vi.fn().mockImplementation(function () {
-    const currentWorkerIndex = workerIndex;
-    workerIndex += 1;
-    if (currentWorkerIndex === workerConstructorErrorAt) {
-      throw new Error("worker construction failed");
+  EngineWorkerClient: class {
+    constructor() {
+      return workerHarness.workers[workerHarness.nextWorker++];
     }
-    return mockWorkers[currentWorkerIndex];
-  }),
+  },
 }));
 
 describe("AiWorkerPool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    workerIndex = 0;
-    workerConstructorErrorAt = null;
+    workerHarness.nextWorker = 0;
   });
 
-  it("disposes earlier workers when a later worker fails to construct", () => {
-    workerConstructorErrorAt = 1;
-
-    expect(() => new AiWorkerPool(2)).toThrow("worker construction failed");
-
-    expect(mockWorkers[0].dispose).toHaveBeenCalledOnce();
-    expect(mockWorkers[1].dispose).not.toHaveBeenCalled();
-  });
-
-  it("merges worker scores without reintroducing missing actions", async () => {
+  it("merges score-only candidates without minting or dispatching an action", async () => {
     const pass = { type: "PassPriority" } as const;
-    const cast = {
-      type: "CastSpell",
-      data: { object_id: 7, card_id: 7, targets: [] },
-    } as const;
-
-    mockWorkers[0].getAiScoredCandidates.mockResolvedValue([
-      [pass, 1.0],
-      [cast, 2.0],
-    ]);
-    mockWorkers[1].getAiScoredCandidates.mockResolvedValue([[pass, 3.0]]);
+    workers[0].getAiScoredCandidates.mockResolvedValue([[pass, 1]]);
+    workers[1].getAiScoredCandidates.mockResolvedValue([[pass, 3]]);
 
     const pool = new AiWorkerPool(2);
     await pool.initialize();
-    const merged = await pool.getAiScoredCandidates("{}", "VeryHard", 1);
 
-    expect(merged).toEqual([
-      [pass, 2.0],
-      [cast, 2.0],
-    ]);
+    expect(await pool.getAiScoredCandidates("{}", "VeryHard", 1)).toEqual([[pass, 2]]);
   });
 
-  it("does not invent an action absent from all worker results", async () => {
-    const pass = { type: "PassPriority" } as const;
-
-    mockWorkers[0].getAiScoredCandidates.mockResolvedValue([[pass, 1.0]]);
-    mockWorkers[1].getAiScoredCandidates.mockResolvedValue([[pass, 3.0]]);
-
+  it("invalidates score batches superseded while awaiting the pool lock", async () => {
+    let completeFirst!: () => void;
+    const first = new Promise<void>((resolve) => {
+      completeFirst = resolve;
+    });
+    workers[0].restoreState.mockReturnValueOnce(first);
+    workers[0].getAiScoredCandidates.mockResolvedValue([]);
+    workers[1].getAiScoredCandidates.mockResolvedValue([]);
     const pool = new AiWorkerPool(2);
-    await pool.initialize();
-    const merged = await pool.getAiScoredCandidates("{}", "VeryHard", 1);
 
-    expect(merged).toEqual([[pass, 2.0]]);
+    const stale = pool.getAiScoredCandidates("old", "VeryHard", 0);
+    const current = pool.getAiScoredCandidates("current", "VeryHard", 0);
+    completeFirst();
+
+    await expect(stale).resolves.toBeNull();
+    await expect(current).resolves.toEqual([]);
   });
 });

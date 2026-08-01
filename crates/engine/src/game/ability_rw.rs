@@ -8296,4 +8296,54 @@ mod tests {
         assert_eq!(p.reads_event_live, twin.reads_event_live);
         assert_eq!(p.legacy_batch_prompt(), twin.legacy_batch_prompt());
     }
+
+    /// CR 400.7d: the Adamant *rider* cards (Slaying Fire, Cauldron's Gift, …)
+    /// re-route from `AbilityCondition::ManaColorSpent` — an inert,
+    /// reads-nothing arm — to the generic
+    /// `QuantityCheck { ManaSpentToCast { OfColor } }`, which resolves through
+    /// `legacy_ref()`. Pin BOTH sides so the delta is explicit rather than
+    /// incidental: the flip is toward the MORE conservative classification
+    /// (batch-prompt rather than silent auto-order), which is fail-safe, and a
+    /// future retirement of `ManaColorSpent` cannot silently change it.
+    ///
+    /// Companion to `adamant_rider_generic_shape_reads_all_scan_axes` in
+    /// `ability_scan.rs`, which pins the corresponding scan-axis delta. Without
+    /// this test the `ability_rw` half of that re-routing is unpinned.
+    #[test]
+    fn adamant_rider_generic_shape_is_more_conservative_than_legacy() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+        use crate::types::mana::ManaColor;
+
+        let generic = AbilityCondition::QuantityCheck {
+            lhs: qref(QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::OfColor {
+                    color: ManaColor::Red,
+                },
+            }),
+            comparator: Comparator::GE,
+            rhs: qfix(3),
+        };
+        let legacy = AbilityCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+
+        // SCOPE OF THIS TEST: it pins the rw CLASSIFICATION of both shapes. It
+        // constructs the conditions directly and never invokes the parser, so it
+        // does NOT detect a revert of the `OfColor` lowering — that is guarded by
+        // `leading_word_mana_spent_condition_parses_adamant` in
+        // `parser/oracle_effect/conditions.rs`. What reverting the lowering WOULD
+        // do is make this test's `generic` shape unreachable in production while
+        // leaving it green; the pin below is what keeps the two classifications
+        // visibly different so such a change cannot pass unnoticed.
+        assert!(
+            rw_ability_condition(&generic).legacy_batch_prompt(),
+            "the generic ManaSpentToCast shape must carry the legacy_ref batch-prompt marker"
+        );
+        assert!(
+            !rw_ability_condition(&legacy).legacy_batch_prompt(),
+            "the legacy ManaColorSpent arm reads nothing; pinned so the delta stays visible"
+        );
+    }
 }

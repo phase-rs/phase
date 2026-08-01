@@ -2,7 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { ManaPaymentUI } from "../ManaPaymentUI";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../ManaPaymentUI";
 import { useGameStore } from "../../../stores/gameStore";
 import type { GameState } from "../../../adapter/types";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
@@ -419,5 +419,65 @@ describe("ManaPaymentUI", () => {
         ],
       },
     });
+  });
+});
+
+describe("ManaSourceSelectionUI", () => {
+  beforeEach(() => {
+    useGameStore.getState().reset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("dispatches only the engine-issued sacrificial source and Back action", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const source = buildGameObjectWithCoreTypes(["Artifact"], {
+      id: 91,
+      card_id: 91,
+      name: "Basal Sliver",
+      zone: "Battlefield",
+    });
+    const selection = {
+      source: { object_id: 91, incarnation: 0 },
+      ability_index: 0,
+      mana_type: "Black" as const,
+      output: { type: "Concrete" as const, data: "Black" as const },
+      atomic_combination: null,
+      restrictions: [],
+      penalty: "Sacrifices" as const,
+      taps_for_mana: [],
+    };
+    const gameState = createGameState({
+      objects: buildObjectMap(source),
+      waiting_for: {
+        type: "ManaSourceSelection",
+        data: {
+          player: 0,
+          options: [selection],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [],
+      });
+    });
+
+    render(<ManaSourceSelectionUI />);
+
+    fireEvent.click(screen.getByRole("button", { name: /basal sliver/i }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ActivateManaSource",
+      data: { selection },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /back to mana payment/i }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "BackToManaPayment" });
   });
 });

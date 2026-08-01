@@ -31,6 +31,7 @@ fn mana_source_selection() -> ManaSourceSelection {
         source: ObjectIncarnationRef::of(ObjectId(1), 1),
         ability_index: Some(0),
         mana_type: ManaType::Green,
+        output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
         atomic_combination: None,
         restrictions: Vec::new(),
         penalty: ManaSourcePenalty::None,

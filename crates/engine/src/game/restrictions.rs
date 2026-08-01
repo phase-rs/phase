@@ -364,6 +364,29 @@ pub fn record_sacrifice(
     }
 }
 
+/// CR 608.2i: the entry-time snapshot record [`record_battlefield_entry`] pushes for
+/// `obj`. Extracted (behaviour-identical, field-for-field) so a READ-ONLY caller — the
+/// CR 732.2a loop firewall's class-exclusion test — can ask
+/// [`battlefield_entry_matches_filter`] about an object without `&mut GameState`.
+/// `record_battlefield_entry` is its other caller, so the field list has ONE authority.
+pub(crate) fn battlefield_entry_record_for(
+    obj: &GameObject,
+) -> crate::types::game_state::BattlefieldEntryRecord {
+    crate::types::game_state::BattlefieldEntryRecord {
+        object_id: obj.id,
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        colors: obj.color.clone(),
+        // CR 403.3: snapshot the object's keywords at entry time — whatever the layer
+        // state is at the caller's record point (pre-flush for most entries, post-flush
+        // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
+        keywords: obj.keywords.clone(),
+        controller: obj.controller,
+    }
+}
+
 /// CR 403.3: Record a battlefield entry snapshot for data-driven ETB condition queries.
 pub fn record_battlefield_entry(
     state: &mut crate::types::game_state::GameState,
@@ -376,19 +399,7 @@ pub fn record_battlefield_entry(
         return;
     }
 
-    let record = crate::types::game_state::BattlefieldEntryRecord {
-        object_id,
-        name: obj.name.clone(),
-        core_types: obj.card_types.core_types.clone(),
-        subtypes: obj.card_types.subtypes.clone(),
-        supertypes: obj.card_types.supertypes.clone(),
-        colors: obj.color.clone(),
-        // CR 403.3: snapshot the object's keywords at entry time. This is the
-        // printed/base + counter-granted keyword set (pre-layer; see the field doc
-        // on BattlefieldEntryRecord.keywords for the documented Layer-6 limitation).
-        keywords: obj.keywords.clone(),
-        controller: obj.controller,
-    };
+    let record = battlefield_entry_record_for(obj);
     state.battlefield_entries_this_turn.push(record);
 }
 
@@ -538,16 +549,19 @@ pub(crate) fn battlefield_entry_matches_filter(
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types/game_state.rs:1586-1606`). Every other
+/// supertypes / colors / keywords / controller` (`types/game_state.rs:1650-1670`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at `:517` and the whole tally reads a silent constant 0. Measured: 98
+/// matcher fails closed at its `FilterProp` arm (`:515`) and its outer `TargetFilter` arm
+/// (`:544`), and the whole tally reads a silent constant 0 — but see the `Or` exception
+/// documented at `:519-526`: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
+/// instead. Measured: 98
 /// `FilterProp` variants exist (`types/ability.rs:3609-4251`); the matcher answers 4.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
 /// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
 /// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list must name exactly the props the matcher answers at `:504-516`; the binder is
+/// The list must name exactly the props the matcher answers at `:502-514`; the binder is
 /// `ledger_guard_agrees_with_matcher` (test, below).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
@@ -561,7 +575,7 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` (`:408-418`) answers only these two.
+            // CR 109.5: `entry_controller_matches` (`fn` at `:406`) answers only these two.
             typed
                 .controller
                 .as_ref()
@@ -576,12 +590,12 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                     )
                 })
         }
-        // CR 608.2i: mirrors the matcher's monotone connectives (`:540-545`); every leaf must be
+        // CR 608.2i: mirrors the matcher's monotone connectives (`:538-543`); every leaf must be
         // answerable, otherwise the composite silently drops one.
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().all(ledger_filter_is_evaluable)
         }
-        // Everything else is the matcher's `_ => false` at `:546`, including the anti-monotone
+        // Everything else is the matcher's outer `_ => false` at `:544`, including the anti-monotone
         // `TargetFilter::Not`.
         _ => false,
     }

@@ -425,6 +425,13 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    pub(crate) fn ability_continuations(&self) -> impl Iterator<Item = &PendingContinuation> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+            _ => None,
+        })
+    }
+
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
         self.next_draw_sequence_frame_id
     }
@@ -2454,16 +2461,29 @@ impl ResolutionStateWire {
     ///
     /// Version 1 is read only through the legacy migration path below. Version
     /// 2 is the only shape this adapter writes for protocol-19 clients.
-    fn from_value(value: Value) -> Result<Self, String> {
+    fn from_value(mut value: Value) -> Result<Self, String> {
+        let version = {
+            let object = value
+                .as_object()
+                .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
+            object
+                .get("resolution_state_version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    "resolution state wire is missing a numeric resolution_state_version"
+                        .to_string()
+                })?
+        };
+
+        // `ResolutionStateWire` is a public persistence boundary in its own
+        // right. Apply the same one-way legacy upgrades as raw/trusted
+        // envelopes before either wire branch materializes a `GameState`; an
+        // unlabeled active trigger must never be silently reclassified here.
+        crate::types::game_state::migrate_legacy_delayed_trigger_provenance(&mut value)?;
+        crate::types::game_state::migrate_legacy_trigger_firing_carriers(&mut value)?;
         let object = value
             .as_object()
-            .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
-        let version = object
-            .get("resolution_state_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                "resolution state wire is missing a numeric resolution_state_version".to_string()
-            })?;
+            .expect("the checked resolution state wire remains an object");
 
         match version {
             // V1 reader compatibility path: historical keys are consumed here
@@ -2626,6 +2646,7 @@ impl ResolutionStateWire {
                 frames
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
+                crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
@@ -2666,6 +2687,7 @@ impl ResolutionStateWire {
                     return Err("v2 resolution frames cannot be represented by the legacy runtime slots"
                         .to_string());
                 }
+                crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })

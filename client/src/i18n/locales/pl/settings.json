@@ -29,6 +29,7 @@
     "logDefault": "Domyślny dziennik",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
+    "spellPaymentOptions": { "auto": "Automatycznie", "autoExceptSacrificialMana": "Pytaj przed poświęceniem", "manual": "Ręcznie" },
     "nativeEngine": "Używaj natywnego silnika w lokalnych grach i hostowanym trybie wieloosobowym",
     "nativeEngineDescription": "Używaj pobranego silnika do lokalnych gier z AI i gier hostowanych przez lobby. Goście nadal łączą się przez połączenie peer-to-peer lobby. Gdy silnik jest niedostępny, używany jest wbudowany silnik.",
     "boardBackground": "Tło pola bitwy",

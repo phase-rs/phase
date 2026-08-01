@@ -350,6 +350,7 @@ pub fn apply_life_loss_after_replacement(
     // CR 119.8: losing 0 life doesn't count as losing life — no state
     // mutation and no journal command; the event below still fires as before.
     if loss_amount != 0 {
+        let before = crate::game::players::team_life_total(state, pid);
         state
             .resolve_and_apply_player_edit(
                 pid,
@@ -358,6 +359,16 @@ pub fn apply_life_loss_after_replacement(
                 },
             )
             .expect("post-replacement life loss must target a live player");
+        let after = crate::game::players::team_life_total(state, pid);
+        // The clone-local preview observes the real edit before events or a
+        // substitution continuation can introduce later, unrelated work.
+        crate::game::life_safety::record_life_mutation_receipt(
+            state,
+            pid,
+            before,
+            after,
+            loss_amount,
+        );
     }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).

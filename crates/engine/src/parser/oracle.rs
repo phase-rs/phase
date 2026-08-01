@@ -63,15 +63,18 @@ use super::oracle_effect::{
     parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
+use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
+    PrintedAbilityIndex, PrintedTriggerIndex, RelationSynthesisIr, SpellPayloadIr,
+    UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{
-    AbilityIr, AbilityRootTransform, AbilityShellIr, ResidualConditionPolicy, ShellStage,
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ResidualConditionPolicy,
+    ShellStage,
 };
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
@@ -85,9 +88,9 @@ use super::oracle_keyword::{
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
-    extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block,
+    extract_ability_word_reminder_body, lower_oracle_block_ir, parse_oracle_block,
     split_short_label_prefix, strip_ability_word, strip_ability_word_with_name,
-    strip_flavor_word_with_name, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
+    strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
@@ -1193,7 +1196,6 @@ fn try_split_and_cant_become_untapped(
 fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     match &item.node {
         OracleNodeIr::Replacement(replacement_ir) => Some(&replacement_ir.definition),
-        OracleNodeIr::PreLoweredReplacement(def) => Some(def),
         _ => None,
     }
 }
@@ -1264,7 +1266,6 @@ fn item_trigger(item: &OracleItemIr) -> Option<Cow<'_, TriggerDefinition>> {
 fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
     match &item.node {
         OracleNodeIr::Static(ir) => Some(&ir.definition),
-        OracleNodeIr::PreLoweredStatic(def) => Some(def),
         _ => None,
     }
 }
@@ -1273,9 +1274,42 @@ fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
 /// list, pairing producer/consumer items by `OracleItemId`. Runs at parse time;
 /// both the main and Class document-construction paths converge here.
 fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> OracleDocIr {
-    doc.relations
-        .extend(detect_document_relations(&doc.items, types));
+    let relations = detect_document_relations(&doc.items, types);
+    finalize_relation_syntheses(&mut doc, &relations);
+    doc.relations.extend(relations);
     doc
+}
+
+/// Install relation-derived nodes onto their already-emitted source item. This
+/// preserves identity, source provenance, source order, and the builder's
+/// historical printed-slot accounting; the builder deliberately cannot emit a
+/// relation synthesis as a fresh item.
+fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelationIr]) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost {
+            chooser,
+            copy_static,
+            filter,
+            description,
+        }) = relation
+        else {
+            continue;
+        };
+        let Some(item) = doc.items.iter_mut().find(|item| item.id == *chooser) else {
+            continue;
+        };
+        // Fail closed if a relation producer no longer names the unsupported
+        // chooser form it proved during discovery. Never overwrite another IR
+        // kind just because its id happens to match.
+        if !matches!(&item.node, OracleNodeIr::Unsupported { .. }) {
+            continue;
+        }
+        item.node = OracleNodeIr::RelationSynthesis(RelationSynthesisIr {
+            filter: filter.clone(),
+            description: description.clone(),
+            copy_static: *copy_static,
+        });
+    }
 }
 
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
@@ -1838,80 +1872,39 @@ fn detect_linked_choice_copy_chosen_host(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    let chooser = items.iter().find(|item| {
-        item_ability(item).is_some_and(|def| ability_is_as_enters_choose_permanent_gap(&def))
-    });
+    let chooser = items.iter().find_map(as_enters_choose_permanent_gap_item);
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
             s.modifications
                 .contains(&ContinuousModification::CopyChosen)
         })
     });
-    if let (Some(chooser), Some(copy_static)) = (chooser, copy_static) {
-        if chooser.id != copy_static.id {
+    if let (Some((chooser, filter, description)), Some(copy_static)) = (chooser, copy_static) {
+        if chooser != copy_static.id {
             relations.push(DocumentRelationIr::LinkedChoice(
                 LinkedChoiceKind::CopyChosenHost {
-                    chooser: chooser.id,
+                    chooser,
                     copy_static: copy_static.id,
+                    filter,
+                    description,
                 },
             ));
         }
     }
 }
 
-/// CR 607.2d + CR 707.2c + CR 614.12a: Replace the proven chooser gap ability
-/// with a Moved `ChoosePermanent` replacement. Filter is re-derived from the
-/// Unimplemented description so line-local parse never assigns copy-host
-/// semantics without this relation.
-fn apply_linked_choice_copy_chosen_host(
-    result: &mut ParsedAbilities,
-    relations: &[DocumentRelationIr],
-    ability_ids: &mut Vec<OracleItemId>,
-    replacement_ids: &mut Vec<OracleItemId>,
-) {
-    for relation in relations {
-        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost { chooser, .. }) =
-            relation
-        else {
-            continue;
-        };
-        let Some(ability_pos) = position_of(ability_ids, *chooser) else {
-            continue;
-        };
-        let Some(description) = result.abilities[ability_pos]
-            .effect
-            .unimplemented_description()
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let Some(filter) = filter_from_as_enters_choose_permanent_text(&description) else {
-            continue;
-        };
-        result.abilities.remove(ability_pos);
-        ability_ids.remove(ability_pos);
-        let execute =
-            AbilityDefinition::new(AbilityKind::Spell, Effect::ChoosePermanent { filter });
-        result.replacements.push(
-            ReplacementDefinition::new(ReplacementEvent::Moved)
-                .execute(execute)
-                .valid_card(TargetFilter::SelfRef)
-                // CR 614.1c: battlefield-entry-scoped.
-                .destination_zone(Zone::Battlefield)
-                .description(description),
-        );
-        replacement_ids.push(*chooser);
-    }
-}
-
-/// An Unimplemented ability whose fragment is an as-enters permanent-object
-/// choice ("As … enters, choose a creature/permanent…"). Framing + Typed filter
-/// must both match — same grammar as `as_enters_choose_permanent_filter`.
-fn ability_is_as_enters_choose_permanent_gap(def: &AbilityDefinition) -> bool {
-    let Some(description) = def.effect.unimplemented_description() else {
-        return false;
+/// Typed facts from a proven unsupported chooser source. The legacy post-fold
+/// path read `Effect::Unimplemented`'s description, which
+/// `lower_unsupported_node` derives from this residual's fragment (not its
+/// display description), so relation synthesis preserves that exact contract.
+fn as_enters_choose_permanent_gap_item(
+    item: &OracleItemIr,
+) -> Option<(OracleItemId, TargetFilter, String)> {
+    let OracleNodeIr::Unsupported { unsupported, .. } = &item.node else {
+        return None;
     };
-    filter_from_as_enters_choose_permanent_text(description).is_some()
+    let filter = filter_from_as_enters_choose_permanent_text(&unsupported.fragment)?;
+    Some((item.id, filter, unsupported.fragment.clone()))
 }
 
 fn filter_from_as_enters_choose_permanent_text(description: &str) -> Option<TargetFilter> {
@@ -3043,6 +3036,11 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut trigger_ids: Vec<OracleItemId> = Vec::new();
     let mut static_ids: Vec<OracleItemId> = Vec::new();
     let mut replacement_ids: Vec<OracleItemId> = Vec::new();
+    // An already-emitted unsupported chooser can become a relation-synthesized
+    // replacement without entering `result.abilities`.
+    // Its historical printed slot still exists, so this source-order counter is
+    // deliberately independent of the published ability vector length.
+    let mut printed_ability_slot = 0usize;
     // CR 707.9a printed slots are resolved in this loop, not in
     // `OracleDocBuilder::finish` where they used to be. The stamp rewrites the
     // `placeholder()` (= 0) the dispatch loop baked into each
@@ -3054,9 +3052,9 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // source-ordered `BTreeMap` and count each category separately, so the k-th
     // spell item is at ability slot k either way.
     //
-    // The slot IS `result.<category>.len()` at the moment of the push, which is
-    // what makes this the correct seam rather than merely a possible one. Stamped
-    // BEFORE the relation passes below, matching the pre-relation state the
+    // The slot counter advances for every source spell item, including a
+    // `RelationSynthesis` that publishes only a replacement. Stamped BEFORE the
+    // relation passes below, matching the pre-relation state the
     // `finish()` walk saw — several of those passes insert into, remove from, and
     // move ids between the category tracks.
     //
@@ -3067,9 +3065,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
                 let mut def = lower_ability_ir(ability_ir);
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
             }
             // Same three steps as the two arms around it: lower, stamp the
             // CR 707.9a printed ability slot, push. The residual is stamped like
@@ -3080,9 +3079,28 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 min_x_value,
             } => {
                 let mut def = lower_unsupported_node(unsupported, *min_x_value);
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
+            }
+            OracleNodeIr::RelationSynthesis(synthesis) => {
+                let execute = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChoosePermanent {
+                        filter: synthesis.filter.clone(),
+                    },
+                );
+                result.replacements.push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .execute(execute)
+                        .valid_card(TargetFilter::SelfRef)
+                        // CR 614.1c: battlefield-entry-scoped.
+                        .destination_zone(Zone::Battlefield)
+                        .description(synthesis.description.clone()),
+                );
+                replacement_ids.push(item.id);
+                printed_ability_slot += 1;
             }
             OracleNodeIr::Trigger(trigger_node) => {
                 let mut def = lower_trigger_node_ir(trigger_node);
@@ -3127,19 +3145,12 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 result.triggers.push(def);
                 trigger_ids.push(item.id);
             }
-            OracleNodeIr::PreLoweredStatic(def) => {
-                result.statics.push(def.clone());
-                static_ids.push(item.id);
-            }
-            OracleNodeIr::PreLoweredReplacement(def) => {
-                result.replacements.push(def.clone());
-                replacement_ids.push(item.id);
-            }
             OracleNodeIr::PreLoweredSpell(def) => {
                 let mut def = def.clone();
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
             }
         }
     }
@@ -3174,12 +3185,6 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     );
     reconcile_host_bound_phase_outs(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
-    apply_linked_choice_copy_chosen_host(
-        &mut result,
-        &ir.relations,
-        &mut ability_ids,
-        &mut replacement_ids,
-    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
@@ -3197,11 +3202,9 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     //
     // The tracks are sound to zip here: of the relation passes above,
     // `apply_linked_choice_etb_counter` removes from `result.replacements` and
-    // `replacement_ids` at the same index, and `apply_linked_choice_copy_chosen_host`
-    // moves an ability id onto the replacement track. This is also exactly why
-    // the audit stays HERE, post-relation: a pre-lowering audit is blind to
-    // relation-synthesized semantics (that pass *synthesizes a replacement*), so
-    // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
+    // `replacement_ids` at the same index. Relation synthesis already populated
+    // the replacement track during the source-order fold, which is why the audit
+    // stays HERE: a pre-lowering audit is blind to that semantic output.
     //
     // Emitted into a local vec and appended, rather than passing `&mut
     // ir.diagnostics` directly: the audit reads `ir.items` and writes the
@@ -3849,10 +3852,6 @@ impl<'a> DocEmitter<'a> {
             },
         );
     }
-    fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
-        self.last_trigger = Some(def.clone());
-        self.emit_at(line, OracleNodeIr::PreLoweredTrigger(def));
-    }
     /// Mirrors `static_ir_at`: the peek mirror stores the LOWERED definition, so
     /// the peek reader is unchanged and no `source_text` is invented for a slot
     /// nothing reads it from. Lowering here is a clone (`lower_trigger_node_ir`
@@ -3860,10 +3859,6 @@ impl<'a> DocEmitter<'a> {
     fn trigger_ir_at(&mut self, line: usize, ir: TriggerNodeIr) {
         self.last_trigger = Some(lower_trigger_node_ir(&ir));
         self.emit_at(line, OracleNodeIr::Trigger(ir));
-    }
-    fn static_at(&mut self, line: usize, def: StaticDefinition) {
-        self.last_static = Some(def.clone());
-        self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
     fn static_ir_at(&mut self, line: usize, ir: StaticIr) {
         self.last_static = Some(lower_static_ir(&ir));
@@ -3913,6 +3908,11 @@ impl<'a> DocEmitter<'a> {
             match node {
                 OracleNodeIr::Static(ir) => self.static_ir_at(item_line, ir),
                 OracleNodeIr::Trigger(ir) => self.trigger_ir_at(item_line, ir),
+                OracleNodeIr::RelationSynthesis(_) => {
+                    panic!(
+                        "relation synthesis is finalization-only and cannot be forwarded by DocEmitter"
+                    );
+                }
                 other => {
                     self.emit_at(item_line, other);
                 }
@@ -3920,39 +3920,6 @@ impl<'a> DocEmitter<'a> {
         }
     }
 
-    /// Move every vector item a `&mut ParsedAbilities`-taking mutator just pushed
-    /// into the builder at `item_line`, then clear them. Used for the complex
-    /// cross-file mutators (modal / enters-replacement lowering) that the (B)
-    /// tuple-return design does NOT rewrite internally: they still push into a
-    /// scratch `ParsedAbilities`, and this drains that scratch into source-ordered
-    /// emission. `result`'s SINGLETON fields (modal/additional_cost/…) are left
-    /// untouched — the caller handles those.
-    fn drain_result_vectors(&mut self, item_line: usize, result: &mut ParsedAbilities) {
-        for def in std::mem::take(&mut result.abilities) {
-            self.ability_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.triggers) {
-            self.trigger_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.statics) {
-            self.static_at(item_line, def);
-        }
-        for def in std::mem::take(&mut result.replacements) {
-            self.replacement_at(item_line, def);
-        }
-        for kw in std::mem::take(&mut result.extracted_keywords) {
-            self.keyword_at(item_line, kw);
-        }
-        for r in std::mem::take(&mut result.casting_restrictions) {
-            self.casting_restriction_at(item_line, r);
-        }
-        for o in std::mem::take(&mut result.casting_options) {
-            self.casting_option_at(item_line, o);
-        }
-    }
-    fn replacement_at(&mut self, line: usize, def: ReplacementDefinition) {
-        self.emit_at(line, OracleNodeIr::PreLoweredReplacement(def));
-    }
     fn keyword_at(&mut self, line: usize, kw: Keyword) {
         self.emit_at(line, OracleNodeIr::Keyword(kw));
     }
@@ -4502,7 +4469,57 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 0: Semicolon-separated keyword lines (e.g., "Defender; reach").
+        // Priority 0: Modal block (standard "Choose one —" + modes, or Spree + modes).
+        // Must run before keyword extraction so "Spree" header + follow-on `+` lines
+        // are consumed as a modal block, not swallowed as a keyword-only line.
+        if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
+            match lower_oracle_block_ir(block, card_name, ctx.host_self_reference.clone(), &mut ctx)
+            {
+                OracleBlockIr::Activated(ability) => {
+                    emitter.ability_ir_at(item_line, ability);
+                }
+                OracleBlockIr::Modal { choice, modes } => {
+                    for mode in modes {
+                        emitter.ability_ir_at(
+                            mode.source_line
+                                .expect("collected modal bullets have source lines"),
+                            *mode.ability,
+                        );
+                    }
+                    emitter.modal_at(item_line, choice);
+                }
+                OracleBlockIr::Triggered(triggers) => {
+                    for trigger in triggers {
+                        emitter.trigger_ir_at(item_line, TriggerNodeIr::Parsed(Box::new(trigger)));
+                    }
+                }
+                OracleBlockIr::AsEnters {
+                    replacement,
+                    children,
+                } => {
+                    emitter.replacement_ir_at(item_line, replacement);
+                    for (line, children) in children {
+                        for child in children {
+                            match child {
+                                AnchorModeIr::Trigger(trigger) => {
+                                    emitter.trigger_ir_at(line, TriggerNodeIr::Parsed(trigger))
+                                }
+                                AnchorModeIr::Static(static_ir) => {
+                                    emitter.static_ir_at(line, *static_ir)
+                                }
+                                AnchorModeIr::Unsupported(ability) => {
+                                    emitter.ability_ir_at(line, *ability);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i = next_i;
+            continue;
+        }
+
+        // Priority 1: Semicolon-separated keyword lines (e.g., "Defender; reach").
         // Oracle text uses semicolons exclusively to separate keywords on a single line.
         // The colon guard prevents splitting activated ability lines like "{T}: Draw a card".
         if line.contains(';') && !line.contains(':') {
@@ -4530,27 +4547,6 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
-        // Must run before keyword extraction so "Spree" header + follow-on `+` lines
-        // are consumed as a modal block, not swallowed as a keyword-only line.
-        if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
-            // Modal lowering still pushes into a scratch `ParsedAbilities`; drain
-            // its vector output into source-ordered emission at the block's line,
-            // and capture the `modal` singleton's line for post-loop emission.
-            lower_oracle_block(
-                block,
-                card_name,
-                ctx.host_self_reference.clone(),
-                &mut result,
-            );
-            emitter.drain_result_vectors(item_line, &mut result);
-            if result.modal.is_some() {
-                modal_line.get_or_insert(item_line);
-            }
-            i = next_i;
-            continue;
-        }
-
         // Pre-keyword activated ability: "Equip {cost}" / "Equip — {cost}"
         // (but not "Equipped ...").
         // This must run before keyword-only extraction because MTGJSON keyword
@@ -4558,7 +4554,7 @@ pub(crate) fn parse_oracle_ir(
         // ability and still needs the synthesized activation body.
         if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
             if let Some(ability) = try_parse_equip(&line) {
-                emitter.ability_at(item_line, ability);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
@@ -4725,14 +4721,14 @@ pub(crate) fn parse_oracle_ir(
                 .trim_start_matches(" \u{2014} ")
                 .trim_start_matches(" - ");
             if let Some(ability) = try_parse_equip(equip_part) {
-                emitter.ability_at(item_line, ability);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
         if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
-            emitter.ability_at(item_line, ability);
+            emitter.ability_ir_at(item_line, ability);
             i += 1;
             continue;
         }
@@ -5160,9 +5156,10 @@ pub(crate) fn parse_oracle_ir(
         // trigger-shaped temporal text through the effect parser before generic
         // trigger dispatch.
         if is_spell && has_trigger_prefix(&lower) {
-            if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
+            if let Some(ability) =
+                try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
             {
-                emitter.ability_at(item_line, def);
+                emitter.ability_ir_at(item_line, ability);
                 i += 1;
                 continue;
             }
@@ -6283,6 +6280,7 @@ pub(crate) fn parse_oracle_ir(
                     shell: AbilityShellIr::default(),
                     die_results: vec![],
                     root_transforms: vec![],
+                    modal: None,
                 }
             } else if let Some(vote) = crate::parser::oracle_vote::parse_vote_block_ir(
                 parse_line,
@@ -6295,6 +6293,7 @@ pub(crate) fn parse_oracle_ir(
                     shell: AbilityShellIr::default(),
                     die_results: vec![],
                     root_transforms: vec![],
+                    modal: None,
                 }
             } else {
                 parse_ability_ir_with_context(parse_line, AbilityKind::Spell, &mut ctx)
@@ -7065,7 +7064,7 @@ fn scrub_replacement_descriptions(rep: &mut ReplacementDefinition) {
 /// "Equipment you control have equip {0}" (Puresteel Paladin granted-equip
 /// pattern) does not slice off the first 5 bytes of "Equipment" and parse the
 /// remainder ("ment you control...") as a malformed activated ability cost.
-pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityIr> {
     let (activation_line, cost_reduction) = split_trailing_self_cost_reduction(line);
     // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
     // "equip" is always ASCII so byte length == char length.
@@ -7095,26 +7094,43 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     let (cost_text, constraints) = strip_activated_constraints(cost_text);
     let target = parse_equip_target_filter(&cost_text)?;
     let cost = parse_equip_cost(&cost_text);
-    let mut ability = AbilityDefinition::new(
-        AbilityKind::Activated,
-        Effect::Attach {
-            attachment: crate::types::ability::TargetFilter::SelfRef,
-            target,
-        },
-    )
-    .cost(cost)
-    .description(line.to_string())
-    .sorcery_speed();
-    if !constraints.restrictions.is_empty() {
-        for restriction in constraints.restrictions {
-            if !ability.activation_restrictions.contains(&restriction) {
-                ability.activation_restrictions.push(restriction);
-            }
+    let mut activation_restrictions = vec![ActivationRestriction::AsSorcery];
+    for restriction in constraints.restrictions {
+        if !activation_restrictions.contains(&restriction) {
+            activation_restrictions.push(restriction);
         }
     }
-    ability.cost_reduction = cost_reduction;
-    ability.ability_tag = Some(AbilityTag::Equip);
-    Some(ability)
+
+    Some(AbilityIr {
+        source_text: line.to_string(),
+        body: EffectChainIr::single_clause(
+            line,
+            AbilityKind::Activated,
+            parsed_clause(Effect::Attach {
+                attachment: crate::types::ability::TargetFilter::SelfRef,
+                target,
+            }),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr {
+            cost: Some(cost),
+            cost_reduction,
+            activation_restrictions,
+            ability_tag: Some(AbilityTag::Equip),
+            description: Some(line.to_string()),
+            ..AbilityShellIr::default()
+        },
+        die_results: vec![],
+        modal: None,
+        root_transforms: vec![],
+    })
+}
+
+/// Lower native Equip IR for grant/token consumers that are not document emitters.
+pub(crate) fn try_parse_equip_lowered(line: &str) -> Option<AbilityDefinition> {
+    try_parse_equip(line).map(|ir| lower_ability_ir(&ir))
 }
 
 fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
@@ -7275,7 +7291,7 @@ fn minus_x_loyalty_cost() -> AbilityCost {
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:", "[−X]:"
-fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityDefinition> {
+fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityIr> {
     let trimmed = line.trim();
 
     // Try bracket format first: [+2]: ..., [−1]: ..., [0]: ..., [−X]: ...
@@ -7287,26 +7303,20 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
                 // feeds the effect via `cost_x_paid`. Checked before
                 // `parse_loyalty_number`, which only handles fixed amounts.
                 if is_minus_x_loyalty(inner) {
-                    let effect_text = effect_text.trim();
-                    ctx.subject = None;
-                    ctx.actor = None;
-                    let mut def =
-                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                    def.cost = Some(minus_x_loyalty_cost());
-                    def.description = Some(trimmed.to_string());
-                    apply_loyalty_restrictions(&mut def);
-                    return Some(def);
+                    return Some(parse_loyalty_ability_ir(
+                        effect_text.trim(),
+                        trimmed,
+                        minus_x_loyalty_cost(),
+                        ctx,
+                    ));
                 }
                 if let Some(amount) = parse_loyalty_number(inner) {
-                    let effect_text = effect_text.trim();
-                    ctx.subject = None;
-                    ctx.actor = None;
-                    let mut def =
-                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                    def.cost = Some(AbilityCost::Loyalty { amount });
-                    def.description = Some(trimmed.to_string());
-                    apply_loyalty_restrictions(&mut def);
-                    return Some(def);
+                    return Some(parse_loyalty_ability_ir(
+                        effect_text.trim(),
+                        trimmed,
+                        AbilityCost::Loyalty { amount },
+                        ctx,
+                    ));
                 }
             }
         }
@@ -7318,14 +7328,12 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
         // bracket branch). `parse_loyalty_number` rejects "X", so this must be
         // checked first.
         if is_minus_x_loyalty(prefix) {
-            let effect_text = effect_text.trim();
-            ctx.subject = None;
-            ctx.actor = None;
-            let mut def = parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-            def.cost = Some(minus_x_loyalty_cost());
-            def.description = Some(trimmed.to_string());
-            apply_loyalty_restrictions(&mut def);
-            return Some(def);
+            return Some(parse_loyalty_ability_ir(
+                effect_text.trim(),
+                trimmed,
+                minus_x_loyalty_cost(),
+                ctx,
+            ));
         }
         if let Some(amount) = parse_loyalty_number(prefix) {
             // Verify it looks like a loyalty prefix (starts with +, −, –, -, or is "0")
@@ -7336,20 +7344,34 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
                 || first_char == '-'
                 || prefix.trim() == "0"
             {
-                let effect_text = effect_text.trim();
-                ctx.subject = None;
-                ctx.actor = None;
-                let mut def =
-                    parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
-                def.cost = Some(AbilityCost::Loyalty { amount });
-                def.description = Some(trimmed.to_string());
-                apply_loyalty_restrictions(&mut def);
-                return Some(def);
+                return Some(parse_loyalty_ability_ir(
+                    effect_text.trim(),
+                    trimmed,
+                    AbilityCost::Loyalty { amount },
+                    ctx,
+                ));
             }
         }
     }
 
     None
+}
+
+/// Build native IR for an already-recognized loyalty header. The context reset
+/// remains immediately before body parsing, matching the prior lowered route.
+fn parse_loyalty_ability_ir(
+    effect_text: &str,
+    description: &str,
+    cost: AbilityCost,
+    ctx: &mut ParseContext,
+) -> AbilityIr {
+    ctx.subject = None;
+    ctx.actor = None;
+    let mut ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
+    ir.shell.cost = Some(cost);
+    ir.shell.description = Some(description.to_string());
+    apply_loyalty_restrictions(&mut ir.shell);
+    ir
 }
 
 /// CR 606.3: A player may activate a loyalty ability only during a main phase
@@ -7365,13 +7387,14 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
 /// "as though none of its loyalty abilities have been activated this turn"
 /// cap-raise from ever taking effect.
-fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
+fn apply_loyalty_restrictions(shell: &mut AbilityShellIr) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
-    if !def
+    if !shell
         .activation_restrictions
         .contains(&ActivationRestriction::AsSorcery)
     {
-        def.activation_restrictions
+        shell
+            .activation_restrictions
             .push(ActivationRestriction::AsSorcery);
     }
 }

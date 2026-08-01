@@ -289,6 +289,9 @@ pub fn derive_display_state(state: &mut GameState) {
     state.has_pending_cast = state.waiting_for.has_pending_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some());
+    state.allows_cancel_cast = state.waiting_for.allows_cancel_cast()
+        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
+            && state.pending_cast.is_some());
 
     // Invariant: the two storage sites for "am I mid-cast" must agree. If
     // `waiting_for` says we're mid-cast, `GameState::pending_cast` must be

@@ -453,9 +453,7 @@ mod tests {
         source_id: ObjectId,
         description: &str,
     ) -> engine::game::triggers::PendingTriggerContext {
-        use engine::game::triggers::{
-            PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
-        };
+        use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
         use engine::types::ability::{ModalChoice, PlayerFilter, ResolvedAbility};
         use engine::types::events::GameEvent;
 
@@ -507,11 +505,7 @@ mod tests {
             subject_match_count: None,
             die_result: None,
         };
-        PendingTriggerContext {
-            pending,
-            trigger_events: vec![event],
-            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-        }
+        PendingTriggerContext::single(pending)
     }
 
     /// CR 603.3b + CR 400.2: A single-group `pending_trigger_order` (one

@@ -3439,7 +3439,7 @@ mod tests {
             PlayerId(0),
         ));
 
-        state.resolving_stack_entry = None;
+        crate::game::stack::clear_resolving_stack_entry(&mut state);
         assert!(!triggered_cause_sacrifice_or_exile_muzzled(
             &state,
             &ability,

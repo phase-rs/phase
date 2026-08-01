@@ -23,9 +23,9 @@ use crate::types::player::PlayerId;
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
-    ResolvedRulesCommand,
+    ResolvedOncePerTurnPermission, ResolvedRulesCommand,
 };
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -236,7 +236,7 @@ pub fn apply_for_simulation(
 /// submitting connection; `semantic_owner` is the player whose decision slot
 /// the opaque interaction capability names. They differ when another player
 /// controls that player's decisions.
-pub(crate) fn apply_interaction(
+pub fn apply_interaction(
     state: &mut GameState,
     authenticated_actor: PlayerId,
     semantic_owner: PlayerId,
@@ -264,6 +264,19 @@ pub(crate) fn apply_interaction_for_simulation(
         action,
         PublicFinalizeMode::DeferredDisplay,
     )
+}
+
+/// Apply exactly the reducer portion of an interaction action for the
+/// clone-local life-safety preview. The normal public/simulation entry points
+/// continue through the complete reconciliation and presentation boundary.
+pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    Ok(raw.result)
 }
 
 pub(super) fn apply_action_boundary(
@@ -300,6 +313,34 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        stack_resolution_limit,
+    )?;
+    finish_action_boundary(state, raw, mode)
+}
+
+struct RawActionApplication {
+    result: ActionResult,
+    journal_start: usize,
+    is_actor_scoped_preference: bool,
+    boundary_snapshot: GameState,
+    previous_interaction_waiting: WaitingFor,
+    previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
+    submitted_interaction_owner: Option<PlayerId>,
+    preserve_interaction: bool,
+}
+
+fn apply_action_boundary_core(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    stack_resolution_limit: Option<u32>,
+) -> Result<RawActionApplication, EngineError> {
     mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
@@ -325,14 +366,41 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         *state = boundary_snapshot;
         return Err(err);
     }
-    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
             *state = boundary_snapshot;
             return Err(err);
         }
     };
+    Ok(RawActionApplication {
+        result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+    })
+}
+
+fn finish_action_boundary(
+    state: &mut GameState,
+    raw: RawActionApplication,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
     state.consumed_before_priority_trigger_events.clear();
+    let RawActionApplication {
+        mut result,
+        journal_start,
+        is_actor_scoped_preference,
+        boundary_snapshot,
+        previous_interaction_waiting,
+        previous_interaction_slots,
+        submitted_interaction_owner,
+        preserve_interaction,
+    } = raw;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -443,7 +511,8 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // above (CR 704.3 ordering), so a player ALREADY at 0 life loses via the real
     // 704.5a SBA first and this never preempts or double-fires a legitimate win — it
     // only fires when the game would otherwise grind on (high victim life, or mid-drain
-    // before 0). The `!GameOver` guard makes it idempotent across the :196/:200 calls.
+    // before 0). The `!GameOver` guard makes it idempotent across the two
+    // `reconcile_terminal_result` calls in `apply` (`:326` and `:330`).
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. }) // a player would get priority (CR 704.3)
         // CR 732.2a: the mandatory-loop game-ending shortcut is gated behind the
@@ -645,7 +714,15 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("interactive bridge only runs during priority")
             };
-            let schema = build_shortcut_schema(&[], certificate.win_kind, state, proposer);
+            // CR 732.2a: a non-targeted drain publishes no decision points, and this path
+            // states no narrowed CR 704 count bound — `UntilLethal` is terminated by the
+            // real SBA, not by a caller-supplied count, so the ceiling stays the global
+            // safety limit.
+            let schema = build_shortcut_schema(
+                Vec::new(),
+                shortcut_iteration_count(certificate.win_kind),
+                MAX_SHORTCUT_CYCLES,
+            );
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
                 predicted_winner: Some(winner),
@@ -867,21 +944,17 @@ fn shortcut_iteration_count(
     }
 }
 
-/// CR 732.2a: build the READ-side decision schema for a loop-shortcut offer. `pins` is the
-/// carried single-authority decision list (`build_recast_template` output for the object-growth
-/// path; `&[]` for a non-targeted drain) — never re-derived here. Legal sets come from live
-/// engine queries (`is_convoke_eligible`); the frontend computes nothing.
-fn build_shortcut_schema(
+/// CR 732.2a: reify a carried pin list into the READ-side decision points an offer publishes.
+/// `pins` is the single-authority decision list (`build_recast_template` output for the
+/// object-growth path; empty for a non-targeted drain) — never re-derived here. Legal sets come
+/// from live engine queries (`is_convoke_eligible`); the frontend computes nothing.
+fn pinned_decisions_to_points(
     pins: &[crate::analysis::decision_template::PinnedDecision],
-    win_kind: crate::analysis::loop_check::WinKind,
     state: &GameState,
     controller: PlayerId,
-) -> crate::analysis::decision_template::ShortcutDecisionSchema {
-    use crate::analysis::decision_template::{
-        DecisionPoint, DecisionPointKind, PinnedDecision, ShortcutDecisionSchema,
-    };
-    let points: Vec<DecisionPoint> = pins
-        .iter()
+) -> Vec<crate::analysis::decision_template::DecisionPoint> {
+    use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind, PinnedDecision};
+    pins.iter()
         .filter_map(|pin| match pin {
             // CR 603.3b: trigger ordering is not a loop-declaration choice — no read-side peer.
             PinnedDecision::Order { .. } => None,
@@ -957,7 +1030,23 @@ fn build_shortcut_schema(
                 kind: DecisionPointKind::UnlessBreak,
             }),
         })
-        .collect();
+        .collect()
+}
+
+/// CR 732.2a: assemble a loop-shortcut offer's READ-side schema from its already-reified
+/// decision `points`, its proposed repeat mode, and its CR 704 count bound.
+///
+/// `iteration_count` and `max_iterations` are separate inputs on purpose: the first is the
+/// SUGGESTION the frontend seeds its picker with, the second is the LEGAL CEILING the
+/// declared-count check enforces. A producer that cannot compute a real bound passes
+/// `MAX_SHORTCUT_CYCLES`, which is what every offer built today does — so the ceiling is
+/// inert until a producer narrows it.
+fn build_shortcut_schema(
+    points: Vec<crate::analysis::decision_template::DecisionPoint>,
+    iteration_count: crate::analysis::decision_template::IterationCount,
+    max_iterations: u32,
+) -> crate::analysis::decision_template::ShortcutDecisionSchema {
+    use crate::analysis::decision_template::{DecisionPointKind, ShortcutDecisionSchema};
     // CR 702.51a: engine-owned total of untapped convoke-eligible creatures across every
     // ConvokeTaps point — the frontend renders this directly instead of re-deriving it from
     // `points` (display-layer purity). Identical predicate/sum to the deleted React reduce.
@@ -969,7 +1058,8 @@ fn build_shortcut_schema(
         })
         .sum();
     ShortcutDecisionSchema {
-        iteration_count: shortcut_iteration_count(win_kind),
+        iteration_count,
+        max_iterations,
         points,
         convoke_tappable_count,
     }
@@ -1508,8 +1598,61 @@ fn materialize_fixed_shortcut(
     // activation period) is the routing signal; the `seq` rides `state.last_loop_action_sequence`
     // (carried on the clone since the offer). The drain path below is byte-identical for every
     // other loop.
+    //
+    // CR 732.2c: record the count the shortcut was ACCEPTED at. "Once the last player has
+    // either accepted or shortened the shortcut proposal, the shortcut is taken" — its ending
+    // point is fixed at N, so the CR 500.5 boundary collapse prompt may only offer `0..=N`.
+    // Re-asking with a wider range would let the controller take a longer sequence than the
+    // one the table agreed to.
+    //
+    // STASH-GATED, and it must stay that way. A bound with no deferred materialization to
+    // bound is unclearable — all three clears (`take_pending_materialization`,
+    // `clear_collapsed_materializations`, `clear_unbounded_loop`) are keyed on the stash, and
+    // the field is `#[serde(default)]`-persistent — so it would outlive its accept and
+    // silently cap the NEXT accept's agreed count forever (a mana accept at `Fixed(1)`
+    // capping a later, unanimously agreed `Fixed(500)` object-growth collapse at 1). Only the
+    // object-growth route below registers anything, and even it registers CONDITIONALLY: a
+    // mana engine grows no token/counter/life axis and registers nothing at all. So the gate
+    // is a measured STASH-GREW check taken ACROSS the call — testing before it would be
+    // unconditionally false, since that call is what registers. Length-delta rather than
+    // `contains_key`, so a non-registering accept cannot `min`-shrink a bound that an
+    // earlier, larger, genuinely-registering accept owns.
+    //
+    // MINIMUM, not overwrite: `register_pending_materialization` APPENDS, so a controller who
+    // accepts twice before the CR 500.5 boundary owns ONE stash holding both accepts' items,
+    // and the boundary applies ONE submitted amount to every item in it. Overwriting the bound
+    // would let a later `Fixed(1000)` accept re-scale an earlier `Fixed(1)` accept's items
+    // 1000×, materializing growth the table never agreed to. The minimum is the only bound
+    // that no accept in the stash can exceed. Conservative on purpose: the later accept is
+    // UNDER-delivered (its agreed 1000 caps at the earlier 1) rather than the earlier one
+    // being over-delivered — divergence from the table's agreement in the safe direction.
+    //
+    // The exact fix is a per-accept bound, deferred for its WIRE-COMPATIBILITY COST — not
+    // because it is unrepresentable. A bound carried ON each item, or the accept-grouped
+    // `Vec<MaterializationBatch { n, items }>` this is tracked as, survives the boundary's
+    // pause-safety `sort_by_key` fine: the sort moves each payload along with its key. What
+    // it costs is a shape change to `pending_unbounded_materialization`, a SAVED-GAME field,
+    // plus the `cr733/authority_matrix` census fixture that pins its composition. (Only a
+    // PARALLEL per-item bound VECTOR would be positionally unsyncable across that sort; that
+    // is the shape being rejected here, not per-accept binding as such.)
     if !state.last_loop_action_sequence.is_empty() {
+        let stashed_before = state
+            .pending_unbounded_materialization
+            .get(&proposal.proposer)
+            .map_or(0, Vec::len);
         materialize_object_growth_shortcut(state, result, proposal);
+        if state
+            .pending_unbounded_materialization
+            .get(&proposal.proposer)
+            .map_or(0, Vec::len)
+            > stashed_before
+        {
+            state
+                .pending_materialization_count
+                .entry(proposal.proposer)
+                .and_modify(|bound| *bound = (*bound).min(n))
+                .or_insert(n);
+        }
         return;
     }
 
@@ -2511,11 +2654,13 @@ fn try_offer_object_growth_shortcut(
     // recast, else `[]` (a multi-activation period carries no convoke pin). Legal sets are derived
     // against the live offer-time board.
     let schema_template = build_recast_template(&seq[0]);
+    // CR 732.2a: an UNBOUNDED object-growth offer is not repeated a CR 704-limited number of
+    // times — it is materialized once as an unbounded axis — so it states no narrowed count
+    // bound and keeps the global safety limit.
     let schema = build_shortcut_schema(
-        &schema_template.decisions,
-        certificate.win_kind,
-        state,
-        caster,
+        pinned_decisions_to_points(&schema_template.decisions, state, caster),
+        shortcut_iteration_count(certificate.win_kind),
+        MAX_SHORTCUT_CYCLES,
     );
     Some((certificate, schema))
 }
@@ -2632,20 +2777,38 @@ fn materialize_object_growth_shortcut(
         !growths.is_empty() && crate::analysis::resource::counter_growth_is_observed(state);
     let life_observed =
         !life.is_empty() && crate::analysis::resource::life_growth_is_observed(state);
-    if counter_observed || life_observed {
+    // CR 732.2a + CR 603.6a: a life axis the board RE-EARNS on a battlefield entry also belongs on
+    // the concrete replay. Not an observedness question (the batched arithmetic is right) but a
+    // ROUTE one: the batched `Tokens` collapse mints N real tokens whose real CR 603.6a entries
+    // re-earn the same life the batched `Life` already applied, so the accept pays twice.
+    //
+    // The conjuncts are AXIS-shaped, never effect-shaped: a life axis grew (`!life.is_empty()`),
+    // the collapse will mint the tokens that re-earn it (`token_profile.is_some()` — a mana-only
+    // collapse mints nothing, so nothing re-fires), and the board has an entry trigger at all.
+    // Testing the trigger's EFFECT for `GainLife` would be under-approximate: life reaches
+    // `apply_life_gain` from four resolvers, including CR 702.15b lifelink on an ETB damage
+    // trigger (the Terror of the Peaks shape), which no effect-shape test can see.
+    let life_etb_sourced = !life.is_empty()
+        && token_profile.is_some()
+        && crate::analysis::resource::board_has_functioning_etb_trigger(state);
+    // M5: hoisted out of the branch so an empty period can never register NOTHING — a route
+    // flipped to the replay falls back to the batched arm instead of silently dropping the whole
+    // materialization. (Unreachable today: `growths`/`life` are derived from the same
+    // `drive_one_period_frames`, which returns `None` on an empty sequence, so every route
+    // predicate is already false there. Kept explicit so a future route conjunct cannot
+    // reintroduce the hole.)
+    let sequence = state.last_loop_action_sequence.clone();
+    if (counter_observed || life_observed || life_etb_sourced) && !sequence.is_empty() {
         // CR 732.2a: OBSERVED batchable growth — one DriveSequence collapses the WHOLE loop (all
         // axes); replaying the captured sequence recreates every per-cycle effect honoring
         // observers. Do NOT also register batched items (the routes are exclusive per accept).
-        let sequence = state.last_loop_action_sequence.clone();
-        if !sequence.is_empty() {
-            state.register_pending_materialization(
-                proposal.proposer,
-                crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
-                    sequence,
-                    collapsed_axes: proposal.unbounded.clone(),
-                },
-            );
-        }
+        state.register_pending_materialization(
+            proposal.proposer,
+            crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
+                sequence,
+                collapsed_axes: proposal.unbounded.clone(),
+            },
+        );
     } else {
         // UNOBSERVED fast path — register each grown persistent axis for the batched N×δ collapse.
         if let Some(profile) = token_profile {
@@ -2775,6 +2938,19 @@ struct LoopShortcutOffer<'a> {
     schema: &'a crate::analysis::decision_template::ShortcutDecisionSchema,
 }
 
+/// CR 732.2a (MagicCompRules.txt:6372) + CR 800.4a (MagicCompRules.txt:6408): reject a
+/// shortcut declaration and hand priority back to the next living seat — the manual-play
+/// handback every reject path in `handle_declare_shortcut` lands on. Single
+/// authority: a sixth reject path added later cannot forget to sync
+/// `result.waiting_for`.
+fn reject_shortcut_declaration(state: &mut GameState, result: &mut ActionResult) {
+    priority::reset_priority(state);
+    state.waiting_for = WaitingFor::Priority {
+        player: living_priority_seat(state),
+    };
+    result.waiting_for = state.waiting_for.clone();
+}
+
 /// CR 732.2a: the proposer declared the loop shortcut. Build the public proposal and open
 /// the APNAP accept-or-shorten window over the proposer's living opponents (turn order). No
 /// opponents (solitaire / all eliminated) ⇒ take the shortcut immediately.
@@ -2804,23 +2980,39 @@ fn handle_declare_shortcut(
     // any template the caller supplies is inert for the drive (the loop raises no target
     // prompt). This preserves the established `Fixed(N)` drain behavior (the resolve-firewall
     // materialize tests drive a synthetic pin against the empty drain schema).
-    if let Some(t) = &template {
-        if !offer.schema.points.is_empty() {
-            let required: Vec<crate::analysis::decision_template::DecisionSlot> =
-                offer.schema.points.iter().map(|p| p.slot.clone()).collect();
-            let period = shortcut_drive_period(Some(t));
-            if crate::analysis::decision_template::predictability_gate(t, &required).is_err()
-                || crate::analysis::decision_template::validate_pins(offer.schema, t, period, state)
+    if !offer.schema.points.is_empty() {
+        match &template {
+            Some(t) => {
+                let required: Vec<crate::analysis::decision_template::DecisionSlot> =
+                    offer.schema.points.iter().map(|p| p.slot.clone()).collect();
+                let period = shortcut_drive_period(Some(t));
+                if crate::analysis::decision_template::predictability_gate(t, &required).is_err()
+                    || crate::analysis::decision_template::validate_pins(
+                        offer.schema,
+                        t,
+                        period,
+                        state,
+                    )
                     .is_err()
-            {
-                priority::reset_priority(state);
-                // CR 800.4a: hand priority to the next living seat.
-                state.waiting_for = WaitingFor::Priority {
-                    player: living_priority_seat(state),
-                };
-                result.waiting_for = state.waiting_for.clone();
+                {
+                    reject_shortcut_declaration(state, &mut result);
+                    return Ok(result);
+                }
+            }
+            // CR 732.2a: a `template: None` declaration against a NON-EMPTY schema skips the
+            // validation above entirely — the pins the offer published are never checked. That
+            // is legitimate for exactly one drive shape: the object-growth route, which
+            // re-derives its template from `state.last_loop_action_sequence` (the same routing
+            // discriminant `materialize` dispatches on) and never reads `proposal.template`.
+            // With an EMPTY sequence there is nothing to re-derive from, so a pin-consuming
+            // drive would run with no pins at all — fail closed into the same manual-play
+            // handback the validation failure above uses. Both conjuncts are required: keying
+            // on `template.is_none()` alone breaks the shipped object-growth declarations.
+            None if state.last_loop_action_sequence.is_empty() => {
+                reject_shortcut_declaration(state, &mut result);
                 return Ok(result);
             }
+            None => {}
         }
     }
     // CR 732.2a SAFETY LIMIT (see MAX_SHORTCUT_CYCLES): reject an over-cap Fixed count at
@@ -2839,12 +3031,27 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > MAX_SHORTCUT_CYCLES =>
         {
-            priority::reset_priority(state);
-            // CR 800.4a: hand priority to the next living seat.
-            state.waiting_for = WaitingFor::Priority {
-                player: living_priority_seat(state),
-            };
-            result.waiting_for = state.waiting_for.clone();
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        // CR 732.2a: the per-offer CR 704 bound, enforced at the same single authority as the
+        // global cap. A `Fixed(n)` above `max_iterations` would contain a conditional action —
+        // some living player crosses a CR 704.5a / CR 704.5c / CR 104.3c loss threshold inside
+        // the proposal, and what happens next depends on that — so it is not a legal shortcut.
+        crate::analysis::decision_template::IterationCount::Fixed(n)
+            if *n > offer.schema.max_iterations =>
+        {
+            reject_shortcut_declaration(state, &mut result);
+            return Ok(result);
+        }
+        // CR 732.2a: `UntilLethal` names no count at all, so it can only be legal when the
+        // offer states no narrowed bound. An offer that DID narrow its bound is one whose
+        // producer measured a CR 704 threshold inside the loop; running it "until lethal"
+        // would run past that threshold.
+        crate::analysis::decision_template::IterationCount::UntilLethal
+            if offer.schema.max_iterations < MAX_SHORTCUT_CYCLES =>
+        {
+            reject_shortcut_declaration(state, &mut result);
             return Ok(result);
         }
         // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
@@ -3285,11 +3492,13 @@ pub(super) fn resume_pending_continuation_if_priority(
             .as_ref()
             .map(crate::types::game_state::DeferredLifeCostResume::resume_at_resolution_depth);
         if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
+            super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
         }
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
             && deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary)
         {
+            super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
         }
         let mut drained_deferred_life = false;
@@ -3301,6 +3510,7 @@ pub(super) fn resume_pending_continuation_if_priority(
                     state.resolution_stack.len() <= resume.resume_at_resolution_depth()
                 })
         {
+            super::life_safety::observe_boundary_carrier(state);
             let waiting_for = drain_pending_deferred_life_cost_resume(state, events)?;
             state.waiting_for = waiting_for;
             drained_deferred_life = true;
@@ -3309,8 +3519,10 @@ pub(super) fn resume_pending_continuation_if_priority(
             && drained_deferred_life
             && state.pending_deferred_life_cost_resume.is_none()
         {
+            super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
             }
         }
@@ -3320,12 +3532,14 @@ pub(super) fn resume_pending_continuation_if_priority(
         // terminally drained; ordinary phase-boundary prompts use other states
         // and are intentionally unaffected.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
             turns::resume_phase_transition_after_post_replacement(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
         // dispatcher owns the remaining eligible payment roots.
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::life_safety::observe_boundary_carrier(state);
             let _ = drain_pending_cost_move_resume(
                 state,
                 events,
@@ -3629,14 +3843,30 @@ fn pass_priority_once_with_pipeline(
             && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
         {
             state.record_loop_detect_sample();
-        } else if !matches!(wf, WaitingFor::OrderTriggers { .. }) {
+        } else if !wf.is_forced_cascade_window() {
             state.loop_detect_ring.clear();
         }
-        // CR 603.3b + CR 732.2a: leave the ring intact on the mandatory trigger-ordering
-        // window — ordering simultaneous triggers is a forced step of putting them on the
-        // stack (staged in pending_trigger_order, so the stack is momentarily shrunk/empty
-        // here), not a settle or deliberate break. Preserving the Priority{active} samples
-        // across the beat lets a self-refilling multi-trigger loop reach CR 732.2a detection.
+        // CR 603.3b/603.3d/603.5/608.2/903.9a + CR 703.1/117.3a + CR 732.2a: leave the
+        // ring intact on every FORCED PRE-PRIORITY window, not just trigger ordering.
+        // `is_forced_cascade_window` is the single authority for that class (the other
+        // clear site, `apply_action`, consults the same predicate); it holds exactly the
+        // windows at which no player has priority — the forced steps of putting triggers
+        // on the stack / finishing a resolution, plus the CR 703.1 turn-based actions
+        // CR 117.3a places before the step's own grant of priority — so answering one is
+        // never a settle or a deliberate break. The stack is momentarily shrunk or empty
+        // at these windows (an ordering batch is staged in `pending_trigger_order`; a
+        // mid-resolution "may" pause has already popped its entry; a turn-based window
+        // opens between phases with the stack drained), so without this arm the
+        // accumulated `Priority{active}` samples would be discarded and a self-refilling
+        // multi-trigger loop could never reach CR 732.2a detection. The turn-based
+        // members buy RING SURVIVAL across a turn boundary — necessary but not yet
+        // sufficient for the cross-turn shortcut CR 732.2a contemplates ("may even cross
+        // multiple turns"), because `loop_states_equal` still compares `turn_number`
+        // (via `impl PartialEq for GameState`, un-neutralized by `normalize_for_loop` and
+        // `project_out_resources`), so no cross-turn pair certifies today. The measured
+        // justification is the wipe itself: without these members the Fantastic Four dump
+        // force-clears the ring once per 99-beat turn period at declare-attackers,
+        // capping it at 2 frames where the widened class reaches 13.
     }
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
@@ -4371,10 +4601,31 @@ fn apply_action(
     // cascade (OrderTriggers is the forced CR 603.3b placement of simultaneous triggers,
     // not a deliberate action). Every other action (cast/activate/play-land) is a
     // deliberate break and still invalidates the ring.
+    //
+    // CR 603.3d / CR 603.5 + CR 608.2 / CR 903.9a / CR 703.1 + CR 117.3a: the second
+    // conjunct keys on the
+    // WINDOW BEING ANSWERED, not on the action, because `state.waiting_for` has not been
+    // reduced yet here — the very next statement reads `state.waiting_for.acting_player()`
+    // for `semantic_actor`. Answering a forced pre-priority window is not a deliberate
+    // break of the cascade (no player had priority to break it with), so the ring must
+    // survive the answer as well as the prompt; the sampler at the other clear site
+    // consults the same `is_forced_cascade_window` authority. Keying on the window rather
+    // than the action also covers every answering variant at once — an action-keyed list
+    // would need `ChooseTarget`, `SelectTargets`, `DecideOptionalEffect` AND
+    // `DecideOptionalEffectAndRemember`, and would silently miss the next one added.
+    // Widening the class to the CR 703.1 turn-based windows makes that the decisive
+    // argument rather than a convenience one: the same conjunct picked up
+    // `DeclareAttackers`, `DeclareBlockers`, `ChooseUntap`, `ChooseExert`, `ChooseEnlist`
+    // and the `SelectCards` that answers `DiscardToHandSize` with no edit here — and
+    // `SelectCards` in particular is answer-overloaded across a dozen unrelated windows,
+    // so an action-keyed list could not have expressed the class correctly at all.
+    // `PassPriority` keeps its own action-side exemption because it is answered at a
+    // `Priority` window, which is deliberately NOT in the forced class.
     if !matches!(
         action,
         GameAction::PassPriority | GameAction::OrderTriggers { .. }
-    ) {
+    ) && !state.waiting_for.is_forced_cascade_window()
+    {
         state.loop_detect_ring.clear();
     }
 
@@ -4475,6 +4726,48 @@ fn apply_action(
                 selection.source.object_id,
                 crate::types::game_state::LoopAction::TapLandForMana { selection },
             );
+            waiting_for
+        }
+        (WaitingFor::Priority { player }, GameAction::ActivateManaSource { selection }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if state
+                .objects
+                .get(&selection.source.object_id)
+                .is_some_and(|object| {
+                    object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                })
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "Land mana abilities use TapLandForMana".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::Priority,
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            if let Some(ability_index) = selection.ability_index {
+                record_mana_loop_action_step(
+                    state,
+                    *player,
+                    selection.source.object_id,
+                    crate::types::game_state::LoopAction::Activate {
+                        source_id: selection.source.object_id,
+                        ability_index,
+                    },
+                );
+            }
             waiting_for
         }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
@@ -6055,6 +6348,49 @@ fn apply_action(
                 None => WaitingFor::Priority { player },
             }
         }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::BackToManaPayment,
+        ) => {
+            // The selection window never consumes mana or changes pins. Restore
+            // the exact payment state rather than re-running the planner.
+            let _ = options;
+            WaitingFor::ManaPayment {
+                player: *player,
+                convoke_mode: *convoke_mode,
+            }
+        }
+        (
+            WaitingFor::ManaSourceSelection {
+                player,
+                options,
+                convoke_mode,
+            },
+            GameAction::ActivateManaSource { selection },
+        ) => {
+            if !options.contains(&selection) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Mana source was not offered for this payment".to_string(),
+                ));
+            }
+            let events_before = events.len();
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                *player,
+                &selection,
+                &mut events,
+                ManaAbilityResume::ManaPayment {
+                    outer_player: Some(*player),
+                    convoke_mode: *convoke_mode,
+                },
+            )?;
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
+            waiting_for
+        }
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
             // CR 601.2f + CR 601.2i: Caster may back out before committing to an
             // X value. Pop the stack entry placed at announcement and restore.
@@ -7447,7 +7783,7 @@ fn apply_action(
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
-                die_result: None,
+        die_result: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -8424,6 +8760,7 @@ fn apply_action(
                     }
                 }
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                state.pending_trigger_firing = None;
                 // CR 601.2d + CR 603.3d: Triggered abilities divide effects
                 // while being put on the stack. The chosen per-target amounts
                 // are resolution data on the resolved ability. The entry is
@@ -8782,6 +9119,7 @@ fn apply_retarget(
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     super::stack::pop_uncommitted_pending_trigger_entry(state);
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so
@@ -8877,6 +9215,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             ) else {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             };
 
@@ -8896,6 +9235,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             if modal.selection.is_random() {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             }
 
@@ -8910,6 +9250,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             if unavailable_modes.len() >= modal.mode_count {
                 super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
+                state.pending_trigger_firing = None;
                 return Ok(None);
             }
 
@@ -9025,6 +9366,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // cursor.
         super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         return Ok(None);
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
@@ -9109,16 +9451,39 @@ fn record_graveyard_play_permission(
     }
 }
 
-fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>) {
-    let Some(source_id) = source else {
-        return;
-    };
-    crate::game::ledger::consume_once_per_turn_permission(
-        state,
-        source_id,
-        crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
-    )
-    .expect("exile play permission must have an unused ledger slot");
+fn record_exile_play_permission(
+    state: &mut GameState,
+    authorization: Option<casting::ExileLandPlayAuthorization>,
+) {
+    match authorization {
+        Some(casting::ExileLandPlayAuthorization::ObjectAttached {
+            source,
+            frequency: CastFrequency::OncePerTurn,
+        }) => crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            ResolvedOncePerTurnPermission::ExilePlay,
+        )
+        .expect("object-attached exile play permission must have an unused ledger slot"),
+        Some(casting::ExileLandPlayAuthorization::Static {
+            source,
+            frequency: CastFrequency::OncePerTurn | CastFrequency::OncePerTurnPerPermanentType,
+        }) => crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            ResolvedOncePerTurnPermission::ExileCast,
+        )
+        .expect("static exile play permission must have an unused ledger slot"),
+        Some(casting::ExileLandPlayAuthorization::ObjectAttached {
+            frequency: CastFrequency::Unlimited | CastFrequency::OncePerTurnPerPermanentType,
+            ..
+        })
+        | Some(casting::ExileLandPlayAuthorization::Static {
+            frequency: CastFrequency::Unlimited,
+            ..
+        })
+        | None => {}
+    }
 }
 
 /// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
@@ -9144,6 +9509,42 @@ fn record_top_of_library_land_permission(
         )
         .expect("top-of-library play permission must have an unused ledger slot");
     }
+}
+
+/// CR 305.1 + CR 116.2a: Finalize a land play once its zone change has
+/// committed. A paused delivery tail may still require a choice, but the land
+/// is already on the battlefield and no continuation retains the selected play
+/// authority, so per-play accounting must happen at this seam.
+#[allow(clippy::too_many_arguments)]
+fn finalize_committed_land_play(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+    graveyard_permission_source: Option<ObjectId>,
+    exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
+    library_permission_source: Option<(ObjectId, CastFrequency)>,
+    events: &mut Vec<GameEvent>,
+) {
+    state.lands_played_this_turn += 1;
+    record_land_played_from_zone(state, player, object_id, origin_zone);
+    record_graveyard_play_permission(state, graveyard_permission_source, object_id);
+    record_exile_play_permission(state, exile_play_authorization);
+    if let Some((source_id, frequency)) = library_permission_source {
+        record_top_of_library_land_permission(state, source_id, frequency);
+    }
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|candidate| candidate.id == player)
+        .expect("priority player exists");
+    player_data.lands_played_this_turn += 1;
+    priority::clear_priority_passes(state);
+    events.push(GameEvent::LandPlayed {
+        object_id,
+        player_id: player,
+        from_zone: origin_zone,
+    });
 }
 
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
@@ -9308,15 +9709,12 @@ fn handle_play_land(
             Some((src_id, frequency))
         });
     let in_library_with_permission = library_permission_src.is_some();
-    let exile_permission_source = if state.exile.contains(&object_id) {
-        super::casting::exile_lands_playable_by_permission(state, player)
-            .iter()
-            .find(|(obj_id, _)| *obj_id == object_id)
-            .map(|(_, source_id)| *source_id)
+    let exile_play_authorization = if state.exile.contains(&object_id) {
+        super::casting::exile_land_play_authorization(state, player, object_id)
     } else {
         None
     };
-    let in_exile_with_permission = exile_permission_source.is_some();
+    let in_exile_with_permission = exile_play_authorization.is_some();
 
     if !in_hand
         && !in_graveyard_with_permission
@@ -9531,12 +9929,19 @@ fn handle_play_land(
                     // the battlefield (the move precedes the counter pause in the
                     // tail), so stamp the play origin now — matching the pre-token
                     // arm, which stamped before the `apply_etb_counters`
-                    // early-return — then surface the parked prompt; the land
-                    // epilogue must not run yet.
+                    // early-return — then surface the parked prompt. The land
+                    // play itself is already committed.
                     crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                        // CR 305.1 + CR 400.7i: stamp land-play provenance so
-                        // effects can find the permanent the played land became.
-                        mark_land_played_from_zone(state, object_id, origin_zone);
+                        finalize_committed_land_play(
+                            state,
+                            player,
+                            object_id,
+                            origin_zone,
+                            gy_permission_source,
+                            exile_play_authorization,
+                            library_permission_src,
+                            events,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -9564,27 +9969,16 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    state.lands_played_this_turn += 1;
-                    record_land_played_from_zone(state, player, object_id, origin_zone);
-                    record_graveyard_play_permission(state, gy_permission_source, object_id);
-                    record_exile_play_permission(state, exile_permission_source);
-                    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn
-                    // library play slot using the pre-captured source (land play is
-                    // a special action per CR 305.1/116.2a; CR 401.5 top-of-library
-                    // visibility closes after the action; library.front() now points
-                    // to the next card, not the played land).
-                    if let Some((src_id, frequency)) = library_permission_src {
-                        record_top_of_library_land_permission(state, src_id, frequency);
-                    }
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                        p.lands_played_this_turn += 1;
-                    }
-                    priority::clear_priority_passes(state);
-                    events.push(GameEvent::LandPlayed {
+                    finalize_committed_land_play(
+                        state,
+                        player,
                         object_id,
-                        player_id: player,
-                        from_zone: origin_zone,
-                    });
+                        origin_zone,
+                        gy_permission_source,
+                        exile_play_authorization,
+                        library_permission_src,
+                        events,
+                    );
                     return Ok(next_waiting_for);
                 }
             }
@@ -9599,29 +9993,16 @@ fn handle_play_land(
             // A replacement needs player choice (e.g., shock land "pay 2 life?").
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
-            state.lands_played_this_turn += 1;
-            record_land_played_from_zone(state, player, object_id, origin_zone);
-            // CR 604.2: Record once-per-turn graveyard play permission usage.
-            record_graveyard_play_permission(state, gy_permission_source, object_id);
-            record_exile_play_permission(state, exile_permission_source);
-            // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library
-            // play slot using the pre-captured source (land play is a special
-            // action per CR 305.1/116.2a; CR 401.5 top-of-library visibility
-            // closes after the action; library.front() now points to the next
-            // card, not the played land).
-            if let Some((src_id, frequency)) = library_permission_src {
-                record_top_of_library_land_permission(state, src_id, frequency);
-            }
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                p.lands_played_this_turn += 1;
-            }
-            priority::clear_priority_passes(state);
-
-            events.push(GameEvent::LandPlayed {
+            finalize_committed_land_play(
+                state,
+                player,
                 object_id,
-                player_id: player,
-                from_zone: origin_zone,
-            });
+                origin_zone,
+                gy_permission_source,
+                exile_play_authorization,
+                library_permission_src,
+                events,
+            );
 
             return Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
@@ -9629,35 +10010,16 @@ fn handle_play_land(
         }
     }
 
-    // Increment land counter
-    state.lands_played_this_turn += 1;
-    record_land_played_from_zone(state, player, object_id, origin_zone);
-    // CR 604.2: Record once-per-turn graveyard play permission usage.
-    record_graveyard_play_permission(state, gy_permission_source, object_id);
-    record_exile_play_permission(state, exile_permission_source);
-    // CR 305.1 + CR 116.2a + CR 401.5: consume the once-per-turn library play
-    // slot using the pre-captured source (land play is a special action per
-    // CR 305.1/116.2a; CR 401.5 top-of-library visibility closes after the
-    // action; library.front() now points to the next card, not the played
-    // land — post-delivery re-lookup would fail).
-    if let Some((src_id, frequency)) = library_permission_src {
-        record_top_of_library_land_permission(state, src_id, frequency);
-    }
-    let player_data = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == player)
-        .expect("priority player exists");
-    player_data.lands_played_this_turn += 1;
-
-    // Reset priority passes (action was taken)
-    priority::clear_priority_passes(state);
-
-    events.push(GameEvent::LandPlayed {
+    finalize_committed_land_play(
+        state,
+        player,
         object_id,
-        player_id: player,
-        from_zone: origin_zone,
-    });
+        origin_zone,
+        gy_permission_source,
+        exile_play_authorization,
+        library_permission_src,
+        events,
+    );
 
     // Player retains priority after playing a land
     Ok(WaitingFor::Priority { player })

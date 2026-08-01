@@ -37,26 +37,22 @@ fn mk_ctx(
             card_id.map(CardId).unwrap_or(CardId(0)),
         );
     }
-    PendingTriggerContext {
-        pending: PendingTrigger {
-            source_id: ObjectId(source_id),
-            controller: PlayerId(0),
-            condition: None,
-            ability: Box::new(ability),
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event: None,
-            modal: None,
-            mode_abilities: Vec::new(),
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        trigger_events: Vec::new(),
-        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-    }
+    PendingTriggerContext::single(PendingTrigger {
+        source_id: ObjectId(source_id),
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ability),
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: None,
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: None,
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+    })
 }
 
 fn mk_named_ctx(

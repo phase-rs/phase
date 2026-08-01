@@ -39,8 +39,6 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-  getAiAction: vi.fn().mockResolvedValue(null),
-  getAiFallbackAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
@@ -393,45 +391,6 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initializeGame({ decks: [] });
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiAction("Medium", 1);
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
-    });
-  });
-
-  describe("getAiFallbackAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiFallbackAction();
-      expect(mockWorkerClient.getAiFallbackAction).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiActionForSeats", () => {
-    it("delegates to getAiAction for the active seat", async () => {
-      await adapter.initialize();
-      await adapter.getAiActionForSeats(
-        [
-          { playerId: 0, difficulty: "Easy" },
-          { playerId: 1, difficulty: "Hard" },
-        ],
-        1,
-      );
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Hard", 1);
-    });
-
-    it("returns null if no matching seat", async () => {
-      await adapter.initialize();
-      const result = await adapter.getAiActionForSeats(
-        [{ playerId: 0, difficulty: "Easy" }],
-        1,
-      );
-      expect(result).toBeNull();
     });
   });
 

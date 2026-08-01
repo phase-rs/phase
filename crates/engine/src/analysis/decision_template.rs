@@ -212,6 +212,26 @@ pub struct ShortcutDecisionSchema {
     /// CR 732.1b: the proposed repeat mode. `UntilLethal` for a determinate CR 704.5a /
     /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop.
     pub iteration_count: IterationCount,
+    /// CR 732.2a: the largest number of repetitions this proposal may legally specify — the
+    /// minimum over every applicable CR 704 elimination bound and finite-pool bound, over
+    /// every LIVING player, aggregated per declarable victim, clamped to
+    /// `MAX_SHORTCUT_CYCLES`. `IterationCount` above is the *suggestion*; this is the
+    /// *bound*, and they are deliberately separate fields: a proposal that exceeds this
+    /// contains a conditional action (an in-proposal CR 704.5a / CR 704.5c / CR 104.3c /
+    /// CR 121.4 elimination would decide what happens next), which CR 732.2a forbids.
+    ///
+    /// The single count authority: the declared-count check in `game::engine` rejects a
+    /// `Fixed(n)` above it, and `game::interaction` publishes it as the count picker's
+    /// ceiling. Every offer built before the bounded-offer phase carries
+    /// `MAX_SHORTCUT_CYCLES`, so those checks are inert until a producer narrows it.
+    ///
+    /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`:
+    /// the frontend never reads the raw bound, it reads the already-clamped ceiling the
+    /// engine publishes as `InteractionShortcutCountSpec::Fixed { max }`. Mirroring it
+    /// would hand the display layer a second number it would have to reconcile — exactly
+    /// the derive-in-the-frontend the layer rule forbids.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
     /// The open per-iteration decision-points needing pins. EMPTY for a choice-free drain.
     pub points: Vec<DecisionPoint>,
     /// CR 702.51a: total untapped creatures the controller may tap for convoke across every
@@ -221,6 +241,13 @@ pub struct ShortcutDecisionSchema {
     pub convoke_tappable_count: usize,
 }
 
+/// A schema deserialized from a pre-bound snapshot carries no CR 732.2a count bound. The
+/// forward-compatible default is the global safety limit, which is what every producer
+/// emitted before the field existed — so an old save round-trips byte-equivalently.
+fn default_max_iterations() -> u32 {
+    crate::game::engine::MAX_SHORTCUT_CYCLES
+}
+
 // CR 732.2a: `IterationCount` carries no `Default` and its `Fixed(u32)` is a tuple variant
 // (so a derived `#[default]` cannot apply) — hand-impl the forward-compat deser default the
 // `#[serde(default)]` on `WaitingFor::LoopShortcut.schema` needs.
@@ -228,6 +255,7 @@ impl Default for ShortcutDecisionSchema {
     fn default() -> Self {
         Self {
             iteration_count: IterationCount::Fixed(0),
+            max_iterations: default_max_iterations(),
             points: Vec::new(),
             convoke_tappable_count: 0,
         }
@@ -861,6 +889,9 @@ mod tests {
     fn shortcut_decision_schema_round_trips_and_defaults() {
         let schema = ShortcutDecisionSchema {
             iteration_count: IterationCount::UntilLethal,
+            // A NARROWED CR 732.2a bound, deliberately not the default: a round-trip that
+            // carried the default would pass even if the field were dropped from the wire.
+            max_iterations: 17,
             points: vec![DecisionPoint {
                 slot: DecisionSlot {
                     source: all_copies(7),
@@ -879,15 +910,34 @@ mod tests {
             convoke_tappable_count: 2,
         };
         let json = serde_json::to_value(&schema).expect("serialize");
+        assert_eq!(
+            json["max_iterations"], 17,
+            "the CR 732.2a bound must reach the wire — a `#[serde(default)]` field that is \
+             never serialized would silently reset to the cap on every reload"
+        );
         let back: ShortcutDecisionSchema = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, schema);
         assert_eq!(
             ShortcutDecisionSchema::default(),
             ShortcutDecisionSchema {
                 iteration_count: IterationCount::Fixed(0),
+                max_iterations: crate::game::engine::MAX_SHORTCUT_CYCLES,
                 points: vec![],
                 convoke_tappable_count: 0,
             }
+        );
+        // A pre-bound snapshot (no `max_iterations` key at all) must load at the cap, which
+        // is exactly what every producer emitted before the field existed.
+        let mut legacy = serde_json::to_value(ShortcutDecisionSchema::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .expect("schema serializes as an object")
+            .remove("max_iterations");
+        assert_eq!(
+            serde_json::from_value::<ShortcutDecisionSchema>(legacy)
+                .expect("a pre-bound snapshot still deserializes")
+                .max_iterations,
+            crate::game::engine::MAX_SHORTCUT_CYCLES
         );
     }
 

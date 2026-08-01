@@ -79,6 +79,9 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // Analysis provenance is meaningful only to the clone executing a preview;
+    // never carry it into a viewer projection.
+    filtered.life_safety_probe = Box::default();
     // Pending activation trigger collection retains source contexts and the
     // uncommitted event journal solely for rules execution. The pending ability
     // itself remains public, but this implementation carrier is never part of a
@@ -112,6 +115,30 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // and cost-recipient relationships. It is server authority and must not
     // expose one player's mana history to another viewer.
     filtered.resolved_rules_journal = Default::default();
+    // Delayed-trigger allocation and firing receipts are server authority.
+    // Server transport serializes this filtered state directly, so clear every
+    // root carrier here as well as in the dedicated WASM client projection.
+    filtered.next_delayed_trigger_token = 0;
+    filtered.next_delayed_trigger_instance = 0;
+    filtered.pending_trigger_firing = None;
+    filtered.stack_trigger_firings.clear();
+    filtered.resolving_trigger_firing = None;
+    for trigger in &mut filtered.delayed_triggers {
+        trigger.provenance = None;
+    }
+    for context in &mut filtered.deferred_triggers {
+        context.firing = crate::types::identifiers::TriggerFiring::UnknownLegacy;
+        context.dispatch_origin = crate::game::triggers::PendingTriggerDispatchOrigin::Normal;
+    }
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for group in &mut order.groups {
+            for context in &mut group.triggers {
+                context.firing = crate::types::identifiers::TriggerFiring::UnknownLegacy;
+                context.dispatch_origin =
+                    crate::game::triggers::PendingTriggerDispatchOrigin::Normal;
+            }
+        }
+    }
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates
@@ -760,6 +787,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 certificate: certificate.clone(),
                 schema: ShortcutDecisionSchema {
                     iteration_count: schema.iteration_count.clone(),
+                    // CR 732.2a: the count bound is derived from PUBLIC board state (life,
+                    // poison, library sizes over the living players), so it carries through
+                    // the per-viewer projection unredacted — only hidden-info legal targets
+                    // are rewritten above.
+                    max_iterations: schema.max_iterations,
                     points,
                     convoke_tappable_count,
                 },
@@ -1123,7 +1155,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 remaining_mv_budget,
                 ref filter,
                 ref zones,
-                exile_instead_of_graveyard,
+                ref graveyard_replacement,
                 source,
                 ref member_pool,
             },
@@ -1138,7 +1170,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     remaining_mv_budget,
                     filter: filter.clone(),
                     zones: zones.clone(),
-                    exile_instead_of_graveyard,
+                    graveyard_replacement: graveyard_replacement.clone(),
                     source,
                     // CR 400.2: the member pool can reference the same private
                     // candidates (a hand/graveyard window would leak eligible
@@ -4870,7 +4902,9 @@ mod tests {
                 remaining_mv_budget: Some(6),
                 filter: crate::types::ability::TargetFilter::Any,
                 zones: vec![Zone::Graveyard, Zone::Hand],
-                exile_instead_of_graveyard: true,
+                graveyard_replacement: Some(
+                    crate::types::ability::SpellStackToGraveyardReplacement::Exile,
+                ),
                 source: crate::types::game_state::zero_object_id(),
                 member_pool: vec![hand_candidate],
             },
@@ -4906,7 +4940,7 @@ mod tests {
                         candidates,
                         remaining_casts,
                         remaining_mv_budget,
-                        exile_instead_of_graveyard,
+                        graveyard_replacement,
                         member_pool,
                         ..
                     },
@@ -4926,7 +4960,10 @@ mod tests {
                 assert_eq!(member_pool, vec![ObjectId(0)]);
                 assert_eq!(remaining_casts, 2);
                 assert_eq!(remaining_mv_budget, Some(6));
-                assert!(exile_instead_of_graveyard);
+                assert_eq!(
+                    graveyard_replacement.as_ref(),
+                    Some(&crate::types::ability::SpellStackToGraveyardReplacement::Exile)
+                );
             }
             other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
         }

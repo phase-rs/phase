@@ -22,10 +22,15 @@ import {
   loadActiveDraftPod,
   loadDraftGuestSession,
   loadDraftHostSession,
+  loadDraftIntergameCommands,
+  loadDraftSettlementOutbox,
   saveActiveDraftPod,
   saveDraftGuestSession,
   saveDraftHostSession,
+  saveDraftIntergameCommands,
+  saveDraftSettlementOutbox,
 } from "../draftPersistence";
+import { draftIntergameDigest } from "../intergameCommandLedger";
 import type { PersistedDraftHostSession } from "../draftPersistence";
 
 describe("draftPersistence", () => {
@@ -157,6 +162,34 @@ describe("draftPersistence", () => {
 
       expect(loadActiveDraftPod()).toBeNull();
     });
+  });
+
+  it("persists a held intergame command until its receipt", async () => {
+    const payload = { type: "ChoosePlayDraw" as const, playFirst: true };
+    const command = {
+      commandId: "command-1",
+      matchId: "traditional-1",
+      gameNumber: 2,
+      seat: 1,
+      payload,
+      launchPayload: { matchId: "traditional-1", seat: 1 },
+      launchDigest: draftIntergameDigest({ matchId: "traditional-1", seat: 1 }),
+      payloadDigest: draftIntergameDigest(payload),
+      status: "Pending" as const,
+    };
+    await saveDraftIntergameCommands(command.matchId, [command]);
+    await expect(loadDraftIntergameCommands(command.matchId)).resolves.toEqual([command]);
+  });
+
+  it("does not replay a legacy settlement across a renewed match binding", async () => {
+    const binding = {
+      podId: "draft-1", matchId: "match-1", round: 1, sessionKey: "session-1",
+      lease: "lease-1", nonce: "nonce-1", revision: 0, matchAuthoritySeat: 0,
+    };
+    await saveDraftSettlementOutbox({ binding, receiptId: "receipt-1", winnerSeat: 1 });
+
+    await expect(loadDraftSettlementOutbox({ ...binding, revision: 1, lease: "lease-2" })).resolves.toBeNull();
+    await expect(loadDraftSettlementOutbox(binding)).resolves.toMatchObject({ receiptId: "receipt-1" });
   });
 
   describe("guest session", () => {

@@ -18,29 +18,9 @@
 //!      engine's `MAX_MULLIGANS` cap.
 //!
 //! `ForceKeep` outranks both in `MulliganRegistry`'s three-way precedence, so a
-//! single floor closes both routes.
-//!
-//! # Accepted interaction: Serum Powder
-//!
-//! CR 103.5b (`docs/MagicCompRules.txt:299`) lets Serum Powder exile the hand
-//! and redraw at the same mulligan count. In the band where this floor engages
-//! (`mulligans_taken >= 3` normally, `>= 4` with the free-first discount) a
-//! floored keep suppresses a Powder activation that the pre-floor code would
-//! have taken, because `search.rs` takes the keep whenever `decision.keep` is
-//! true.
-//!
-//! This is **accepted**, and the trade is stated rather than assumed: the Powder
-//! is NOT free here. `resolve_declare_point` only takes its zero-cost fast path
-//! when `owed == 0`, and a first activation in this band always has
-//! `owed >= 3`, so the Powder is routed through `BottomCards` first. The AI
-//! therefore trades a *curated* best-N-of-seven (bottomed via
-//! `plan_aware_bottom_cards`) for N *random* cards — card-neutral, better for a
-//! degenerate hand, worse for a merely-mediocre one. **No expectation analysis
-//! has been performed**, so this is neither claimed to be an improvement nor a
-//! regression. A second activation from the post-Powder hand *is* free
-//! (`owed == 0` once the bottoms are prepaid) and is also suppressed; that is a
-//! real if narrow cost. Revisiting either belongs in its own scoped change with
-//! a proper expectation analysis, not here.
+//! single floor closes both routes for hands that retain a bounded opening
+//! action. A certified dead landless hand is the deliberate exception: it keeps
+//! the existing force-mulligan path instead of receiving a floor override.
 
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -68,7 +48,7 @@ impl MulliganPolicy for MulliganCardFloor {
 
     fn evaluate(
         &self,
-        _hand: &[ObjectId], // input-unused: the floor is a card-count bound, not a hand-quality judgement
+        hand: &[ObjectId],
         state: &GameState,
         _features: &DeckFeatures, // input-unused: the floor is universal, not archetype-scoped
         _plan: &PlanSnapshot, // input-unused: the floor is a card-count bound, not a curve judgement
@@ -89,6 +69,16 @@ impl MulliganPolicy for MulliganCardFloor {
             };
         };
         let free_first = *free_first_mulligan;
+
+        // The floor is a safety net for merely weak hands, not a reason to
+        // retain a hand that the shared, conservative opening forecast proves
+        // cannot take any action before a draw or outside help.
+        if super::OpeningHandActionForecast::for_hand(hand, state).is_certified_dead_landless() {
+            return MulliganScore::Score {
+                delta: 0.0,
+                reason: PolicyReason::new("mulligan_card_floor_dead_landless"),
+            };
+        }
 
         // CR 103.5 + CR 103.5c: `kept_hand_size_after` is the engine's single
         // authority for post-keep hand size; never re-derive it here.
@@ -116,8 +106,18 @@ impl MulliganPolicy for MulliganCardFloor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+    };
+    use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::{MulliganDecisionEntry, MulliganDecisionPhase};
+    use engine::types::identifiers::CardId;
+    use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
 
     use super::*;
 
@@ -127,6 +127,7 @@ mod tests {
     /// `waiting_for` is not `MulliganDecision`, so the policy abstains there.
     fn state_on_mulligan_step(free_first_mulligan: bool) -> GameState {
         let mut state = GameState::new_two_player(0);
+        add_zero_cost_action(&mut state);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![],
             free_first_mulligan,
@@ -134,12 +135,48 @@ mod tests {
         state
     }
 
-    /// `MulliganCardFloor` never reads the hand (`_hand` is `input-unused`), so
-    /// policy-level tests pass an empty slice. Registry-level tests in `mod.rs`
-    /// must NOT — `KeepablesByLandCount` does read it.
+    fn add_zero_cost_action(state: &mut GameState) {
+        let object_id = create_object(
+            state,
+            CardId(9000),
+            PlayerId(0),
+            "Zero-Cost Action".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&object_id).expect("just created");
+        object.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Artifact],
+            subtypes: Vec::new(),
+        };
+        // `NoCost` means no printed mana cost, which CR 118.6 makes
+        // unpayable. This fixture needs a castable `{0}` spell.
+        object.mana_cost = ManaCost::generic(0);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        // The opening forecast flushes layers before asking the engine for
+        // legal actions, so test cards must carry the same printed baseline
+        // that production card loading supplies.
+        object.base_card_types = object.card_types.clone();
+        object.base_mana_cost = object.mana_cost.clone();
+        object.base_abilities = Arc::clone(&object.abilities);
+    }
+
+    /// The forecast consumes the actual opening hand, so policy-level tests
+    /// use the zero-cost action installed by `state_on_mulligan_step`.
     fn evaluate(state: &GameState, mulligans_taken: u8) -> MulliganScore {
+        let hand: Vec<_> = state.players[PlayerId(0).0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect();
         MulliganCardFloor.evaluate(
-            &[],
+            &hand,
             state,
             &DeckFeatures::default(),
             &PlanSnapshot::default(),
@@ -247,6 +284,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn floor_abstains_for_certified_dead_landless_hand() {
+        let mut state = GameState::new_two_player(0);
+        let uncastable = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Uncastable Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let object = state
+            .objects
+            .get_mut(&uncastable)
+            .expect("just created hand card");
+        object.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Artifact],
+            subtypes: Vec::new(),
+        };
+        object.mana_cost = ManaCost::generic(1);
+        object.base_card_types = object.card_types.clone();
+        object.base_mana_cost = object.mana_cost.clone();
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![],
+            free_first_mulligan: false,
+        };
+
+        match evaluate(&state, 3) {
+            MulliganScore::Score { delta, reason } => {
+                assert_eq!(delta, 0.0, "dead-hand abstention must be neutral");
+                assert_eq!(reason.kind, "mulligan_card_floor_dead_landless");
+            }
+            other => panic!("dead landless hand must not be ForceKeep, got {other:?}"),
+        }
+    }
+
     /// V9 — multi-authority: the floor bounds *this* player's mulligan count,
     /// which arrives as the `mulligans_taken` parameter (`search.rs` sources it
     /// from the `MulliganDecisionEntry` matching the AI player). Both halves run
@@ -272,6 +345,7 @@ mod tests {
             ],
             free_first_mulligan: false,
         };
+        add_zero_cost_action(&mut state);
 
         assert!(
             matches!(evaluate(&state, 4), MulliganScore::ForceKeep { .. }),

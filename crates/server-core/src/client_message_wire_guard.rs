@@ -53,14 +53,48 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::Reconnect {
             game_code,
             player_token,
-        } => guard_game_reconnect(game_code, player_token),
+            full_key,
+        } => {
+            guard_game_reconnect(game_code, player_token)?;
+            if full_key.game_code != *game_code || full_key.generation == 0 {
+                return Err(
+                    "reconnect full_key must match game_code and have a generation".to_string(),
+                );
+            }
+            Ok(())
+        }
         ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::Concede
+        | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
         | ClientMessage::RequestTakeback
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
+        ClientMessage::BootstrapTerminalDelivery { request } => {
+            if request.key.game_code.is_empty()
+                || request.player_token.is_empty()
+                || request.request_id.is_empty()
+            {
+                return Err("terminal bootstrap fields must not be empty".to_string());
+            }
+            Ok(())
+        }
+        ClientMessage::ReadTerminalResult { credential } => {
+            if credential.0.is_empty() {
+                return Err("terminal credential must not be empty".to_string());
+            }
+            Ok(())
+        }
+        ClientMessage::AckTerminalDelivery {
+            delivery_id,
+            credential,
+        } => {
+            if delivery_id.0.is_empty() || credential.0.is_empty() {
+                return Err("terminal acknowledgement fields must not be empty".to_string());
+            }
+            Ok(())
+        }
         ClientMessage::CreateGameWithSettings {
             deck,
             display_name,
@@ -239,6 +273,10 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede
+        | ClientMessage::ConcedeMatch
+        | ClientMessage::BootstrapTerminalDelivery { .. }
+        | ClientMessage::ReadTerminalResult { .. }
+        | ClientMessage::AckTerminalDelivery { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::SeatMutate { .. }
@@ -304,6 +342,7 @@ mod tests {
                     source: ObjectIncarnationRef::of(ObjectId(1), 1),
                     ability_index: None,
                     mana_type: ManaType::Green,
+                    output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                     atomic_combination: None,
                     restrictions: vec![ManaRestriction::OnlyForAny(vec![
                         ManaRestriction::OnlyForSpell;
@@ -328,6 +367,7 @@ mod tests {
                     source: ObjectIncarnationRef::of(ObjectId(1), 1),
                     ability_index: None,
                     mana_type: ManaType::Green,
+                    output: engine::types::mana::ManaSourceOutput::Concrete(ManaType::Green),
                     atomic_combination: None,
                     restrictions: Vec::new(),
                     penalty: ManaSourcePenalty::None,

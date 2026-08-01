@@ -1238,7 +1238,7 @@ fn legality_equivalence_key(
             key.is_blocked = crate::game::restrictions::is_source_blocked(state, *source_id);
             Some(key)
         }
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             if poison.has_activation {
                 return None;
             }

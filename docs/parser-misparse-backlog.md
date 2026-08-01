@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4732
-- **Total card appearances across root causes:** 4766 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4726
+- **Total card appearances across root causes:** 4760 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -26,7 +26,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 133 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 95 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
-| 15 | Multi-target / 'up to N' optionality or count dropped | 89 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 84 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
@@ -211,7 +211,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Devoted Sultai
 - Devout Harpist
 - Dewdrop Cure
-- Diluvian Primordial
 - Dimension X Pizzasaur
 - Diplomatic Escort
 - Dire Fleet Warmonger
@@ -4208,7 +4207,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 15. Multi-target / 'up to N' optionality or count dropped  (89 cards)
+### 15. Multi-target / 'up to N' optionality or count dropped  (83 cards)
 
 **Signature.** MultiTargetSpec / 'up to one/two target' optionality dropped to a mandatory single Typed target (or collapsed into DamageAll), losing the multi_target / up_to slot and per-target distinctness.
 
@@ -4217,7 +4216,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 <details><summary>Cards</summary>
 
 - A-Incriminate
-- Batroc the Leaper
 - Blue Dragon
 - Bon... placeholder
 - Bonfire of the Damned
@@ -4232,7 +4230,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Capricious Efreet
 - Cetavolver
 - Chandra, Flame's Catalyst
-- Chandra, Hope's Beacon
 - Chandra, Roaring Flame
 - Chaotic Transformation
 - Clattering Augur
@@ -4254,8 +4251,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Invent
 - Ioreth of the Healing House
 - Jace, Ingenious Mind-Mage
-- Jagged Lightning
-- Jaya's Immolating Inferno
 - Journey of Discovery
 - Magus of the Candelabra
 - March of Reckless Joy
@@ -4269,7 +4264,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Nimbleclaw Adept
 - Nomad Decoy
 - Perpetual Timepiece
-- Pinnacle of Rage
 - Primal Might
 - Pull from the Deep
 - Put Away
@@ -4285,7 +4279,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rimehorn Aurochs
 - Risky Move
 - Sex Appeal
-- Shower of Coals
 - Simoon
 - Soratami Mirror-Mage
 - Soratami Seer

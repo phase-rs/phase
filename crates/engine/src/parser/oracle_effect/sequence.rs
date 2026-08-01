@@ -7,6 +7,9 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::enters_under::{
+    bind_control_clause, fold_control_clauses, name_entry_control_antecedent,
+};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx};
@@ -117,7 +120,13 @@ fn parse_search_attach_host_phrase(input: &str) -> OracleResult<'_, TargetFilter
     .parse(input)
 }
 
-fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
+/// CR 701.3a + CR 303.4f: Parse an "attached to <host>" rider from return /
+/// search destination remainders (Gift of Immortality, Next of Kin, Lynde).
+///
+/// Returns `(host, unconsumed_remainder)` so rules-bearing suffixes after the
+/// host phrase (`, then attach …`, `. Exile those Auras …`) stay available for
+/// normal continuation parsing (Cass, Hand of Vengeance; Storm Herald).
+pub(crate) fn parse_search_attach_host(text: &str) -> Option<(TargetFilter, &str)> {
     let lower = text.to_ascii_lowercase();
     nom_on_lower(text, &lower, |input| {
         let (input, _) = take_until("attached to").parse(input)?;
@@ -125,7 +134,6 @@ fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
         let (input, filter) = parse_search_attach_host_phrase(input)?;
         Ok((input, filter))
     })
-    .map(|(filter, _)| filter)
 }
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
@@ -3710,6 +3718,36 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_host,
         } => {
+            // CR 110.2a: fail closed before touching either representation of
+            // the put step. Search lowering may already have installed a
+            // library-to-battlefield ChangeZone in the preceding definition;
+            // patching that node and merely appending an Unimplemented sibling
+            // would leave the default-controller move executable. Replacing
+            // the whole search assembly also prevents an attachment rider from
+            // surviving without the controller clause it depends on. The arena
+            // keys this existing clause by its boxed-effect allocation, so mutate
+            // that effect in place and clear both chain links rather than assigning
+            // a new AbilityDefinition behind the arena's back.
+            if let Some(possessor) = enters_under.unbound_possessor() {
+                if let Some(previous) = defs.last_mut() {
+                    *previous.effect = Effect::unimplemented(
+                        "change_zone_enters_under_anaphor",
+                        possessor.printed_clause(),
+                    );
+                    previous.sub_ability = None;
+                    previous.else_ability = None;
+                    previous.forward_result = false;
+                } else {
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::unimplemented(
+                            "change_zone_enters_under_anaphor",
+                            possessor.printed_clause(),
+                        ),
+                    ));
+                }
+                return;
+            }
             // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
             // finds the card in any searched zone, so the put-step must move it
             // from wherever it actually is (`origin: None`). A library-only
@@ -3730,7 +3768,7 @@ pub(super) fn apply_clause_continuation(
                     previous,
                     destination,
                     enter_tapped,
-                    enters_under.clone(),
+                    enters_under.as_controller_ref(),
                 );
             }
             let put_origin = if multi_zone_search {
@@ -3738,24 +3776,22 @@ pub(super) fn apply_clause_continuation(
             } else {
                 Some(Zone::Library)
             };
-            let mut change_zone = AbilityDefinition::new(
-                kind,
-                Effect::ChangeZone {
-                    origin: put_origin,
-                    destination,
-                    target: TargetFilter::Any,
-                    owner_library: false,
-                    enter_transformed: false,
-                    enters_under,
-                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-                    enters_attacking: false,
-                    up_to: false,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    face_down_profile: None,
-                    enters_modified_if: None,
-                },
-            );
+            let put_effect = Effect::ChangeZone {
+                origin: put_origin,
+                destination,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            };
+            let mut change_zone = AbilityDefinition::new(kind, put_effect);
             if let Some(host) = attach_host {
                 change_zone.forward_result = true;
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -5193,6 +5229,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
     text: &str,
     effect: &Effect,
     full_text: &str,
+    ctx: &ParseContext,
 ) -> Option<ContinuationAst> {
     match effect {
         Effect::SearchLibrary { split, .. } => {
@@ -5247,7 +5284,9 @@ pub(super) fn parse_intrinsic_continuation_ast(
             let attach_host = if nom_primitives::scan_contains(&full_lower, "attached to")
                 || nom_primitives::scan_contains(&lower, "attached to")
             {
-                parse_search_attach_host(&full_lower).or(Some(TargetFilter::Any))
+                parse_search_attach_host(&full_lower)
+                    .map(|(host, _)| host)
+                    .or(Some(TargetFilter::Any))
             } else {
                 None
             };
@@ -5292,9 +5331,22 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a: "... under your control" routes the found card to the ability controller.
-                enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
-                    .then_some(ControllerRef::You),
+                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
+                // (`full_lower`) as the single-literal `scan_contains` this
+                // replaces — no widening. `You`-wins makes the fold
+                // byte-for-byte non-regressive. This seam has no object filter
+                // of its own (the found card is not a parsed `TargetFilter`
+                // here), so the CR 108.3 moved-object-owner source can never
+                // fire: only a mapped, `ParseContext`-declared referent binds.
+                // The one dangerous scope value at this seam (`TargetPlayer`,
+                // which `filter.rs` resolves to the FIRST player target of an
+                // unrelated slot) is refused inside
+                // `map_relative_player_scope`, so the seam needs no
+                // special-casing of its own.
+                enters_under: bind_control_clause(
+                    fold_control_clauses(&full_lower),
+                    name_entry_control_antecedent(None, ctx),
+                ),
                 reveal,
                 attach_host,
             })
@@ -12934,26 +12986,64 @@ mod tests {
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to that creature, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::ParentTarget)
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to target creature. if you search your library this way, shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::Typed(TypedFilter::creature()))
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to target player, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::Player)
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put that card onto the battlefield attached to ~, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::SelfRef)
+        );
+    }
+
+    #[test]
+    fn search_attach_host_preserves_continuation_remainder() {
+        // Cass, Hand of Vengeance: host phrase ends at the comma; ", then attach …"
+        // must remain for continuation parsing.
+        let (host, rem) = super::parse_search_attach_host(
+            "attached to target creature, then attach any number of Equipment that were attached to it to that creature",
+        )
+        .expect("attach host");
+        assert_eq!(
+            host,
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature())
+        );
+        assert_eq!(
+            rem.trim(),
+            "then attach any number of Equipment that were attached to it to that creature",
+            "Cass continuation must survive attach-host parse"
+        );
+
+        // Storm Herald: host phrase ends at the period; exile delayed clause must remain.
+        let (host, rem) = super::parse_search_attach_host(
+            "attached to creatures you control. Exile those Auras at the beginning of your next end step.",
+        )
+        .expect("attach host");
+        assert!(
+            matches!(host, TargetFilter::Typed(_)),
+            "Storm Herald host must parse as typed filter, got {host:?}"
+        );
+        assert_eq!(
+            rem.trim(),
+            "Exile those Auras at the beginning of your next end step.",
+            "Storm Herald exile clause must survive attach-host parse"
         );
     }
 

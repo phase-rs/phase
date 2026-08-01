@@ -1774,11 +1774,35 @@ pub(super) fn handle_copy_target_choice(
                 }));
             }
         }
-        if !super::effects::token::commit_liminal_token_entry_with_event_emission(
+        // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
+        // PAUSE on a CR 616.1 ordering choice between two AddCounter replacements. On that pause
+        // the only stashed post-action is the entry finalization, and its `Suppress` emission mode
+        // means the finalize tail neither emits the entry events nor (since the entry record is now
+        // written by `record_zone_change` inside `push_committed_token_entry_events`) records the
+        // entry at all — the token would enter invisibly. Hand the emit down as a post-finalize
+        // action so the paused path still performs the entry EMIT the unpaused one performs below.
+        // Only the emit: on a pause this function returns at the `commit_liminal_token_entry_*`
+        // call below, so the unpaused tail's CR 614.12a `BecomeCopy` chain,
+        // `finish_copy_target_choice_entry`, and the copy continuation do not run on that route.
+        // That abandonment is pre-existing and is not what this hand-down addresses. Dropped
+        // unused when the commit does not pause.
+        let paused_entry_emit: Vec<PendingCounterPostAction> = entry_events
+            .clone()
+            .map(
+                |(name, event_source_id)| PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+                    object_id: source_id,
+                    name,
+                    source_id: event_source_id,
+                },
+            )
+            .into_iter()
+            .collect();
+        if !super::effects::token::commit_liminal_token_entry_with_post_actions(
             state,
             resume_event,
             events,
             TokenEntryEventEmission::Suppress,
+            paused_entry_emit,
         ) {
             return Ok(state.waiting_for.clone());
         }

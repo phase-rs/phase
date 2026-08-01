@@ -969,6 +969,15 @@ pub(crate) fn move_object_with_terminal(
         if matches!(req.cause, ZoneChangeCause::DebugCommand) {
             let delivery_start = events.len();
             zones::move_to_zone(state, req.object_id, req.to, events);
+            // pod-lab loop-3 Q5: debug-staged board setup (GameScenario, the
+            // shared seam nearly every engine integration test builds boards
+            // through) stays maximally conservative and out of scope for the
+            // move_to_zone incremental-flush carve-out below — there is zero
+            // gameplay perf benefit to incrementalizing test/debug setup, and
+            // the blast radius of a subtle divergence here is the whole test
+            // suite. Unconditional, regardless of what move_to_zone's own
+            // (now axis-gated) internal decision would otherwise have been.
+            crate::game::layers::mark_layers_full(state);
             return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
                 member,
                 &events[delivery_start..],
@@ -2302,8 +2311,17 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.face_down = true;
             }
         }
+        // pod-lab loop-3 Q5: tracks whether this delivery took the plain,
+        // non-merge, non-library-placement `move_to_zone` branch — the ONLY
+        // branch whose own internal dirty-mark decision (see the carve-out
+        // added to `move_to_zone` above) is trustworthy enough to let the
+        // redundant check below skip re-marking `Full`. `false` for both the
+        // library-placement branch and the merge-survivor branch, neither of
+        // which is analyzed by that carve-out.
+        let took_plain_zone_transfer;
         match (to, library_placement.as_ref()) {
             (Zone::Library, Some(position)) => {
+                took_plain_zone_transfer = false;
                 let index = match position {
                     LibraryPosition::Top => Some(0),
                     LibraryPosition::Bottom => None,
@@ -2334,8 +2352,10 @@ pub(crate) fn deliver_replaced_zone_change(
                     // replacement consult. Deliver the resulting destination
                     // with the CR 730.3 `from: None` event shape rather than
                     // pretending it independently left the battlefield.
+                    took_plain_zone_transfer = false;
                     crate::game::merge::put_component_into_zone(state, object_id, to, events);
                 } else {
+                    took_plain_zone_transfer = true;
                     zones::move_to_zone(state, object_id, to, events);
                 }
             }
@@ -2397,7 +2417,20 @@ pub(crate) fn deliver_replaced_zone_change(
         // and before the zone-change record snapshots is_token. That is the sole
         // path a copy (only ever created on the stack by `Effect::CastCopyOfCard`)
         // reaches the battlefield, so no un-flipped copy can arrive here.
-        if to == Zone::Battlefield || from == Zone::Battlefield {
+        // pod-lab loop-3 Q5: `move_to_zone` (above) already made the correct,
+        // precise dirty-mark decision for a plain transfer that actually
+        // landed on the battlefield — this check no longer re-clobbers it to
+        // `Full`. Gated on `entered_battlefield && took_plain_zone_transfer`
+        // together, not `took_plain_zone_transfer` alone: a rejected entry
+        // (Grafdigger's Cage-class `CantEnterBattlefieldFrom`, CR 614.1d) has
+        // `entered_battlefield == false` and must keep this unconditional
+        // mark, since `move_to_zone` never reached its own mark block for a
+        // rejected entry at all. A merge-survivor delivery or a
+        // library-placement delivery is `took_plain_zone_transfer == false`
+        // and is untouched, exactly as before.
+        if from == Zone::Battlefield
+            || (to == Zone::Battlefield && !(entered_battlefield && took_plain_zone_transfer))
+        {
             crate::game::layers::mark_layers_full(state);
         }
         // CR 708.3: An object put onto the battlefield face down is turned face
@@ -2952,6 +2985,9 @@ fn execute_zone_move_with_applied_terminal(
                         }
                     }
                 }
+                // CR 303.4i specified-host Remain is handled after delivery when
+                // `attach_to` fails / SBA (CR 704.5m). Pre-move filter checks while
+                // the Aura is still in GY falsely Remained legal Gift/Lynde hosts.
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
                 let delivery_start = events.len();
@@ -4014,6 +4050,555 @@ mod face_down_exile_entry_tests {
             obj.back_face.is_none(),
             "the face-down profile must not be applied to a card whose entry was \
              rejected — the hidden card must be left unchanged"
+        );
+    }
+}
+
+/// pod-lab loop-3 Q5: verifies the `move_to_zone`/`deliver_replaced_zone_change`
+/// incremental-flush carve-out through the FULL production pipeline
+/// (`move_object`/`ZoneMoveRequest::effect`), not just `zones::move_to_zone` in
+/// isolation — so `entered_battlefield`/`took_plain_zone_transfer`, computed in
+/// this file, are genuinely exercised. Every assertion reads
+/// `state.layers_dirty` directly (the dirty-lattice/flush-arm seam itself),
+/// not just final board state, per this fix's own verification-matrix
+/// requirement that a test must fail if the carve-out is reverted or
+/// mis-scoped — board state alone is identical either way for a plain
+/// creature entry, so it cannot prove which path was taken.
+#[cfg(test)]
+mod layers_incremental_flush_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::LayersDirty;
+    use crate::types::identifiers::CardId;
+    use crate::types::statics::StaticMode;
+
+    fn reset_clean(state: &mut GameState) {
+        state.layers_dirty = LayersDirty::Clean;
+    }
+
+    /// Row 1 (verification matrix): the dominant real-game case — a plain
+    /// creature resolving from the Stack — takes the cheap `EnteredObjects`
+    /// path, not `Full`. This is the fix's entire perf payoff; if this
+    /// assertion regresses to `Full`, the carve-out has been reverted or
+    /// over-narrowed.
+    #[test]
+    fn stack_to_battlefield_plain_entry_marks_entered_not_full() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80001),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(80002),
+            PlayerId(0),
+            "Vanilla Creature".to_string(),
+            Zone::Stack,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(spell, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&spell].zone, Zone::Battlefield);
+        match &state.layers_dirty {
+            LayersDirty::EnteredObjects(ids) => {
+                assert!(
+                    ids.contains(&spell),
+                    "the entering object must be tracked in EnteredObjects"
+                );
+            }
+            other => panic!(
+                "a plain Stack-to-Battlefield entry must take the incremental \
+                 EnteredObjects path, got {other:?}"
+            ),
+        }
+    }
+
+    /// Row 2: Hand->Battlefield (land plays, Elvish Piper, Sneak Attack, Show
+    /// and Tell) must keep forcing `Full` UNCONDITIONALLY. `layers.rs`'s
+    /// zone-reading classifier hardcodes `QuantityRef::HandSize` to `false`,
+    /// so a live HandSize-gated static (Carnage Interpreter class) would go
+    /// undetected by `static_dependency_before`/`after` alone — this
+    /// unconditional exclusion is that class's only protection.
+    #[test]
+    fn hand_to_battlefield_still_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80011),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(80012),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(land, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a Hand-origin battlefield entry must still force a full \
+             re-evaluation, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Row 7b (round-3 review blocker): Exile->Battlefield (reanimation,
+    /// flicker return, "you may cast this from exile") must ALSO keep forcing
+    /// `Full` unconditionally, for the identical reason as Hand.
+    /// `QuantityRef::CardsExiledBySource`/`ExiledCardPower`/`TrackedSetSize`/
+    /// `FilteredTrackedSetSize`/`TrackedSetAggregate` (Unlicensed Hearse,
+    /// Veteran Survivor, Sutured Ghoul class) are ALL hardcoded to `false` in
+    /// the same classifier, and their count is live-filtered on
+    /// `obj.zone == Zone::Exile` — it changes the instant a linked card
+    /// leaves Exile, with no Axis-2 flush-time analog to catch it.
+    #[test]
+    fn exile_to_battlefield_still_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80021),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(80022),
+            PlayerId(0),
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(exiled, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&exiled].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "an Exile-origin battlefield entry must still force a full \
+             re-evaluation, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Row 3: a battlefield entry REJECTED by a `CantEnterBattlefieldFrom`
+    /// static (Grafdigger's Cage class, CR 614.1d) must still mark `Full` via
+    /// `zone_pipeline.rs`'s `entered_battlefield` gate — `move_to_zone` never
+    /// reaches its own (now axis-gated) mark block for a rejected entry at
+    /// all, so this file's redundant check is the ONLY thing marking
+    /// anything for this case, exactly as before the carve-out existed.
+    #[test]
+    fn rejected_battlefield_entry_still_marks_full() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80031),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let cage = create_object(
+            &mut state,
+            CardId(80032),
+            PlayerId(0),
+            "Grafdigger's Cage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&cage).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CantEnterBattlefieldFrom).affected(
+                    TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard, Zone::Library],
+                            }]),
+                    ),
+                ),
+            );
+        }
+        let caged = create_object(
+            &mut state,
+            CardId(80033),
+            PlayerId(0),
+            "Caged Creature".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&caged).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        reset_clean(&mut state);
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(caged, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&caged].zone,
+            Zone::Library,
+            "a CantEnterBattlefieldFrom static must keep the card in its origin zone"
+        );
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a rejected battlefield entry must still force a full \
+             re-evaluation via entered_battlefield, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// F5 (CodeRabbit, PR #6777 round): the incremental `EnteredObjects` path
+    /// (Row 1) is only safe when nothing on the board reads membership of the
+    /// entering object's origin or destination zone. A Graveyard->Battlefield
+    /// entry (reanimation) is neither the Hand nor Exile carve-out, so it
+    /// would wrongly take the cheap path unless `static_dependency_before`/
+    /// `after` itself catches it: a live static (Tarmogoyf class) whose
+    /// `affected` filter reads `Zone::Graveyard` must still force `Full` when
+    /// a card leaves that zone for the battlefield. Round 4: the watcher
+    /// carries a real modification (it sources a live effect) and the fixture
+    /// is primed by a real flush, so the before arm is proven through the
+    /// INDEXED path — bucket membership asserted, no empty-index fallback.
+    #[test]
+    fn battlefield_entry_with_static_dependency_marks_full_via_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = create_object(
+            &mut state,
+            CardId(80041),
+            PlayerId(0),
+            "Graveyard Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the watcher sources a LIVE continuous effect — active effects
+            // are built by iterating `def.modifications`
+            // (`active_continuous_effects_from_static_definitions`), so an
+            // affected-filter-only def would source nothing.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80042),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let reanimated = create_object(
+            &mut state,
+            CardId(80043),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&reanimated).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // Round-4 fix (maintainer, PR #6777): prime with a real flush so the
+        // live watcher is INDEXED, then prove the before arm fires through the
+        // indexed path (buckets non-empty — no empty-index fallback involved).
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: the live graveyard-reading watcher is indexed after the priming flush"
+        );
+        assert!(
+            crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "the indexed watcher must make the pre-transition dependency check true"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(reanimated, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&reanimated].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "a Graveyard-origin battlefield entry with a live zone-membership-dependent static must force a full re-evaluation via static_dependency_before/after, got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// F5 discrimination companion (maintainer, PR #6777 round 2): the sibling
+    /// test's watcher static is live on the battlefield BEFORE the transition,
+    /// and `move_object` ORs `static_dependency_before || static_dependency_after`
+    /// — so that test alone cannot catch the post-entry arm being dropped.
+    /// Here the zone-reading static rides ON the entering object itself: while
+    /// it sits in the Graveyard it is not a static-effect source (only
+    /// battlefield/command objects generate continuous effects), so the
+    /// before-check is false, and only the post-entry re-check
+    /// (`static_dependency_after`) can see the now-live static and force
+    /// `Full`. Removing the after arm turns this mark into the cheap
+    /// `EnteredObjects` path and fails this test.
+    #[test]
+    fn battlefield_entry_whose_own_zone_reading_static_marks_full_post_entry() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80044),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80045),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // Round-4 fix (maintainer, PR #6777): a real companion modification
+            // so the arriving watcher sources a LIVE continuous effect once on
+            // the battlefield (active effects iterate `def.modifications`).
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+
+        // Round-3 fix (maintainer, PR #6777): prime with a REAL layer flush so
+        // the fixture carries exactly the index state production would — not a
+        // hand-reset that leaves `static_source_index` unbuilt. For this board
+        // shape the rebuild leaves the index PRECISELY empty:
+        // `StaticSourceIndex::rebuild_from_state` keys on generators only
+        // (static_source_index.rs), the lone battlefield object carries no
+        // static, and the graveyard watcher sits outside both indexed buckets.
+        // At the post-entry check the index is then stale-EMPTY, not
+        // legitimately empty: the watcher has arrived and IS a generator, but
+        // nothing rebuilds the index mid-move, so `use_fallback` in
+        // `for_each_static_effect_source` fires and the direct scan sees the
+        // newcomer. That is exactly the production shape of "the first
+        // generator enters a generator-free board" — reached in any real game
+        // — so the `Full` mark pinned here is live behavior, not a recovery
+        // path for hand-built state. The populated-bucket shape, where the
+        // after arm provably cannot see the newcomer, is pinned by
+        // `populated_index_entry_defers_zone_reading_static_to_flush_escalation`.
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Clean),
+            "priming flush must leave the dirty lattice clean, got {:?}",
+            state.layers_dirty
+        );
+        assert!(
+            state.static_source_index.battlefield_sources.is_empty()
+                && state.static_source_index.command_sources.is_empty(),
+            "fixture premise: a generator-free board rebuilds to a precisely empty index"
+        );
+
+        // Precondition for discrimination: with the watcher still in the
+        // Graveyard, no battlefield/command object reads zone membership, so
+        // the pre-transition check must come up empty and the post-entry arm
+        // is the only guard under test.
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: a pre-transition static dependency would let the before arm mask the after arm"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "an entering object that itself carries a zone-membership-reading static must force a full re-evaluation via static_dependency_after (the before check is provably false here), got {:?}",
+            state.layers_dirty
+        );
+    }
+
+    /// Round-3 companion (maintainer, PR #6777): the POPULATED-index shape.
+    /// With an unrelated generator on the battlefield the indexed buckets are
+    /// non-empty, and the mid-mutation dependency checks read a stale-by-design
+    /// index (rebuilt only at the top of a flush pass — see the "Authority"
+    /// note in static_source_index.rs): the just-entered watcher is not yet a
+    /// bucket member, so BOTH the before and after arms are false and
+    /// `move_object` proposes the cheap `EnteredObjects` mark. Safety for this
+    /// shape is delivered at flush time, not at the mutation site:
+    /// `prepare_incremental_flush` escalates to a full pass (arm (1) of
+    /// `entered_object_blocks_incremental` fires first on the entering
+    /// object's live continuous effect; the recipient-sourced active-effect
+    /// check just after the index rebuild is a redundant backstop). This
+    /// test pins that handoff end-to-end — cheap mark at the seam, escalation
+    /// plus full evaluation at the flush — so neither half of the contract can
+    /// silently regress.
+    #[test]
+    fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
+        let mut state = GameState::new_two_player(42);
+        let generator = create_object(
+            &mut state,
+            CardId(80046),
+            PlayerId(0),
+            "Benign Generator".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&generator).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // Plain typed filter: no InZone/InAnyZone prop, so per
+            // `target_filter_reads_zone` it reads membership of NEITHER
+            // transition zone — it exists only to populate the index bucket.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default().with_type(TypeFilter::Creature),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(80047),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entering_watcher = create_object(
+            &mut state,
+            CardId(80048),
+            PlayerId(0),
+            "Entering Graveyard Watcher".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_watcher).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            // A real modification (not just a zone-reading affected filter) so
+            // the entered object sources a live continuous effect once on the
+            // battlefield — the exact condition `entered_object_blocks_incremental`
+            // arm (1) escalates on.
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::Continuous)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Creature)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Graveyard],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            );
+        }
+
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        assert_eq!(
+            state.static_source_index.battlefield_sources.len(),
+            1,
+            "fixture premise: exactly the benign generator is indexed after the priming flush"
+        );
+        assert!(
+            !crate::game::layers::static_layer_dependency_for_zone_transition(
+                &state,
+                Zone::Graveyard,
+                Zone::Battlefield
+            ),
+            "fixture invalid: the generator must not read either transition zone"
+        );
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entering_watcher, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&entering_watcher].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::EnteredObjects(_)),
+            "with populated (stale-by-design) buckets the mutation-site arms cannot see the entering object's own static; the cheap mark is the designed outcome here, got {:?}",
+            state.layers_dirty
+        );
+
+        crate::game::perf_counters::reset();
+        crate::game::layers::flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            counters.layers_escalated, 1,
+            "flush must escalate: the entered object sources a live continuous effect"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 1,
+            "the escalation must land in a full evaluation"
         );
     }
 }

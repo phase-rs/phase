@@ -63,11 +63,12 @@ pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use log::{GameLogEntry, LogCategory, LogSegment};
 pub use mana::{
-    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourcePenalty,
-    ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
+    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourceOutput,
+    ManaSourcePenalty, ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
 };
 pub use match_config::{
-    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
+    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchForfeitCause, MatchForfeitResult,
+    MatchPhase, MatchScore, MatchType,
 };
 pub use phase::Phase;
 pub use player::{Player, PlayerId};

@@ -12,6 +12,7 @@ use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
@@ -659,6 +660,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
         parse_colors_of_mana_spent_threshold,
+        parse_color_mana_spent_threshold,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
@@ -2220,6 +2222,20 @@ fn parse_has_counters_axes(
     .parse(rest)?;
 
     Ok((rest, (subject, counters, minimum, maximum)))
+}
+
+/// CR 122.1 + CR 608.2c: identifies only a leading `if it has … counter on it,`
+/// condition. The generic counter-condition parser resolves bare `it` to the
+/// source by default; effect-chain parsing uses this narrow lexical fact to
+/// rebind that condition when an earlier clause established a typed referent.
+/// Explicit source subjects (`~`, `this creature`, `this land`) deliberately do
+/// not match and retain their source scope.
+pub(crate) fn is_leading_if_bare_recipient_counter_condition(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        terminated(preceded(tag("if "), parse_has_counters_axes), tag(",")).parse(i)
+    })
+    .is_some_and(|((subject, ..), _)| matches!(subject, CounterConditionSubject::RecipientPronoun))
 }
 
 /// Subject axis for counter-has conditions. Accepts the canonical
@@ -6603,6 +6619,39 @@ fn parse_colors_of_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticC
                 qty: QuantityRef::ManaSpentToCast {
                     scope,
                     metric: CastManaSpentMetric::DistinctColors,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 106.3 + CR 601.2h: Parse "{at least N | N or more | N or fewer | N or
+/// less} <color> mana {was|were} spent to cast <self>" — the Adamant threshold
+/// (CR 207.2c ability word; the label itself carries no rules meaning and is
+/// peeled by the caller). Measures `CastManaSpentMetric::OfColor` — how much
+/// mana of exactly one color paid the cost — against a fixed threshold.
+///
+/// Sibling of `parse_colors_of_mana_spent_threshold` (distinct colors) and
+/// `parse_mana_spent_threshold` (total): all three share
+/// `parse_amount_threshold` and `parse_mana_spent_self_subject`, differing only
+/// in the aggregate leaf. CR 400.7d: the subject anaphora selects the scope.
+fn parse_color_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, color) = parse_color(rest)?;
+    let (rest, _) = tag(" mana ").parse(rest)?;
+    let (rest, _) = alt((tag("was "), tag("were "))).parse(rest)?;
+    let (rest, _) = tag("spent to cast ").parse(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope,
+                    metric: CastManaSpentMetric::OfColor { color },
                 },
             },
             comparator,
@@ -16808,6 +16857,235 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // CR 106.3 + CR 601.2h: per-color mana-spent threshold (Adamant grammar).
+    // Group A — accepted forms across every axis of the composed combinator.
+    // -----------------------------------------------------------------------
+
+    fn color_mana_spent(
+        text: &str,
+    ) -> (
+        CastManaObjectScope,
+        crate::types::mana::ManaColor,
+        Comparator,
+        i32,
+    ) {
+        let (rest, c) = parse_inner_condition(text)
+            .unwrap_or_else(|e| panic!("expected {text:?} to parse, got {e:?}"));
+        assert_eq!(rest, "", "combinator must self-delimit for {text:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: CastManaSpentMetric::OfColor { color },
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => (scope, color, comparator, value),
+            other => panic!("expected OfColor QuantityComparison for {text:?}, got {other:?}"),
+        }
+    }
+
+    /// All five colors route through the shared `parse_color` leaf — the arm is
+    /// not hardcoded to white (the color of the first Adamant card fixed).
+    #[test]
+    fn color_mana_spent_threshold_all_five_colors() {
+        use crate::types::mana::ManaColor;
+        for (text, expected) in [
+            (
+                "at least three white mana was spent to cast this spell",
+                ManaColor::White,
+            ),
+            (
+                "at least three blue mana was spent to cast this spell",
+                ManaColor::Blue,
+            ),
+            (
+                "at least three black mana was spent to cast this spell",
+                ManaColor::Black,
+            ),
+            (
+                "at least three red mana was spent to cast this spell",
+                ManaColor::Red,
+            ),
+            (
+                "at least three green mana was spent to cast this spell",
+                ManaColor::Green,
+            ),
+        ] {
+            let (scope, color, comparator, value) = color_mana_spent(text);
+            assert_eq!(scope, CastManaObjectScope::SelfObject);
+            assert_eq!(color, expected);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(value, 3);
+        }
+    }
+
+    /// The comparator axis is threaded from the shared `parse_amount_threshold`,
+    /// not pinned to the single `at least` surface form Adamant happens to use.
+    #[test]
+    fn color_mana_spent_threshold_comparator_axis() {
+        for (text, cmp, n) in [
+            (
+                "at least two red mana was spent to cast this spell",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "two or more red mana was spent to cast this spell",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "two or fewer red mana was spent to cast this spell",
+                Comparator::LE,
+                2,
+            ),
+            (
+                "two or less red mana was spent to cast this spell",
+                Comparator::LE,
+                2,
+            ),
+        ] {
+            let (_, _, comparator, value) = color_mana_spent(text);
+            assert_eq!(comparator, cmp, "for {text:?}");
+            assert_eq!(value, n, "for {text:?}");
+        }
+    }
+
+    /// CR 400.7d: the subject anaphora selects the scope, and the "was"/"were"
+    /// number axis is accepted on both surfaces.
+    #[test]
+    fn color_mana_spent_threshold_subject_and_number_axes() {
+        for (text, expected) in [
+            (
+                "at least three red mana was spent to cast this spell",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast this creature",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast it",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana were spent to cast ~",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast that spell",
+                CastManaObjectScope::TriggeringSpell,
+            ),
+        ] {
+            let (scope, _, _, _) = color_mana_spent(text);
+            assert_eq!(scope, expected, "for {text:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hostile rows U1-U3: the new arm must not STEAL its siblings' phrases.
+    // Reach-guard: `color_mana_spent_threshold_all_five_colors` above proves the
+    // arm is live, so these negatives are not vacuous.
+    // -----------------------------------------------------------------------
+
+    /// U1/U2/U3: the sibling phrases must NOT produce an `OfColor` metric.
+    /// Henge Walker's max-over-colors ("mana of the same color") is explicitly
+    /// out of scope and must fail closed; the `DistinctColors` and `Total`
+    /// siblings must keep their own arms.
+    #[test]
+    fn color_mana_spent_threshold_does_not_steal_sibling_phrases() {
+        for text in [
+            // U1 — Henge Walker (out of scope, must fail closed entirely).
+            "at least three mana of the same color was spent to cast this spell",
+            // U2 — Steel Exemplar's DistinctColors form.
+            "two or more colors of mana were spent to cast it",
+            // U3 — the bare Total form, and the source-qualified form.
+            "at least three mana was spent to cast this spell",
+            "at least three mana from a treasure was spent to cast this spell",
+        ] {
+            let produced_of_color = matches!(
+                parse_inner_condition(text),
+                Ok((
+                    _,
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                metric: CastManaSpentMetric::OfColor { .. },
+                                ..
+                            },
+                        },
+                        ..
+                    }
+                ))
+            );
+            assert!(!produced_of_color, "new arm stole sibling phrase {text:?}");
+        }
+        // U1 specifically must not parse AT ALL — a silent success would gate
+        // Henge Walker on the wrong metric instead of failing closed.
+        assert!(
+            parse_inner_condition(
+                "at least three mana of the same color was spent to cast this spell"
+            )
+            .is_err(),
+            "max-over-colors is out of scope and must fail closed"
+        );
+    }
+
+    /// Group B — sibling non-regression: the three incumbent metrics keep their
+    /// exact pre-change output now that a fourth arm sits between them in the
+    /// `parse_resolution_context_conditions` alt.
+    #[test]
+    fn color_mana_spent_threshold_siblings_unchanged() {
+        let metric_of = |text: &str| match parse_inner_condition(text) {
+            Ok((
+                "",
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast { scope, metric },
+                        },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+            )) => (scope, metric, comparator, value),
+            other => panic!("expected mana-spent comparison for {text:?}, got {other:?}"),
+        };
+
+        assert_eq!(
+            metric_of("two or more colors of mana were spent to cast it"),
+            (
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::DistinctColors,
+                Comparator::GE,
+                2
+            )
+        );
+        assert_eq!(
+            metric_of("at least three mana was spent to cast this spell"),
+            (
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::Total,
+                Comparator::GE,
+                3
+            )
+        );
+        assert_eq!(
+            metric_of("five or more mana was spent to cast that spell"),
+            (
+                CastManaObjectScope::TriggeringSpell,
+                CastManaSpentMetric::Total,
+                Comparator::GE,
+                5
+            )
+        );
+    }
+
     #[test]
     fn test_parse_condition_mana_spent_vs_self_power_only() {
         let (rest, c) = parse_condition(
@@ -18787,6 +19065,25 @@ mod tests {
             parse_recipient_has_counters("it has a shield counter on the battlefield").is_err(),
             "non-pronoun suffix must not match the counter axis"
         );
+    }
+
+    /// CR 122.1 + CR 608.2c: effect-chain parsing may rebind only the bare
+    /// recipient-pronoun form after an earlier typed target. Explicit source
+    /// and demonstrative-recipient subjects must remain distinguishable.
+    #[test]
+    fn leading_if_bare_recipient_counter_condition_is_narrow() {
+        assert!(is_leading_if_bare_recipient_counter_condition(
+            "If it has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If this creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If that creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If it is tapped, it gains flying"
+        ));
     }
 
     /// CR 611.3a: the bound pronoun "it" in a self-referential combat-state gate
