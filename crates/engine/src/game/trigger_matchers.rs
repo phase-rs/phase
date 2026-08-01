@@ -5050,7 +5050,7 @@ mod tests {
                 &state,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 PlayerId(1),
-                source_id,
+                &test_trigger_source_context(&state, source_id),
             ),
             "attacking the monarch (P1) must match"
         );
@@ -5062,7 +5062,7 @@ mod tests {
                 &state,
                 crate::game::combat::AttackTarget::Player(PlayerId(0)),
                 PlayerId(0),
-                source_id,
+                &test_trigger_source_context(&state, source_id),
             ),
             "attacking a non-monarch player must NOT match"
         );
@@ -5076,7 +5076,7 @@ mod tests {
                 &state,
                 crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 PlayerId(1),
-                source_id,
+                &test_trigger_source_context(&state, source_id),
             ),
             "with no monarch, the monarch attack-target filter must never match"
         );
