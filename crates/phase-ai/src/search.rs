@@ -3783,8 +3783,12 @@ pub fn select_safe_action_from_scores(
     temperature: f64,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
-    softmax_select_pairs(scored, temperature, rng)
-        .filter(|action| !is_pact_payment_cast(state, action))
+    let safe: Vec<_> = scored
+        .iter()
+        .filter(|(action, _)| !is_pact_payment_cast(state, action))
+        .cloned()
+        .collect();
+    softmax_select_pairs(&safe, temperature, rng)
 }
 
 /// Internal softmax primitive for the canonical chooser and phase-AI tests.
@@ -4681,6 +4685,16 @@ mod tests {
             )
             .is_none(),
             "a public score-to-action bridge must reject caller-supplied Pact actions without a durable route"
+        );
+        assert_eq!(
+            select_safe_action_from_scores(
+                runner.state(),
+                &[(root.action, 100.0), (GameAction::PassPriority, 1.0)],
+                1.0,
+                &mut SmallRng::seed_from_u64(103),
+            ),
+            Some(GameAction::PassPriority),
+            "removing Pact candidates before softmax preserves a remaining safe action"
         );
     }
 

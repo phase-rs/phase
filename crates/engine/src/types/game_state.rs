@@ -18450,6 +18450,11 @@ impl GameState {
             dt.ability.clear_trigger_identity_recursive();
             dt.provenance = None;
         }
+        for firing in clone.stack_trigger_firings.values_mut() {
+            if matches!(firing, TriggerFiring::Delayed(Some(_))) {
+                *firing = TriggerFiring::Delayed(None);
+            }
+        }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
         }
@@ -22186,6 +22191,28 @@ mod tests {
         assert!(
             !loop_states_equal(&ordinary, &delayed),
             "ordinary and delayed stack-trigger firings must not share a loop identity"
+        );
+    }
+
+    #[test]
+    fn loop_states_equal_ignores_delayed_trigger_receipt_identity() {
+        let mut first = GameState::new_two_player(7);
+        let mut later = first.clone();
+        first
+            .stack_trigger_firings
+            .insert(ObjectId(91), TriggerFiring::Delayed(None));
+        later.stack_trigger_firings.insert(
+            ObjectId(91),
+            TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+                token: DelayedTriggerToken(1),
+                instance: DelayedTriggerInstanceId(1),
+                source_id: ObjectId(1),
+            })),
+        );
+
+        assert!(
+            loop_states_equal(&first.normalize_for_loop(), &later.normalize_for_loop()),
+            "a delayed trigger's installation receipt is not loop-material state"
         );
     }
 

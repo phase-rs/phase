@@ -361,6 +361,7 @@ struct BenefitClassificationContext {
 #[derive(Default)]
 struct BenefitPricingContext {
     ai_draws_so_far: u32,
+    previewed_ai_draw: bool,
 }
 
 impl EffectTriviality {
@@ -472,12 +473,13 @@ fn effect_benefit_value(
             // `preview_draw_delivery` starts from its input state. A later
             // chained draw therefore cannot be priced independently without
             // replaying the earlier delivery; stand down rather than double-count.
-            if pricing.ai_draws_so_far > 0 {
+            if pricing.previewed_ai_draw {
                 return None;
             }
             let requested = resolve_quantity(state, count, ai_player, source_id).max(0) as u32;
             match preview_draw_delivery(state, ai_player, requested) {
                 DrawDeliveryPreview::Exact { delivered } => {
+                    pricing.previewed_ai_draw = true;
                     pricing.ai_draws_so_far = pricing.ai_draws_so_far.saturating_add(delivered);
                     Some(f64::from(delivered) * SINGLE_CARD_VALUE)
                 }

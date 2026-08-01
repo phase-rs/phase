@@ -338,6 +338,7 @@ fn preview_checks_empty_library_replacements_before_exact_zero() {
         1,
         DrawDeliveryPreview::Exact { delivered: 0 },
     );
+    assert_eq!(completed_delivery(runner(0, Vec::new()), 1).0, 0);
     preview_is_read_only(
         &runner(0, vec![optional_prevent()]),
         1,

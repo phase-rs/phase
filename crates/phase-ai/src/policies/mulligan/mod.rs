@@ -109,10 +109,18 @@ impl OpeningHandActionForecast {
     pub(super) fn for_hand(hand: &[ObjectId], state: &GameState) -> Self {
         let Some(player) = hand
             .iter()
-            .find_map(|object_id| state.objects.get(object_id).map(|object| object.controller))
+            .find_map(|object_id| state.objects.get(object_id).map(|object| object.owner))
         else {
             return Self::default();
         };
+        if hand.iter().any(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| object.owner != player)
+        }) {
+            return Self::default();
+        }
 
         let player_count = state.players.len() as u32;
         if player_count == 0 {
