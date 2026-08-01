@@ -21,6 +21,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{ManaChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -32,6 +33,7 @@ const DARK_RITUAL_ORACLE: &str = "Add {B}{B}{B}.";
 // Trigger line of Last Light of Durin's Day (the Mountaincycling keyword line
 // is irrelevant to the rider under test and omitted).
 const LAST_LIGHT_ORACLE: &str = "Whenever a Mountain you control enters, put a quest counter on this enchantment. If it has six or more quest counters on it, sacrifice it. If you do, search your hand and/or library for a Dragon card and put it onto the battlefield. If you search your library this way, shuffle.";
+const REVELATION_OF_POWER_ORACLE: &str = "Target creature gets +2/+2 until end of turn. If it has a counter on it, it also gains flying and lifelink until end of turn.";
 
 fn counter_count(runner: &engine::game::scenario::GameRunner, id: ObjectId, counter: &str) -> u32 {
     runner.state().objects[&id]
@@ -295,5 +297,33 @@ fn source_counter_rider_sacrifices_source_not_triggering_object() {
         Zone::Battlefield,
         "the triggering Mountain must survive — pre-fix the TriggeringSource \
          mis-binding sacrificed it instead of the source"
+    );
+}
+
+/// Issue #6559 regression: the intervening counter check reads the previously
+/// chosen creature, not the Instant. This drives casting, target selection,
+/// condition evaluation, and layer application; it fails if the source-counter
+/// guard binds the rider's bare pronouns to `SelfRef`.
+#[test]
+fn revelation_of_power_grants_keywords_to_its_countered_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario.add_creature(P0, "Countered Creature", 2, 2).id();
+    scenario.with_counter(creature, engine::types::counter::CounterType::Plus1Plus1, 1);
+    let revelation = scenario
+        .add_spell_to_hand_from_oracle(P0, "Revelation of Power", true, REVELATION_OF_POWER_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(revelation).target_object(creature).resolve();
+
+    assert!(
+        outcome.state().objects[&creature].has_keyword(&Keyword::Flying),
+        "the countered target must gain flying"
+    );
+    assert!(
+        outcome.state().objects[&creature].has_keyword(&Keyword::Lifelink),
+        "the countered target must gain lifelink"
     );
 }
