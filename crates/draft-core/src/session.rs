@@ -1763,7 +1763,10 @@ mod tests {
             .find(|player| !paired_players.contains(player))
             .expect("one player is unpaired in a three-player pod");
         assert_eq!(
-            session.match_records.get(&bye).map(|record| record.match_wins),
+            session
+                .match_records
+                .get(&bye)
+                .map(|record| record.match_wins),
             Some(1),
             "the specific unpaired player earns exactly one match win",
         );
@@ -1784,12 +1787,19 @@ mod tests {
             Err(DraftError::InvalidTransition { .. })
         ));
         assert_eq!(
-            session.pairings.iter().filter(|pairing| pairing.round == 1).count(),
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 1)
+                .count(),
             1,
             "replaying a completed round must not append pairings",
         );
         assert_eq!(
-            session.match_records.get(&bye).map(|record| record.match_wins),
+            session
+                .match_records
+                .get(&bye)
+                .map(|record| record.match_wins),
             Some(1),
             "replaying a completed round must not award the bye twice",
         );
