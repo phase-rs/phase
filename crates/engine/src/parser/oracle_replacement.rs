@@ -5280,76 +5280,30 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                     )
                 })
         })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| parse_external_entry_untapped_long_suffix(stripped))
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
+        .or_else(|| parse_external_entry_plain_suffix(stripped))
 }
 
-/// CR 614.1c: Parse the long external-entry untapped form. The subject is a
-/// type phrase of arbitrary length, so capture it before a factored verb axis
-/// and require the suffix to consume the full line.
-fn parse_external_entry_untapped_long_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
+/// CR 614.1c: Parse the external-entry tap-state grammar. The type-phrase
+/// subject is arbitrary, while verb number, battlefield wording, and tap state
+/// vary independently; parse those axes once rather than adding suffix arms.
+fn parse_external_entry_plain_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
     type VE<'a> = OracleError<'a>;
-    let (_, subject) = terminated(
+    let (_, (subject, (_, enters_tapped))) = terminated(
         pair(
             take_until::<_, _, VE>(" enter"),
-            alt((
-                tag(" enter the battlefield untapped"),
-                tag(" enters the battlefield untapped"),
-            )),
+            preceded(
+                pair(tag(" enter"), opt(tag("s"))),
+                pair(
+                    opt(tag(" the battlefield")),
+                    alt((value(true, tag(" tapped")), value(false, tag(" untapped")))),
+                ),
+            ),
         ),
         eof::<&str, VE<'_>>,
     )
     .parse(input)
     .ok()?;
-    Some((
-        subject.0,
-        ExternalEntryKind::Plain {
-            enters_tapped: false,
-        },
-    ))
+    Some((subject, ExternalEntryKind::Plain { enters_tapped }))
 }
 
 fn build_external_entry_replacement(
