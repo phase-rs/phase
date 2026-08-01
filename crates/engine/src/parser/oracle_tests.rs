@@ -23268,7 +23268,15 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
     assert!(
         matches!(
             &static_abilities[0].condition,
-            Some(StaticCondition::RecipientHasCounters { .. })
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Recipient,
+                        ..
+                    },
+                },
+                ..
+            })
         ),
         "the bare counter-condition pronoun must gate the recipient, got {:?}",
         static_abilities[0].condition
@@ -23306,9 +23314,17 @@ fn explicit_source_counter_gate_over_prior_target_stays_source_scoped() {
     assert!(
         matches!(
             &static_abilities[0].condition,
-            Some(StaticCondition::HasCounters { .. })
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        ..
+                    },
+                },
+                ..
+            })
         ),
-        "explicit source text must retain HasCounters, got {:?}",
+        "explicit source text must retain CountersOn(Source), got {:?}",
         static_abilities[0].condition
     );
 }

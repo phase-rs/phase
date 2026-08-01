@@ -296,14 +296,25 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     }
 }
 
-fn generic_effect_has_source_counter_condition(effect: &Effect) -> bool {
+fn generic_effect_has_source_counter_quantity_condition(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::GenericEffect {
             static_abilities,
             ..
         } if static_abilities.iter().any(|definition| {
-            matches!(&definition.condition, Some(StaticCondition::HasCounters { .. }))
+            matches!(
+                &definition.condition,
+                Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::Source,
+                            ..
+                        },
+                    },
+                    ..
+                })
+            )
         })
     )
 }
@@ -312,7 +323,7 @@ fn generic_effect_has_source_counter_condition(effect: &Effect) -> bool {
 /// `if it has … counter on it,` gate follows the prior chosen target. This is
 /// the sole authority for that lexical form after its static definitions have
 /// been finalized; explicit source subjects never reach this helper.
-fn rewrite_generic_effect_source_counter_condition_to_recipient(effect: &mut Effect) {
+fn rewrite_generic_effect_source_counter_quantity_condition_to_recipient(effect: &mut Effect) {
     let Effect::GenericEffect {
         static_abilities, ..
     } = effect
@@ -321,19 +332,25 @@ fn rewrite_generic_effect_source_counter_condition_to_recipient(effect: &mut Eff
     };
 
     for definition in static_abilities {
-        let Some(StaticCondition::HasCounters {
-            counters,
-            minimum,
-            maximum,
-        }) = &definition.condition
-        else {
+        let is_source_counter_quantity = matches!(
+            &definition.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        ..
+                    },
+                },
+                ..
+            })
+        );
+        if !is_source_counter_quantity {
             continue;
-        };
-        definition.condition = Some(StaticCondition::RecipientHasCounters {
-            counters: counters.clone(),
-            minimum: *minimum,
-            maximum: *maximum,
-        });
+        }
+        definition.condition = definition
+            .condition
+            .take()
+            .map(crate::parser::oracle_static::rebind_source_object_quantities_to_recipient);
     }
 }
 
@@ -31137,12 +31154,14 @@ pub(crate) fn parse_effect_chain_ir(
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
         if prior_typed_referent
-            && generic_effect_has_source_counter_condition(&clause.effect)
+            && generic_effect_has_source_counter_quantity_condition(&clause.effect)
             && crate::parser::oracle_nom::condition::is_leading_if_bare_recipient_counter_condition(
                 normalized_text,
             )
         {
-            rewrite_generic_effect_source_counter_condition_to_recipient(&mut clause.effect);
+            rewrite_generic_effect_source_counter_quantity_condition_to_recipient(
+                &mut clause.effect,
+            );
         }
         // CR 608.2c: Bind a bare anaphoric "the difference" count placeholder in
         // this clause against the two operands its own leading `QuantityCheck`
