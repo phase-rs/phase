@@ -30258,6 +30258,18 @@ fn unbindable_search_destination_removes_move_and_attachment() {
         AbilityKind::Spell,
     );
 
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "change_zone_enters_under_anaphor"
+        ),
+        "the unbound SearchDestination must replace its preinstalled search assembly: {def:#?}"
+    );
+    assert!(
+        def.sub_ability.is_none() && def.else_ability.is_none() && !def.forward_result,
+        "the gap must not retain an executable attachment or alternate branch: {def:#?}"
+    );
     let mut chain = Vec::new();
     collect_chain_defs(&def, &mut chain);
     assert!(

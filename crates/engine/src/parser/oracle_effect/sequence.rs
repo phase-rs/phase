@@ -3719,19 +3719,27 @@ pub(super) fn apply_clause_continuation(
             // patching that node and merely appending an Unimplemented sibling
             // would leave the default-controller move executable. Replacing
             // the whole search assembly also prevents an attachment rider from
-            // surviving without the controller clause it depends on.
+            // surviving without the controller clause it depends on. The arena
+            // keys this existing clause by its boxed-effect allocation, so mutate
+            // that effect in place and clear both chain links rather than assigning
+            // a new AbilityDefinition behind the arena's back.
             if let Some(possessor) = enters_under.unbound_possessor() {
-                let gap = AbilityDefinition::new(
-                    kind,
-                    Effect::unimplemented(
+                if let Some(previous) = defs.last_mut() {
+                    *previous.effect = Effect::unimplemented(
                         "change_zone_enters_under_anaphor",
                         possessor.printed_clause(),
-                    ),
-                );
-                if let Some(previous) = defs.last_mut() {
-                    *previous = gap;
+                    );
+                    previous.sub_ability = None;
+                    previous.else_ability = None;
+                    previous.forward_result = false;
                 } else {
-                    defs.push(gap);
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::unimplemented(
+                            "change_zone_enters_under_anaphor",
+                            possessor.printed_clause(),
+                        ),
+                    ));
                 }
                 return;
             }
