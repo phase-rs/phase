@@ -10,8 +10,9 @@ multi-face cards keep their back faces) into a small committed fixture that
 `tests::integration::support::shared_card_db` loads instead.
 
 Scans the integration tests under `crates/engine/tests`, source-side test
-modules under `crates/engine/src`, and source files that load the same fixture
-through `crate::test_support::shared_card_db`.
+modules under `crates/engine/src`, source files that load the same fixture
+through `crate::test_support::shared_card_db`, and Phase AI tests that load the
+fixture directly.
 
 Re-run after adding a test that references a new card:
 
@@ -49,6 +50,10 @@ ALWAYS_SCAN_SRC_FILES = [
     REPO_ROOT / "crates/engine/src/game/meld_tests.rs",
 ]
 
+# Phase AI owns a small number of real-card scenarios that load the engine
+# fixture directly, rather than through the engine test-support wrapper.
+FIXTURE_CONSUMER_TEST_FILES = [REPO_ROOT / "crates/phase-ai/src/search.rs"]
+
 # Double-quoted Rust string literal contents (handles \" escapes).
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -74,7 +79,11 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
     file. Card-name literals are single-line, so this loses nothing.
     """
     keys: set[str] = set()
-    for rs in [*TESTS_DIR.rglob("*.rs"), *src_fixture_files()]:
+    for rs in [
+        *TESTS_DIR.rglob("*.rs"),
+        *src_fixture_files(),
+        *FIXTURE_CONSUMER_TEST_FILES,
+    ]:
         text = rs.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             for raw in STRING_LITERAL.findall(line):

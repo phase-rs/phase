@@ -6924,9 +6924,10 @@ mod tests {
     #[test]
     fn real_subtlety_prompt_stays_conservative_against_an_opposing_creature_spell() {
         let db = CardDatabase::from_export(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/card-data.json"),
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/integration_cards.json"),
         )
-        .expect("full card export loads real Subtlety data");
+        .expect("Subtlety integration fixture loads");
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let subtlety = scenario.add_real_card(P0, "Subtlety", Zone::Hand, &db);

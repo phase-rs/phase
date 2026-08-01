@@ -30,7 +30,7 @@ use crate::types::ability::{ActivationRestriction, DamageModification};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
@@ -785,12 +785,15 @@ pub fn board_delta(before: &GameState, after: &GameState) -> BoardDelta {
 pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameState) -> bool {
     // (1) Board equal modulo the NARROWED projection AND modulo the stack, with the
     // object resource axes STRICT-COMPARED (R5-B1). Project both, clear both stacks
-    // (the stack is compared separately in (2)), then require full board equality
-    // plus loyalty-activation parity plus strict object damage/counter equality.
+    // and their stack-entry-indexed firing sidecars (the stack is compared separately
+    // in (2)), then require full board equality plus loyalty-activation parity plus
+    // strict object damage/counter equality.
     let mut pa = project_out_resources(prior);
     let mut pb = project_out_resources(current);
     pa.stack.clear();
     pb.stack.clear();
+    pa.stack_trigger_firings.clear();
+    pb.stack_trigger_firings.clear();
     if !(loop_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
         && object_resource_axes_match(prior, current))
@@ -2182,7 +2185,8 @@ fn object_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
 
 /// Normalize a stack into behavioral-identity clones for coverability counting:
 /// zero the volatile top-level `id`/`source_id` and the per-kind inner `source_id`,
-/// and strip nested `source_id`s from the embedded ability
+/// strip nested `source_id`s from the embedded ability, and retain the associated
+/// trigger-firing class
 /// ([`crate::game::triggers::normalize_ability_identity`]). KEEP `controller` (an
 /// opponent's otherwise-identical trigger must never merge with the controller's)
 /// and the entire `kind` payload (`condition`, `trigger_event`,
@@ -2190,11 +2194,19 @@ fn object_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
 /// content difference only SUPPRESSES a match (fail-safe). Two same-controller
 /// entries differing only in `source_id` (two Blight-Priest copies) resolve
 /// identically after the item-4 guard, so identifying them is sound.
-fn normalized_stack_entries(state: &GameState) -> Vec<StackEntry> {
+fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<TriggerFiring>)> {
     state
         .stack
         .iter()
         .map(|entry| {
+            let firing = state
+                .stack_trigger_firings
+                .get(&entry.id)
+                .copied()
+                .map(|firing| match firing {
+                    TriggerFiring::Delayed(Some(_)) => TriggerFiring::Delayed(None),
+                    firing => firing,
+                });
             let mut norm = entry.clone();
             norm.id = ObjectId(0);
             norm.source_id = ObjectId(0);
@@ -2216,7 +2228,7 @@ fn normalized_stack_entries(state: &GameState) -> Vec<StackEntry> {
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
             }
-            norm
+            (norm, firing)
         })
         .collect()
 }
@@ -2229,7 +2241,10 @@ fn normalized_stack_entries(state: &GameState) -> Vec<StackEntry> {
 ///
 // ponytail: greedy embedding + per-kind linear counts, n = stack depth (small);
 // revisit only if a deep-stack combo profiles hot.
-fn stack_covers(prior: &[StackEntry], current: &[StackEntry]) -> bool {
+fn stack_covers(
+    prior: &[(StackEntry, Option<TriggerFiring>)],
+    current: &[(StackEntry, Option<TriggerFiring>)],
+) -> bool {
     // (2a) greedy two-pointer subsequence embedding, bottom-up.
     let mut ci = 0usize;
     for pe in prior {
@@ -3009,15 +3024,30 @@ fn project_out_resources(state: &GameState) -> GameState {
     // `die_result`, plus the boxed `ability` and `condition`. These are CONTENT, not
     // bookkeeping: a residual difference in any of them only makes the two states
     // compare UNEQUAL, which SUPPRESSES a match — fail-safe (never a false win). The
-    // same fail-safe direction holds for any state field that still references a raw
-    // stack id (`stack_paid_facts`, `pending_trigger_entry`, a `WaitingFor` carrying
-    // a stack-entry id): left AS-IS, a residual mismatch can only suppress a match.
+    // `stack_trigger_firings` is the one sidecar indexed by the fresh stack-entry
+    // id, so canonicalize it with the stack. The firing kind remains significant:
+    // CR 603.7 keeps delayed and ordinary trigger firings distinct. A delayed
+    // provenance receipt is monotonic installation history, however, so it is
+    // reduced to the same legacy-delayed marker as `normalize_for_loop`. The same
+    // fail-safe direction holds for any other state field that still references a
+    // raw stack id (`stack_paid_facts`, `pending_trigger_entry`, a `WaitingFor`
+    // carrying a stack-entry id): left AS-IS, a residual mismatch can only suppress
+    // a match.
     // Canonicalizing the position id can therefore never MANUFACTURE a false positive
     // (a wrongful win); it can only make a genuine repeat visible.
+    let mut trigger_firings = std::mem::take(&mut s.stack_trigger_firings);
     for (pos, entry) in s.stack.iter_mut().enumerate() {
-        entry.id = ObjectId(pos as u64);
+        let original_id = entry.id;
+        let canonical_id = ObjectId(pos as u64);
+        entry.id = canonical_id;
+        if let Some(firing) = trigger_firings.remove(&original_id) {
+            let firing = match firing {
+                TriggerFiring::Delayed(Some(_)) => TriggerFiring::Delayed(None),
+                firing => firing,
+            };
+            s.stack_trigger_firings.insert(canonical_id, firing);
+        }
     }
-
     s
 }
 
@@ -3266,7 +3296,9 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken,
+    };
     use crate::types::zones::Zone;
 
     fn pid(n: u8) -> PlayerId {
@@ -4178,12 +4210,38 @@ mod tests {
     fn modulo_equal_ignores_volatile_stack_entry_id() {
         let mut a = GameState::new_two_player(7);
         a.stack.push_back(trigger_entry(10, 500, 0));
+        a.stack_trigger_firings.insert(
+            ObjectId(10),
+            TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+                token: DelayedTriggerToken(1),
+                instance: DelayedTriggerInstanceId(1),
+                source_id: ObjectId(500),
+            })),
+        );
         let mut b = a.clone();
         b.stack.clear();
         b.stack.push_back(trigger_entry(11, 500, 0)); // same source, fresh id
+        b.stack_trigger_firings.remove(&ObjectId(10));
+        b.stack_trigger_firings.insert(
+            ObjectId(11),
+            TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+                token: DelayedTriggerToken(2),
+                instance: DelayedTriggerInstanceId(2),
+                source_id: ObjectId(500),
+            })),
+        );
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
-            "same triggered ability from the same source must compare equal modulo its fresh id"
+            "same delayed firing must compare equal modulo fresh stack and provenance identities"
+        );
+
+        let mut different_firing = b.clone();
+        different_firing
+            .stack_trigger_firings
+            .insert(ObjectId(11), TriggerFiring::Ordinary);
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &different_firing),
+            "ordinary and delayed trigger firings must remain distinct"
         );
 
         // CONTROL: a different source_id is a genuinely different stack point.
@@ -4439,6 +4497,36 @@ mod tests {
     fn n1_p1_homogeneous_cover_true() {
         let (prior, current) = cover_base();
         assert!(loop_states_cover_modulo_growth(&prior, &current));
+    }
+
+    /// Stack growth compares trigger-firing semantics, not the fresh IDs that
+    /// index their sidecar rows. This keeps the board-only precheck independent
+    /// of stack depth while preserving CR 603.7's ordinary/delayed distinction.
+    #[test]
+    fn n1_trigger_firings_follow_normalized_stack_entries() {
+        let (mut prior, mut current) = cover_base();
+        for id in [10, 11] {
+            prior
+                .stack_trigger_firings
+                .insert(ObjectId(id), TriggerFiring::Ordinary);
+        }
+        for id in [20, 21, 22] {
+            current
+                .stack_trigger_firings
+                .insert(ObjectId(id), TriggerFiring::Ordinary);
+        }
+        assert!(
+            loop_states_cover_modulo_growth(&prior, &current),
+            "fresh stack-entry IDs must not block a same-kind trigger cover"
+        );
+
+        current
+            .stack_trigger_firings
+            .insert(ObjectId(21), TriggerFiring::Delayed(None));
+        assert!(
+            !loop_states_cover_modulo_growth(&prior, &current),
+            "ordinary and delayed firing classes must not cover each other"
+        );
     }
 
     /// P2: interleaved `[B,A]` → `[B,B,A]` covers (subsequence, non-prefix) —
