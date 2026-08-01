@@ -19,6 +19,12 @@ import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 interface DeckListProps {
   deck: ParsedDeck;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+  /** Adds one more copy of an existing entry, in place. See
+   *  `CardEntryRowProps.onIncrement`. */
+  onIncrementCard: (name: string, section: "main" | "sideboard") => void;
+  /** CR 100.2a: engine-resolved copy-limit predicate paired with
+   *  `onIncrementCard`. See `CardEntryRowProps.canIncrement`. */
+  canIncrementCard: (name: string) => boolean;
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onImport: (deck: ParsedDeck) => void;
   onCardHover?: (cardName: string | null) => void;
@@ -55,6 +61,8 @@ function totalCards(entries: DeckEntry[]): number {
 export function DeckList({
   deck,
   onRemoveCard,
+  onIncrementCard,
+  canIncrementCard,
   onMoveCard,
   onImport,
   onCardHover,
@@ -314,6 +322,8 @@ export function DeckList({
                 entries={mainGroups.get(key) ?? []}
                 section="main"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
@@ -331,6 +341,8 @@ export function DeckList({
                 entries={deck.sideboard}
                 section="sideboard"
                 onRemove={onRemoveCard}
+                onIncrement={onIncrementCard}
+                canIncrement={canIncrementCard}
                 onMove={onMoveCard}
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}

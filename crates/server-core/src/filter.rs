@@ -488,7 +488,7 @@ mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -713,7 +713,7 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
-        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger = Some(Box::new(ctx.pending.clone()));
         state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
 
         // Controller view: payload intact, batch intact.

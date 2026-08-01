@@ -22,70 +22,178 @@ expression: "&ir"
         "fragment": "{2}{B}: If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it. (A suspected creature has menace and can't block.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "PutCounter",
-            "counter_type": "P1P1",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "SelfRef"
-            }
-          },
-          "cost": {
-            "type": "Mana",
-            "cost": {
-              "type": "Cost",
-              "shards": [
-                "Black"
-              ],
-              "generic": 2
-            }
-          },
-          "sub_ability": null,
-          "else_ability": {
-            "kind": "Activated",
-            "effect": {
-              "type": "Suspect",
-              "target": {
-                "type": "SelfRef"
+        "Spell": {
+          "source_text": "If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 44,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "If ~ is suspected, put a +1/+1 counter on it"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "PutCounter",
+                    "counter_type": "P1P1",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "SelfRef"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": {
+                  "type": "SourceMatchesFilter",
+                  "filter": {
+                    "type": "Typed",
+                    "type_filters": [],
+                    "controller": null,
+                    "properties": [
+                      {
+                        "type": "Suspected"
+                      }
+                    ]
+                  }
+                },
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "scope": {
-                "type": "Single"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 46,
+                    "end_byte": 67,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "Otherwise, suspect it"
+                },
+                "disposition": {
+                  "BranchOtherwise": {
+                    "else_def": {
+                      "kind": "Activated",
+                      "effect": {
+                        "type": "Suspect",
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "scope": {
+                          "type": "Single"
+                        }
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
+                    "kind": "Bound"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "otherwise_placeholder",
+                    "description": null
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Mana",
+              "cost": {
+                "type": "Cost",
+                "shards": [
+                  "Black"
+                ],
+                "generic": 2
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "description": "{2}{B}: If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "duration": null,
-          "description": "{2}{B}: If ~ is suspected, put a +1/+1 counter on it. Otherwise, suspect it.",
-          "target_prompt": null,
-          "condition": {
-            "type": "SourceMatchesFilter",
-            "filter": {
-              "type": "Typed",
-              "type_filters": [],
-              "controller": null,
-              "properties": [
-                {
-                  "type": "Suspected"
-                }
-              ]
-            }
-          },
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

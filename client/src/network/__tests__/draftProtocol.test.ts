@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 4", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(4);
+    it("is version 7", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(7);
     });
   });
 
@@ -68,6 +68,8 @@ describe("draftProtocol", () => {
       "draft_kicked",
       "draft_pairing",
       "draft_match_result",
+      "draft_match_settlement",
+      "draft_match_settlement_ack",
       "draft_paused",
       "draft_resumed",
       "draft_lobby_update",
@@ -76,7 +78,11 @@ describe("draftProtocol", () => {
       "draft_request_advance",
       "draft_match_start",
       "draft_bo3_sideboard_prompt",
+      "draft_bo3_between_games",
       "draft_bo3_sideboard_submit",
+      "draft_bo3_intergame_command",
+      "draft_bo3_intergame_authorized",
+      "draft_bo3_intergame_receipt",
       "draft_bo3_play_draw_prompt",
       "draft_bo3_play_draw_choice",
       "draft_bo3_game_start",
@@ -158,6 +164,16 @@ describe("draftProtocol", () => {
             ai_decks: [],
           },
           matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1",
+            matchId: "round-1-table-1",
+            round: 1,
+            sessionKey: "session-1",
+            lease: "lease-1",
+            nonce: "nonce-1",
+            revision: 0,
+            matchAuthoritySeat: 0,
+          },
         },
       };
 

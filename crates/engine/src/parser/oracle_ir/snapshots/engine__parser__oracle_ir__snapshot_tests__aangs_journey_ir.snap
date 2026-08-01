@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 763
 expression: "&ir"
 ---
 {
@@ -85,282 +84,435 @@ expression: "&ir"
         "fragment": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "SearchLibrary",
-            "filter": {
-              "type": "Typed",
-              "type_filters": [
-                "Land"
-              ],
-              "controller": null,
-              "properties": [
-                {
-                  "type": "HasSupertype",
-                  "value": "Basic"
-                }
-              ]
-            },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "reveal": false
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "SearchLibrary",
-              "filter": {
-                "type": "Or",
-                "filters": [
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Land"
-                    ],
-                    "controller": null,
-                    "properties": [
-                      {
-                        "type": "HasSupertype",
-                        "value": "Basic"
-                      }
-                    ]
+        "Spell": {
+          "source_text": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle. You gain 2 life.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Enchantment",
-                      {
-                        "Subtype": "Shrine"
-                      }
-                    ],
-                    "controller": null,
-                    "properties": []
-                  }
-                ]
-              },
-              "count": {
-                "type": "Fixed",
-                "value": 2
-              },
-              "reveal": false,
-              "selection_constraint": {
-                "type": "MatchEachFilter",
-                "filters": [
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Land"
-                    ],
-                    "controller": null,
-                    "properties": [
-                      {
-                        "type": "HasSupertype",
-                        "value": "Basic"
-                      }
-                    ]
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 41,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
                   },
-                  {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Enchantment",
-                      {
-                        "Subtype": "Shrine"
+                  "fragment": "Search your library for a basic land card"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": {
+                      "SearchDestination": {
+                        "destination": "Hand",
+                        "enter_tapped": false,
+                        "enters_under": null,
+                        "reveal": false,
+                        "attach_host": null
                       }
-                    ],
-                    "controller": null,
-                    "properties": []
+                    }
                   }
-                ]
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "SearchLibrary",
+                    "filter": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Land"
+                      ],
+                      "controller": null,
+                      "properties": [
+                        {
+                          "type": "HasSupertype",
+                          "value": "Basic"
+                        }
+                      ]
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "reveal": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 43,
+                    "end_byte": 136,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "If this spell was kicked, instead search your library for a basic land card and a Shrine card"
+                },
+                "disposition": {
+                  "FoldSearchIntoElse": {
+                    "intrinsic": {
+                      "SearchDestination": {
+                        "destination": "Hand",
+                        "enter_tapped": false,
+                        "enters_under": null,
+                        "reveal": false,
+                        "attach_host": null
+                      }
+                    }
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "SearchLibrary",
+                    "filter": {
+                      "type": "Or",
+                      "filters": [
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Land"
+                          ],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "HasSupertype",
+                              "value": "Basic"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Enchantment",
+                            {
+                              "Subtype": "Shrine"
+                            }
+                          ],
+                          "controller": null,
+                          "properties": []
+                        }
+                      ]
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 2
+                    },
+                    "reveal": false,
+                    "selection_constraint": {
+                      "type": "MatchEachFilter",
+                      "filters": [
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Land"
+                          ],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "HasSupertype",
+                              "value": "Basic"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Enchantment",
+                            {
+                              "Subtype": "Shrine"
+                            }
+                          ],
+                          "controller": null,
+                          "properties": []
+                        }
+                      ]
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": {
+                  "type": "AdditionalCostPaidInstead"
+                },
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 2,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 3
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 138,
+                    "end_byte": 156,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 2
+                  },
+                  "fragment": "Reveal those cards"
+                },
+                "disposition": {
+                  "Continue": {
+                    "continuation": "SearchResultClauseHandled"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Reveal",
+                    "target": {
+                      "type": "ParentTarget"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Comma",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 3,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 4
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 158,
+                    "end_byte": 181,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 3
+                  },
+                  "fragment": "put them into your hand"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": null,
+                    "destination": "Hand",
+                    "target": {
+                      "type": "ParentTarget"
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Then",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 4,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 5
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 188,
+                    "end_byte": 195,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 4
+                  },
+                  "fragment": "shuffle"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Shuffle",
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 5,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 6
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 197,
+                    "end_byte": 212,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 5
+                  },
+                  "fragment": "You gain 2 life"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GainLife",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 2
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": "Library",
-                "destination": "Hand",
-                "target": {
-                  "type": "Any"
-                },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
-                "kind": "Spell",
-                "effect": {
-                  "type": "ChangeZone",
-                  "origin": null,
-                  "destination": "Hand",
-                  "target": {
-                    "type": "ParentTarget"
-                  },
-                  "owner_library": false,
-                  "enter_transformed": false,
-                  "enter_tapped": false,
-                  "enters_attacking": false
-                },
-                "cost": null,
-                "sub_ability": {
-                  "kind": "Spell",
-                  "effect": {
-                    "type": "Shuffle",
-                    "target": {
-                      "type": "Controller"
-                    }
-                  },
-                  "cost": null,
-                  "sub_ability": {
-                    "kind": "Spell",
-                    "effect": {
-                      "type": "GainLife",
-                      "amount": {
-                        "type": "Fixed",
-                        "value": 2
-                      }
-                    },
-                    "cost": null,
-                    "sub_ability": null,
-                    "duration": null,
-                    "description": null,
-                    "target_prompt": null,
-                    "condition": null,
-                    "optional_targeting": false,
-                    "optional": false,
-                    "forward_result": false,
-                    "sub_link": "SequentialSibling"
-                  },
-                  "duration": null,
-                  "description": null,
-                  "target_prompt": null,
-                  "condition": null,
-                  "optional_targeting": false,
-                  "optional": false,
-                  "forward_result": false
-                },
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
-                "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
-              },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
-            },
-            "else_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": "Library",
-                "destination": "Hand",
-                "target": {
-                  "type": "Any"
-                },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
-                "kind": "Spell",
-                "effect": {
-                  "type": "ChangeZone",
-                  "origin": null,
-                  "destination": "Hand",
-                  "target": {
-                    "type": "ParentTarget"
-                  },
-                  "owner_library": false,
-                  "enter_transformed": false,
-                  "enter_tapped": false,
-                  "enters_attacking": false
-                },
-                "cost": null,
-                "sub_ability": {
-                  "kind": "Spell",
-                  "effect": {
-                    "type": "Shuffle",
-                    "target": {
-                      "type": "Controller"
-                    }
-                  },
-                  "cost": null,
-                  "sub_ability": {
-                    "kind": "Spell",
-                    "effect": {
-                      "type": "GainLife",
-                      "amount": {
-                        "type": "Fixed",
-                        "value": 2
-                      }
-                    },
-                    "cost": null,
-                    "sub_ability": null,
-                    "duration": null,
-                    "description": null,
-                    "target_prompt": null,
-                    "condition": null,
-                    "optional_targeting": false,
-                    "optional": false,
-                    "forward_result": false,
-                    "sub_link": "SequentialSibling"
-                  },
-                  "duration": null,
-                  "description": null,
-                  "target_prompt": null,
-                  "condition": null,
-                  "optional_targeting": false,
-                  "optional": false,
-                  "forward_result": false
-                },
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
-                "condition": null,
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false
-              },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
-              "optional": false,
-              "forward_result": false
-            },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": {
-              "type": "AdditionalCostPaidInstead"
-            },
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life."
+            }
+          ]
         }
       }
     }

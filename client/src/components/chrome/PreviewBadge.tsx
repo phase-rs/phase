@@ -39,8 +39,8 @@ export function PreviewBadge() {
       <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+3.75rem)] z-30 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
         <a
           href={__RELEASE_SITE_URL__}
-          target="_blank"
-          rel="noopener noreferrer"
+          target={isRemoteTauriShell ? undefined : "_blank"}
+          rel={isRemoteTauriShell ? undefined : "noopener noreferrer"}
           onClick={(e) => {
             e.preventDefault();
             rememberChannelPreference("release");
@@ -64,14 +64,17 @@ export function PreviewBadge() {
     );
   }
 
-  if (!__IS_RELEASE_BUILD__) return null;
+  // A remote desktop shell must always be able to switch back to preview,
+  // including when it is testing a locally-built release page without the
+  // production release flag stamped into the bundle.
+  if (!__IS_RELEASE_BUILD__ && !isRemoteTauriShell) return null;
 
   return (
     <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+3.75rem)] z-30 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
       <a
         href={__PREVIEW_SITE_URL__}
-        target="_blank"
-        rel="noopener noreferrer"
+        target={isRemoteTauriShell ? undefined : "_blank"}
+        rel={isRemoteTauriShell ? undefined : "noopener noreferrer"}
         // The remote Tauri shell keeps first-party navigation in the webview;
         // web builds retain the existing external-tab behavior.
         onClick={(e) => {

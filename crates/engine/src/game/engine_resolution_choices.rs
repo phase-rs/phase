@@ -12,7 +12,9 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
-use crate::types::mana::ManaCost;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::Zone;
 
 use super::effects;
@@ -794,10 +796,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(
@@ -1275,11 +1275,40 @@ pub(super) fn handle_resolution_choice(
                 // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
+            // CR 701.22a + CR 701.22d: a scry event occurs only after the
+            // controller has completed its top/bottom choices. Keep both the
+            // clamped look count and an explicit `Some(0)` bottom count on the
+            // event that observers preserve into their eventual trigger.
+            let resumed_events_start = events.len();
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: player,
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(all_cards.len() as u32),
+                scry_bottom_count: Some(bottom_cards.len() as u32),
+            });
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
             crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 603.2 + CR 603.3b: the resumed continuation can perform further
+            // observable game actions (e.g. a SECOND "scry N" in the same
+            // resolution — "whenever you scry" fires once per scry event) and
+            // pause again on another prompt before this action settles to
+            // Priority. `run_post_action_pipeline` only scans an action's events
+            // at a Priority settlement, so without parking here the resumed
+            // slice's events (the second scry's `PlayerPerformedAction`, which
+            // carries that scry's own effective look count) are dropped and its
+            // trigger is silently lost. Park the resumed slice into
+            // `deferred_triggers` (B2, mirroring
+            // `batch_or_drain_observer_triggers`); the queue drains with each
+            // trigger's own preserved event once resolution truly settles.
+            let waiting_for = finish_with_continuation(state, player, events);
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                resumed_events_start,
+            );
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::ArrangePlanarDeckTopChoice {
@@ -1962,7 +1991,7 @@ pub(super) fn handle_resolution_choice(
                         remaining_mv_budget,
                         filter,
                         zones,
-                        exile_instead_of_graveyard,
+                        graveyard_replacement,
                         source,
                         member_pool,
                     },
@@ -2017,7 +2046,7 @@ pub(super) fn handle_resolution_choice(
                         remaining_mv_budget,
                         filter,
                         zones,
-                        exile_instead_of_graveyard,
+                        graveyard_replacement: graveyard_replacement.clone(),
                         source,
                         member_pool,
                     },
@@ -2030,6 +2059,10 @@ pub(super) fn handle_resolution_choice(
                     constraint: None,
                     cast_transformed: false,
                     cleanup,
+                    // The window's success action installs this rider exactly
+                    // once after the cast finalizes. Passing it through this
+                    // request would make `initiate_cast_during_resolution`
+                    // install a duplicate synthetic replacement.
                     graveyard_replacement: None,
                     cost: crate::types::ability::ResolutionCastCost::Free,
                 },
@@ -2426,16 +2459,21 @@ pub(super) fn handle_resolution_choice(
                         });
                     }
                 }
-                PayableResource::ManaGeneric { per_x } => {
-                    let cost = ManaCost::Cost {
-                        shards: vec![],
-                        generic: amount.saturating_mul(per_x),
-                    };
+                PayableResource::ManaGeneric { base_cost } => {
+                    // CR 107.3f + CR 118.1 + CR 118.12: concretize the chosen
+                    // X into the ORIGINAL cost — any colored/generic pips
+                    // alongside the X shard (e.g. Elenda and Azor's
+                    // `{X}{W}{U}{B}`) survive concretization and are paid
+                    // here too. Paying a synthetic all-generic `{N}` cost
+                    // instead would silently drop the colored requirements
+                    // (#6410).
+                    let mut cost = base_cost.clone();
+                    cost.concretize_x(amount);
                     if !casting::can_pay_effect_mana_cost_after_auto_tap(
                         state, player, source_id, &cost,
                     ) {
                         return Err(EngineError::InvalidAction(format!(
-                            "Player {:?} cannot pay {} generic mana",
+                            "Player {:?} cannot pay {}",
                             player,
                             cost.mana_value()
                         )));
@@ -2459,9 +2497,28 @@ pub(super) fn handle_resolution_choice(
                     // CR 119.4: pay N life via the life-loss-as-cost authority
                     // (replacement pipeline + CantLoseLife) — NOT inline life
                     // subtraction.
+                    let resume_at_resolution_depth = state.resolution_stack.len();
                     match crate::game::life_costs::pay_life_as_cost(state, player, amount, events) {
                         crate::game::life_costs::PayLifeCostResult::Paid { .. } => {}
-                        _ => {
+                        crate::game::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
+                            ..
+                        }
+                        | crate::game::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                            ..
+                        } => {
+                            state.pending_deferred_life_cost_resume = Some(
+                                crate::types::game_state::DeferredLifeCostResume::PayAmount {
+                                    player,
+                                    total: accumulated.saturating_add(amount),
+                                    resume_at_resolution_depth,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                        crate::game::life_costs::PayLifeCostResult::InsufficientLife
+                        | crate::game::life_costs::PayLifeCostResult::Prohibited => {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {player:?} cannot pay {amount} life"
                             )))
@@ -2473,24 +2530,7 @@ pub(super) fn handle_resolution_choice(
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much
             // damage"). `last_effect_count` is the documented fallback slot.
             let total = accumulated.saturating_add(amount);
-            state.last_effect_count = Some(total as i32);
-            let pending_starts_with_pay_amount = state
-                .active_ability_continuation()
-                .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
-            if !pending_starts_with_pay_amount {
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.set_chosen_x_recursive(total);
-                }
-            }
-            let mut waiting_for = finish_with_continuation(state, player, events);
-            if let WaitingFor::PayAmountChoice {
-                accumulated: next_accumulated,
-                ..
-            } = &mut waiting_for
-            {
-                *next_accumulated = total;
-                state.waiting_for = waiting_for.clone();
-            }
+            let waiting_for = finish_pay_amount_choice(state, player, total, events);
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
@@ -3310,9 +3350,14 @@ pub(super) fn handle_resolution_choice(
             // replacement's decline ability runs via `pending_continuation`, which the
             // effect's resolver populated with the decline branch before the prompt.
             if optional && chosen.is_empty() {
-                for &card_id in &cards {
-                    state.revealed_cards.remove(&card_id);
-                }
+                state
+                    .resolve_and_apply_information(
+                        &cards,
+                        ResolvedInformationAudience::Controller(player),
+                        ResolvedInformationLifetime::UntilActionBoundary,
+                        ResolvedInformationEdit::Hide,
+                    )
+                    .expect("reveal-choice cleanup must reference live card occurrences");
                 state.private_look_ids.clear();
                 state.private_look_player = None;
                 set_priority(state, player);
@@ -3353,9 +3398,14 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            for &card_id in &cards {
-                state.revealed_cards.remove(&card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &cards,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-choice cleanup must reference live card occurrences");
             state.private_look_ids.clear();
             state.private_look_player = None;
 
@@ -3853,9 +3903,42 @@ pub(super) fn handle_resolution_choice(
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
             }
+            // CR 608.2c + CR 608.2d: A counter-kind choice first selects the
+            // object whose counters define the legal kinds. Preserve that
+            // object's exact public snapshot on the continuation so later
+            // "each other ..." text can exclude it without conflating it with
+            // the spell's source or a separately declared downstream target.
+            let counter_kind_choice = state
+                .active_ability_continuation()
+                .filter(|cont| {
+                    matches!(
+                        cont.chain.effect,
+                        crate::types::ability::Effect::ChooseCounterKind { .. }
+                    )
+                })
+                .and_then(|_| chosen.first())
+                .and_then(|id| {
+                    state.objects.get(id).map(|object| {
+                        crate::types::ability::CostPaidObjectSnapshot {
+                            object_id: *id,
+                            lki: object.snapshot_for_mana_spent(),
+                        }
+                    })
+                });
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
-                cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                if let Some(snapshot) = counter_kind_choice {
+                    if let crate::types::ability::Effect::ChooseCounterKind { target } =
+                        &mut cont.chain.effect
+                    {
+                        *target = crate::types::ability::TargetFilter::SpecificObject {
+                            id: snapshot.object_id,
+                        };
+                    }
+                    cont.chain.set_effect_context_object_recursive(snapshot);
+                } else {
+                    cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                }
                 // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
                 // over "the other cards exiled this way" (Plargg and Nassari)
                 // must confine its offer to THIS resolution's exile batch. The
@@ -3889,6 +3972,7 @@ pub(super) fn handle_resolution_choice(
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
+                        | crate::types::ability::Effect::ChooseCounterKind { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
@@ -4589,6 +4673,31 @@ pub(super) fn handle_resolution_choice(
                 // Issue #423 audit: no cards chosen — this branch moves no
                 // objects and emits no battlefield-exit events, so no
                 // dies-trigger collection is needed.
+                //
+                // CR 603.7: Terminal empty `up_to` must still rebind a fresh
+                // empty chain tracked set before the continuation drains, or a
+                // following `TargetFilter::TrackedSet` can observe a prior
+                // non-empty set. Mid-pause empty publishes stay skipped at the
+                // NeedsAura / NeedsChoice call sites (`mid_pause: true`).
+                if matches!(
+                    effect_kind,
+                    EffectKind::Sacrifice
+                        | EffectKind::ChangeZone
+                        | EffectKind::BounceAll
+                        | EffectKind::Tap
+                        | EffectKind::Untap
+                        | EffectKind::PutAtLibraryPosition
+                        | EffectKind::CastFromZone
+                ) && state.active_ability_continuation().is_some()
+                {
+                    publish_effect_zone_choice_tracked_set(
+                        state,
+                        effect_kind,
+                        &[],
+                        library_position,
+                        false,
+                    );
+                }
                 state.last_effect_count = Some(0);
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
@@ -4640,6 +4749,13 @@ pub(super) fn handle_resolution_choice(
                             if state.active_ability_continuation().is_none() {
                                 state.finish_active_paused_post_replacement_dispatch();
                             }
+                            // CR 608.2c + CR 701.21a: Singular sacrificed referent
+                            // for a chained Demonstrative / CostPaidObject consumer
+                            // is stamped once at the sacrifice-completion seam
+                            // (`perform_player_scope_sacrifices` when
+                            // `propagate_parent_context` is set). Do not re-scan
+                            // here — a second authority drifts when the snapshot
+                            // ladder changes (issue #5925).
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4742,6 +4858,17 @@ pub(super) fn handle_resolution_choice(
                                 }
                             }
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                                // CR 608.2c + CR 603.7 + CR 303.4f: Publish the
+                                // selection before pausing for Aura host choice —
+                                // this early return skips the terminal publish
+                                // below (Storm Herald "Exile those Auras").
+                                publish_effect_zone_choice_tracked_set(
+                                    state,
+                                    effect_kind,
+                                    &chosen_ids,
+                                    library_position,
+                                    true,
+                                );
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
@@ -4798,6 +4925,16 @@ pub(super) fn handle_resolution_choice(
                                 // `effects/mod.rs::drain_pending_change_zone_iteration`
                                 // resumes the loop after this replacement
                                 // choice resolves (issue #535).
+                                // CR 608.2c + CR 603.7: Publish selection before
+                                // the replacement pause — same early-return gap
+                                // as NeedsAuraAttachmentChoice above.
+                                publish_effect_zone_choice_tracked_set(
+                                    state,
+                                    effect_kind,
+                                    &chosen_ids,
+                                    library_position,
+                                    true,
+                                );
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
@@ -4950,6 +5087,14 @@ pub(super) fn handle_resolution_choice(
                             &library_position,
                             events,
                         );
+                        if let Some(next_owner) =
+                            effects::change_zone::resume_next_mass_library_order_choice(state)
+                        {
+                            state.priority_player = next_owner;
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     } else {
                         // The selected EffectZoneChoice is now consumed. Clear it
                         // before the pipeline may park a CR 616.1 prompt; otherwise
@@ -5342,34 +5487,17 @@ pub(super) fn handle_resolution_choice(
                             GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
                             _ => None,
                         })
-                        .collect()
-                } else if matches!(effect_kind, EffectKind::PutAtLibraryPosition)
-                    && matches!(library_position, Some(LibraryPosition::Bottom))
-                    && state.active_ability_continuation().is_some()
-                {
-                    // CR 608.2c: Expressive Iteration's bottom pick narrows the
-                    // tracked set to the remaining looked-at library cards so the
-                    // chained exile step cannot re-select the bottomed card.
-                    state
-                        .chain_tracked_set_id
-                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|id| !chosen.contains(id))
-                        .filter(|id| {
-                            state
-                                .objects
-                                .get(id)
-                                .is_some_and(|obj| obj.zone == Zone::Library)
-                        })
-                        .collect()
+                        .collect::<Vec<_>>()
                 } else {
                     chosen.clone()
                 };
-                let tracked_id = TrackedSetId(state.next_tracked_set_id);
-                state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, tracked);
-                state.chain_tracked_set_id = Some(tracked_id);
+                publish_effect_zone_choice_tracked_set(
+                    state,
+                    effect_kind,
+                    &tracked,
+                    library_position,
+                    false,
+                );
             }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
@@ -5542,7 +5670,7 @@ pub(super) fn handle_resolution_choice(
             // single GameState slot cleared after every drain.
             if matches!(
                 choice_type,
-                ChoiceType::Player | ChoiceType::Opponent { .. }
+                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
             ) {
                 if let Ok(pid) = choice.parse::<u8>() {
                     if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -5584,7 +5712,7 @@ pub(super) fn handle_resolution_choice(
                     let ability = pending.ability.clone();
                     let cost = pending.cost.clone();
                     state.waiting_for = match casting_costs::finish_pending_cast_cost_or_pay(
-                        state, player, *pending, ability, cost, events,
+                        state, player, *pending, *ability, cost, events,
                     ) {
                         Ok(waiting_for) => waiting_for,
                         Err(err) => {
@@ -6508,6 +6636,82 @@ fn action_result_outcome(
     })
 }
 
+/// CR 608.2c + CR 603.7: Publish the EffectZoneChoice selection as the chain
+/// tracked set when a continuation will consume it ("those Auras", plotted
+/// cards, etc.).
+///
+/// Must also run on mid-delivery pauses (`NeedsAuraAttachmentChoice` /
+/// replacement `NeedsChoice`): those early-return before the terminal publish
+/// at the end of the EffectZoneChoice arm, and Storm Herald's delayed exile
+/// would otherwise bind `TrackedSet` against an unbound sentinel.
+///
+/// `mid_pause`: when true, an empty selection is not published yet (Aura host
+/// choice / replacement ordering still open). When false (terminal completion),
+/// an empty `up_to` selection must rebind a fresh empty chain set so a following
+/// `TargetFilter::TrackedSet` cannot reuse a prior non-empty set.
+fn publish_effect_zone_choice_tracked_set(
+    state: &mut GameState,
+    effect_kind: EffectKind,
+    chosen: &[ObjectId],
+    library_position: Option<LibraryPosition>,
+    mid_pause: bool,
+) {
+    if !matches!(
+        effect_kind,
+        EffectKind::Sacrifice
+            | EffectKind::ChangeZone
+            | EffectKind::BounceAll
+            | EffectKind::Tap
+            | EffectKind::Untap
+            | EffectKind::PutAtLibraryPosition
+            | EffectKind::CastFromZone
+    ) || state.active_ability_continuation().is_none()
+    {
+        return;
+    }
+    // Distinguish mid-pause "nothing to publish yet" from a genuine empty
+    // narrowed set (PutAtLibraryPosition Bottom). The latter must still rebind
+    // `chain_tracked_set_id` so a chained TrackedSet exile cannot re-select
+    // cards that just left the library (CR 608.2c).
+    let mut narrowed = false;
+    let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+        // Sacrifice publishes from PermanentSacrificed events at the completion
+        // seam; callers pass the sacrificed ids already.
+        chosen.to_vec()
+    } else if matches!(effect_kind, EffectKind::PutAtLibraryPosition)
+        && matches!(library_position, Some(LibraryPosition::Bottom))
+    {
+        narrowed = true;
+        // CR 608.2c: Expressive Iteration's bottom pick narrows the tracked set
+        // to the remaining looked-at library cards so the chained exile step
+        // cannot re-select the bottomed card.
+        state
+            .chain_tracked_set_id
+            .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|id| !chosen.contains(id))
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Library)
+            })
+            .collect()
+    } else {
+        chosen.to_vec()
+    };
+    // Pause-only: skip empty until the selection is terminal. Terminal empty
+    // (including narrowed-to-empty Bottom) must still rebind.
+    if tracked.is_empty() && mid_pause && !narrowed {
+        return;
+    }
+    let tracked_id = TrackedSetId(state.next_tracked_set_id);
+    state.next_tracked_set_id += 1;
+    state.tracked_object_sets.insert(tracked_id, tracked);
+    state.chain_tracked_set_id = Some(tracked_id);
+}
+
 fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
@@ -6804,6 +7008,10 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
+    if let Some(next_owner) = effects::change_zone::resume_next_mass_library_order_choice(state) {
+        state.priority_player = next_owner;
+        return;
+    }
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
@@ -6847,6 +7055,36 @@ fn finish_with_continuation(
     state.waiting_for.clone()
 }
 
+/// CR 118.12 + CR 119.4 + CR 616.1: Complete the outer pay-amount action only
+/// after any interactive post-replacement child of the life payment has
+/// settled. Shared by the direct submit path and the deferred-life resumer.
+pub(crate) fn finish_pay_amount_choice(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    total: u32,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    state.last_effect_count = Some(total as i32);
+    let pending_starts_with_pay_amount = state
+        .active_ability_continuation()
+        .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
+    if !pending_starts_with_pay_amount {
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.set_chosen_x_recursive(total);
+        }
+    }
+    let mut waiting_for = finish_with_continuation(state, player, events);
+    if let WaitingFor::PayAmountChoice {
+        accumulated: next_accumulated,
+        ..
+    } = &mut waiting_for
+    {
+        *next_accumulated = total;
+        state.waiting_for = waiting_for.clone();
+    }
+    waiting_for
+}
+
 /// CR 701.25a / CR 616.1: Run the post-loop cleanup a rest-pile batch deferred
 /// when it paused mid-pile. Called by
 /// `zone_pipeline::drain_pending_batch_deliveries` the moment the batch tail
@@ -6881,6 +7119,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,
@@ -7223,9 +7477,14 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
-            for card_id in &clear_markers {
-                state.revealed_cards.remove(card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &clear_markers,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-rest cleanup must reference live card occurrences");
             if let Some(kept) = publish_tracked_set {
                 effects::publish_fresh_tracked_set(state, kept.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
@@ -9361,5 +9620,131 @@ mod tests {
 
         assert_eq!(active_plane(&state), Some(deck_second));
         assert!(state.planar_deck.contains(&deck_top));
+    }
+
+    /// CR 603.7: Terminal `up_to` EffectZoneChoice with zero cards selected must
+    /// rebind a fresh empty chain tracked set through the production
+    /// `handle_resolution_choice` path so a following TrackedSet consumer cannot
+    /// reuse a prior non-empty set. Mid-pause empty publishes stay skipped.
+    #[test]
+    fn terminal_empty_up_to_effect_zone_choice_rebinds_empty_tracked_set() {
+        use crate::types::ability::{
+            CastingPermission, Effect, PermissionGrantee, ResolvedAbility,
+        };
+        use crate::types::game_state::PendingContinuation;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::EtbTapState;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let eligible = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Eligible Aura".to_string(),
+            Zone::Graveyard,
+        );
+        let stale = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Stale".to_string(),
+            Zone::Exile,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![stale]);
+        state.next_tracked_set_id = 2;
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+
+        // Mid-pause empty must not rebind (Storm Herald Aura-host pause).
+        publish_effect_zone_choice_tracked_set(&mut state, EffectKind::ChangeZone, &[], None, true);
+        assert_eq!(state.chain_tracked_set_id, Some(TrackedSetId(1)));
+        assert_eq!(
+            state.tracked_object_sets.get(&TrackedSetId(1)),
+            Some(&vec![stale])
+        );
+
+        // Continuation consumes the chain tracked set — must observe the fresh
+        // empty set from terminal zero-choice, not the stale prior members.
+        state.park_ability_continuation(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::Plotted { turn_plotted: 0 },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    grantee: PermissionGrantee::ObjectOwner,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            &state,
+        ));
+
+        let waiting = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![eligible],
+            count: 1,
+            min_count: 0,
+            up_to: true,
+            source_id: source,
+            effect_kind: EffectKind::ChangeZone,
+            zone: Zone::Graveyard,
+            destination: Some(Zone::Battlefield),
+            enter_tapped: EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        state.waiting_for = waiting.clone();
+
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: vec![] },
+            &mut events,
+        )
+        .expect("terminal empty up_to EffectZoneChoice resolves");
+
+        assert_eq!(
+            state.chain_tracked_set_id,
+            Some(TrackedSetId(2)),
+            "production empty up_to path must rebind a fresh chain tracked set"
+        );
+        assert!(state
+            .tracked_object_sets
+            .get(&TrackedSetId(2))
+            .is_some_and(|objects| objects.is_empty()));
+        assert!(
+            state
+                .objects
+                .get(&stale)
+                .is_some_and(|obj| obj.casting_permissions.is_empty()),
+            "TrackedSet continuation must not grant against the prior non-empty set"
+        );
+        assert_eq!(
+            state.objects.get(&eligible).map(|obj| obj.zone),
+            Some(Zone::Graveyard),
+            "zero-choice must leave eligible cards unmoved"
+        );
     }
 }

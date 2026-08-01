@@ -111,7 +111,7 @@ describe("OpponentSeatHeader", () => {
       gameState: {
         ...createGameState(waitingFor),
         derived: {
-          turn_order: [{ player: 1, slot_index: 1, turns_from_now: 1 }],
+          turn_order: [{ player: 1, slot_index: 1, turns_from_now: 1, turn_number: 2 }],
         },
       },
       waitingFor,

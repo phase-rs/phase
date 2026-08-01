@@ -8,13 +8,60 @@ use serde::Serialize;
 
 use super::ast::parsed_clause;
 use super::context::ParseContext;
-use super::effect_chain::EffectChainIr;
+use super::effect_chain::{DieResultBranchIr, EffectChainIr, ModalModeIr};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ModalChoice,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
     UnlessPayModifier,
 };
 use crate::types::triggers::TriggerMode;
+
+/// The document-node payload for a trigger: either a decomposition the parser
+/// produced, or a definition a recognizer already assembled.
+///
+/// The escape hatch lives HERE and not on `TriggerIr`, because
+/// `TriggerDefinition -> TriggerIr` has no inverse. Two fields of the
+/// decomposition are pure parse-time inputs with no representation in the
+/// output — `TriggerModifiers::trigger_subject` (CR 608.2k pronoun subject) and
+/// `TriggerModifiers::effect_lower`, the latter load-bearing at three sites in
+/// `lower_trigger_ir` — and `TriggerBody` has no variant carrying an
+/// already-lowered ability (unit 3b-5 deliberately deleted the one that did).
+/// Lowering then unconditionally overwrites nine `TriggerDefinition` fields, so
+/// a `partial_def = definition` round-trip does not survive contact with it.
+///
+/// This is the `QuantityExpr`/`QuantityRef` split CLAUDE.md mandates: a
+/// finished definition is a *constant*, not a decomposition, so it wraps the IR
+/// rather than becoming a variant of it.
+///
+/// The variant is `Assembled` rather than reusing the `OracleNodeIr` debt
+/// marker's name, on purpose: that name is what
+/// `scripts/check-prelowered-ratchet.sh` greps for, and this type is the
+/// mechanism that RETIRES that debt. Reusing it would make the burn-down metric
+/// count the fix as debt, so the number would rise as the debt fell.
+///
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum TriggerNodeIr {
+    /// Native parsed trigger decomposition, lowered only at the document seam.
+    Parsed(Box<TriggerIr>),
+    /// Already-assembled definition from a recognizer that builds its own.
+    /// `lower_trigger_node_ir` returns it untouched.
+    Assembled {
+        definition: Box<TriggerDefinition>,
+        /// The recognizer's own input text — provenance only. Document lowering
+        /// derives spans and fragments from the emitting line, never from here.
+        source_text: String,
+    },
+}
+
+impl TriggerNodeIr {
+    /// Wrap a recognizer-produced trigger definition for source-ordered emission.
+    pub(crate) fn from_definition(source_text: &str, definition: TriggerDefinition) -> Self {
+        Self::Assembled {
+            definition: Box::new(definition),
+            source_text: source_text.to_string(),
+        }
+    }
+}
 
 /// Trigger-level IR: the complete parsed representation of a trigger line
 /// before final assembly into `TriggerDefinition`.
@@ -35,6 +82,32 @@ pub(crate) struct TriggerIr {
     pub(crate) modifiers: TriggerModifiers,
     /// Original oracle text for description/provenance.
     pub(crate) source_text: String,
+    /// CR 706.3b result-table rows for the terminal die roll in this trigger.
+    /// They remain IR until trigger-body lowering attaches them before finalization.
+    pub(crate) die_results: Vec<DieResultBranchIr>,
+    /// Complete context established from the trigger condition before its body
+    /// is parsed. Nested modal modes must start from this same seed so event
+    /// anaphora (notably spell-cast "it") keep their trigger-body meaning.
+    #[serde(skip)]
+    pub(crate) body_context: ParseContext,
+}
+
+impl TriggerIr {
+    /// Whether the body ends in the typed die-roll node that owns a result table.
+    pub(crate) fn has_terminal_roll_die(&self) -> bool {
+        let chain = match &self.body {
+            Some(TriggerBody::EffectChain(chain)) => chain,
+            Some(TriggerBody::ReflexivePayment(reflexive)) => &reflexive.effect_chain,
+            Some(TriggerBody::Modal(_))
+            | Some(TriggerBody::Vote(_))
+            | Some(TriggerBody::Pile(_))
+            | None => return false,
+        };
+        let Some(clause) = chain.clauses.last() else {
+            return false;
+        };
+        matches!(clause.parsed.effect, Effect::RollDie { .. })
+    }
 }
 
 /// The body of a trigger. Whole-body recognizers retain their typed payloads
@@ -61,6 +134,8 @@ pub(crate) enum TriggerBody {
 pub(crate) struct ReflexivePaymentIr {
     pub(crate) cost: AbilityCost,
     pub(crate) effect_chain: EffectChainIr,
+    pub(crate) payment_chain: Option<EffectChainIr>,
+    pub(crate) modal: Option<ModalIr>,
 }
 
 /// CR 700.2: Typed inline-modal trigger body.
@@ -73,7 +148,7 @@ pub(crate) struct ReflexivePaymentIr {
 pub(crate) struct ModalIr {
     pub(crate) marker: EffectChainIr,
     pub(crate) choice: ModalChoice,
-    pub(crate) mode_abilities: Vec<AbilityDefinition>,
+    pub(crate) modes: Vec<ModalModeIr>,
 }
 
 /// CR 701.38: Typed vote trigger body.
@@ -140,8 +215,7 @@ impl VoteIr {
         )
     }
 
-    /// Compatibility lowering for non-trigger callers that have not yet moved
-    /// to trigger-body IR. Trigger parsing uses [`Self::effect_chain`] instead.
+    /// Compatibility lowering for callers outside the native spell router.
     pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
         let vote = AbilityDefinition::new(kind, self.vote);
         match self.pre_vote_choose {
@@ -205,12 +279,6 @@ impl PileIr {
             self.actor.clone(),
             self.in_trigger,
         )
-    }
-
-    /// Compatibility lowering for non-trigger callers that still consume a
-    /// lowered definition. Trigger parsing uses [`Self::effect_chain`] instead.
-    pub(crate) fn into_ability(self, kind: AbilityKind) -> AbilityDefinition {
-        AbilityDefinition::new(kind, self.effect)
     }
 }
 

@@ -36,6 +36,8 @@ pub(crate) fn run_post_action_pipeline_from(
     skip_trigger_scan: bool,
     skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
+    stage_pending_activation_trigger_events(state, events, event_start);
+
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
@@ -334,6 +336,39 @@ pub(crate) fn run_post_action_pipeline_from(
         default_wf.clone(),
         default_wf.acting_player(),
     ))
+}
+
+/// Route events emitted while a target-bearing activation remains pending into
+/// its private trigger transaction before the ordinary post-action collector
+/// can observe them.
+///
+/// CR 602.2a-b + CR 603.2: target declaration and cost payment can create
+/// trigger events before the activated ability reaches the stack. These events
+/// remain pending until the activation commits; recording their occurrences in
+/// the consumed buffer preserves the generic collector's exactly-once contract
+/// for this action without making the transaction public state.
+fn stage_pending_activation_trigger_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let new_events = &events[event_start..];
+    if new_events.is_empty() {
+        return;
+    }
+    let Some(mut collection) = state.take_pending_activation_trigger_collection() else {
+        return;
+    };
+    collection.collect(state, new_events);
+    state.restore_pending_activation_trigger_collection(collection);
+    state
+        .consumed_before_priority_trigger_events
+        .extend(new_events.iter().enumerate().map(|(offset, event)| {
+            triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: triggers::trigger_event_occurrence(events, event_start + offset),
+            }
+        }));
 }
 
 /// CR 603.3b + CR 608.2g: settles a terminal resolution marker only after its

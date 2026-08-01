@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
-import type { GameLogEntry, GameState } from "../types";
+import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction } from "../types";
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -102,6 +102,20 @@ function matchState(label: string): GameState {
     objects: {},
   } as unknown as GameState;
 }
+
+const viewerInteraction = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+  authorizedSubmitters: [0],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [],
+  attachmentFans: {},
+  availability: { type: "inputRequired" },
+} as LegalActionsResult["viewerInteraction"];
+
+const objectActions: Record<string, ObjectAction[]> = {
+  "42": [{ type: "PassPriority" }],
+};
 
 describe("ServerDraftAdapter", () => {
   let adapter: ServerDraftAdapter;
@@ -293,6 +307,48 @@ describe("ServerDraftAdapter", () => {
         logEntries,
       }),
     );
+  });
+
+  it("caches GameStarted interaction and per-object action data", async () => {
+    const state = matchState("server-draft-started");
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "GameStarted",
+        data: {
+          state,
+          your_player: 0,
+          legal_actions_by_object: objectActions,
+          viewer_interaction: viewerInteraction,
+        },
+      }),
+    );
+
+    await expect(adapter.getLegalActions()).resolves.toMatchObject({
+      legalActionsByObject: objectActions,
+      viewerInteraction,
+    });
+  });
+
+  it("caches StateUpdate interaction and per-object action data", async () => {
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "StateUpdate",
+        data: {
+          state: matchState("server-draft-update"),
+          events: [],
+          legal_actions_by_object: objectActions,
+          viewer_interaction: viewerInteraction,
+        },
+      }),
+    );
+
+    await expect(adapter.getLegalActions()).resolves.toMatchObject({
+      legalActionsByObject: objectActions,
+      viewerInteraction,
+    });
   });
 
   it("does not send ReportMatchResult on GameOver", () => {

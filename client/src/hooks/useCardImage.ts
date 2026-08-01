@@ -375,6 +375,7 @@ export function useCardImage(
   const [isRotated, setIsRotated] = useState(false);
   const [isFlip, setIsFlip] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [stateRequestKey, setStateRequestKey] = useState<string | null>(null);
   const [, setArtCacheTick] = useState(0);
 
   const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
@@ -459,6 +460,7 @@ export function useCardImage(
 
   useEffect(() => {
     if (overrideUrl) {
+      setStateRequestKey(requestKey);
       setSrc(overrideUrl);
       setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
       setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
@@ -467,6 +469,7 @@ export function useCardImage(
     }
 
     if (!cardName && !oracleId) {
+      setStateRequestKey(requestKey);
       setSrc(null);
       setIsRotated(false);
       setIsFlip(false);
@@ -477,8 +480,17 @@ export function useCardImage(
     let cancelled = false;
 
     async function loadImage() {
-      setIsLoading(true);
-      setSrc(null);
+      const cachedEntry = imageRequestCache.get(requestKey);
+      setStateRequestKey(requestKey);
+      if (cachedEntry && !cachedEntry.promise) {
+        setSrc(cachedEntry.asset?.src ?? null);
+        setIsRotated(cachedEntry.asset?.isRotated ?? false);
+        setIsFlip(isCardImageFlipLayoutSync(resolvedOracleId, cardName));
+        setIsLoading(false);
+      } else {
+        setIsLoading(true);
+        setSrc(null);
+      }
 
       try {
         const imageAsset = await acquireCachedImageSrc(
@@ -535,6 +547,35 @@ export function useCardImage(
     resolvedOracleId,
     size,
   ]);
+
+  // Effects reset the state after render, so a component reused for a new card
+  // would otherwise expose the previous card's src for one frame. Hand previews
+  // intentionally keep one mounted component while scrubbing; gate the result
+  // by request identity and synchronously reuse the hand card's cached asset
+  // when available.
+  if (stateRequestKey !== requestKey) {
+    if (overrideUrl) {
+      return {
+        src: overrideUrl,
+        isLoading: false,
+        isRotated: isCardImageRotatedSync(resolvedOracleId, cardName),
+        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+      };
+    }
+    if (!cardName && !oracleId) {
+      return { src: null, isLoading: false, isRotated: false, isFlip: false };
+    }
+    const cachedEntry = imageRequestCache.get(requestKey);
+    if (cachedEntry && !cachedEntry.promise) {
+      return {
+        src: cachedEntry.asset?.src ?? null,
+        isLoading: false,
+        isRotated: cachedEntry.asset?.isRotated ?? false,
+        isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
+      };
+    }
+    return { src: null, isLoading: true, isRotated: false, isFlip: false };
+  }
 
   return { src, isLoading, isRotated, isFlip };
 }

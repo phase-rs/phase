@@ -9,11 +9,20 @@
 //! The clause-lowering helpers this traversal calls still live in `lower.rs`
 //! (widened to `pub(super)` for this move); relocating them is a later increment.
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::character::complete::multispace0;
+use nom::combinator::value;
+use nom::sequence::preceded;
+use nom::Parser;
+
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
     AbsorbKind, ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
     PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
+use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
     CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition,
@@ -28,11 +37,13 @@ use super::lower::{
     apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
+    attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
     attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
-    consolidate_die_and_coin_defs, definition_targets_self_source,
-    effect_publishes_revealed_subject, extract_bounded_target_multi_target,
-    extract_exact_target_multi_target, extract_optional_target_multi_target,
-    extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
+    clone_would_transplant_gated_referent, consolidate_die_and_coin_defs,
+    definition_targets_self_source, effect_publishes_revealed_subject,
+    extract_bounded_target_multi_target, extract_exact_target_multi_target,
+    extract_optional_target_multi_target, extract_verb_up_to_multi_target,
+    fold_copy_spell_gains_haste_and_quoted_grant,
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
@@ -44,31 +55,109 @@ use super::lower::{
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
-    patch_self_ref_head_tap_anaphor, resolve_populated_token_anaphors,
-    resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
-    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
-    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
-    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
-    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
-    thread_chosen_damage_source_into_oneshot_effects,
+    patch_self_ref_head_tap_anaphor, relink_gated_token_referent_consumers,
+    resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
+    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
+    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
+    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
+    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
+    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_repeat_process_keywords, attach_same_is_true_keywords,
+    attach_perpetual_keyword_grants, attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate, draw_object_count_filter,
-    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
-    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
+    def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
+    demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_spell_graveyard_replacement_rider,
+    parse_spells_cast_this_way_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
     rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
     rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
     rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback,
 };
+
+/// CR 601.2c: True when the assembled head chose one or more players at
+/// announcement, including Oracle's type-less `target opponents` lowering.
+fn is_multi_target_player_subject_definition(def: &AbilityDefinition) -> bool {
+    def.multi_target.is_some()
+        && def
+            .effect
+            .target_filter()
+            .is_some_and(|target| match target {
+                TargetFilter::Player | TargetFilter::Opponent => true,
+                TargetFilter::Typed(typed) => {
+                    typed.type_filters.is_empty()
+                        && typed.properties.is_empty()
+                        && matches!(typed.controller, Some(ControllerRef::Opponent))
+                }
+                _ => false,
+            })
+}
+
+/// CR 701.3a + CR 303.4f: Stamp `forward_result` on a ChangeZone→Battlefield that
+/// nests Attach, including when that return sits under TargetOnly (Necrotic Plague).
+fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition) {
+    let nests_attach = matches!(
+        def.sub_ability.as_deref().map(|s| &*s.effect),
+        Some(Effect::Attach { .. })
+    );
+    if nests_attach
+        && matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    {
+        def.forward_result = true;
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(else_ability);
+    }
+}
+
+/// CR 608.2c: A bare verb after a multi-target player subject continues that
+/// subject. A printed player subject (especially `you`) starts an independent
+/// actor-relative instruction instead.
+fn has_implicit_player_subject_continuation(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    nom_on_lower(source, &lower, |input| {
+        value(
+            (),
+            preceded(
+                multispace0,
+                alt((
+                    tag::<_, _, OracleError<'_>>("you "),
+                    tag("target "),
+                    tag("each "),
+                    tag("that "),
+                    tag("those "),
+                    tag("the "),
+                    tag("a player "),
+                    tag("an opponent "),
+                    tag("players "),
+                    tag("opponents "),
+                    tag("it "),
+                    tag("they "),
+                )),
+            ),
+        )
+        .parse(input)
+    })
+    .is_none()
+}
 
 // ===========================================================================
 // AssemblyEnv (Plan 01 §6, U6-B1) — emit-time provenance + role registries
@@ -638,6 +727,15 @@ pub(super) enum AntecedentRole {
     /// the sibling template a "Repeat this process for <keywords>" continuation
     /// clones (Kathril, Aspect Warper).
     KeywordCounterPlacement,
+    /// CR 702.1c + CR 608.2c: A perpetual keyword grant
+    /// (`ApplyPerpetual { GrantKeywords }`) — the sibling
+    /// template a "The same is true for <keywords>" continuation clones when the
+    /// antecedent is a PERPETUAL grant rather than Odric's static `GenericEffect`
+    /// grant (Mutable Pupa). Membership is the EFFECT VARIANT ALONE, mirroring
+    /// `def_is_perpetual_keyword_grant`; the gating condition is the mutator's
+    /// business, not the role's filter. "Perpetually" is a digital-only extension
+    /// outside the Comprehensive Rules.
+    PerpetualKeywordGrantHead,
     /// A `DealDamage` — the antecedent an "excess damage" rider redirects from
     /// (CR 120.4a). The rider need not be adjacent to the damage clause, which is
     /// why this is a role and not `LastEmitted`.
@@ -709,6 +807,11 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
     match role {
         AntecedentRole::GenericEffectHead => Some(def_is_generic_effect_head),
         AntecedentRole::KeywordCounterPlacement => Some(def_is_keyword_counter_placement),
+        // LIVE — mirrors `KeywordCounterPlacement`. The mutator
+        // (`attach_perpetual_keyword_grants`) appends siblings (length-changing),
+        // but staying live keeps it consistent with its sibling role and immune to
+        // any future in-place effect rewrite.
+        AntecedentRole::PerpetualKeywordGrantHead => Some(def_is_perpetual_keyword_grant),
         // LIVE, not cached. The scan this role replaces (`sequence.rs`, the
         // `DigFromAmong` fallthrough) re-derived its antecedent from `defs` on every
         // call, so it saw the CURRENT effect of every def. A cached registry is
@@ -778,6 +881,13 @@ pub(super) enum EffectClass {
     /// `ChooseDrawnThisTurnPayOrTopdeck` — the only effect
     /// `DrawnThisTurnFollowup` patches.
     DrawnThisTurnChoice,
+    /// CR 116.2c: a `GenericEffect` carrying at least one `StaticDefinition` —
+    /// the only shape an `EndEffectCost` continuation can name, because it is
+    /// the only one that installs a continuous effect for a later special action
+    /// to end. Membership is decided by
+    /// `super::effect_installs_continuous_effect`, the same predicate the
+    /// detector uses, so detection and binding cannot select different defs.
+    InstalledContinuousEffect,
 }
 
 /// What a handler does when its antecedent does not resolve.
@@ -1011,6 +1121,14 @@ impl AssemblyEnv {
                 &*defs[index].effect,
                 Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
             ),
+            // CR 116.2c: `role_members` applies this guard as a MEMBERSHIP
+            // filter, so `LastWithRole(GenericEffectHead)` resolves to "the last
+            // `GenericEffect` WITH non-empty statics" — it skips a later
+            // empty-statics one instead of binding it and stamping a cost that
+            // names nothing.
+            Some(BindGuard::EffectShape(EffectClass::InstalledContinuousEffect)) => {
+                super::effect_installs_continuous_effect(&defs[index].effect)
+            }
             Some(BindGuard::DigLookbackTransparentCost) => {
                 let d = &defs[index];
                 d.optional
@@ -1051,7 +1169,8 @@ impl AssemblyEnv {
                 | AntecedentRole::DigOrMill
                 | AntecedentRole::DigLook
                 | AntecedentRole::DamageDealer
-                | AntecedentRole::CopySpellBearer => Vec::new(),
+                | AntecedentRole::CopySpellBearer
+                | AntecedentRole::PerpetualKeywordGrantHead => Vec::new(),
             },
         };
         members
@@ -1302,16 +1421,47 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                     }
                     ReplicateKind::CounterPlacement => {
+                        let bound = env
+                            .resolve(
+                                &defs,
+                                AntecedentSelector::LastWithRole(
+                                    AntecedentRole::KeywordCounterPlacement,
+                                ),
+                                None,
+                                OnMiss::Ignore,
+                            )
+                            // CR 603.12: the clones are pushed at the TAIL of
+                            // `defs` carrying the template's target VERBATIM, so
+                            // a template that reads a gated publisher's
+                            // `TargetFilter::LastCreated` would have that
+                            // chain-context referent transplanted past whatever
+                            // sits in between, where
+                            // `state.last_created_token_ids`, a game-lifetime
+                            // ledger, binds a token from an EARLIER resolution.
+                            // Decline ONLY that shape: the predicate builds the
+                            // clone and asks
+                            // `lower::relink_gated_token_referent_consumers`
+                            // itself whether it lands honestly. Every other
+                            // binding is replicated as printed — CR 608.2c has
+                            // the controller follow the instructions in the
+                            // order WRITTEN, so silently dropping a printed
+                            // replication is the worse error direction.
+                            .filter(|i| !clone_would_transplant_gated_referent(&defs, *i));
+                        if let Some(bound_index) = bound {
+                            attach_repeat_process_keywords(&mut defs, bound_index, keywords);
+                        }
+                    }
+                    ReplicateKind::PerpetualKeywordGrant => {
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::LastWithRole(
-                                AntecedentRole::KeywordCounterPlacement,
+                                AntecedentRole::PerpetualKeywordGrantHead,
                             ),
                             None,
                             OnMiss::Ignore,
                         );
                         if let Some(bound_index) = bound {
-                            attach_repeat_process_keywords(&mut defs, bound_index, keywords);
+                            attach_perpetual_keyword_grants(&mut defs, bound_index, keywords);
                         }
                     }
                 }
@@ -1478,9 +1628,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // 1 runs as printed, then the tail runs from
                         // `else_ability`. Single-clause bases collapse to the
                         // prior shape (empty tail → no `else_ability`).
-                        // U6-C2: `Instead` is the ONLY handler that binds FirstEmitted
-                        // (CR 608.2c — the override replaces the FIRST printed
-                        // instruction). Do not unify it with the `Last*` selectors.
+                        // U6-C2: `Instead` is the ONLY handler that begins from
+                        // FirstEmitted. Its one structural refinement is an optional
+                        // payment: there, the override replaces the immediate
+                        // `IfYouDo` continuation, not the payment instruction.
+                        // Do not unify it with the `Last*` selectors.
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::FirstEmitted,
@@ -1502,21 +1654,51 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
                             let mut instead = *instead_def.clone();
-                            // CR 702.33d + CR 707.10: Resolve "create N of those
-                            // tokens" anaphor against the root (the antecedent
-                            // for a multi-clause base is the first printed clause).
-                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
-                            if rewrite_counter_instead_target_from_antecedent(
-                                &mut instead.effect,
-                                &root.effect,
-                            ) {
-                                instead.target_choice_timing = root.target_choice_timing;
+                            if instead_replaces_optional_payment_continuation(&root) {
+                                // CR 608.2c: after "you may pay ... If you do, X",
+                                // a later "Y instead" modifies X, not the preceding
+                                // payment instruction. Keep the payment as the root
+                                // and attach the override to its paid continuation.
+                                let continuation = root
+                                    .sub_ability
+                                    .as_deref_mut()
+                                    .expect("the optional-payment continuation was checked");
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                ) {
+                                    instead.target_choice_timing =
+                                        continuation.target_choice_timing;
+                                }
+                                if has_explicit_player_target(continuation.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = continuation.sub_ability.take();
+                                continuation.sub_ability = Some(Box::new(instead));
+                            } else {
+                                // CR 702.33d + CR 707.10: Resolve "create N of those
+                                // tokens" anaphor against the root (the antecedent
+                                // for a multi-clause base is the first printed clause).
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                ) {
+                                    instead.target_choice_timing = root.target_choice_timing;
+                                }
+                                if has_explicit_player_target(root.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = root.sub_ability.take();
+                                root.sub_ability = Some(Box::new(instead));
                             }
-                            if has_explicit_player_target(root.effect.as_ref()) {
-                                rewrite_player_anaphor_targets_in_definition(&mut instead);
-                            }
-                            instead.else_ability = root.sub_ability.take();
-                            root.sub_ability = Some(Box::new(instead));
                             defs.push(root);
                             if let Some(id) = root_id {
                                 env.arena.reinstate(id);
@@ -1669,14 +1851,43 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             continue;
         }
 
+        // CR 614.1a + CR 608.2g: An exact "if a spell cast this way would be
+        // put into a graveyard" rider scopes each cast in the immediately prior
+        // free-cast window. Absorb it before the legacy singular-spell route;
+        // this avoids converting a multi-cast destination into a sequential
+        // one-shot `ParentTarget` rider.
+        if let Some(dest) = parse_spells_cast_this_way_graveyard_replacement_rider(
+            &clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase(),
+        ) {
+            if attach_graveyard_redirect_rider_to_prior_free_cast_from_zones(
+                &mut defs,
+                dest.clone(),
+            ) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+            // Diluvian Primordial's paired target fanout remains a
+            // `CastFromZone` until its resolver opens the free-cast window.
+            // Preserve the canonical ParentTarget representation here; the
+            // direct resolver translates it to the same window metadata.
+            if attach_graveyard_redirect_rider_to_prior_cast_from_zone(&mut defs, dest) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+        }
+
         // CR 614.1a + CR 608.2n: a "if that spell would be put into a graveyard,
         // [put on library / return to hand] instead" rider that trails an
         // optional `CastFromZone` (Kylox's Voltstrider) is a CR 608.2n
         // destination-replacement on the cast spell. Fold the canonical rider
         // onto the prior cast so the runtime stamps the redirect, intercepting it
         // before the generic chain assembly mistakes a `PutAtLibraryPosition{
-        // Bottom}` for the Sanwell free-cast bottom-cleanup. Exile is left to its
-        // existing clean path (the helper declines it).
+        // Bottom}` for the Sanwell free-cast bottom-cleanup. Every destination,
+        // including exile, becomes the same ParentTarget rider shape.
         if let Some(dest) = parse_spell_graveyard_replacement_rider(
             &clause_ir
                 .source
@@ -1735,16 +1946,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             def.description = Some(clause_ir.source.fragment().unwrap_or_default().to_string());
         }
         // CR 608.2c: This clause's link to its parent = the boundary that
-        // SEPARATED the previous clause from this one. A `Sentence` boundary
-        // marks a `SequentialSibling` (next printed instruction, resolves even
-        // when an optional parent is declined); `Comma`/`Then`/none marks a
-        // within-clause `ContinuationStep` (part of the parent's action).
-        def.sub_link = match prev_boundary {
-            Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
-            Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
-                SubAbilityLink::ContinuationStep
-            }
-        };
+        // SEPARATED the previous clause from this one, translated by the single
+        // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
+        // which the referent walk in `oracle_effect::mod` also consults.
+        def.sub_link = sub_link_after_boundary(prev_boundary);
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
         // prevented this way, …" rider is printed as its own sentence but is not
         // an independent instruction — its "this way" back-reference binds to the
@@ -1779,7 +1984,36 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // `parse_target_with_ctx` during chunk parse, so a targeted "of their
         // choice" routes target selection to the scoped (upkeep) player.
         def.target_chooser = clause_ir.target_chooser.clone();
+        // CR 701.3a + CR 303.4f: ChangeZone→Battlefield with an Attach sub
+        // (Gift of Immortality delayed reattach) must nest Attach on the
+        // ChangeZone with `forward_result` BEFORE delayed wrapping. Sibling-
+        // pushing then wrapping each unit would yield CDT{ChangeZone} +
+        // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
+        // nests before wrap; mirror that for this attach-on-return shape.
         let clause_sub = if is_target_only {
+            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
+            // Plague) must stamp `forward_result` on the nested return so the
+            // chosen host propagates into Attach (see
+            // `change_zone_forwards_chosen_attach_host`).
+            if let Some(sub) = def.sub_ability.as_mut() {
+                stamp_forward_result_on_battlefield_attach_return(sub);
+            }
+            None
+        } else if matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && matches!(
+            clause_ir.parsed.sub_ability.as_deref().map(|s| &*s.effect),
+            Some(Effect::Attach { .. })
+        ) {
+            // CR 303.4f + CR 608.2c: forward the moved Aura into Attach so
+            // `resolve_forward_result_search_attach_host` stamps `attach_to`
+            // and skips the CR 303.4f host-choice consult.
+            def.forward_result = true;
             def.sub_ability = clause_ir.parsed.sub_ability.clone();
             None
         } else {
@@ -1834,6 +2068,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     ..
                 } if crate::game::casting_costs::cost_has_x(cost)
             );
+        // CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that
+        // clause is now absorbed into `Effect::GenericEffect.end_cost` by the
+        // `EndEffectCost` continuation and never reaches here. Kept as
+        // defense-in-depth for the non-mana shape the narrow extractor rejects.
         let is_pay_to_end_effect_termination =
             crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
                 &clause_ir
@@ -2015,6 +2253,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 def = def.multi_target(spec.clone());
             }
         }
+        // CR 601.2c + CR 608.2c: A conjugated continuation after an "any
+        // number of target players/opponents each" head shares the targets
+        // selected for that head. At this assembly seam, the previous definition
+        // has its finalized `multi_target` shape and this clause still has its
+        // source text, so bind a bare draw ("then draw seven cards") to
+        // `ParentTarget`. An explicit imperative ("then you draw a card")
+        // remains controller-relative.
+        if def.sub_link == SubAbilityLink::ContinuationStep
+            && defs
+                .last()
+                .is_some_and(is_multi_target_player_subject_definition)
+            && has_implicit_player_subject_continuation(
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        {
+            if let Effect::Draw { target, .. } = def.effect.as_mut() {
+                if matches!(
+                    target,
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) {
+                    *target = TargetFilter::ParentTarget;
+                }
+            }
+        }
         if parse_controlled_by_different_players_target_constraint(
             clause_ir.source.fragment().unwrap_or_default(),
         ) {
@@ -2108,12 +2372,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         },
                     ),
                 );
-                // CR 608.2c: Lift condition/optional/repeat/player_scope to outer wrapper.
-                let lifted_condition = inner.condition.clone();
-                let lifted_optional = inner.optional;
-                let lifted_optional_for = inner.optional_for;
-                let lifted_repeat_for = inner.repeat_for.clone();
-                let lifted_player_scope = inner.player_scope.clone();
+                // CR 608.2c: Lift condition/optional/repeat/player_scope to the
+                // outer wrapper — move, don't clone. Leaving
+                // `OptionalEffectPerformed` on the delayed payload (Next of Kin
+                // #4956) would re-check that creation-time "if you do" signal when
+                // the delayed trigger fires at end step and skip the return.
+                let lifted_condition = std::mem::take(&mut inner.condition);
+                let lifted_optional = std::mem::replace(&mut inner.optional, false);
+                let lifted_optional_for = std::mem::take(&mut inner.optional_for);
+                let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
+                let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`
@@ -2302,6 +2570,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
     // is a simple "reveal the top N" with no player selection — it must resolve synchronously
     // (via RevealTop) so that sub_ability chains like RevealedHasCardType evaluate inline.
+    //
+    // CR 107.3 + CR 701.20a: Dynamic counts (Portent of Calamity's "top X cards") cannot
+    // round-trip through `RevealTop { count: u32 }` without collapsing to 1. Keep those
+    // Digs as reveal-only peeks (`keep_count: 0`) so X resolves at runtime; a later
+    // ForEachCategory / LastRevealed rest-move consumes the revealed pool.
     for def in &mut defs {
         if let Effect::Dig {
             count,
@@ -2317,14 +2590,27 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             if destination == &Some(Zone::Library) && rest_destination == &Some(Zone::Library) {
                 continue;
             }
-            let count_val = match count {
-                QuantityExpr::Fixed { value } => *value as u32,
-                _ => 1,
-            };
-            *def.effect = Effect::RevealTop {
-                player: player.clone(),
-                count: count_val,
-            };
+            match count {
+                QuantityExpr::Fixed { value } => {
+                    *def.effect = Effect::RevealTop {
+                        player: player.clone(),
+                        count: *value as u32,
+                    };
+                }
+                _ => {
+                    if let Effect::Dig {
+                        keep_count,
+                        destination,
+                        rest_destination,
+                        ..
+                    } = &mut *def.effect
+                    {
+                        *keep_count = Some(0);
+                        *destination = None;
+                        *rest_destination = None;
+                    }
+                }
+            }
         }
     }
 
@@ -2356,6 +2642,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `state.last_created_token_ids` (snapshotted at delayed-trigger
     // creation for the Sacrifice case — CR 603.7c).
     resolve_populated_token_anaphors(&mut defs);
+
+    // CR 603.12 + CR 609.3: A clause whose subject is the token published by a
+    // clause under an affirmative reflexive gate ("When you do, create a token.
+    // Put a +1/+1 counter on that token.") is part of that gated instruction,
+    // not the next independent one — with no token created it can do nothing.
+    // Must run AFTER the anaphor rewrites above, which are what bind the
+    // referent it looks for.
+    relink_gated_token_referent_consumers(&mut defs);
 
     // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
     // copy (CR 707.10). It creates a card copy in the source zone, then casts
@@ -2665,6 +2959,19 @@ fn rebind_condition_instead_damage_anaphor(
         return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
     }
     false
+}
+
+/// CR 608.2c: identify the structural "you may pay ... If you do, X" form
+/// whose immediate paid continuation, rather than the payment itself, can be
+/// modified by a following "Y instead" clause.
+fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> bool {
+    matches!(root.effect.as_ref(), Effect::PayCost { .. })
+        && root.sub_ability.as_ref().is_some_and(|continuation| {
+            continuation
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+        })
 }
 
 #[cfg(test)]

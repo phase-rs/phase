@@ -1,0 +1,61 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "GainLife",
+        "amount": {
+          "type": "Ref",
+          "qty": {
+            "type": "ObjectCount",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": []
+            }
+          }
+        }
+      },
+      "cost": null,
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PreventDamage",
+          "amount": "All",
+          "target": {
+            "type": "Any"
+          },
+          "scope": "CombatDamage"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
+      },
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

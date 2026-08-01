@@ -10,7 +10,7 @@ use super::ability::{
     QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
-use super::identifiers::ObjectId;
+use super::identifiers::ObjectIncarnationRef;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;
@@ -694,9 +694,10 @@ pub enum BlockExceptionKind {
 
 /// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
 /// All three modes are applied in the CR 601.2f cost-locking step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CostModifyMode {
     /// Subtractive — reduce generic mana (floor: 0).
+    #[default]
     Reduce,
     /// Additive — increase generic mana. Thalia, Guardian of Thraben class.
     Raise,
@@ -712,6 +713,12 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
 }
 
+/// Serde `skip_serializing_if` for [`CostModifyMode::Reduce`] defaults on
+/// directional cost-modification fields (self `CostReduction`, ability statics).
+pub(crate) fn is_cost_modify_mode_reduce(mode: &CostModifyMode) -> bool {
+    matches!(mode, CostModifyMode::Reduce)
+}
+
 /// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
 /// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
 fn special_action_registry_str(action: SpecialAction) -> &'static str {
@@ -721,6 +728,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
         SpecialAction::UnlockDoor => "UnlockDoor",
         SpecialAction::TurnFaceUp => "TurnFaceUp",
         SpecialAction::RollPlanarDie => "RollPlanarDie",
+        SpecialAction::EndContinuousEffect => "EndContinuousEffect",
     }
 }
 
@@ -732,6 +740,9 @@ fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
         "UnlockDoor" => Some(SpecialAction::UnlockDoor),
         "TurnFaceUp" => Some(SpecialAction::TurnFaceUp),
         "RollPlanarDie" => Some(SpecialAction::RollPlanarDie),
+        // CR 116.2c: this arm is NOT compiler-forced (`_ => None` below) —
+        // omitting it silently breaks the registry string round-trip.
+        "EndContinuousEffect" => Some(SpecialAction::EndContinuousEffect),
         _ => None,
     }
 }
@@ -1151,9 +1162,10 @@ pub enum StaticMode {
     /// of the attacker that must be blocked. Data-carrying variant — not
     /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
     /// direct pattern-match in `combat.rs` declare-blockers validation. The
-    /// `ObjectId` is stable for the end-of-turn lifetime of the granting effect.
+    /// incarnation reference prevents an attacker that left and re-entered from
+    /// inheriting the old combat requirement (CR 400.7).
     MustBlockAttacker {
-        attacker: ObjectId,
+        attacker: ObjectIncarnationRef,
     },
     CantDraw {
         who: ProhibitionScope,
@@ -1884,6 +1896,12 @@ pub enum StaticMode {
         filter: Option<ManaColor>,
         action: StepEndManaAction,
     },
+    /// CR 106.4 + CR 119.3: If an affected player loses unspent mana as a
+    /// step or phase ends, that player loses that much life.
+    ///
+    /// This is a boolean rule modification: multiple active instances do not
+    /// multiply the life loss caused by a single mana-loss event.
+    UnspentManaLossCausesLifeLoss,
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
@@ -2129,6 +2147,7 @@ pub enum StaticModeKind {
     SpendManaAsAnyColor,
     PayLifeAsColoredMana,
     StepEndUnspentMana,
+    UnspentManaLossCausesLifeLoss,
     CanAttackWithDefender,
     AttackOnlyNeighbor,
     IgnoreLandwalkForBlocking,
@@ -2272,6 +2291,9 @@ impl StaticMode {
             StaticMode::SpendManaAsAnyColor { .. } => StaticModeKind::SpendManaAsAnyColor,
             StaticMode::PayLifeAsColoredMana { .. } => StaticModeKind::PayLifeAsColoredMana,
             StaticMode::StepEndUnspentMana { .. } => StaticModeKind::StepEndUnspentMana,
+            StaticMode::UnspentManaLossCausesLifeLoss => {
+                StaticModeKind::UnspentManaLossCausesLifeLoss
+            }
             StaticMode::CanAttackWithDefender => StaticModeKind::CanAttackWithDefender,
             StaticMode::AttackOnlyNeighbor => StaticModeKind::AttackOnlyNeighbor,
             StaticMode::IgnoreLandwalkForBlocking { .. } => {
@@ -2393,6 +2415,7 @@ impl Hash for StaticMode {
                 filter.hash(state);
                 action.hash(state);
             }
+            StaticMode::UnspentManaLossCausesLifeLoss => {}
             StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
@@ -2626,6 +2649,7 @@ impl StaticMode {
             | StaticMode::SpendManaAsAnyColor { .. }
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::UnspentManaLossCausesLifeLoss
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
@@ -3029,6 +3053,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::StepEndUnspentMana { filter, action } => {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
+            }
+            StaticMode::UnspentManaLossCausesLifeLoss => {
+                write!(f, "UnspentManaLossCausesLifeLoss")
             }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
@@ -3493,6 +3520,7 @@ impl FromStr for StaticMode {
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
             "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
+            "UnspentManaLossCausesLifeLoss" => StaticMode::UnspentManaLossCausesLifeLoss,
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }

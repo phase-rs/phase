@@ -15,6 +15,7 @@ use nom::Parser;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
+    parse_property_keyword, parse_superlative_adjective,
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
@@ -304,6 +305,8 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
         parse_entered_this_turn,
         // CR 102.2 + CR 608.2h: opponent-scoped entry tally (Zendikar trap cycle).
         parse_opponent_had_entered_this_turn,
+        // CR 102.2 + CR 603.4: opponent-scoped past-tense entry gate (Lictor).
+        parse_entered_this_turn_under_opponent_control,
         parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
         parse_first_spell_this_game_condition,
@@ -2918,27 +2921,6 @@ fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCon
     ))
 }
 
-/// Parse a superlative adjective into its corresponding `AggregateFunction`.
-pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
-    alt((
-        value(AggregateFunction::Max, tag("greatest")),
-        value(AggregateFunction::Max, tag("highest")),
-        value(AggregateFunction::Min, tag("lowest")),
-        value(AggregateFunction::Min, tag("least")),
-    ))
-    .parse(input)
-}
-
-/// Property keyword parser — used by both LHS and RHS of the comparison.
-pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
-    alt((
-        value(ObjectProperty::Power, tag("power")),
-        value(ObjectProperty::Toughness, tag("toughness")),
-        value(ObjectProperty::ManaValue, tag("mana value")),
-    ))
-    .parse(input)
-}
-
 /// Parse the comparator phrase between "is " and "each other ...".
 ///
 /// The aggregate function is coupled to the comparator direction by the
@@ -3351,6 +3333,12 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     }
 
     if let Ok((after_or_more, _)) = tag::<_, _, OracleError<'_>>(" or more ").parse(rest) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("unspent mana").parse(after_or_more) {
+            return Ok((
+                rest,
+                make_quantity_ge(QuantityRef::UnspentMana { color: None }, n),
+            ));
+        }
         // CR 603.4 + CR 404.2: Oversold Cemetery's intervening-if predicate
         // counts face-up creature cards in its controller's graveyard.
         if let Ok((rest, type_filters)) =
@@ -3598,6 +3586,58 @@ fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, Static
         ));
     }
     None
+}
+
+/// CR 102.2 / CR 102.3 + CR 608.2c: Parse a relationship-qualified predicate
+/// on the current scoped player:
+///
+/// `the player|that player` + `is your opponent` + `and has` +
+/// a hand-size or life-total predicate.
+///
+/// Three axes compose independently — subject, relation, and scalar predicate.
+/// The relation is a real `alt()` axis (`parse_scoped_player_relation`) yielding
+/// a `PlayerFilter`, and the scalar predicate reuses the existing
+/// `PlayerScope::ScopedPlayer` hand/life productions. The effect-condition
+/// bridge decides whether its parse context actually has a scoped player to
+/// bind; this leaf deliberately does not infer one.
+///
+/// The `" and has "` connector is deliberately fused into this production
+/// rather than delegated to `parse_condition_connective` (the single authority
+/// documented at the top of this module): that combinator is typed
+/// `OracleResult<'_, StaticCondition>`, and `StaticCondition` has no
+/// player-relationship variant — the relation exists only as
+/// `AbilityCondition::ScopedPlayerMatches`. The generic connective therefore
+/// structurally cannot join a relation leg to a scalar leg without a new
+/// `StaticCondition` variant, which is an `add-engine-variant`-gated proposal.
+pub(crate) fn parse_scoped_player_opponent_and_has_condition(
+    input: &str,
+) -> OracleResult<'_, (PlayerFilter, StaticCondition)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the player "),
+        tag("that player "),
+    ))
+    .parse(input)?;
+    let (rest, filter) = parse_scoped_player_relation(rest)?;
+    let (rest, _) = tag(" and has ").parse(rest)?;
+    let Some((rest, predicate)) = parse_hand_size_predicate(rest, PlayerScope::ScopedPlayer)
+        .or_else(|| parse_life_predicate(rest, PlayerScope::ScopedPlayer))
+    else {
+        return Err(oracle_err(input));
+    };
+    Ok((rest, (filter, predicate)))
+}
+
+/// CR 102.2 / CR 102.3: the relation axis of a scoped-player predicate —
+/// which topology relation to the printed controller the scoped player must
+/// hold. Mirrors the `parse_condition_connector` shape (`value()` arms inside
+/// an `alt()`), so a further relation is a one-line arm rather than a
+/// restructure.
+fn parse_scoped_player_relation(input: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((value(
+        PlayerFilter::Opponent,
+        tag::<_, _, OracleError<'_>>("is your opponent"),
+    ),))
+    .parse(input)
 }
 
 /// Build a QuantityComparison: qty [comparator] n.
@@ -7811,6 +7851,38 @@ fn parse_opponent_had_entered_this_turn(input: &str) -> OracleResult<'_, StaticC
     parse_entered_this_turn_subject(rest, suffix, 1, player)
 }
 
+/// CR 102.2 + CR 102.3 + CR 603.4 + CR 608.2h + CR 608.2i: "[a | an | another | N
+/// or more] <type> entered the battlefield under an opponent's control this turn"
+/// — the opponent-scoped, PAST-tense mirror of `parse_entered_this_turn`'s "under
+/// your control" surface (Lictor's Pheromone Trail intervening-"if"). Distinct
+/// from `parse_opponent_had_entered_this_turn`, which reads the "an opponent had …
+/// enter … under their control" auxiliary/present-tense surface of the Zendikar
+/// trap cycle; this is the bare subject-first past-tense form that leads with the
+/// type rather than an "an opponent had" prefix.
+///
+/// The "under an opponent's control" scope is carried by
+/// `PlayerScope::Opponent { aggregate: Max }` — the existential "an opponent"
+/// reading documented on `parse_opponent_had_entered_this_turn` — NOT a
+/// `controller: Opponent` injected into the type filter: the runtime keys the
+/// `BattlefieldEntriesThisTurn` tally on `record.controller` per opponent and
+/// takes the largest, so in a multiplayer game the per-opponent count is compared
+/// to the threshold rather than the cross-opponent sum (two different opponents
+/// each having one creature enter must NOT satisfy "two or more … under an
+/// opponent's control"). CR 608.2i keeps a permanent that has since left the
+/// battlefield counted, because the snapshot survives departure.
+fn parse_entered_this_turn_under_opponent_control(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let suffix = "entered the battlefield under an opponent's control this turn";
+    let player = PlayerScope::Opponent {
+        aggregate: AggregateFunction::Max,
+    };
+    if let Ok(result) = parse_or_more_entered_count(input, suffix, player.clone()) {
+        return Ok(result);
+    }
+    parse_entered_this_turn_subject(input, suffix, 1, player)
+}
+
 /// Parse "there are [fewer than/more than] N [or more] [things] ..." conditions.
 ///
 /// Covers threshold ("seven or more cards"), delirium ("four or more card types"),
@@ -7837,6 +7909,26 @@ fn parse_opponent_had_entered_this_turn(input: &str) -> OracleResult<'_, StaticC
 /// continuous "as long as" gates), both of which re-read the condition against
 /// live game state at check time.
 fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(input, nom_quantity::parse_quantity_ref)
+}
+
+/// Narrow fallback for a caller that owns the comma separating an
+/// intervening-if from its trigger effect. The caller first tries the complete
+/// generic condition grammar; this only handles the strict battlefield-count
+/// noun phrase followed by that clause boundary.
+pub(crate) fn parse_there_are_battlefield_count_clause(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(
+        input,
+        nom_quantity::parse_type_count_on_battlefield_clause,
+    )
+}
+
+fn parse_there_are_conditions_with_quantity(
+    input: &str,
+    parse_quantity: for<'a> fn(&'a str) -> OracleResult<'a, QuantityRef>,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
     let (rest, prefix) = opt(parse_strict_comparator_prefix).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
@@ -7868,7 +7960,7 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             ),
         ));
     }
-    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, qty) = parse_quantity(rest)?;
     Ok((
         rest,
         make_quantity_comparison(
@@ -9935,6 +10027,88 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 20 });
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 102.2 / CR 102.3 + CR 119 + CR 402.1 + CR 608.2c: the scoped-player
+    /// relationship grammar factors subject, opponent relation, connector, and
+    /// scalar tail. Both demonstrative subjects and every existing hand/life
+    /// comparator family produce an exact typed pair with no remainder.
+    #[test]
+    fn scoped_player_opponent_and_has_composes_subject_relation_and_scalar_axes() {
+        let hand = |comparator, value| StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        };
+        let life = |comparator, value| StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        };
+
+        for (input, expected) in [
+            (
+                "the player is your opponent and has four or more cards in hand",
+                hand(Comparator::GE, 4),
+            ),
+            (
+                "that player is your opponent and has one or fewer cards in hand",
+                hand(Comparator::LE, 1),
+            ),
+            (
+                "the player is your opponent and has fewer than seven cards in hand",
+                hand(Comparator::LT, 7),
+            ),
+            (
+                "that player is your opponent and has exactly three cards in hand",
+                hand(Comparator::EQ, 3),
+            ),
+            (
+                "the player is your opponent and has 10 or less life",
+                life(Comparator::LE, 10),
+            ),
+            (
+                "that player is your opponent and has 20 or more life",
+                life(Comparator::GE, 20),
+            ),
+        ] {
+            let (rest, parsed) =
+                parse_scoped_player_opponent_and_has_condition(input).expect("grammar must parse");
+            assert_eq!(rest, "", "{input:?} left remainder {rest:?}");
+            assert_eq!(parsed, (PlayerFilter::Opponent, expected), "{input:?}");
+        }
+    }
+
+    /// Adjacent phrases must not be accepted as the relationship-qualified
+    /// production. The all-consuming wrapper is load-bearing: a valid prefix
+    /// followed by semantic text is a rejection, not a partial success.
+    #[test]
+    fn scoped_player_opponent_and_has_rejects_hostile_adjacent_phrases() {
+        for input in [
+            "a player is your opponent and has four or more cards in hand",
+            "the opponent is your opponent and has four or more cards in hand",
+            "the player isn't your opponent and has four or more cards in hand",
+            "the player is an opponent and has four or more cards in hand",
+            "the player is your opponent or has four or more cards in hand",
+            "the player is your opponent and had four or more cards in hand",
+            "the player is your opponent and has four or more cards in handbag",
+            "the player is your opponent and has four or more cards in hand and draws",
+        ] {
+            assert!(
+                nom::combinator::all_consuming(parse_scoped_player_opponent_and_has_condition)
+                    .parse(input)
+                    .is_err(),
+                "hostile adjacent phrase must fail closed: {input:?}"
+            );
         }
     }
 
@@ -12520,6 +12694,72 @@ mod tests {
     }
 
     #[test]
+    fn test_entered_this_turn_under_opponent_control_singular() {
+        // Lictor's Pheromone Trail intervening-"if". The "under an opponent's
+        // control" scope must land on PlayerScope::Opponent (existential Max),
+        // NOT a controller injected into the type filter, and the filter must
+        // still carry the creature type restriction.
+        let (rest, c) = parse_inner_condition(
+            "a creature entered the battlefield under an opponent's control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(filter.controller, None);
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => {
+                panic!("expected opponent-scoped BattlefieldEntriesThisTurn GE 1, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_entered_this_turn_under_opponent_control_count() {
+        // The counted threshold surface routes through the same opponent scope.
+        let (rest, c) = parse_inner_condition(
+            "two or more creatures entered the battlefield under an opponent's control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::BattlefieldEntriesThisTurn {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                                ..
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => {
+                panic!("expected opponent-scoped BattlefieldEntriesThisTurn GE 2, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn test_you_had_another_enter_this_turn() {
         let (rest, c) = parse_inner_condition(
             "you had another creature enter the battlefield under your control this turn",
@@ -13812,6 +14052,29 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 5 },
             },
         );
+    }
+
+    #[test]
+    fn you_have_or_more_unspent_mana_parses_word_and_digit_thresholds() {
+        for (text, expected) in [
+            ("you have six or more unspent mana", 6),
+            ("you have 6 or more unspent mana", 6),
+            ("you have five or more unspent mana", 5),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::UnspentMana { color: None },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: expected },
+                },
+                "expected total unspent mana threshold for {text:?}",
+            );
+        }
     }
 
     #[test]
@@ -15463,6 +15726,50 @@ mod tests {
                 other => panic!("expected typed creature filter, got {other:?}"),
             },
             other => panic!("expected ObjectCount == 0, got {other:?}"),
+        }
+    }
+
+    /// CR 603.4 + CR 109.2: Deathbringer Regent's threshold counts any
+    /// player's other creatures on the battlefield when given its complete
+    /// condition clause.
+    #[test]
+    fn deathbringer_regent_noun_clause_is_battlefield_scoped() {
+        let (rest, c) =
+            parse_inner_condition("there are five or more other creatures on the battlefield")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected creature filter, got {:?}",
+                        tf.type_filters
+                    );
+                    assert_eq!(tf.controller, None);
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "expected Another prop, got {:?}",
+                        tf.properties
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Battlefield
+                        }),
+                        "expected battlefield-only count, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 5, got {other:?}"),
         }
     }
 

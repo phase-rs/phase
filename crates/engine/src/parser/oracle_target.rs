@@ -13,7 +13,7 @@ use crate::types::ability::{
     Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty,
     ObjectScope, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1026,6 +1026,24 @@ pub fn parse_target_with_syntax<'a>(
         return (filter, rest, syntax);
     }
 
+    // CR 608.2c + CR 607.2a (Portent of Calamity): "the rest of the exiled cards"
+    // names the cards still linked to this resolution's exile step — not the bare
+    // "the rest" tracked-set anaphor, which can absorb unrelated chain members
+    // after an intervening revealed-library cleanup publishes to the chain set.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
+    {
+        return (
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Exiled),
+            },
+            &text[lower.len() - rest.len()..],
+            syntax,
+        );
+    }
+
     // CR 603.7: Anaphoric tracked-set pronouns
     static TRACKED_SET_PHRASES: &[&str] = &[
         "the chosen cards",
@@ -1611,6 +1629,18 @@ pub fn parse_target_with_syntax<'a>(
         return (TargetFilter::Controller, rest, syntax);
     }
 
+    // CR 615.1 + CR 615.1a: Bare "players" — a mass, untargeted player
+    // recipient with no "target" keyword (Defend the Hearth: "prevent all
+    // combat damage that would be dealt to players this turn"). `Player` has
+    // no `TypeFilter` representation (it is not a card type), so the
+    // `parse_type_filter_word`-based fallback below never recognizes it; this
+    // needs its own bare-noun arm, mirroring the "target player" arm above.
+    if let Some((_, rest)) =
+        nom_on_lower(text, &lower, |input| parse_word_bounded(input, "players"))
+    {
+        return (TargetFilter::Player, rest, syntax);
+    }
+
     // "the top/bottom [N] [type] card[s] of [possessive] library/graveyard"
     // Zone position references that appear as targets of exile/mill/reveal effects.
     // Returns a filter with InZone for the referenced zone and controller.
@@ -2057,21 +2087,47 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
-    // Strip leading article ("a "/"an ") when followed by a recognized type word
-    // or the "commander" class. Guard: "an opponent" → "opponent" fails type word
-    // check → no stripping. CR 903.3: "commander" is recognized by the commander
-    // atom below (it pushes `IsCommander`), not by `starts_with_type_phrase_lead`,
-    // so the article guard must also accept it — otherwise "a commander you own"
-    // (Hellkite Courser, #5256) keeps its article and never reaches the atom,
-    // collapsing to a match-anything filter. "commander you own" / "target
-    // commander" already work; this makes the indefinite article compose too.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
-            pos += "a ".len();
-        }
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
-            pos += "an ".len();
+    // Strip a leading indefinite quantifier ("a "/"an "/"any ") when followed by
+    // a recognized type word or the "commander" class. Guard: "an opponent" →
+    // "opponent" fails the type-word check → no stripping. CR 903.3: "commander"
+    // is recognized by the commander atom below (it pushes `IsCommander`), not by
+    // `starts_with_type_phrase_lead`, so the guard must also accept it —
+    // otherwise "a commander you own" (Hellkite Courser, #5256) keeps its article
+    // and never reaches the atom, collapsing to a match-anything filter.
+    // "commander you own" / "target commander" already work; this makes the
+    // indefinite article/quantifier compose too.
+    //
+    // CR 115.10a (+ CR 115.1d for the triggered-ability case): an object/player
+    // is a target ONLY if the text uses the literal word "target" — "any
+    // creature you control" (no "target") is an untargeted controller choice,
+    // distinct from "any target" (a fixed keyword phrase matched earlier in
+    // `parse_target_with_syntax`, which requires "target" as the very next word
+    // and so never reaches here). "any " strips exactly like "a "/"an " above: a
+    // plain quantifier over the following type word, adding no extra
+    // `FilterProp` (unlike "other"/"another" below). Without this the type word
+    // is never reached and the phrase falls through every arm to the
+    // `TargetFilter::Any` fallback at the bottom of this function's caller
+    // (Kathril, Aspect Warper's "put a flying counter on any creature you
+    // control", issue #6321).
+    //
+    // Composed through "other"/"another" — mirroring the "all"/"each"/"every"
+    // block's own `after_other` composition just below — so "any other
+    // creature you control" (gain-control / sacrifice effects) also reaches
+    // the type word instead of leaking "other" into the subtype string. Only
+    // the quantifier is consumed here; the "other"/"another" handler below
+    // still runs on the remainder and adds `FilterProp::Another`.
+    if let Ok((rest, matched)) =
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "), tag("any "))).parse(&lower[pos..])
+    {
+        let after_other = alt((tag::<_, _, OracleError<'_>>("other "), tag("another ")))
+            .parse(rest)
+            .map(|(r, _)| r)
+            .ok();
+        if starts_with_type_phrase_lead(rest)
+            || starts_with_commander_word(rest)
+            || after_other.is_some_and(starts_with_type_phrase_lead)
+        {
+            pos += matched.len();
         }
     }
 
@@ -2489,6 +2545,72 @@ pub fn parse_type_phrase_with_ctx<'a>(
                         _ => unreachable!(),
                     };
                     (Some(tf), Some(sub_name))
+                } else if let TypeFilter::Subtype(second) = tf {
+                    // CR 205.3b + CR 205.3m: on a PRINTED type line, subtypes
+                    // of every card type except creature (and plane) are
+                    // always single words — each dash-separated word is its
+                    // own subtype. Creature subtypes are the one category the
+                    // rules let run one OR two words (the sole two-word
+                    // creature type is "Time Lord"; every other type in the
+                    // 205.3m list — "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/
+                    // "Wizard" included — is one word). So when ORACLE TEXT
+                    // names two consecutive creature-subtype words, that is
+                    // ambiguous ONLY for creatures — the same word-boundary
+                    // question ("one two-word type, or two one-word types
+                    // stacked?") never arises for other categories, where
+                    // CR 205.3b already guarantees each word is separate.
+                    // This generic phrase-chaining rule exists to resolve
+                    // exactly that creature-only ambiguity, so it is scoped
+                    // to fire ONLY when NEITHER matched word is a registered
+                    // NONCREATURE subtype (`fixed_noncreature_subtypes` —
+                    // land/artifact/enchantment/spell/battle/planeswalker).
+                    // "Urza's" (a real land type per CR 205.3i, LAND_SUBTYPES
+                    // in card_type.rs) is noncreature — land subtypes CAN
+                    // co-occur on one permanent (Urza's Mine genuinely has
+                    // BOTH the "Urza's" and "Mine" land subtypes), but the
+                    // dedicated Urza-lands condition parser already owns that
+                    // Oracle-text pattern and deliberately extracts only the
+                    // discriminating second word ("Mine"/"Power-Plant"/
+                    // "Tower" — "Urza's" is common to all three lands in the
+                    // cycle, so checking for it adds no discriminating
+                    // power). Chaining here instead fully consumed "an urza's
+                    // mine" into one filter with an empty remainder, which
+                    // changed which downstream condition-builder claimed the
+                    // clause and regressed that specialized parser (issue
+                    // #6321 / PR #6533 review —
+                    // urzas_lands_share_delta_shape /
+                    // legacy_misparses_are_now_honest_gaps). Staying out of
+                    // every noncreature category's way, not just this one
+                    // land cycle, is why the check is by vocabulary
+                    // membership rather than an Urza's-specific special case.
+                    let first_name = match &card_type {
+                        Some(TypeFilter::Subtype(s)) => s.as_str(),
+                        _ => unreachable!(),
+                    };
+                    let is_noncreature_subtype = |name: &str| {
+                        crate::types::card_type::fixed_noncreature_subtypes()
+                            .any(|s| s.eq_ignore_ascii_case(name))
+                    };
+                    if is_noncreature_subtype(first_name) || is_noncreature_subtype(&second) {
+                        // Decline — this generic creature-stack rule doesn't
+                        // own noncreature subtype pairs. Whichever specialized
+                        // handler owns this category still gets the untouched
+                        // trailing text.
+                        (card_type, subtype)
+                    } else {
+                        // Both words are creature-only: chain the second as
+                        // an additional AND-combined type filter instead of
+                        // silently dropping it. Reuses the existing `subtype`
+                        // slot (already flows into `base_type_filters`
+                        // below), so `card_type` keeps the first subtype and
+                        // this fills the second (Fate Reforged chapter II —
+                        // "a copy of any Elder Dragon…", issue #6321 / PR
+                        // #6533: without this, "any " strips down to
+                        // `Subtype("Elder")` alone, dropping "Dragon").
+                        let ct_len = rest_after.len() - ct_rest.len();
+                        pos += ws + ct_len;
+                        (card_type, Some(second))
+                    }
                 } else {
                     (card_type, subtype)
                 }
@@ -2734,6 +2856,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
+
+    // CR 109.2: a BARE postnominal superlative's ranked population is the
+    // enclosing noun phrase, which is not fully parsed yet at the point the
+    // suffix appears. Record the head here and materialize the `FilterProp`
+    // after the phrase closes (see the block below `base_type_filters`).
+    let mut pending_bare_superlative: Option<(AggregateFunction, ObjectProperty)> = None;
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
@@ -2774,6 +2902,50 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
+    }
+
+    // CR 109.2 + CR 601.2c: BARE postnominal superlative ("with the lowest mana
+    // value" — Culling Scales; "with the greatest power" — Triumph of Gerrard,
+    // Szat's Will; "with the greatest mana value" — Favor of the Mighty). The
+    // `among`-bearing form was already consumed by the passes above, which are the
+    // single authority for an EXPLICIT eligible set; this pass handles the form
+    // whose population is the enclosing noun phrase itself.
+    //
+    // CR 109.2 PRE-CHECK (fail-fast, NOT the authority): CR 109.2 licenses the
+    // battlefield default only for a description that names no zone and contains no
+    // "card"/"spell"/"source"/"scheme"; CR 109.2a is what a "card" + zone
+    // description means instead. The accumulators bound so far already settle the
+    // "card" leg, so a `card` phrase is never consumed and its text stays honest in
+    // the remainder. The zone passes have
+    // not run yet — which is exactly why the AUTHORITY is the identical call in
+    // the materialization block below, over the FINAL accumulators.
+    if phrase_denotes_battlefield_permanents(
+        left_card_suffix,
+        &[
+            &adjective_type_filters,
+            card_type.as_slice(),
+            &extra_core_type_filters,
+            &neg_type_filters,
+        ],
+        &properties,
+    ) {
+        if let Some((head, consumed)) = parse_bare_superlative_property_suffix(&lower[pos..]) {
+            // CR 109.2: refuse BEFORE consuming when a non-battlefield zone clause
+            // still lies ahead. Naming a zone withdraws the battlefield default, and
+            // that population is not modelled here; consuming first only to refuse
+            // at materialization would drop the restriction while leaving the card
+            // looking supported.
+            //
+            // A trailing relative type clause ("that's an artifact", "that's an
+            // artifact or creature") is deliberately NOT refused here — it is folded
+            // into the population below, so the population still equals the candidate
+            // set. Refusing it pre-consumption would leave the whole tail unparsed and
+            // drop the TYPE clause too, which is worse than the bug being fixed.
+            if !nonbattlefield_zone_clause_lies_ahead(&lower[pos + consumed..]) {
+                pending_bare_superlative = Some(head);
+                pos += consumed;
+            }
+        }
     }
 
     // Check "with [counter] counter(s) on it/them" suffix
@@ -3406,6 +3578,71 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
+
+    // CR 109.2 + CR 601.2c + CR 608.2b: materialize the deferred bare superlative
+    // now that the enclosing noun phrase is complete — full type conjunction,
+    // controller (including a trailing "you control" / "they control"), and every
+    // other accumulated property.
+    //
+    // CR 109.2 AUTHORITY. This re-check is NOT redundant with the pre-check at the
+    // detection pass: `parse_zone_suffix` runs unconditionally after that pass and
+    // pushes into the same `properties` this block snapshots. "creature with the
+    // greatest power in your graveyard" therefore reaches here with
+    // `InZone { Graveyard }` accumulated and must NOT be emitted — a
+    // battlefield-defaulted population would rank the wrong set, and a
+    // graveyard-defaulted one would lean on off-battlefield P/T reads this change
+    // does not attempt.
+    //
+    // Ordering is load-bearing: build the population snapshot BEFORE appending the
+    // prop. Reversed, the prop nests inside its own population and
+    // `resolve_filter_threshold` recurses without bound.
+    if let Some((function, property)) = pending_bare_superlative.take() {
+        // CR 109.2: the ranked population must be the SAME set as the candidates. A
+        // trailing relative type clause closes the noun phrase AFTER the detection
+        // pass, so fold it into the population here rather than refusing — refusing
+        // would leave the tail unparsed and drop the type clause as well.
+        if phrase_denotes_battlefield_permanents(
+            left_card_suffix,
+            &[&base_type_filters, &relative_core_type_filters],
+            &properties,
+        ) {
+            // Population type set == candidate type set, so ranking and candidacy
+            // agree object-for-object.
+            //
+            // A MULTI-type relative clause ("that's an artifact or creature") is a
+            // DISJUNCTION that `type_filter_branches` spreads across one `Or` leg per
+            // type. `TypeFilter::AnyOf` expresses that same union as a single
+            // conjunctive member, because
+            // `base ∧ (A ∨ B) == (base ∧ A) ∪ (base ∧ B)`. The prop built below is
+            // pushed into `properties`, which the branch cross-product then
+            // replicates onto every leg — so each leg ranks against the WHOLE
+            // population, not just its own type.
+            let mut population_types = base_type_filters.clone();
+            match relative_core_type_filters.as_slice() {
+                [] => {}
+                [only] => population_types.push(only.clone()),
+                many => population_types.push(TypeFilter::AnyOf(many.to_vec())),
+            }
+            let population = TargetFilter::Typed(TypedFilter {
+                type_filters: population_types,
+                controller: controller.clone(),
+                properties: properties.clone(),
+            });
+            let prop = superlative_property_filter_prop(function, property, population);
+            properties.push(prop);
+        } else {
+            // CR 109.2 (+ CR 109.2a for the "card" leg): the phrase names a
+            // non-battlefield zone, so the battlefield default is withdrawn and the
+            // ranked population is one this change does not model. Leave the text
+            // unclaimed and record it, rather than emitting a population that
+            // would silently be the wrong set.
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: lower.trim().into(),
+                parser: "bare_superlative_property_suffix_unmodelled_population".into(),
+                line_index: 0,
+            });
+        }
+    }
 
     let type_filter_branches = if relative_core_type_filters.is_empty() {
         vec![base_type_filters]
@@ -4760,48 +4997,146 @@ fn superlative_property_filter_prop(
 /// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
 /// The eligible set after "among " is parsed by the authoritative
 /// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
-/// Returns (FilterProp, bytes consumed from the original text).
+/// CR 109.2: the postnominal superlative qualifier with an EXPLICIT eligible set —
+/// "with the <superlative> <property> among <set>". This function owns ONLY the
+/// explicit-set clause; an explicit set overrides the enclosing noun phrase as
+/// the ranked population.
+///
+/// The head grammar is delegated in full to the single authority
+/// `oracle_nom::filter::parse_superlative_property_head`. The BARE form (no
+/// "among" clause), whose population is the enclosing noun phrase, is handled by
+/// `parse_bare_superlative_property_suffix` + the deferred materialization in
+/// `parse_type_phrase_with_ctx`.
 fn parse_superlative_property_suffix(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    // "with the <superlative> <property> among " — the superlative head selects
-    // the aggregate direction and the property is the second axis. Factor the
-    // 2×3 cross product into two alts (PATTERNS.md §8b).
-    // CR 208.1 (power and toughness) + CR 202.3 (mana value): greatest/highest =
-    // Max, least/lowest/smallest = Min. Both directions feed the same generic
-    // superlative_property_filter_prop, so the runtime (values.min()/max() in
-    // game/quantity.rs) and the Sacrifice/Destroy/return resolvers select the
-    // constrained object unchanged.
-    let (rest, (function, property)) = (
-        tag::<_, _, OracleError<'_>>("with the "),
-        alt((
-            value(
-                AggregateFunction::Max,
-                alt((tag("greatest "), tag("highest "))),
-            ),
-            value(
-                AggregateFunction::Min,
-                alt((tag("least "), tag("lowest "), tag("smallest "))),
-            ),
-        )),
-        alt((
-            value(ObjectProperty::Power, tag("power")),
-            value(ObjectProperty::Toughness, tag("toughness")),
-            value(ObjectProperty::ManaValue, tag("mana value")),
-        )),
-        tag(" among "),
-    )
-        .parse(trimmed)
-        .map(|(rest, (_, function, property, _))| (rest, (function, property)))
-        .ok()?;
+    let (rest, (function, property)) = nom_filter::parse_superlative_property_head(trimmed).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" among ").parse(rest).ok()?;
     // Delegate the "<type-set> <controller> control(s)" clause to the
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.
     let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
     let prop = superlative_property_filter_prop(function, property, eligible);
     Some((prop, text.len() - after.len()))
+}
+
+/// CR 109.2 + CR 601.2c: the BARE postnominal superlative — "with the
+/// <superlative> <property>" with NO "among <set>" clause. Detects and measures
+/// the head only; the eligible population is the ENCLOSING noun phrase, so the
+/// `FilterProp` is materialized by the caller once that phrase is fully parsed.
+///
+/// The `not(peek((space1, tag("among"))))` guard keeps the `among` form on its own
+/// authority even if that parse failed downstream for an unrelated reason — a
+/// bare-form fallback there would silently RE-SCOPE the ranked population, which
+/// is worse than leaving the phrase unparsed.
+fn parse_bare_superlative_property_suffix(
+    text: &str,
+) -> Option<((AggregateFunction, ObjectProperty), usize)> {
+    let trimmed = text.trim_start();
+    let (rest, head) = nom_filter::parse_superlative_property_head(trimmed).ok()?;
+    let (rest, _) = not(peek((space1, tag::<_, _, OracleError<'_>>("among"))))
+        .parse(rest)
+        .ok()?;
+    Some((head, text.len() - rest.len()))
+}
+
+/// CR 109.2 look-ahead: does a NON-BATTLEFIELD zone clause still lie ahead in
+/// this noun phrase? (CR 109.2 grants the battlefield default only to a
+/// description that names no zone; CR 109.2a is reserved for "card" + zone.)
+///
+/// The zone passes run after the bare-superlative detection pass, so at detection
+/// the accumulators cannot yet show a graveyard/exile scope. Without this
+/// look-ahead the detection pass would CONSUME the superlative and the
+/// materialization guard would then refuse to emit it — leaving a filter that
+/// looks supported with its ranked restriction silently gone, which is the exact
+/// defect this whole change exists to remove.
+///
+/// Implemented by trying the authoritative `parse_zone_suffix` at each word
+/// boundary of the remaining phrase (the shared word-boundary scan primitive), so
+/// there is no bespoke zone vocabulary here.
+fn nonbattlefield_zone_clause_lies_ahead(rest: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(rest, |candidate| match parse_zone_suffix(candidate) {
+        Some((props, _, _)) if props.iter().any(filter_prop_names_non_battlefield_zone) => {
+            Ok((candidate, ()))
+        }
+        _ => Err(nom::Err::Error(OracleError::new(
+            candidate,
+            nom::error::ErrorKind::Fail,
+        ))),
+    })
+    .is_some()
+}
+
+/// CR 109.2 vs CR 109.2a — STRUCTURAL carve-out, never positional.
+///
+/// CR 109.2 makes a type description with no zone clause and no "card" mean
+/// permanents on the battlefield; that is the ONLY reading under which a bare
+/// superlative's ranked population may default to the battlefield
+/// (`game/quantity.rs` zone default). CR 109.2a makes a description containing
+/// "card" plus a zone name mean cards in that zone instead — a different
+/// population this pass must NOT silently claim.
+///
+/// Signals, all read from the parser's own typed accumulators:
+///   * `left_card_suffix` — the noun phrase ended in the "card"/"cards" noun;
+///   * a `TypeFilter::Card` anywhere in the accumulated type filters (the
+///     bare-noun form, where `left_card_suffix` is not set);
+///   * an accumulated non-battlefield zone prop.
+///
+/// Called TWICE: as a fail-fast pre-check at detection (so a `card` phrase is
+/// never consumed) and again at materialization over the FINAL accumulators,
+/// where it is the AUTHORITY that governs emission — the zone passes run after
+/// detection, so only the second call can see a zone prop.
+fn phrase_denotes_battlefield_permanents(
+    left_card_suffix: bool,
+    type_filter_groups: &[&[TypeFilter]],
+    properties: &[FilterProp],
+) -> bool {
+    !left_card_suffix
+        && !type_filter_groups
+            .iter()
+            .any(|group| group.iter().any(type_filter_includes_card))
+        && !properties
+            .iter()
+            .any(filter_prop_names_non_battlefield_zone)
+}
+
+/// CR 205: exhaustive over every `TypeFilter` variant so a negated or disjunctive
+/// `Card` leg cannot slip past the CR 109.2a carve-out, and so a future variant
+/// forces a CR 109.2a decision rather than defaulting to "battlefield".
+fn type_filter_includes_card(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Card => true,
+        TypeFilter::Non(inner) => type_filter_includes_card(inner),
+        TypeFilter::AnyOf(inner) => inner.iter().any(type_filter_includes_card),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_) => false,
+    }
+}
+
+/// CR 109.2 + CR 400.1: any accumulated zone prop naming a zone other than the
+/// battlefield disqualifies the CR 109.2 battlefield default. The `_ => false`
+/// wildcard is deliberate — `FilterProp` has ~180 variants and enumerating them
+/// all in a zone predicate would be pure noise.
+fn filter_prop_names_non_battlefield_zone(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::InZone { zone } => *zone != Zone::Battlefield,
+        FilterProp::InAnyZone { zones } => zones.iter().any(|z| *z != Zone::Battlefield),
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_names_non_battlefield_zone),
+        FilterProp::Not { prop } => filter_prop_names_non_battlefield_zone(prop),
+        _ => false,
+    }
 }
 
 /// Parse "with/that have/that each have mana value N or less" / "… or greater"
@@ -5422,6 +5757,18 @@ fn parse_counter_spec_after_lead(
         |input| {
             let (input, expr) = nom_quantity::parse_quantity_expr_number(input)?;
             let (input, _) = tag_e::<_, _, OracleError<'_>>(" ").parse(input)?;
+            // CR 122.1: "with N or more/or greater <type> counters" — redundant
+            // with the already-GE `with` lead (mirrors the CMC "N or greater"
+            // handling above `parse_counter_suffix`'s call site), but the
+            // qualifier must still be consumed here or it leaks into the
+            // counter-type slice below (issue #6492: "or more +1/+1" parsed as
+            // a garbage counter type on Runadi, Behemoth Caller's haste static).
+            let input = alt((
+                tag_e::<_, _, OracleError<'_>>("or more "),
+                tag_e("or greater "),
+            ))
+            .parse(input)
+            .map_or(input, |(rest, _)| rest);
             Ok((input, expr))
         },
     ));
@@ -6158,6 +6505,22 @@ fn parse_shared_quality_reference<'a>(
     if let Ok((rest, ())) = parse_word_bounded(input, "it") {
         let mut ctx_mut = ctx.clone();
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
+    }
+
+    // CR 608.2k: a singular demonstrative back-reference ("that creature" /
+    // "that permanent" / "that card" / "that token") to the trigger subject resolves to the
+    // triggering object exactly like the bare pronoun "it" above — Conjurer's
+    // Mantle ("Whenever equipped creature attacks, ... reveal a card that shares
+    // a creature type with that creature"). Route through the same ctx-aware
+    // resolver so it binds to `TriggeringSource` when a non-source trigger
+    // subject exists and stays `ParentTarget` (chosen-target anaphor) otherwise.
+    // Restricted to the singular object demonstratives so a fresh noun phrase
+    // ("a creature you control") still parses as its own filter below.
+    for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
+        if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
+            let mut ctx_mut = ctx.clone();
+            return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
+        }
     }
 
     let (filter, rest) = parse_target(input);
@@ -9012,6 +9375,29 @@ mod tests {
     }
 
     #[test]
+    fn shared_quality_that_token_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let (filter, rest) =
+            parse_target_with_ctx("a card that shares a card type with that token", &mut ctx);
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed card filter");
+        };
+        let reference = filter
+            .properties
+            .iter()
+            .find_map(|property| match property {
+                FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+                _ => None,
+            })
+            .expect("expected shared-quality reference");
+        assert_eq!(reference, &TargetFilter::TriggeringSource);
+    }
+
+    #[test]
     fn bare_them_with_typed_trigger_subject_binds_to_triggering_source() {
         let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(
@@ -11385,6 +11771,24 @@ mod tests {
         );
     }
 
+    /// CR 615.1 (issue #6682, Defend the Hearth class): bare "players" with no
+    /// "target" keyword must resolve to a mass player recipient, not the
+    /// unclassified `Any` fallback.
+    #[test]
+    fn bare_players_resolves_to_player_filter() {
+        let (f, rest) = parse_target("players");
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::Player);
+    }
+
+    /// Negative: "players" must still require a word boundary — "playerskip"
+    /// (a hypothetical longer word) must not spuriously match the bare noun.
+    #[test]
+    fn bare_players_requires_word_boundary() {
+        let (f, _rest) = parse_target("playersXYZ");
+        assert_ne!(f, TargetFilter::Player);
+    }
+
     /// Recursively check whether any leaf of the filter is `HasChosenName`.
     fn filter_contains_has_chosen_name(f: &TargetFilter) -> bool {
         match f {
@@ -11644,6 +12048,46 @@ mod tests {
                 comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 1 },
             } if s == "oil"
+        ));
+    }
+
+    /// CR 122.1 + CR 613.4c: issue #6492 — Runadi, Behemoth Caller's haste
+    /// static ("Creatures you control with three or more +1/+1 counters on
+    /// them have haste.") requires "three or more" to consume cleanly instead
+    /// of leaking "or more" into the counter-type slice (`Generic("or more
+    /// +1/+1")` pre-fix — no creature ever matched the filter, so haste never
+    /// applied). "with N counters" is already GE per the `with` lead, so "or
+    /// more"/"or greater" is a redundant qualifier that must be consumed, not
+    /// carried into the counter type.
+    #[test]
+    fn parse_counter_suffix_three_or_more_plus1plus1() {
+        let result = parse_counter_suffix(" with three or more +1/+1 counters on them");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 3 },
+            }
+        ));
+    }
+
+    /// Sibling coverage: "or greater" (not just "or more") must also be
+    /// stripped cleanly.
+    #[test]
+    fn parse_counter_suffix_two_or_greater_stun() {
+        let result = parse_counter_suffix(" with two or greater stun counters on it");
+        assert!(result.is_some());
+        let (prop, _consumed) = result.unwrap();
+        assert!(matches!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Stun),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 2 },
+            }
         ));
     }
 
@@ -15236,6 +15680,196 @@ mod tests {
         }
     }
 
+    /// CR 115.10a + CR 608.2d: "any other <type> you control" — the indefinite
+    /// quantifier "any" must compose through "other"/"another" the same way
+    /// "all"/"each"/"every" already do above, or the type word is never
+    /// reached and the phrase collapses to the degenerate `TargetFilter::Any`
+    /// fallback (gain-control / sacrifice effects — "gain control of any
+    /// other creature", "sacrifice any other creature you control").
+    #[test]
+    fn parse_type_phrase_any_other_creature_you_control() {
+        let (filter, rest) = parse_type_phrase("any other creature you control");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+            "quantifier/other leaked into subtype: {:?}",
+            tf.type_filters
+        );
+        // "other" excludes the source → Another IS present.
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "expected Another: {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 205.3b + CR 205.3m: creature subtypes are the one category the
+    /// rules let run one OR two words on a type line (the sole two-word
+    /// creature type is "Time Lord"; every other listed creature type —
+    /// "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/"Wizard" included — is one
+    /// word), so two of them printed back to back are two SEPARATE stacked
+    /// subtypes, not a compound word (`oracle-subtypes.json` lists "Elder"
+    /// and "Dragon" as separate entries). Not a `[Subtype] [CoreType]`
+    /// promotion either (that existing arm only fires when the SECOND word is
+    /// a concrete core type like "creature"). Before this fix the second
+    /// subtype word was silently dropped (Fate Reforged chapter II — "a copy
+    /// of any Elder Dragon from the Legends expansion" — collapsed to bare
+    /// `Subtype("Elder")`, an over-broad filter matching any "Elder"-subtype
+    /// creature, not just Elder Dragons; issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_type_phrase_two_word_subtype_chain() {
+        for (text, first, second) in [
+            ("Elder Dragon", "Elder", "Dragon"),
+            ("Elf Warrior", "Elf", "Warrior"),
+            ("Human Wizard", "Human", "Wizard"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(first.to_string())),
+                "expected Subtype(\"{first}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(second.to_string())),
+                "expected Subtype(\"{second}\") for '{text}' — the second subtype word must \
+                 not be silently dropped, got {:?}",
+                tf.type_filters
+            );
+        }
+    }
+
+    /// CR 205.3b + CR 205.3i: "Urza's" is a real land type (LAND_SUBTYPES,
+    /// `card_type.rs`), and land subtypes CAN co-occur on one permanent —
+    /// Urza's Mine genuinely has both the "Urza's" and "Mine" land subtypes.
+    /// But the two-consecutive-subtype-word chain above is scoped to resolve
+    /// a CREATURE-only word-boundary ambiguity (CR 205.3b/205.3m) and must
+    /// stay out of every noncreature category's way — including this one.
+    /// Chaining here would fully consume "urza's mine" into one
+    /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
+    /// remainder, which changes which downstream condition-builder claims the
+    /// clause and regresses the dedicated Urza-lands
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
+    /// oracle_condition.rs — issue #6321 / PR #6533 review), which
+    /// deliberately extracts only the discriminating second word ("Mine" —
+    /// "Urza's" is common to all three cycle members and adds no
+    /// discriminating power). "mine" must stay unconsumed in the remainder so
+    /// that specialized handler still sees it.
+    #[test]
+    fn parse_type_phrase_urzas_possessive_prefix_does_not_chain() {
+        let (filter, rest) = parse_type_phrase("urza's mine");
+        assert_eq!(
+            rest.trim(),
+            "mine",
+            "\"mine\" must stay unconsumed, not chained into the type filter"
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Urza's".to_string())],
+            "only the possessive fragment may be consumed here, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 201.2 + CR 115.10a: Naming Screen — "Each creature you control that
+    /// doesn't share a name with any other creature you control gets +1/+1."
+    /// `parse_shared_quality_reference` (the reference-population parser for
+    /// "that doesn't share a name with X") explicitly REJECTS a `TargetFilter
+    /// ::Any` result from `parse_target` as a parse failure (it cannot build a
+    /// meaningful name comparison against "anything"). Before the "any"/
+    /// "other" composition fix, "any other creature you control" collapsed to
+    /// `Any`, so this whole relative clause failed to parse and the static
+    /// ability fell through to an unstructured fallback — after the fix it
+    /// builds a real `Typed{Creature, Another, You}` reference and the clause
+    /// parses (issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_shared_quality_clause_naming_screen_reference() {
+        let ctx = ParseContext::default();
+        let (rest, prop) =
+            parse_shared_quality_clause("that doesn't share a name with any other creature you control", &ctx)
+                .expect("the reference population must parse now that \"any other ...\" is a real Typed filter, not Any");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } = prop
+        else {
+            panic!("expected SharesQuality, got {prop:?}");
+        };
+        assert_eq!(quality, SharedQuality::Name);
+        assert_eq!(relation, SharedQualityRelation::DoesNotShare);
+        let reference = reference.expect("reference population must be present");
+        let TargetFilter::Typed(tf) = *reference else {
+            panic!("expected Typed reference filter, got {reference:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature in the reference filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "\"other\" must exclude the compared creature itself, got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 707.2 + CR 115.10a: Duplication Device — "target creature becomes a
+    /// copy of any creature on the battlefield". "any creature on the
+    /// battlefield" carries no controller restriction (any player's
+    /// creatures) — before the "any" widening this collapsed to `Any`
+    /// (matching literally anything, including non-creatures/players);
+    /// afterward it correctly reaches the pre-existing, unmodified zone-
+    /// suffix machinery that already handles "creature on the battlefield"
+    /// for non-"any" phrasing (issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_type_phrase_any_creature_on_the_battlefield() {
+        let (filter, rest) = parse_type_phrase("any creature on the battlefield");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)),
+            "expected an InZone(Battlefield) property, got {:?}",
+            tf.properties
+        );
+        // "on the battlefield" (not "you control") — no controller restriction.
+        assert_eq!(
+            tf.controller, None,
+            "\"on the battlefield\" must not add a controller restriction"
+        );
+    }
+
     /// CR 700.9 + CR 109.4: "modified creatures you control other than ~"
     /// (Thundering Raiju). The "modified" adjective adds `FilterProp::Modified`
     /// and the trailing "other than ~" adds `FilterProp::Another` so the count
@@ -16523,6 +17157,341 @@ mod tests {
         assert!(
             matches!(f, TargetFilter::Or { .. }),
             "expected Or filter, got {f:?}"
+        );
+    }
+
+    // ---- CR 109.2: BARE postnominal superlative (no "among" clause) ----
+
+    /// Extract the sole superlative `FilterProp` from a parsed target filter,
+    /// plus the population it ranks over.
+    fn bare_superlative_parts(filter: &TargetFilter) -> (&FilterProp, &TargetFilter) {
+        let tf = typed_leg(filter).expect("expected a Typed target filter");
+        let prop = tf
+            .properties
+            .iter()
+            .find(|p| {
+                matches!(
+                    p,
+                    FilterProp::Cmc {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate { .. }
+                        },
+                        ..
+                    } | FilterProp::PtComparison {
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate { .. }
+                        },
+                        ..
+                    }
+                )
+            })
+            .expect("expected a superlative FilterProp carrying an Aggregate");
+        let population = match prop {
+            FilterProp::Cmc {
+                value:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { filter, .. },
+                    },
+                ..
+            }
+            | FilterProp::PtComparison {
+                value:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { filter, .. },
+                    },
+                ..
+            } => filter,
+            _ => unreachable!("matched above"),
+        };
+        (prop, population)
+    }
+
+    /// CR 109.2 + CR 202.3 — Culling Scales, verbatim clause. The bare superlative
+    /// ranks over the ENCLOSING noun phrase ("nonland permanent"), so the emitted
+    /// population must reproduce that type conjunction and must itself carry NO
+    /// properties (a population that nested the superlative inside itself would make
+    /// `resolve_filter_threshold` recurse without bound).
+    ///
+    /// Reverting the materialization block leaves `properties: []` here — the exact
+    /// misparse this fixes, where the ability could destroy ANY nonland permanent.
+    #[test]
+    fn bare_superlative_lowest_mana_value_ranks_over_enclosing_noun_phrase() {
+        let (filter, rest) = parse_target("target nonland permanent with the lowest mana value");
+        assert!(
+            rest.trim().is_empty(),
+            "whole phrase consumed, got {rest:?}"
+        );
+        let (prop, population) = bare_superlative_parts(&filter);
+        let FilterProp::Cmc {
+            comparator, value, ..
+        } = prop
+        else {
+            panic!("expected Cmc, got {prop:?}");
+        };
+        assert_eq!(*comparator, Comparator::EQ, "ties are all legal targets");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function, property, ..
+            },
+        } = value
+        else {
+            unreachable!()
+        };
+        assert_eq!(*function, AggregateFunction::Min, "lowest → Min");
+        assert_eq!(*property, ObjectProperty::ManaValue);
+
+        let pop = typed_leg(population).expect("population should be a Typed filter");
+        assert!(pop.type_filters.contains(&TypeFilter::Permanent));
+        assert!(pop
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(
+            pop.properties.is_empty(),
+            "the population must not contain the superlative prop itself, got {:?}",
+            pop.properties
+        );
+    }
+
+    /// CR 109.2 — "greatest power" on a controller-scoped noun phrase (Triumph of
+    /// Gerrard's chapter text). The trailing "you control" belongs to the noun
+    /// phrase, so it must appear on BOTH the candidate filter and the ranked
+    /// population: ranking a controller-scoped candidate against a global
+    /// population would pick the wrong creature.
+    #[test]
+    fn bare_superlative_greatest_power_carries_controller_onto_population() {
+        let (filter, _) = parse_target("target creature you control with the greatest power");
+        let tf = typed_leg(&filter).expect("typed");
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        let (prop, population) = bare_superlative_parts(&filter);
+        let FilterProp::PtComparison { stat, value, .. } = prop else {
+            panic!("expected PtComparison, got {prop:?}");
+        };
+        assert_eq!(*stat, PtStat::Power);
+        let QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate { function, .. },
+        } = value
+        else {
+            unreachable!()
+        };
+        assert_eq!(*function, AggregateFunction::Max, "greatest → Max");
+        let pop = typed_leg(population).expect("typed population");
+        assert_eq!(
+            pop.controller,
+            Some(ControllerRef::You),
+            "the population must inherit the noun phrase's controller"
+        );
+    }
+
+    /// CR 109.2 — the explicit "among <set>" form keeps its own authority and is
+    /// unchanged by the bare-form pass. Regression guard for the 37 corpus cards
+    /// that already worked: the population here is the EXPLICIT set, not the
+    /// CR 109.2 — a MULTI-type trailing relative clause is a disjunction, and every
+    /// `Or` leg must rank against the WHOLE population, not just its own type.
+    ///
+    /// `target permanent with the greatest mana value that's an artifact or creature`
+    /// spreads into `Or { [Permanent+Artifact], [Permanent+Creature] }`. Before this
+    /// fix the superlative was consumed and then dropped, so the phrase targeted ANY
+    /// artifact or creature (maintainer review on PR #6789). The population is now a
+    /// single conjunctive `TypeFilter::AnyOf`, which is exactly that union:
+    /// `base ∧ (A ∨ B) == (base ∧ A) ∪ (base ∧ B)`.
+    #[test]
+    fn multi_type_relative_clause_ranks_every_leg_against_the_whole_population() {
+        let (filter, _) = parse_target(
+            "target permanent with the greatest mana value that's an artifact or creature",
+        );
+        let legs = match &filter {
+            TargetFilter::Or { filters } => filters,
+            other => panic!("expected an Or of one leg per relative type, got {other:?}"),
+        };
+        // Reach-guard: the disjunctive branch really was taken, so the per-leg
+        // assertions below cannot pass vacuously on a single collapsed filter.
+        assert_eq!(
+            legs.len(),
+            2,
+            "reach-guard: one leg per relative core type, got {legs:?}"
+        );
+
+        let expected_population_types = vec![
+            TypeFilter::Permanent,
+            TypeFilter::AnyOf(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+        ];
+        for (leg, own_type) in legs
+            .iter()
+            .zip([TypeFilter::Artifact, TypeFilter::Creature])
+        {
+            let tf = typed_leg(leg).expect("each leg is a Typed filter");
+            assert!(
+                tf.type_filters.contains(&own_type),
+                "leg must keep its own candidate type {own_type:?}, got {:?}",
+                tf.type_filters
+            );
+            // Reverting the fix removes this prop entirely and the leg targets any
+            // artifact or creature.
+            let (_, population) = bare_superlative_parts(leg);
+            let pop = typed_leg(population).expect("typed population");
+            assert_eq!(
+                pop.type_filters, expected_population_types,
+                "every leg must rank against the FULL disjunctive population, not \
+                 just {own_type:?}"
+            );
+        }
+    }
+
+    /// enclosing noun phrase, so it must NOT inherit "nonland permanent".
+    #[test]
+    fn among_form_population_still_comes_from_the_explicit_set() {
+        let (filter, _) =
+            parse_target("target creature with the greatest power among creatures you control");
+        let (_, population) = bare_superlative_parts(&filter);
+        let pop = typed_leg(population).expect("typed population");
+        assert!(pop.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(pop.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 109.2a — a description containing "card" plus a zone names cards in that
+    /// zone, a population this change does not model, so the superlative must NOT
+    /// be materialized.
+    ///
+    /// Reach-guarded: the same filter must still carry the graveyard zone prop,
+    /// proving the phrase really was parsed and only the superlative was declined —
+    /// without that guard this assertion would pass on any total parse failure.
+    #[test]
+    fn card_in_nonbattlefield_zone_does_not_materialize_a_superlative() {
+        let (filter, _) =
+            parse_target("target creature card in your graveyard with the greatest power");
+        let tf = typed_leg(&filter).expect("typed");
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }
+            )),
+            "reach-guard: the graveyard zone must still be parsed, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { .. }
+                    },
+                    ..
+                } | FilterProp::PtComparison {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { .. }
+                    },
+                    ..
+                }
+            )),
+            "CR 109.2a: no superlative may be emitted for a card-in-zone population, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// The head's `not(alphanumeric1)` word boundary: a longer word starting with a
+    /// property keyword must not half-match. Reach-guarded by the positive twin so
+    /// the negative cannot pass because the phrase failed to parse at all.
+    #[test]
+    fn bare_superlative_head_requires_a_word_boundary() {
+        assert!(
+            nom_filter::parse_superlative_property_head("with the greatest powerstone").is_err(),
+            "\"powerstone\" must not half-match the \"power\" property keyword"
+        );
+        assert!(
+            nom_filter::parse_superlative_property_head("with the greatest power").is_ok(),
+            "positive twin: the bare property keyword must still parse"
+        );
+    }
+
+    /// Every superlative adjective maps to the right aggregate direction through
+    /// the relocated shared atom, for every property axis.
+    #[test]
+    fn bare_superlative_head_covers_both_axes() {
+        for (word, want_fn) in [
+            ("greatest", AggregateFunction::Max),
+            ("highest", AggregateFunction::Max),
+            ("least", AggregateFunction::Min),
+            ("lowest", AggregateFunction::Min),
+            ("smallest", AggregateFunction::Min),
+        ] {
+            for (noun, want_prop) in [
+                ("power", ObjectProperty::Power),
+                ("toughness", ObjectProperty::Toughness),
+                ("mana value", ObjectProperty::ManaValue),
+            ] {
+                let text = format!("with the {word} {noun}");
+                let (_, (f, p)) = nom_filter::parse_superlative_property_head(&text)
+                    .unwrap_or_else(|e| panic!("{text:?} should parse: {e:?}"));
+                assert_eq!(f, want_fn, "failed for {text:?}");
+                assert_eq!(p, want_prop, "failed for {text:?}");
+            }
+        }
+    }
+
+    /// CR 109.2 — the look-ahead that stops the superlative being CONSUMED when a
+    /// non-battlefield zone clause still lies ahead. Refusing only later, after
+    /// consumption, would leave a filter that looks supported with its ranked
+    /// restriction silently gone — the exact defect this change removes.
+    ///
+    /// Tested at the guard rather than through `parse_target`, because the zone
+    /// passes that would populate an `InZone` prop run later in the enclosing
+    /// phrase parser; asserting on the guard is what makes this non-vacuous.
+    #[test]
+    fn nonbattlefield_zone_lookahead_gates_superlative_consumption() {
+        for ahead in [
+            " in your graveyard",
+            " in exile",
+            " in your hand",
+            " in a graveyard to your hand",
+        ] {
+            assert!(
+                nonbattlefield_zone_clause_lies_ahead(ahead),
+                "{ahead:?} must be recognized as a non-battlefield zone clause ahead"
+            );
+        }
+        // Battlefield is the CR 109.2 default, so it must NOT block consumption —
+        // the positive twin that keeps the guard from refusing everything.
+        for ahead in [
+            "",
+            " on the battlefield",
+            " you control",
+            " that's attacking",
+        ] {
+            assert!(
+                !nonbattlefield_zone_clause_lies_ahead(ahead),
+                "{ahead:?} must not block the CR 109.2 battlefield default"
+            );
+        }
+    }
+
+    /// CR 109.2 — a trailing relative type clause must end up in the ranked
+    /// POPULATION, not merely on the candidates: ranking `[Permanent, Artifact]`
+    /// candidates against a `[Permanent]` population would select the wrong object.
+    ///
+    /// This is the CodeRabbit finding on PR #6789. Refusing the superlative instead
+    /// was tried and rejected — it left the whole tail unparsed and dropped the
+    /// TYPE clause too, which is worse than the bug being fixed.
+    #[test]
+    fn trailing_relative_type_clause_is_folded_into_the_population() {
+        let (filter, _) =
+            parse_target("target permanent with the greatest mana value that's an artifact");
+        let tf = typed_leg(&filter).expect("typed");
+        // Reach-guard: the relative clause reached the candidate filter.
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Artifact),
+            "reach-guard: the \"that's an artifact\" clause must reach the candidate \
+             filter, got {:?}",
+            tf.type_filters
+        );
+        let (_, population) = bare_superlative_parts(&filter);
+        let pop = typed_leg(population).expect("typed population");
+        assert!(
+            pop.type_filters.contains(&TypeFilter::Artifact)
+                && pop.type_filters.contains(&TypeFilter::Permanent),
+            "the population must carry the SAME type set as the candidates, got {:?}",
+            pop.type_filters
         );
     }
 }

@@ -797,9 +797,30 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // STILL NARROW: `static_definition_has_optional` only exempts permission
         // modes and optional modifications — statics that are neither (CantGainLife,
         // +1/+1, MustAttack, etc.) remain subject to Optional_YouMay detection.
+        //
+        // CR 116.2c + CR 117.3a: `end_cost` is a THIRD carrier of the "you may" on
+        // this variant. "You may pay {W} to end this effect" grants a later
+        // SPECIAL ACTION (CR 116.2c: "any time they have priority"), so the clause
+        // emits no def of its own and sets no `optional` flag; the permission
+        // lives on the continuous effect the same resolution installs. This
+        // replaces the mandatory `Effect::PayCost` def that used to be the only
+        // AST evidence satisfying this detector for the Licid cycle — evidence
+        // that was flatly wrong at runtime, because it force-paid the cost on
+        // resolution.
+        //
+        // EXTENDS the existing arm rather than adding a sibling: a second
+        // `Effect::GenericEffect` arm after this one would be an
+        // `unreachable_patterns` lint (a hard failure under `-D warnings`), and
+        // placed before it would shadow the statics walk for every
+        // `GenericEffect` carrying an `end_cost`.
+        //
+        // STILL NARROW: `end_cost.is_some()` is exactly "this effect carries a
+        // printed CR 116.2c permission" — no other `GenericEffect` is affected.
         Effect::GenericEffect {
-            static_abilities, ..
-        } => static_abilities.iter().any(static_definition_has_optional),
+            static_abilities,
+            end_cost,
+            ..
+        } => end_cost.is_some() || static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
@@ -3333,6 +3354,7 @@ fn detect_condition_if(
     // probes below are deliberately type-agnostic.
     if evidence.has_slot("condition")
         || evidence.has_slot("constraint")
+        || evidence.has_slot("target_condition")
         || evidence.has_slot("unless_filter")
         || evidence.has_slot("unless_pay")
         || evidence.has_slot("if_clause")

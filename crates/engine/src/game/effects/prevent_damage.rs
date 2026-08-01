@@ -190,6 +190,17 @@ fn untargeted_damage_filter(
                 permanent_type: *permanent_type,
             })
         }
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): a tracked-set
+        // recipient ("those permanents"/"those creatures" — Mutational
+        // Advantage's clause-derived population, Energy Arc's target-derived
+        // untapped creatures) is an OBJECT population, not a player. The
+        // generic `is_context_ref()` classification below (used broadly for
+        // "does this need a declared target slot") also happens to cover
+        // `TrackedSet`/`TrackedSetFiltered`, which would otherwise
+        // misroute it through `resolve_player_for_context_ref` here — object
+        // matching is `typed_recipient_valid_card_filter`'s job, so this
+        // arm must be checked BEFORE the generic `is_context_ref()` catch-all.
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => None,
         filter if filter.is_context_ref() => Some(player_damage_filter(
             super::resolve_player_for_context_ref(state, ability, filter),
         )),
@@ -211,6 +222,13 @@ fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilt
         // `valid_card` slot (that would drop the "you" leg — the HIGH-severity
         // leak this arm forecloses even if the caller's branch order changes).
         TargetFilter::ControllerAndControlledPermanents { .. } => None,
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): a tracked-set
+        // recipient IS an object population — checked before the generic
+        // `is_context_ref()` exclusion below (which would otherwise reject
+        // it, mirroring `untargeted_damage_filter`'s matching carve-out).
+        filter @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }) => {
+            Some(filter.clone())
+        }
         filter if filter.is_context_ref() => None,
         filter => Some(filter.clone()),
     }
@@ -253,6 +271,25 @@ pub fn resolve(
             }
         };
 
+    // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): resolve any
+    // `TrackedSet` sentinel in the recipient/source filters to a CONCRETE
+    // tracked-set id now, at shield-creation time — before it is folded into
+    // a `ReplacementDefinition` that may persist and be rechecked at many
+    // later damage events this turn. Left unresolved, the raw
+    // `TrackedSetId(0)` sentinel would be re-resolved against
+    // `state.chain_tracked_set_id` at EACH future check
+    // (`filter::matches_target_filter`), which drifts to whatever unrelated
+    // chain most recently published a tracked set by then — a stale,
+    // silently-wrong rebinding (Energy Arc's "those creatures" shield must
+    // stay bound to the untapped creatures for the rest of the turn, not
+    // whatever some later spell's chain happens to publish). Mirrors
+    // `register_transient_effect`'s identical one-shot resolution
+    // (`game/effects/effect.rs`) for the analogous durable continuous-effect
+    // case. A no-op for every non-`TrackedSet` filter.
+    let target = crate::game::targeting::resolve_tracked_set_sentinel(state, target);
+    let effect_source_filter = effect_source_filter
+        .map(|filter| crate::game::targeting::resolve_tracked_set_sentinel(state, filter));
+
     // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
     // instant or sorcery spell would deal this turn") carries its chosen source
     // object in `ability.targets[0]` via a `ParentTargetSlot` sentinel in the
@@ -265,14 +302,33 @@ pub fn resolve(
     // chosen creature IS the damage source, not a recipient). Same routing: the
     // shield is source-scoped, so it must NOT be hosted on the creature as a
     // recipient object (which would wrongly re-impose "recipient == creature").
-    let source_scoped_prevent =
-        matches!(
-            &effect_source_filter,
-            Some(TargetFilter::And { filters })
-                if filters
-                    .iter()
-                    .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
-        ) || matches!(&effect_source_filter, Some(TargetFilter::ParentTarget));
+    //
+    // CR 608.2c + CR 615 (issue #6682): Energy Arc's "by"-only half carries a
+    // `TrackedSet` source filter instead (a SET of chosen creatures, not one).
+    // `ability.targets` here is NOT this effect's own recipient selection — it
+    // is the enclosing Untap clause's targets, inherited onto this
+    // SequentialSibling by the chain walker's generic `should_propagate_
+    // parent_targets` (the inheritance exists for OTHER riders that genuinely
+    // want the parent's chosen object; a source-scoped shield has no use for
+    // it). Without this arm, `host_on_targets` saw a non-`Any`-context-ref
+    // `target` (`Any` itself isn't in `is_context_ref()`'s list) plus those
+    // inherited targets and wrongly hosted the shield ON the untapped
+    // creature with a forced `valid_card: SelfRef` — recipient-scoping a
+    // shield that was supposed to be source-scoped only.
+    let source_scoped_prevent = matches!(
+        &effect_source_filter,
+        Some(TargetFilter::And { filters })
+            if filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
+    ) || matches!(
+        &effect_source_filter,
+        Some(
+            TargetFilter::ParentTarget
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+        )
+    );
 
     // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
     // count at effect-resolution time; the Next(n) shield itself is always static.
@@ -1472,6 +1528,460 @@ mod tests {
         .unwrap();
         assert!(matches!(bear_result, deal_damage::DamageResult::Applied(2)));
         assert_eq!(state.objects.get(&bear).unwrap().damage_marked, 2);
+    }
+
+    /// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): A `TrackedSet(0)`
+    /// sentinel recipient must be resolved to a CONCRETE tracked-set id at
+    /// shield-creation time, not left as the raw sentinel. Proves the
+    /// staleness bug this resolves: without the fix, a persisting shield's
+    /// `valid_card: TrackedSet(0)` would be re-resolved against
+    /// `state.chain_tracked_set_id` at EVERY future damage check, drifting to
+    /// whatever unrelated chain most recently published a tracked set. Here,
+    /// AFTER the shield is created, an unrelated chain overwrites
+    /// `chain_tracked_set_id` to point at a completely different object
+    /// (simulating some other spell resolving later the same turn) — the
+    /// shield must still protect only the ORIGINAL untapped creature (Energy
+    /// Arc class), not the new unrelated set.
+    #[test]
+    fn tracked_set_recipient_resolves_to_concrete_id_immune_to_later_chain_overwrite() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Energy Arc".to_string(),
+            Zone::Stack,
+        );
+        let untapped_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Untapped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let unrelated_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unrelated Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The preceding Untap clause published the untapped creature as the
+        // chain's tracked set — the state `prevent_damage::resolve` sees.
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(5), vec![untapped_creature]);
+        state.chain_tracked_set_id = Some(TrackedSetId(5));
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // A LATER, unrelated chain publishes a fresh tracked set (e.g. some
+        // other spell's exile/mill effect resolving afterward this turn).
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(6), vec![unrelated_creature]);
+        state.chain_tracked_set_id = Some(TrackedSetId(6));
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+
+        // The original untapped creature must still be protected.
+        let protected_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(untapped_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(protected_result, deal_damage::DamageResult::Applied(0)),
+            "the shield must stay bound to the originally-untapped creature"
+        );
+
+        // The later, unrelated creature must NOT be protected — the shield
+        // must not have drifted onto whatever the newest tracked set is.
+        let unrelated_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(unrelated_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(unrelated_result, deal_damage::DamageResult::Applied(3)),
+            "the shield must NOT drift onto an unrelated later chain's tracked set"
+        );
+    }
+
+    /// CR 611.2c + CR 615.11 (issue #6682): Mutational Advantage's official
+    /// ruling — "The set of permanents affected by Mutational Advantage is
+    /// determined at the time Mutational Advantage resolves. Permanents that
+    /// gain counters later in the turn won't become affected by this effect,
+    /// and permanents that lose all of their counters later in the turn
+    /// won't stop being affected." — driven through the real cast pipeline
+    /// (`GameRunner::cast`), not a hand-built `ResolvedAbility`, so the parse
+    /// → chain-context → resolution path is exercised end to end.
+    ///
+    /// Setup: `countered` already has a +1/+1 counter (in the frozen
+    /// population); `uncountered` does not. AFTER the spell resolves:
+    /// `uncountered` gains a counter (must NOT retroactively join the
+    /// shielded population — a live re-check of "permanents with counters"
+    /// would wrongly protect it) and `countered` loses its counter (must
+    /// STAY protected — the shield is bound to the frozen object identity,
+    /// not a live filter re-evaluated at each damage event).
+    #[test]
+    fn mutational_advantage_shield_freezes_population_at_resolution() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::counter::CounterType;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use std::sync::Arc;
+
+        let def = parse_effect_chain(
+            "Permanents you control with counters on them gain hexproof and indestructible \
+             until end of turn. Prevent all damage that would be dealt to those permanents \
+             this turn.",
+            AbilityKind::Spell,
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let countered = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Countered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&countered).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        let uncountered = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Uncountered Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&uncountered)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let spell = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Mutational Advantage".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+                generic: 1,
+            };
+        }
+        for color in [ManaType::Green, ManaType::Blue, ManaType::Colorless] {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let _outcome = runner.cast(spell).resolve();
+        let state = runner.state_mut();
+
+        // CR 611.2c: mutate AFTER resolution — the frozen population must be
+        // immune to both changes.
+        state
+            .objects
+            .get_mut(&uncountered)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&countered)
+            .unwrap()
+            .counters
+            .remove(&CounterType::Plus1Plus1);
+
+        let attacker = create_object(
+            state,
+            CardId(4),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let ctx = deal_damage::DamageContext::from_source(state, attacker).unwrap();
+        let mut events = Vec::new();
+
+        let uncountered_result = deal_damage::apply_damage_to_target(
+            state,
+            &ctx,
+            TargetRef::Object(uncountered),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(uncountered_result, deal_damage::DamageResult::Applied(3)),
+            "a permanent that gains a counter AFTER resolution must NOT retroactively \
+             join the frozen shielded population"
+        );
+
+        let countered_result = deal_damage::apply_damage_to_target(
+            state,
+            &ctx,
+            TargetRef::Object(countered),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(countered_result, deal_damage::DamageResult::Applied(0)),
+            "a permanent that loses its counter AFTER resolution must STAY protected \
+             (frozen by identity, not re-checked live)"
+        );
+    }
+
+    /// CR 608.2c + CR 615 (issue #6682): Energy Arc's bidirectional "dealt to
+    /// and dealt by those creatures" — driven through the real cast pipeline
+    /// (`GameRunner::cast`) with a genuine SUBSET target selection out of two
+    /// eligible creatures, proving the shield scopes to exactly the SELECTED
+    /// creature in BOTH directions:
+    /// - combat damage dealt TO the selected creature is prevented; TO the
+    ///   nonselected creature is not.
+    /// - combat damage dealt BY the selected creature (as a source) is
+    ///   prevented; BY the nonselected creature is not.
+    #[test]
+    fn energy_arc_cast_pipeline_scopes_to_and_by_damage_to_selected_creature() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use std::sync::Arc;
+
+        let def = parse_effect_chain(
+            "Untap any number of target creatures. Prevent all combat damage that would \
+             be dealt to and dealt by those creatures this turn.",
+            AbilityKind::Spell,
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Two eligible creatures — only one is selected as Energy Arc's
+        // target, proving the shield scopes to the CHOSEN subset, not every
+        // creature the multi-target filter could have matched.
+        let selected = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selected Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&selected)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&selected).unwrap().tapped = true;
+
+        let nonselected = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Nonselected Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nonselected)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&nonselected).unwrap().tapped = true;
+
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let spell = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Energy Arc".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+        for color in [ManaType::White, ManaType::Blue] {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        // CR 601.2c: "any number of target creatures" — declare exactly ONE
+        // of the two eligible creatures, proving the shield binds to the
+        // CHOSEN subset (the driver matches declared object intent to the
+        // multi-target slot).
+        let _outcome = runner.cast(spell).target_objects(&[selected]).resolve();
+        let state = runner.state_mut();
+
+        assert!(
+            !state.objects.get(&selected).unwrap().tapped,
+            "the selected creature must be untapped by Energy Arc's own effect"
+        );
+
+        let opponent_attacker_ctx =
+            deal_damage::DamageContext::from_source(state, opponent_creature).unwrap();
+        let mut events = Vec::new();
+
+        // Damage TO: selected is shielded, nonselected is not.
+        let to_selected = deal_damage::apply_damage_to_target(
+            state,
+            &opponent_attacker_ctx,
+            TargetRef::Object(selected),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(to_selected, deal_damage::DamageResult::Applied(0)),
+            "combat damage dealt TO the selected creature must be prevented"
+        );
+        let to_nonselected = deal_damage::apply_damage_to_target(
+            state,
+            &opponent_attacker_ctx,
+            TargetRef::Object(nonselected),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(to_nonselected, deal_damage::DamageResult::Applied(3)),
+            "combat damage dealt TO the nonselected creature must NOT be prevented"
+        );
+
+        // Damage BY: selected as the source is shielded, nonselected as the
+        // source is not.
+        let selected_source_ctx = deal_damage::DamageContext::from_source(state, selected).unwrap();
+        let by_selected = deal_damage::apply_damage_to_target(
+            state,
+            &selected_source_ctx,
+            TargetRef::Object(opponent_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(by_selected, deal_damage::DamageResult::Applied(0)),
+            "combat damage dealt BY the selected creature must be prevented"
+        );
+        let nonselected_source_ctx =
+            deal_damage::DamageContext::from_source(state, nonselected).unwrap();
+        let by_nonselected = deal_damage::apply_damage_to_target(
+            state,
+            &nonselected_source_ctx,
+            TargetRef::Object(opponent_creature),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(by_nonselected, deal_damage::DamageResult::Applied(3)),
+            "combat damage dealt BY the nonselected creature must NOT be prevented"
+        );
     }
 
     /// CR 615.1a: A `Prevention { All }` shield is not depletion-based — it

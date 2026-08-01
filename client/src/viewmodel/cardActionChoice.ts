@@ -94,10 +94,36 @@ export function playOrCastActionsForObject(
 ): GameAction[] {
   return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
     a.type === "CastSpell"
+    || a.type === "CastSpellForFree"
     || a.type === "CastSpellAsSneak"
     || a.type === "CastSpellAsWebSlinging"
     || a.type === "CastSpellAsMiracle"
     || a.type === "CastSpellAsMadness"
+    || a.type === "PlayFaceDown"
     || a.type === "PlayLand"
   );
+}
+
+/**
+ * Resolve the one action that a release-to-cast gesture may dispatch directly.
+ *
+ * The engine-provided per-object bucket is the authority for legality. We then
+ * reuse the existing auto-dispatch guard (single action, no confirmation) and
+ * the shared play/cast family projection. A card with another hand action or
+ * multiple casting modes therefore stays inspectable/playable, but never turns
+ * gold with a promise that releasing will cast immediately.
+ */
+export function resolveDirectPlayOrCastAction(
+  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  object: GameObject | undefined,
+): GameAction | null {
+  if (!object) return null;
+  const directAction = resolveSingleActionDispatch(
+    collectObjectActions(legalActionsByObject, object.id),
+    object,
+  );
+  if (!directAction) return null;
+  return playOrCastActionsForObject(legalActionsByObject, object.id).includes(directAction)
+    ? directAction
+    : null;
 }

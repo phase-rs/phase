@@ -80,6 +80,10 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.10: no mana was spent to cast a spell copy — reset the
+        // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
+        // cast it", issue #5943) do not re-fire off the original's payment.
+        copy_obj.clear_cast_payment_stamps();
         apply_spell_copy_modifications(
             &mut copy_obj,
             &additional_modifications,
@@ -134,30 +138,12 @@ pub fn resolve(
     // CR 707.10 / CR 707.10b: spell copies source themselves; ability copies
     // have the same source as the original ability.
     let copy_source_id = stack_entry_source_id_for_copy(&copy_kind, copy_id);
-    let mut copy_entry = StackEntry {
+    let copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_source_id,
         controller: copy_controller,
         kind: copy_kind,
     };
-
-    // CR 707.10 + CR 701.27f: copying an activated or triggered ability puts
-    // a new ability onto the stack. A self-transform instruction in that copy
-    // compares against the source at copy-creation time, not the original
-    // ability's earlier stack-entry time.
-    if matches!(
-        copy_entry.kind,
-        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-    ) {
-        let source_transformation_count = state
-            .objects
-            .get(&copy_source_id)
-            .filter(|object| object.back_face.is_some())
-            .map(|object| object.transformation_count);
-        if let Some(copied_ability) = copy_entry.ability_mut() {
-            copied_ability.set_source_transformation_count_recursive(source_transformation_count);
-        }
-    }
 
     // CR 707.10: Capture the copied spell's card id before the entry is moved
     // onto the stack. Only spell copies emit `SpellCopied` — copying an
@@ -170,8 +156,9 @@ pub fn resolve(
         | StackEntryKind::KeywordAction { .. } => None,
     };
 
-    state.stack.push_back(copy_entry);
-    events.push(GameEvent::StackPushed { object_id: copy_id });
+    // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
+    // copy-creation generation and emits `StackPushed`.
+    crate::game::stack::push_copy_to_stack(state, copy_entry, events);
 
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.
@@ -732,7 +719,7 @@ fn stack_entry_from_exiled_spell_object(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -887,8 +874,11 @@ mod tests {
         ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
         TapStateChange, TargetFilter, TargetRef,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
 
     /// Helper: push a spell onto the stack with a matching GameObject.
@@ -909,7 +899,7 @@ mod tests {
             controller: owner,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: variant,
                 actual_mana_spent: 0,
             },
@@ -991,6 +981,126 @@ mod tests {
             }
             _ => panic!("Expected both entries to be Spells with abilities"),
         }
+    }
+
+    /// CR 707.10 (issue #5943): a spell copy is not cast — the copy born by
+    /// `resolve(Effect::CopySpell)` must carry NO cast-payment record even
+    /// though it clones the original object. All five stamps reset to their
+    /// no-payment defaults; the original keeps its own record (reach-guard).
+    #[test]
+    fn spell_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Compleated Test Walker",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&ObjectId(10)].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: ObjectId(10),
+                    lki,
+                },
+            );
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.base_card_types = obj.card_types.clone();
+            obj.loyalty = Some(5);
+            obj.base_loyalty = Some(5);
+            obj.keywords.push(Keyword::Compleated);
+            obj.base_keywords.push(Keyword::Compleated);
+        }
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, ObjectId(10), "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the ORIGINAL keeps its payment record — the reset hit
+        // only the copy.
+        assert_eq!(
+            state.objects[&ObjectId(10)].mana_spent_to_cast_amount,
+            2,
+            "original keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(10)].phyrexian_life_paid,
+            1,
+            "original keeps its own Phyrexian life-payment record"
+        );
+
+        // Runtime regression: resolve the copied permanent spell through the
+        // production stack/entry-replacement pipeline. If the copy inherited
+        // the source's life payment, Compleated would reduce its 5 loyalty to 3.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let copy = state
+            .objects
+            .get(&copy_id)
+            .expect("copy persists after resolution");
+        assert_eq!(
+            copy.zone,
+            Zone::Battlefield,
+            "copy must resolve as a permanent"
+        );
+        assert_eq!(
+            copy.counters.get(&CounterType::Loyalty),
+            Some(&5),
+            "CR 702.150a: a spell copy has no source Phyrexian life payment to reduce loyalty"
+        );
     }
 
     /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's
@@ -2132,7 +2242,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2216,7 +2326,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::ActivatedAbility {
                     source_id,
-                    ability: build_resolved_from_def(&definition, source_id, PlayerId(0)),
+                    ability: Box::new(build_resolved_from_def(&definition, source_id, PlayerId(0))),
                 },
             },
             &mut events,
@@ -2285,7 +2395,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: basalt,
-                ability: untap_basalt,
+                ability: Box::new(untap_basalt),
             },
         });
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
@@ -2357,7 +2467,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2422,7 +2532,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_ability,
+                ability: Box::new(gogo_ability),
             },
         });
 
@@ -2448,7 +2558,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: other_id,
-                ability: copy_gogo,
+                ability: Box::new(copy_gogo),
             },
         });
 
@@ -2765,7 +2875,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_copy,
+                ability: Box::new(gogo_copy),
             },
         });
 
@@ -3307,6 +3417,7 @@ mod tests {
                 static_abilities: vec![],
                 duration: None,
                 target: None,
+                end_cost: None,
             },
             vec![],
             ObjectId(10),
@@ -3358,7 +3469,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(original),
+                ability: Some(Box::new(original)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

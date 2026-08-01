@@ -271,7 +271,7 @@ For each cluster in priority order:
 
 1. **Run `$engine-implementer`** for the cluster (not a general-purpose implementation flow).
 2. **Brief the skill with the template below.** Under-briefed runs produce inconsistent work.
-3. **After the skill returns**, verify the commit exists (`git log -1`) and that tests pass. `$engine-implementer` is responsible for verification before committing using the Tilt-preferred / direct-cargo-fallback pattern (`cargo fmt` → `tilt-wait.sh clippy test-engine` if Tilt up, else `clippy-strict` + `test -p engine`; then one-shot `cargo coverage`). See CLAUDE.md § "Canonical verification pattern".
+3. **After the skill returns**, verify the commit exists (`git log -1`) and that tests pass. `$engine-implementer` is responsible for verification before committing using the Tilt-preferred / direct-cargo-fallback pattern (`cargo fmt` → `tilt-wait.sh clippy test-engine` if Tilt up, else `clippy-strict` + `test -p phase-engine`; then one-shot `cargo coverage`). See CLAUDE.md § "Canonical verification pattern".
 4. **Commit between clusters** is the implementer's responsibility per the brief. Do not amend prior commits.
 5. **Handle deferrals** per Phase 6 if the implementer returns with a deferral recommendation.
 
@@ -342,7 +342,7 @@ Deliverables
 5. Verification gate (Tilt-preferred; see CLAUDE.md § "Canonical verification pattern"):
    - `cargo fmt --all` (always direct)
    - If Tilt is up (`tilt get uiresource clippy >/dev/null 2>&1`): `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`
-   - Else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`
+   - Else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`
    - `cargo coverage` (one-shot binary — always direct)
    - `cargo semantic-audit` (one-shot — always direct; check no new findings for the target cards).
 6. Commit message: `feat(engine): <SET> Tier <N>.<M> — <one-line primitive>\n\n<body>`.

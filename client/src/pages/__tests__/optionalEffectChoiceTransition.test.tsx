@@ -140,7 +140,6 @@ function scriptedAdapter(): {
       seq: nextSnapshotSeq(),
     })),
     restoreState: vi.fn(),
-    getAiAction: vi.fn().mockReturnValue(null),
     estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
   };

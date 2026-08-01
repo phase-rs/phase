@@ -9,13 +9,13 @@ Lookup material for build commands, the verification cadence, architecture, envi
 
 ## Tilt resources & operational rules
 
-**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p engine`, `pnpm run type-check`, or `pnpm lint` directly — they compete for cargo target locks. Check Tilt logs instead.
+**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p phase-engine`, `pnpm run type-check`, or `pnpm lint` directly — they compete for cargo target locks. Check Tilt logs instead.
 
 **Available Tilt resources** (defined in `Tiltfile`):
 | Resource | What it does | Triggers on |
 |----------|-------------|-------------|
 | `clippy` | `cargo clippy --all-targets -- -D warnings` | `crates/` changes |
-| `test-engine` | `cargo test -p engine` | `crates/engine/src/` changes |
+| `test-engine` | `cargo test -p phase-engine` | `crates/engine/src/` changes |
 | `test-ai` | `cargo test -p phase-ai` | `crates/engine/src/` or `crates/phase-ai/src/` changes |
 | `wasm` | WASM build (depends on clippy) | engine/AI/WASM src changes |
 | `card-data` | `./scripts/gen-card-data.sh` | `crates/engine/src/` changes |
@@ -82,7 +82,7 @@ if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
   cargo clippy --all-targets -- -D warnings
-  cargo test -p engine
+  cargo test -p phase-engine
   ./scripts/gen-card-data.sh
 fi
 
@@ -107,8 +107,8 @@ Run `./scripts/setup.sh` for full onboarding (Scryfall sidecars → card data �
 ### Rust Engine
 ```bash
 cargo test --all                    # Run all Rust tests
-cargo test -p engine                # Test engine crate only
-cargo test -p engine -- test_name   # Run single test
+cargo test -p phase-engine                # Test engine crate only
+cargo test -p phase-engine -- test_name   # Run single test
 cargo clippy --all-targets -- -D warnings  # Lint
 cargo fmt --all -- --check          # Format check
 cargo fmt --all                     # Auto-format

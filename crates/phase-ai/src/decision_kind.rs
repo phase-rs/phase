@@ -20,7 +20,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
             DecisionKind::Mulligan
         }
-        WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. } => {
+        WaitingFor::ManaPayment { .. }
+        | WaitingFor::ManaSourceSelection { .. }
+        | WaitingFor::PhyrexianPayment { .. } => {
             DecisionKind::ManaPayment
         }
         WaitingFor::ChooseXValue { .. } => DecisionKind::ChooseX,
@@ -58,7 +60,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
             GameAction::PlayLand { .. } => DecisionKind::PlayLand,
             GameAction::CastSpell { .. } => DecisionKind::CastSpell,
             GameAction::ActivateAbility { .. } => DecisionKind::ActivateAbility,
-            GameAction::TapLandForMana { .. } | GameAction::UntapLandForMana { .. } => {
+            GameAction::TapLandForMana { .. }
+            | GameAction::ActivateManaSource { .. }
+            | GameAction::UntapLandForMana { .. } => {
                 DecisionKind::ActivateManaAbility
             }
             // Default: any other priority-time action (PassPriority, special
@@ -151,6 +155,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -337,6 +342,9 @@ mod tests {
                         },
                         ability_index: None,
                         mana_type: engine::types::mana::ManaType::Green,
+                        output: engine::types::mana::ManaSourceOutput::Concrete(
+                            engine::types::mana::ManaType::Green,
+                        ),
                         atomic_combination: None,
                         restrictions: Vec::new(),
                         penalty: engine::types::mana::ManaSourcePenalty::None,

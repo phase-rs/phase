@@ -216,7 +216,7 @@ describe("BattlefieldZoneOverflow", () => {
     const drawerCard = document.querySelector('[data-object-id="1"]');
     expect(drawerCard).not.toBeNull();
 
-    fireEvent.mouseEnter(drawerCard as Element);
+    fireEvent.pointerEnter(drawerCard as Element, { pointerType: "mouse" });
 
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(screen.getAllByAltText("Permanent 1").length).toBeGreaterThan(0);
@@ -230,7 +230,7 @@ describe("BattlefieldZoneOverflow", () => {
     const drawerCard = document.querySelector('[data-object-id="1"]');
     expect(drawerCard).not.toBeNull();
 
-    fireEvent.mouseEnter(drawerCard as Element);
+    fireEvent.pointerEnter(drawerCard as Element, { pointerType: "mouse" });
     fireEvent.mouseMove(drawerCard as Element, { clientX: 24, clientY: 24 });
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();

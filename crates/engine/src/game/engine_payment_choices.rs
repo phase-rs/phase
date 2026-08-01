@@ -1194,100 +1194,13 @@ pub(super) fn handle_unless_payment(
         }
 
         if !payment_failed {
-            clear_echo_due_for_echo_payment(state, &pending_effect);
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&pending_effect.effect),
-                source_id: pending_effect.source_id,
-                subject: None,
-            });
-
-            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost].
-            // If they do, [alternative]." When the payment succeeds, the
-            // primary effect is suppressed (above) and the `IfAPlayerDoes`
-            // sub_ability runs as the alternative outcome. Mirrors the
-            // `OpponentMayChoice` accept path (`engine_payment_choices.rs`
-            // L88-L94) which sets `optional_effect_performed=true` on the
-            // accepted ability so `evaluate_condition` honors `IfAPlayerDoes`
-            // (`effects/mod.rs` L2156-L2158). Cards: Rhystic Lightning,
-            // Don't Make a Sound, Divert Disaster, Assimilate Essence.
-            if let Some(sub) = pending_effect.sub_ability.as_ref().filter(|sub| {
-                sub.condition
-                    .as_ref()
-                    .is_some_and(AbilityCondition::is_optional_effect_performed)
-            }) {
-                // Abandon Attachments #81 parallel: a stale
-                // `cost_payment_failed_flag` from a previous resolution would
-                // make `evaluate_condition` reject the IfAPlayerDoes condition
-                // (`effects/mod.rs` L2156-L2158: `&& !cost_payment_failed_flag`).
-                // Clear it on the success path the same way
-                // `handle_optional_effect_choice` (L29) and
-                // `handle_opponent_may_choice` (L88) do for their accept paths.
-                state.cost_payment_failed_flag = false;
-                let mut sub_resolved = sub.as_ref().clone();
-                if sub_resolved.targets.is_empty() {
-                    sub_resolved.targets = pending_effect.targets.clone();
-                }
-                sub_resolved.context = pending_effect.context.clone();
-                sub_resolved.context.optional_effect_performed = true;
-                post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
-                    state,
-                    &sub_resolved,
-                    events,
-                    &trigger_event,
-                )?);
-            } else if let Some(sub) = pending_effect
-                .sub_ability
-                .as_ref()
-                .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
-            {
-                // CR 700.2d + CR 608.2c: A `SequentialSibling` sub is the NEXT
-                // INDEPENDENT instruction "in the order written" — not a
-                // continuation of the unless-modified instruction, so it must
-                // resolve regardless of whether the unless cost was paid. The
-                // canonical case is choosing the same modal mode more than once
-                // (Mystic Confluence's "Counter target spell unless its
-                // controller pays {3}" picked twice → two independent counter
-                // instructions, each demanding its own {3}; issue #2925). The
-                // primary instruction's effect was suppressed above (its unless
-                // cost was paid), but the sibling chain is a separate instruction
-                // and is resumed here. The decline path resolves the whole
-                // `pending_effect` chain (which already follows the sibling); the
-                // pay path suppresses the head, so it must hand off only the
-                // sibling sub-chain — `resolve_ability_chain` then surfaces the
-                // sibling's OWN `unless_pay` prompt and follows its own chain.
-                let mut sub_resolved = sub.as_ref().clone();
-                if sub_resolved.targets.is_empty() {
-                    sub_resolved.targets = pending_effect.targets.clone();
-                }
-                sub_resolved.context = pending_effect.context.clone();
-                let event_start = resolve_ability_chain_for_unless_payment(
-                    state,
-                    &sub_resolved,
-                    events,
-                    &trigger_event,
-                )?;
-                // CR 608.2c: If the sibling instruction itself paused for input
-                // (e.g. its OWN unless-pay prompt — the second {3} of a
-                // double-counter), that fresh `WaitingFor` is the next state and
-                // MUST be preserved. The shared post-payment tail below would
-                // overwrite an open `UnlessPayment` with active-player priority
-                // (`set_active_priority`), collapsing the second prompt; run the
-                // trigger/SBA pipeline now and return so it survives.
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    let default_wf = state.waiting_for.clone();
-                    let wf = engine_priority::run_post_action_pipeline_from(
-                        state,
-                        events,
-                        event_start,
-                        &default_wf,
-                        false,
-                        false,
-                    )?;
-                    state.waiting_for = wf;
-                    return Ok(action_result(events, state.waiting_for.clone()));
-                }
-                post_action_event_start = Some(event_start);
-            }
+            let waiting_for = finish_successful_unless_payment(
+                state,
+                pending_effect.as_ref(),
+                &trigger_event,
+                events,
+            )?;
+            return Ok(action_result(events, waiting_for));
         }
     }
 
@@ -1344,6 +1257,122 @@ pub(super) fn handle_unless_payment(
         state.waiting_for = wf;
     }
     Ok(action_result(events, state.waiting_for.clone()))
+}
+
+/// CR 118.12 + CR 616.1: Complete an already-paid unless cost without entering
+/// the cost authority again. Deferred life-payment substitutions use this
+/// after their replacement post-effects finish, because the mana and life
+/// components were committed before the replacement choice opened.
+pub(crate) fn finish_successful_unless_payment(
+    state: &mut GameState,
+    pending_effect: &ResolvedAbility,
+    trigger_event: &Option<GameEvent>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    clear_echo_due_for_echo_payment(state, pending_effect);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&pending_effect.effect),
+        source_id: pending_effect.source_id,
+        subject: None,
+    });
+
+    let mut post_action_event_start = None;
+    // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they
+    // do, [alternative]." A paid cost suppresses the primary effect and runs
+    // an `IfAPlayerDoes` alternative outcome.
+    if let Some(sub) = pending_effect.sub_ability.as_ref().filter(|sub| {
+        sub.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+    }) {
+        state.cost_payment_failed_flag = false;
+        let mut sub_resolved = sub.as_ref().clone();
+        if sub_resolved.targets.is_empty() {
+            sub_resolved.targets = pending_effect.targets.clone();
+        }
+        sub_resolved.context = pending_effect.context.clone();
+        sub_resolved.context.optional_effect_performed = true;
+        post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
+            state,
+            &sub_resolved,
+            events,
+            trigger_event,
+        )?);
+    } else if let Some(sub) = pending_effect
+        .sub_ability
+        .as_ref()
+        .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+    {
+        // CR 700.2d + CR 608.2c: A sequential sibling is the next independent
+        // instruction and resolves even though payment suppressed the head.
+        let mut sub_resolved = sub.as_ref().clone();
+        if sub_resolved.targets.is_empty() {
+            sub_resolved.targets = pending_effect.targets.clone();
+        }
+        sub_resolved.context = pending_effect.context.clone();
+        let event_start =
+            resolve_ability_chain_for_unless_payment(state, &sub_resolved, events, trigger_event)?;
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let default_wf = state.waiting_for.clone();
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+            return Ok(state.waiting_for.clone());
+        }
+        post_action_event_start = Some(event_start);
+    }
+
+    if matches!(
+        state.waiting_for,
+        WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
+    ) {
+        set_active_priority(state);
+    }
+    resume_pending_continuation_if_priority(state, events)?;
+    if let Some(event_start) = post_action_event_start {
+        let default_wf = state.waiting_for.clone();
+        state.waiting_for = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+    }
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 118.12 + CR 605.3b + CR 616.1: Continue an unless payment after its
+/// leading mana component was committed and a Phyrexian-style life replacement
+/// finished. The exact suffix remains a payment, not a completed unless cost.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: AbilityCost,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    effect_description: Option<String>,
+    remaining: Vec<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let waiting_for = WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    };
+    let result = handle_unless_payment(state, waiting_for, true, events)?;
+    events.extend(result.events);
+    Ok(result.waiting_for)
 }
 
 fn resolve_ability_chain_for_unless_payment(

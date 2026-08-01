@@ -34,6 +34,7 @@ import type {
   CommandZoneDisplay,
   LogDefaultState,
   MultiplayerBoardLayout,
+  SpellPaymentMode,
   ZoneCollapseMode,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
@@ -72,6 +73,7 @@ const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const ZONE_COLLAPSE_MODES: ZoneCollapseMode[] = ["auto", "on", "off"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
+const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["focused", "split"];
@@ -428,15 +430,12 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   <SettingGroup label={t("gameplay.spellPayment")}>
-                    <label className="flex min-h-11 items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={spellPaymentMode === "manual"}
-                        onChange={(e) => setSpellPaymentMode(e.target.checked ? "manual" : "auto")}
-                        className="accent-cyan-500"
-                      />
-                      <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
-                    </label>
+                    <SegmentedControl
+                      options={SPELL_PAYMENT_MODES}
+                      value={spellPaymentMode}
+                      onChange={setSpellPaymentMode}
+                      renderLabel={(option) => t(`gameplay.spellPaymentOptions.${option}`)}
+                    />
                   </SettingGroup>
 
                   {isTauri() && (
@@ -723,7 +722,7 @@ export function PreferencesModal({
                           type="button"
                           onClick={handleImportTheme}
                           disabled={themeImportStatus === "loading" || !themeImportUrl.trim()}
-                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+                          className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
                         >
                           {themeImportStatus === "loading" ? t("audioTheme.loading") : t("audioTheme.import")}
                         </button>
@@ -1237,7 +1236,7 @@ function MultiplierSlider({
           onChange={(e) => onChange(Number(e.target.value))}
           onDoubleClick={() => onChange(defaultValue)}
           aria-label={label}
-          className="flex-1 accent-cyan-500"
+          className="h-2 flex-1 cursor-pointer rounded-full bg-slate-700 accent-cyan-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200 focus-visible:outline-offset-2 focus-visible:ring-2 focus-visible:ring-cyan-400/70"
         />
         <button
           type="button"
@@ -1537,7 +1536,7 @@ function ArtChainEditor({
             type="button"
             onClick={handleAddSet}
             disabled={!resolveSetCode(setInput)}
-            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-white hover:bg-sky-600/50 disabled:opacity-50"
           >
             {t("artChain.addSet")}
           </button>

@@ -43,84 +43,193 @@ expression: "&ir"
         "fragment": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 3
-            },
-            "target": {
-              "type": "Any"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "AddTargetReplacement",
-              "replacement": {
-                "event": "Moved",
-                "execute": {
-                  "kind": "Spell",
-                  "effect": {
-                    "type": "ChangeZone",
-                    "origin": "Battlefield",
-                    "destination": "Exile",
-                    "target": {
-                      "type": "SelfRef"
-                    },
-                    "owner_library": false,
-                    "enter_transformed": false,
-                    "enter_tapped": false,
-                    "enters_attacking": false
+        "Spell": {
+          "source_text": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
                   },
-                  "cost": null,
-                  "sub_ability": null,
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 30,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "~ deals 3 damage to any target"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 3
+                    },
+                    "target": {
+                      "type": "Any"
+                    }
+                  },
                   "duration": null,
-                  "description": null,
-                  "target_prompt": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
                   "condition": null,
-                  "optional_targeting": false,
                   "optional": false,
-                  "forward_result": false
+                  "unless_pay": null
                 },
-                "mode": {
-                  "type": "Mandatory"
-                },
-                "valid_card": {
-                  "type": "SelfRef"
-                },
-                "description": null,
+                "boundary": "Sentence",
                 "condition": null,
-                "destination_zone": "Graveyard",
-                "consume_on_apply": true,
-                "expiry": {
-                  "type": "EndOfTurn"
-                }
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "target": {
-                "type": "Any"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 32,
+                    "end_byte": 105,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "If a creature dealt damage this way would die this turn, exile it instead"
+                },
+                "disposition": {
+                  "Absorb": {
+                    "rider": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "AddTargetReplacement",
+                        "replacement": {
+                          "event": "Moved",
+                          "execute": {
+                            "kind": "Spell",
+                            "effect": {
+                              "type": "ChangeZone",
+                              "origin": "Battlefield",
+                              "destination": "Exile",
+                              "target": {
+                                "type": "SelfRef"
+                              },
+                              "owner_library": false,
+                              "enter_transformed": false,
+                              "enter_tapped": false,
+                              "enters_attacking": false
+                            },
+                            "cost": null,
+                            "sub_ability": null,
+                            "duration": null,
+                            "description": null,
+                            "target_prompt": null,
+                            "condition": null,
+                            "optional_targeting": false,
+                            "optional": false,
+                            "forward_result": false
+                          },
+                          "mode": {
+                            "type": "Mandatory"
+                          },
+                          "valid_card": {
+                            "type": "SelfRef"
+                          },
+                          "description": null,
+                          "condition": null,
+                          "destination_zone": "Graveyard",
+                          "consume_on_apply": true,
+                          "expiry": {
+                            "type": "EndOfTurn"
+                          }
+                        },
+                        "target": {
+                          "type": "Any"
+                        }
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
+                    "kind": "DieExile"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "die_exile_rider_placeholder",
+                    "description": null
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."
+            }
+          ]
         }
       }
     }

@@ -12,8 +12,13 @@ vi.mock("idb-keyval", () => ({
   set: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { get as idbGet, set as idbSet } from "idb-keyval";
-import { loadGame, saveAuthoritativeGame } from "../gamePersistence";
+import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
+import {
+  loadGame,
+  loadP2PHostSession,
+  saveAuthoritativeGame,
+  saveGame,
+} from "../gamePersistence";
 
 function fixtureState(): GameState {
   return buildGameState({
@@ -50,5 +55,24 @@ describe("game persistence", () => {
     const restored = await loadGame("trusted-local");
     expect(restored).toEqual(envelope);
     expect(persistedGameStateView(restored!)).toEqual(state);
+  });
+
+  it("does not clear resumable storage for a terminal state before GameOver delivery", async () => {
+    const state = fixtureState();
+    state.match_phase = "Completed";
+
+    await saveGame("terminal-pending", state);
+
+    expect(idbSet).not.toHaveBeenCalled();
+    expect(idbDel).not.toHaveBeenCalled();
+  });
+
+  it("rejects a legacy P2P host snapshot without a session key", async () => {
+    vi.mocked(idbGet).mockResolvedValueOnce({
+      gameId: "legacy-p2p",
+      roomCode: "ABCDE",
+    });
+
+    await expect(loadP2PHostSession("legacy-p2p")).resolves.toBeNull();
   });
 });

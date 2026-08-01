@@ -194,12 +194,12 @@ fn queue_planeswalk_trigger(
         // CR 901.8: controlled by the player whose roll caused the trigger.
         controller: player_id,
         condition: None,
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Planeswalk,
             vec![],
             source_id,
             player_id,
-        ),
+        )),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,

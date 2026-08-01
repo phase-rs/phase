@@ -5,6 +5,13 @@
     "cantActivateDuring": "Can't be activated right now",
     "prohibited": "Activating this ability is prohibited"
   },
+  "manaSourceSelection": {
+    "title": "Choose a mana source",
+    "description": "This mana ability requires sacrificing a permanent.",
+    "sacrifice": "Sacrifice",
+    "back": "Back to mana payment",
+    "unknownSource": "Mana source"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -122,6 +129,7 @@
     "blockWithNoneConfirm": "Tap Again: Block with None",
     "selectAttackerForBlocker": "Select the attacker this blocker should defend against",
     "companionToHand": "Companion to Hand",
+    "endContinuousEffect": "End {{source}}'s effect —",
     "resolve": "Resolve",
     "resolveTooltip": "Pass priority so the top stack item can resolve if every player also passes. Shortcut: Space.",
     "resolveAll": "Resolve All",
@@ -249,6 +257,7 @@
     "sacrifice": "Sacrifice",
     "copy": "Copy",
     "copyTooltip": "Token copy of a real card",
+    "cantBeBlocked": "Can't be blocked",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
@@ -541,12 +550,14 @@
     "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
     "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
     "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellColor": "Spend only to cast spells of the chosen color",
     "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
     "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "Spend only to activate abilities",
     "onlyForXCosts": "Spend only on costs that include {X}",
     "onlyForAny": "Spend only on one of the listed uses",
     "onlyForSpecialAction": "Spend only on a specific special action",
+    "impossible": "This mana can't be spent",
     "convokePayment": "Convoke payment",
     "grantsProperty": "Grants a property to the spell",
     "grantCantBeCountered": "Spend on this spell to make it uncounterable"
@@ -694,6 +705,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Must block {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1040,6 +1052,33 @@
       "subtitleActivate": "Activate this ability?",
       "subtitlePlay": "Choose how to play this card",
       "subtitleChoose": "Choose an ability to activate"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Tap for mana",
+      "tapFor": "Tap for {{mana}}",
+      "onlyForSpell": "Only for spells.",
+      "onlyForSpellType": "Only for {{spellType}} spells.",
+      "onlyForCreatureType": "Only for {{creatureType}} spells.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Only for {{spellType}} spells or abilities of {{spellType}}s.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Only for {{spellType}} spells or abilities.",
+      "onlyForActivation": "Only for activating abilities.",
+      "onlyForTaggedActivation": "Only for activating {{tag}} abilities.",
+      "onlyForXCosts": "Only for costs containing X.",
+      "onlyForSpellWithKeywordKind": "Only for spells with {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Only for spells with {{keyword}} cast from {{zone}}.",
+      "onlyForSpellWithManaValue": "Only for spells with mana value {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Only for {{spellType}} spells matching {{criteria}}.",
+      "manaValueCriterion": "mana value {{comparator}} {{value}}",
+      "hasXInCostCriterion": "an X in their cost",
+      "onlyForSpellWithColorCount": "Only for spells with {{comparator}} {{count}} colors.",
+      "onlyForSpellColor": "Only for spells of the {{color}} color.",
+      "onlyForSpellFromZone": "Only for spells {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Only for face-down spells.",
+      "onlyForAny": "Only for one of these uses: {{restrictions}}",
+      "onlyForSpecialAction": "Only for the {{action}} special action.",
+      "impossible": "This mana can't be spent.",
+      "convokePayment": "Only for this convoke payment.",
+      "anySpell": "any"
     },
     "defiler": {
       "title": "Defiler Cost Reduction",
@@ -1746,6 +1785,23 @@
     "targetLand": "the land target",
     "targetCreature": "the creature target",
     "targetChoice": "this target choice"
+  },
+  "giftRecipient": {
+    "title": "Choose Gift Recipient",
+    "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promise a gift?",
+      "pay": "Promise {{gift}}",
+      "decline": "Cast without promising",
+      "kind": {
+        "card": "a card",
+        "treasure": "a Treasure",
+        "food": "a Food",
+        "tappedFish": "a tapped Fish"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Choose Clash Opponent",

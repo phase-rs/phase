@@ -22,75 +22,145 @@ expression: "&ir"
         "fragment": "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "ChangesZone",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "LoseLife",
-              "amount": {
-                "type": "Difference",
-                "left": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "Power",
-                    "scope": {
-                      "type": "Demonstrative"
-                    }
-                  }
-                },
-                "right": {
-                  "type": "Ref",
-                  "qty": {
-                    "type": "Toughness",
-                    "scope": {
-                      "type": "Demonstrative"
-                    }
-                  }
-                }
-              },
-              "target": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "ChangesZone",
+            "partial_def": {
+              "mode": "ChangesZone",
+              "execute": null,
+              "valid_card": {
                 "type": "Typed",
-                "type_filters": [],
-                "controller": "Opponent",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
                 "properties": []
+              },
+              "origin": null,
+              "destination": "Battlefield",
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 98,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "target opponent loses life equal to the difference between that creature's power and its toughness"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "LoseLife",
+                        "amount": {
+                          "type": "Difference",
+                          "left": {
+                            "type": "Ref",
+                            "qty": {
+                              "type": "Power",
+                              "scope": {
+                                "type": "Demonstrative"
+                              }
+                            }
+                          },
+                          "right": {
+                            "type": "Ref",
+                            "qty": {
+                              "type": "Toughness",
+                              "scope": {
+                                "type": "Demonstrative"
+                              }
+                            }
+                          }
+                        },
+                        "target": {
+                          "type": "Typed",
+                          "type_filters": [],
+                          "controller": "Opponent",
+                          "properties": []
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
               }
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": "You",
-            "properties": []
-          },
-          "origin": null,
-          "destination": "Battlefield",
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": {
-            "type": "Player"
-          },
-          "valid_source": null,
-          "description": "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "target opponent loses life equal to the difference between that creature's power and its toughness.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+            "die_results": []
+          }
         }
       }
     }

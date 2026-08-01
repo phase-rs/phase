@@ -519,7 +519,7 @@ fn pay_companion_to_hand_cost(
 /// CR 116.2g + CR 702.139a: Commit the once-per-game companion action only
 /// after its full payment succeeds. This is also the sole point that clears the
 /// player's undoable mana-tap record for this non-mana action.
-fn commit_companion_to_hand(
+pub(crate) fn finish_paid_companion_to_hand(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
@@ -572,7 +572,7 @@ pub fn handle_companion_to_hand(
     }
 
     match pay_companion_to_hand_cost(state, player, &cost, events)? {
-        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paid => Ok(finish_paid_companion_to_hand(state, player, events)),
         SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
 }
@@ -587,7 +587,7 @@ pub(crate) fn resume_companion_to_hand_payment(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     match pay_companion_to_hand_cost(state, player, &cost, events)? {
-        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paid => Ok(finish_paid_companion_to_hand(state, player, events)),
         SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
 }

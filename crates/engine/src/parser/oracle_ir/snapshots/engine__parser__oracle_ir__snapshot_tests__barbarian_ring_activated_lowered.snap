@@ -1,0 +1,128 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Mana",
+        "produced": {
+          "type": "Fixed",
+          "colors": [
+            "Red"
+          ]
+        }
+      },
+      "cost": {
+        "type": "Tap"
+      },
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "DealDamage",
+          "amount": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Controller"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
+      },
+      "duration": null,
+      "description": "{T}: Add {R}. ~ deals 1 damage to you.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false,
+      "is_mana_ability": true
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "DealDamage",
+        "amount": {
+          "type": "Fixed",
+          "value": 2
+        },
+        "target": {
+          "type": "Any"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Red"
+              ],
+              "generic": 0
+            }
+          },
+          {
+            "type": "Tap"
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "SelfRef"
+            },
+            "count": 1
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "Threshold — {R}, {T}, Sacrifice ~: It deals 2 damage to any target. Activate only if there are seven or more cards in your graveyard.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "RequiresCondition",
+          "data": {
+            "condition": {
+              "type": "QuantityComparison",
+              "lhs": {
+                "type": "Ref",
+                "qty": {
+                  "type": "GraveyardSize",
+                  "player": {
+                    "type": "Controller"
+                  }
+                }
+              },
+              "comparator": "GE",
+              "rhs": {
+                "type": "Fixed",
+                "value": 7
+              }
+            }
+          }
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

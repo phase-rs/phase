@@ -22,6 +22,8 @@ use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::planner::quick_state_hash;
 use crate::policies::registry::PolicyId;
+#[cfg(test)]
+use crate::policies::PolicyRegistry;
 use crate::projection::{project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey};
 use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
@@ -32,7 +34,7 @@ use crate::synergy::SynergyGraph;
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
 /// Per-game cache shared by all decisions.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AiSession {
     pub deck_profile: HashMap<PlayerId, DeckProfile>,
     pub features: HashMap<PlayerId, DeckFeatures>,
@@ -44,6 +46,23 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    #[cfg(test)]
+    pub(crate) policy_registry_override: Option<Arc<PolicyRegistry>>,
+}
+
+impl std::fmt::Debug for AiSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiSession")
+            .field("deck_profile", &self.deck_profile)
+            .field("features", &self.features)
+            .field("plan", &self.plan)
+            .field("strategy", &self.strategy)
+            .field("synergy", &self.synergy)
+            .field("memory", &self.memory)
+            .field("projection_cache", &self.projection_cache)
+            .finish()
+    }
 }
 
 impl AiSession {
@@ -84,6 +103,8 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            #[cfg(test)]
+            policy_registry_override: None,
         }
     }
 

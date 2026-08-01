@@ -19,7 +19,7 @@ name: Refresh Card Data Catalogs
 # and no PR opens. So it is safe to fire on any of the triggers below.
 #
 # Triggers:
-#   - schedule: weekly on Monday, after MTGJSON's weekly publish.
+#   - schedule: daily, after MTGJSON's publish window.
 #   - workflow_dispatch: manual run from the Actions tab.
 #   - workflow_run on "Clear Caches": clearing the mtgjson/scryfall caches only
 #     DELETES them; this workflow is the thing that re-fetches, re-processes,
@@ -27,9 +27,20 @@ name: Refresh Card Data Catalogs
 
 on:
   schedule:
-    # Monday 15:00 UTC — after the ISO-week cache key rolls (Mon 00:00) and
-    # MTGJSON has published the week's data.
-    - cron: "0 15 * * 1"
+    # Daily at 15:00 UTC, after MTGJSON's publish window.
+    #
+    # Was weekly (Mondays), which under-served the actual publish cadence:
+    # MTGJSON ships roughly daily (5.3.0+20260723 -> +20260724 on consecutive
+    # days), so for six days out of seven the committed known-tokens.toml was
+    # stale. That is not cosmetic — build.rs embeds that file, so when
+    # gen-card-data.sh regenerates it mid-run the deploy has to recompile the
+    # engine a SECOND time to embed the new catalog. Measured at 5m35s on top
+    # of the first 5m39s compile (run 30114030288), on a job that was timing
+    # out at 30m. Keeping the committed catalog fresh is what removes it.
+    #
+    # Firing daily is safe by construction: the vintage write-gate above means
+    # a run against unchanged MTGJSON rewrites nothing and opens no PR.
+    - cron: "0 15 * * *"
   workflow_dispatch:
   workflow_run:
     workflows: ["Clear Caches"]

@@ -5,6 +5,7 @@
     "cantActivateDuring": "No puede activarse ahora",
     "prohibited": "Activar esta habilidad está prohibido"
   },
+  "manaSourceSelection": { "title": "Elige una fuente de maná", "description": "Esta habilidad de maná requiere sacrificar un permanente.", "sacrifice": "Sacrificar", "back": "Volver al pago de maná", "unknownSource": "Fuente de maná" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -122,6 +123,7 @@
     "blockWithNoneConfirm": "Toca de nuevo: no bloquear con ninguna",
     "selectAttackerForBlocker": "Selecciona el atacante contra el que debe defenderse este bloqueador",
     "companionToHand": "Compañero a la mano",
+    "endContinuousEffect": "Terminar el efecto de {{source}} —",
     "resolve": "Resolver",
     "resolveTooltip": "Pasa la prioridad para que el objeto superior de la pila se resuelva si todos los jugadores también pasan. Atajo: Espacio.",
     "resolveAll": "Resolver todo",
@@ -248,6 +250,7 @@
     "target": "Objetivo",
     "copy": "Copia",
     "copyTooltip": "Ficha copia de una carta real",
+    "cantBeBlocked": "No puede ser bloqueada",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
@@ -509,12 +512,14 @@
     "onlyForSpellWithManaValue": "Gastar solo para lanzar hechizos que cumplan un requisito de valor de maná",
     "onlyForSpellMatchingCostCriteria": "Gastar solo para lanzar hechizos que cumplan un requisito de coste",
     "onlyForSpellWithColorCount": "Gastar solo para lanzar hechizos que cumplan un requisito de cantidad de colores",
+    "onlyForSpellColor": "Gastar solo para lanzar hechizos del color elegido",
     "onlyForSpellFromZone": "Gastar solo para lanzar hechizos desde una zona permitida",
     "onlyForFaceDownSpell": "Gastar solo para lanzar hechizos boca abajo",
     "onlyForActivation": "Gastar solo para activar habilidades",
     "onlyForXCosts": "Gastar solo en costes que incluyan {X}",
     "onlyForAny": "Gastar solo en uno de los usos indicados",
     "onlyForSpecialAction": "Gastar solo en una acción especial específica",
+    "impossible": "Este maná no se puede gastar",
     "convokePayment": "Pago de convocar",
     "grantsProperty": "Otorga una propiedad al hechizo",
     "grantCantBeCountered": "Gástalo en este hechizo para que no se pueda contrarrestar"
@@ -662,6 +667,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Debe bloquear a {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1008,6 +1014,33 @@
       "subtitleActivate": "¿Activar esta habilidad?",
       "subtitlePlay": "Elige cómo jugar esta carta",
       "subtitleChoose": "Elige una habilidad para activar"
+    },
+    "manaRestrictions": {
+      "tapForMana": "Girar para obtener maná",
+      "tapFor": "Girar para {{mana}}",
+      "onlyForSpell": "Solo para hechizos.",
+      "onlyForSpellType": "Solo para hechizos de tipo {{spellType}}.",
+      "onlyForCreatureType": "Solo para hechizos de {{creatureType}}.",
+      "onlyForTypeSpellsOrAbilitiesOfSpellType": "Solo para hechizos de tipo {{spellType}} o habilidades de {{spellType}}s.",
+      "onlyForTypeSpellsOrAbilitiesAny": "Solo para hechizos o habilidades de tipo {{spellType}}.",
+      "onlyForActivation": "Solo para activar habilidades.",
+      "onlyForTaggedActivation": "Solo para activar habilidades {{tag}}.",
+      "onlyForXCosts": "Solo para costes que contengan X.",
+      "onlyForSpellWithKeywordKind": "Solo para hechizos con {{keyword}}.",
+      "onlyForSpellWithKeywordKindFromZone": "Solo para hechizos con {{keyword}} lanzados desde {{zone}}.",
+      "onlyForSpellWithManaValue": "Solo para hechizos con valor de maná {{comparator}} {{value}}.",
+      "onlyForSpellMatchingCostCriteria": "Solo para hechizos de tipo {{spellType}} que cumplan {{criteria}}.",
+      "manaValueCriterion": "valor de maná {{comparator}} {{value}}",
+      "hasXInCostCriterion": "una X en su coste",
+      "onlyForSpellWithColorCount": "Solo para hechizos con {{comparator}} {{count}} colores.",
+      "onlyForSpellColor": "Solo para hechizos del color {{color}}.",
+      "onlyForSpellFromZone": "Solo para hechizos {{polarity}} {{zone}}.",
+      "onlyForFaceDownSpell": "Solo para hechizos boca abajo.",
+      "onlyForAny": "Solo para uno de estos usos: {{restrictions}}",
+      "onlyForSpecialAction": "Solo para la acción especial {{action}}.",
+      "impossible": "Este maná no se puede gastar.",
+      "convokePayment": "Solo para este pago de convocar.",
+      "anySpell": "cualquiera"
     },
     "defiler": {
       "title": "Reducción de coste de Profanador",
@@ -1709,6 +1742,23 @@
     "targetLand": "el objetivo de tierra",
     "targetCreature": "el objetivo de criatura",
     "targetChoice": "esta elección de objetivo"
+  },
+  "giftRecipient": {
+    "title": "Elegir destinatario del regalo",
+    "subtitle": "Elige qué oponente recibe el regalo prometido."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "¿Prometer un regalo?",
+      "pay": "Prometer {{gift}}",
+      "decline": "Lanzar sin prometer",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Alimento",
+        "tappedFish": "un Pez girado"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",

@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "¿Conceder la partida?",
-    "message": "Tu oponente será declarado ganador.",
-    "concede": "Conceder"
+    "game": {
+      "label": "Conceder esta partida",
+      "ordinaryMessage": "Tu oponente gana esta partida.",
+      "matchMessage": "Concedes solo la partida actual. Si el match no está decidido, seguirá el banquillo o la siguiente partida."
+    },
+    "match": {
+      "label": "Conceder todo el match",
+      "message": "Concedes el match. Tu oponente gana el match y no se jugarán más partidas."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} solicita una repetición",
@@ -53,16 +60,18 @@
     "matchScore": "Marcador de la serie {{p0}}-{{p1}}{{draws}}. Mueve cartas entre el mazo principal y el banquillo, luego envía.",
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
-    "main": "Principal ({{count}}/{{total}})",
+    "main": "Principal ({{count}}, mín. {{min}})",
     "sideboard": "Banquillo ({{count}})",
+    "sideboardCapped": "Banquillo ({{count}}/{{max}})",
     "moveFromSideboard": "Mueve cartas del banquillo.",
     "moveFromMain": "Mueve cartas del mazo principal.",
-    "matchesRegistered": "El mazo principal coincide con el tamaño registrado ({{total}}).",
-    "submitDisabled": "El mazo principal tiene {{count}} / {{total}} — envío deshabilitado.",
     "resetAria": "Restablecer al mazo registrado",
     "reset": "Restablecer",
     "submitAria": "Enviar el mazo para el siguiente juego",
-    "submitDeck": "Enviar mazo"
+    "submitDeck": "Enviar mazo",
+    "readyToSubmit": "El mazo es legal: listo para enviar.",
+    "belowMinimum": "El mazo principal necesita al menos {{min}} cartas — ahora tiene {{count}}.",
+    "overSideboardCap": "El banquillo tiene {{count}} cartas — máximo {{max}}."
   },
   "brokerOfflinePrompt": {
     "title": "Servidor de salas inaccesible",

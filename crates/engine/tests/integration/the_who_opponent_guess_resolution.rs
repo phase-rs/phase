@@ -126,7 +126,13 @@ fn choose_guessing_opponent(runner: &mut GameRunner, opponent: PlayerId) {
                 "the controller chooses which opponent makes the guess"
             );
             assert!(
-                matches!(choice_type, ChoiceType::Opponent { restriction: None }),
+                matches!(
+                    choice_type,
+                    ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    }
+                ),
                 "expected opponent choice before the guess, got {choice_type:?}"
             );
             assert!(

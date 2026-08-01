@@ -392,8 +392,15 @@ fn finalize_loyalty_activation(
     let cost = crate::types::ability::AbilityCost::Loyalty {
         amount: loyalty_cost,
     };
-    match super::casting::pay_ability_cost_for_activation(state, player, pw_id, &cost, None, events)
-        .expect("loyalty validation passed in handle_activate_loyalty")
+    match super::casting::pay_ability_cost_for_activation(
+        state,
+        player,
+        pw_id,
+        &cost,
+        Some(ability_index),
+        events,
+    )
+    .expect("loyalty validation passed in handle_activate_loyalty")
     {
         super::casting::PaymentOutcome::Paid => {
             complete_loyalty_activation(state, player, pw_id, resolved, ability_index, events)
@@ -449,7 +456,7 @@ fn complete_loyalty_activation(
             controller: player,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: resolved_with_idx,
+                ability: Box::new(resolved_with_idx),
             },
         },
         events,

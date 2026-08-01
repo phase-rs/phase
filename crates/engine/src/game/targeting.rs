@@ -599,6 +599,11 @@ pub fn resolve_event_context_target(
             .first()
             .copied()
             .map(TargetRef::Object),
+        TargetFilter::LastZoneChanged => state
+            .last_zone_changed_ids
+            .first()
+            .copied()
+            .map(TargetRef::Object),
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
@@ -643,6 +648,13 @@ pub fn resolve_event_context_targets(
         TargetFilter::LastRevealed => {
             return state
                 .last_revealed_ids
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect();
+        }
+        TargetFilter::LastZoneChanged => {
+            return state
+                .last_zone_changed_ids
                 .iter()
                 .map(|id| TargetRef::Object(*id))
                 .collect();
@@ -773,6 +785,14 @@ pub fn resolved_targets(
             .map(TargetRef::Object)
             .collect();
     }
+    if matches!(target_filter, TargetFilter::LastZoneChanged) {
+        return state
+            .last_zone_changed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
             return targets;
@@ -850,7 +870,20 @@ pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let root = state
+    super::ability_utils::flatten_targets_in_chain(resolving_root_ability(state, ability))
+}
+
+/// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
+/// entry that `ability` belongs to (falling back to `ability` itself when no
+/// matching entry is found — e.g. hand-built test abilities resolved outside
+/// the stack). Single authority for the root-entry lookup shared by
+/// [`parent_chain_targets_from_root`] and the delayed-trigger creation
+/// snapshot (`effects::delayed_trigger`).
+pub(crate) fn resolving_root_ability<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+) -> &'a ResolvedAbility {
+    state
         .resolving_stack_entry
         .as_ref()
         .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
@@ -861,8 +894,7 @@ pub(crate) fn parent_chain_targets_from_root(
                 .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
         })
         .and_then(|entry| entry.ability())
-        .unwrap_or(ability);
-    super::ability_utils::flatten_targets_in_chain(root)
+        .unwrap_or(ability)
 }
 
 /// CR 608.2c: Resolve a single earlier target slot by its declared `index` from
@@ -926,12 +958,21 @@ fn target_ref_matches_resolved_filter(
     target: &TargetRef,
 ) -> bool {
     let ctx = super::filter::FilterContext::from_ability(ability);
+    target_ref_matches_resolved_filter_with_context(state, target_filter, target, &ctx)
+}
+
+fn target_ref_matches_resolved_filter_with_context(
+    state: &GameState,
+    target_filter: &TargetFilter,
+    target: &TargetRef,
+    ctx: &super::filter::FilterContext<'_>,
+) -> bool {
     match target {
         TargetRef::Object(id) if state.stack.iter().any(|entry| entry.id == *id) => {
-            super::filter::matches_stack_target_filter(state, *id, target_filter, &ctx)
+            super::filter::matches_stack_target_filter(state, *id, target_filter, ctx)
         }
         TargetRef::Object(id) => {
-            super::filter::matches_target_filter(state, *id, target_filter, &ctx)
+            super::filter::matches_target_filter(state, *id, target_filter, ctx)
         }
         TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
             state,
@@ -948,6 +989,19 @@ pub(crate) fn resolved_object_ids_for_filter(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_ability(ability);
+    resolved_object_ids_for_filter_with_context(state, ability, filter, &ctx)
+}
+
+/// Resolve a filter with a caller-supplied semantic context. This preserves the
+/// usual explicit-target-first behavior while allowing effects whose later text
+/// is relative to an earlier chosen object to bind `recipient_id`.
+pub(crate) fn resolved_object_ids_for_filter_with_context(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    ctx: &super::filter::FilterContext<'_>,
 ) -> Vec<ObjectId> {
     match filter {
         // CR 400.7: self-reference resolves only to the exact source or its own
@@ -967,14 +1021,15 @@ pub(crate) fn resolved_object_ids_for_filter(
             .into_iter()
             .collect(),
         TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
-        TargetFilter::ParentTargetSlot { index } => ability
-            .targets
-            .get(*index)
-            .and_then(target_ref_object)
-            .into_iter()
-            .collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            resolve_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| target_ref_object(&target))
+                .into_iter()
+                .collect()
+        }
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
@@ -983,13 +1038,12 @@ pub(crate) fn resolved_object_ids_for_filter(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
-            let ctx = super::filter::FilterContext::from_ability(ability);
             state
                 .battlefield
                 .iter()
                 .copied()
                 .filter(|id| {
-                    super::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+                    super::filter::matches_target_filter(state, *id, &effective_filter, ctx)
                 })
                 .collect()
         }
@@ -997,9 +1051,15 @@ pub(crate) fn resolved_object_ids_for_filter(
             object_targets(&ability.targets).collect()
         }
         _ => {
-            let ctx = super::filter::FilterContext::from_ability(ability);
             let explicit_targets: Vec<ObjectId> = object_targets(&ability.targets)
-                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .filter(|id| {
+                    target_ref_matches_resolved_filter_with_context(
+                        state,
+                        filter,
+                        &TargetRef::Object(*id),
+                        ctx,
+                    )
+                })
                 .collect();
             if !explicit_targets.is_empty() {
                 return explicit_targets;
@@ -1009,7 +1069,7 @@ pub(crate) fn resolved_object_ids_for_filter(
                 .battlefield
                 .iter()
                 .copied()
-                .filter(|id| super::filter::matches_target_filter(state, *id, filter, &ctx))
+                .filter(|id| super::filter::matches_target_filter(state, *id, filter, ctx))
                 .collect()
         }
     }
@@ -1450,6 +1510,8 @@ pub(crate) fn extract_source_from_event(
         } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
+        // CR 710.4: the flipped permanent is the event's subject.
+        GameEvent::Flipped { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
         GameEvent::TurnedFaceDown { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
@@ -4254,6 +4316,8 @@ mod tests {
         let event = crate::types::events::GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::Scry,
+            look_count: None,
+            scry_bottom_count: None,
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));
@@ -5397,13 +5461,29 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source,
-                ability: root,
+                ability: Box::new(root),
             },
         });
 
         let result = resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 1 }, &state);
 
         assert_eq!(result, vec![first, second]);
+        assert_eq!(
+            resolved_object_ids_for_filter(
+                &state,
+                &body,
+                &TargetFilter::ParentTargetSlot { index: 0 },
+            ),
+            vec![ObjectId(1)],
+        );
+        assert_eq!(
+            resolved_object_ids_for_filter(
+                &state,
+                &body,
+                &TargetFilter::ParentTargetSlot { index: 1 },
+            ),
+            vec![ObjectId(2)],
+        );
     }
 
     /// CR 706.2: a die roll's result is the amount `EventContextAmount`

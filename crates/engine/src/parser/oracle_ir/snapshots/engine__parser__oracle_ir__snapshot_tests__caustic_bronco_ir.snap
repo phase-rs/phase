@@ -22,137 +22,329 @@ expression: "&ir"
         "fragment": "Whenever ~ attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if ~ isn't saddled. Otherwise, each opponent loses that much life."
       },
       "node": {
-        "PreLoweredTrigger": {
-          "mode": "Attacks",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "RevealTop",
-              "player": {
-                "type": "Controller"
+        "Trigger": {
+          "Parsed": {
+            "condition": "Attacks",
+            "partial_def": {
+              "mode": "Attacks",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
               },
-              "count": 1
-            },
-            "cost": null,
-            "sub_ability": {
-              "kind": "Spell",
-              "effect": {
-                "type": "ChangeZone",
-                "origin": null,
-                "destination": "Hand",
-                "target": {
-                  "type": "ParentTarget"
-                },
-                "owner_library": false,
-                "enter_transformed": false,
-                "enter_tapped": false,
-                "enters_attacking": false
-              },
-              "cost": null,
-              "sub_ability": {
-                "kind": "Spell",
-                "effect": {
-                  "type": "LoseLife",
-                  "amount": {
-                    "type": "Ref",
-                    "qty": {
-                      "type": "ObjectManaValue",
-                      "scope": {
-                        "type": "Demonstrative"
-                      }
-                    }
-                  },
-                  "target": {
-                    "type": "Controller"
-                  }
-                },
-                "cost": null,
-                "sub_ability": null,
-                "else_ability": {
-                  "kind": "Spell",
-                  "effect": {
-                    "type": "LoseLife",
-                    "amount": {
-                      "type": "Ref",
-                      "qty": {
-                        "type": "ObjectManaValue",
-                        "scope": {
-                          "type": "Demonstrative"
-                        }
-                      }
-                    }
-                  },
-                  "cost": null,
-                  "sub_ability": null,
-                  "duration": null,
-                  "description": null,
-                  "target_prompt": null,
-                  "condition": null,
-                  "optional_targeting": false,
-                  "optional": false,
-                  "forward_result": false,
-                  "player_scope": {
-                    "type": "Opponent"
-                  }
-                },
-                "duration": null,
-                "description": null,
-                "target_prompt": null,
-                "condition": {
-                  "type": "Not",
-                  "condition": {
-                    "type": "SourceMatchesFilter",
-                    "filter": {
-                      "type": "Typed",
-                      "type_filters": [],
-                      "controller": null,
-                      "properties": [
-                        {
-                          "type": "IsSaddled"
-                        }
-                      ]
-                    }
-                  }
-                },
-                "optional_targeting": false,
-                "optional": false,
-                "forward_result": false,
-                "sub_link": "SequentialSibling"
-              },
-              "duration": null,
-              "description": null,
-              "target_prompt": null,
-              "condition": null,
-              "optional_targeting": false,
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "phase": null,
               "optional": false,
-              "forward_result": false
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
             },
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "origin": null,
-          "destination": null,
-          "trigger_zones": [
-            "Battlefield"
-          ],
-          "phase": null,
-          "optional": false,
-          "damage_kind": "Any",
-          "secondary": false,
-          "valid_target": null,
-          "valid_source": null,
-          "description": "Whenever ~ attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if ~ isn't saddled. Otherwise, each opponent loses that much life.",
-          "constraint": null,
-          "condition": null,
-          "batched": false
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 35,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "reveal the top card of your library"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Dig",
+                        "player": {
+                          "type": "Controller"
+                        },
+                        "count": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "destination": null,
+                        "keep_count": null,
+                        "up_to": false,
+                        "filter": {
+                          "type": "Any"
+                        },
+                        "rest_destination": null,
+                        "reveal": true,
+                        "enter_tapped": false
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Comma",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 40,
+                        "end_byte": 61,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "put it into your hand"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ChangeZone",
+                        "origin": null,
+                        "destination": "Hand",
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "owner_library": false,
+                        "enter_transformed": false,
+                        "enter_tapped": false,
+                        "enters_attacking": false
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 2,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 3
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 63,
+                        "end_byte": 127,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 2
+                      },
+                      "fragment": "You lose life equal to that card's mana value if ~ isn't saddled"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "LoseLife",
+                        "amount": {
+                          "type": "Ref",
+                          "qty": {
+                            "type": "ObjectManaValue",
+                            "scope": {
+                              "type": "Demonstrative"
+                            }
+                          }
+                        },
+                        "target": {
+                          "type": "Controller"
+                        }
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": {
+                      "type": "Not",
+                      "condition": {
+                        "type": "SourceMatchesFilter",
+                        "filter": {
+                          "type": "Typed",
+                          "type_filters": [],
+                          "controller": null,
+                          "properties": [
+                            {
+                              "type": "IsSaddled"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 3,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 4
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 129,
+                        "end_byte": 174,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 3
+                      },
+                      "fragment": "Otherwise, each opponent loses that much life"
+                    },
+                    "disposition": {
+                      "BranchOtherwise": {
+                        "else_def": {
+                          "kind": "Spell",
+                          "effect": {
+                            "type": "LoseLife",
+                            "amount": {
+                              "type": "Ref",
+                              "qty": {
+                                "type": "EventContextAmount"
+                              }
+                            }
+                          },
+                          "cost": null,
+                          "sub_ability": null,
+                          "duration": null,
+                          "description": null,
+                          "target_prompt": null,
+                          "condition": null,
+                          "optional_targeting": false,
+                          "optional": false,
+                          "forward_result": false,
+                          "player_scope": {
+                            "type": "Opponent"
+                          }
+                        },
+                        "kind": "Bound"
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "otherwise_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "SelfRef"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "reveal the top card of your library and put it into your hand. you lose life equal to that card's mana value if ~ isn't saddled. otherwise, each opponent loses that much life.",
+              "relative_player_scope": null
+            },
+            "source_text": "Whenever ~ attacks, reveal the top card of your library and put it into your hand. You lose life equal to that card's mana value if ~ isn't saddled. Otherwise, each opponent loses that much life.",
+            "die_results": []
+          }
         }
       }
     },

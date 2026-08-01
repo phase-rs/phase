@@ -63,13 +63,16 @@ pub(crate) fn install_dash_riders(
         object_id,
         controller,
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-        ability: return_to_hand,
-        controller,
-        source_id: object_id,
-        one_shot: true,
-    });
+    crate::game::triggers::install_delayed_trigger(
+        state,
+        DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ability: Box::new(return_to_hand),
+            controller,
+            source_id: object_id,
+            one_shot: true,
+        },
+    );
 }
 
 /// CR 702.109a + CR 400.3: "Return it to its owner's hand." A battlefield → hand

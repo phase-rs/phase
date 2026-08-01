@@ -9,19 +9,6 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
- * Build a game-scoped AI card-database subset from the loaded full database and
- * the live game state, serialized as the `AiCardSubsetResult` tagged union
- * (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
- * worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
- * the returned subset so its WASM instances don't each parse the full ~93MB
- * corpus. Returns `{"kind":"full"}` defensively when the database or game state
- * is absent (the engine is the single authority for this fallback — see
- * `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
- * and restored to the thread-local on every path.
- */
-export function build_ai_card_subset(): string;
-
-/**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
  * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
  * classification — the frontend must not compute this from card lists itself.
@@ -108,22 +95,17 @@ export function export_replay_log(): string;
  */
 export function getFormatRegistry(): any;
 
-/**
- * Get the AI's chosen action for the current game state.
- * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
- * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
- * `player_id` is the seat index of the AI player (0-based).
- */
-export function get_ai_action(difficulty: string, player_id: number): any;
-
-/**
- * Score all candidate actions and return `[GameAction, score]` tuples.
- * Used by AI workers for root parallelism — each worker scores independently,
- * then results are merged on the main thread.
- * `rng_seed` seeds the game state's RNG so each worker's beam search explores
- * different orderings, producing diverse score vectors.
- */
+/** Return an opaque action proposal bound to the live engine decision domain. */
+export function get_ai_action_proposal(difficulty: string, player_id: number): any;
+/** Filter score-only worker output through the live contract and mint a proposal. */
+export function get_ai_action_proposal_from_scores(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
+/** Score candidates in an isolated worker. The result is not dispatchable. */
 export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
+/** Build the game-scoped card database used by parallel AI workers. */
+export function build_ai_card_subset(): string;
+
+/** Apply an opaque AI proposal, yielding an applied/stale/rejected tagged result. */
+export function submit_ai_action_proposal(token: string, actor: number, action: any): any;
 
 /**
  * Look up a card face by name from the loaded card database.
@@ -280,6 +262,20 @@ export function load_card_database(json_str: string): number;
 export function load_replay_for_playback(json_str: string): number;
 
 /**
+ * CR 100.2a / CR 903.5b: How many copies of the named card a `format` deck may
+ * legally contain across main deck, sideboard, and command zone combined
+ * (CR 100.4a). Unlike `deckCopyLimit`, this is the *resolved* ceiling — it
+ * already applies the basic-land exemption, the card's printed override, and
+ * the format default, so the caller compares a count against it directly.
+ *
+ * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+ * `{"type":"UpTo","data":N}`); switch on `.type`. Returns `{"type":"Unlimited"}`
+ * when the card database isn't loaded, so a not-yet-hydrated frontend never
+ * blocks a legal add.
+ */
+export function maxDeckCopies(name: string, format: any): any;
+
+/**
  * Verify WASM integration works.
  */
 export function ping(): string;
@@ -387,16 +383,6 @@ export function resume_multiplayer_host_state(json_str: string): void;
 export function search_cards_js(query: any): any;
 
 /**
- * Select an action from merged scores using softmax.
- * Called after collecting scored candidates from parallel workers and merging.
- * `scores_json` is a JSON array of `[GameAction, score]` tuples.
- * `difficulty` determines the softmax temperature (engine is the single
- * authority for AI tuning parameters — the frontend never specifies temperature).
- * `rng_seed` provides deterministic randomness.
- */
-export function select_action_from_scores(scores_json: string, difficulty: string, rng_seed: bigint): any;
-
-/**
  * Toggle the multiplayer enforcement flag. Called by multiplayer adapters
  * (P2P host/guest, WS) after the engine is initialized so subsequent
  * `restore_game_state` calls fail fast with a clear error instead of
@@ -437,6 +423,13 @@ export function signatureSpellSelectionPolicy(request: any): any;
 export function submit_action(actor: number, action: any): any;
 
 /**
+ * Submit one opaque, engine-authored interaction response. The browser never
+ * materializes a `GameAction`; only a successful engine reducer result exposes
+ * the exact action to the replay recorder.
+ */
+export function submit_interaction_js(actor: number, submission: any): any;
+
+/**
  * Drain the last captured panic message (consuming it). Returns `null` when
  * no panic has been observed since the last drain. JS calls this after a
  * thrown `RuntimeError` to decide whether to surface the modal as a real
@@ -450,7 +443,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
@@ -461,8 +453,10 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
-    readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
-    readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
+    readonly get_ai_scored_candidates: (a: number, b: number, c: bigint) => [number, number, number];
+    readonly build_ai_card_subset: () => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
@@ -478,6 +472,7 @@ export interface InitOutput {
     readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
+    readonly maxDeckCopies: (a: number, b: number, c: any) => any;
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
@@ -487,11 +482,12 @@ export interface InitOutput {
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
-    readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
+    readonly submit_ai_action_proposal: (a: number, b: number, c: any) => any;
+    readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
