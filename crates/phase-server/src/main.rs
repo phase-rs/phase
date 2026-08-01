@@ -245,6 +245,16 @@ async fn switch_game_spectator_slot(
     Ok(())
 }
 
+async fn prune_game_connections<'a>(
+    connections: &SharedConnections,
+    game_codes: impl IntoIterator<Item = &'a str>,
+) {
+    let mut conns = connections.lock().await;
+    for game_code in game_codes {
+        conns.remove(game_code);
+    }
+}
+
 async fn remove_draft_spectator_sender(
     draft_spectators: &SharedDraftSpectators,
     draft_code: &str,
@@ -1319,25 +1329,32 @@ async fn serve() {
                         })
                         .collect::<Vec<_>>()
                 };
-                let conns = bg_connections.lock().await;
-                for session in &removed {
-                    let game_code = &session.game_code;
-                    info!(game = %game_code, reason = "disconnect_expired", "game over");
-                    if let Some(players) = conns.get(game_code) {
-                        if let Some(deliveries) = prepared.get(game_code) {
-                            for (player, delivery) in deliveries {
-                                if let Some(sender) = players.get(player) {
-                                    let _ = sender.send(ServerMessage::TerminalResult {
-                                        delivery: Some(delivery.clone()),
-                                    });
+                {
+                    let conns = bg_connections.lock().await;
+                    for session in &removed {
+                        let game_code = &session.game_code;
+                        info!(game = %game_code, reason = "disconnect_expired", "game over");
+                        if let Some(players) = conns.get(game_code) {
+                            if let Some(deliveries) = prepared.get(game_code) {
+                                for (player, delivery) in deliveries {
+                                    if let Some(sender) = players.get(player) {
+                                        let _ = sender.send(ServerMessage::TerminalResult {
+                                            delivery: Some(delivery.clone()),
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
-                    if !session.game_started {
-                        retire_unstarted_session_async(&bg_game_db, session);
+                        if !session.game_started {
+                            retire_unstarted_session_async(&bg_game_db, session);
+                        }
                     }
                 }
+                prune_game_connections(
+                    &bg_connections,
+                    removed.iter().map(|session| session.game_code.as_str()),
+                )
+                .await;
                 let mut specs = bg_game_spectators.lock().await;
                 for session in &removed {
                     specs.remove(&session.game_code);
@@ -1379,6 +1396,8 @@ async fn serve() {
                     }
                 }
                 drop(mgr);
+                prune_game_connections(&bg_connections, expired_lobby.iter().map(String::as_str))
+                    .await;
                 let mut specs = bg_game_spectators.lock().await;
                 for game_code in &expired_lobby {
                     specs.remove(game_code);
@@ -1666,11 +1685,16 @@ async fn health() -> &'static str {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use clap::Parser;
+    use tokio::sync::Mutex;
 
     use super::{
-        bootstrap_required, origin_is_allowed, select_card_data_source, CardDataSource, Cli,
+        bootstrap_required, origin_is_allowed, prune_game_connections, select_card_data_source,
+        CardDataSource, Cli, SharedConnections,
     };
 
     #[test]
@@ -1714,6 +1738,38 @@ mod lifecycle_tests {
             select_card_data_source(temp.path(), true).expect("explicit fixture source"),
             CardDataSource::DevFixture(temp.path().join("mtgjson/test_fixture.json"))
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_expiry_prunes_only_the_finished_game_connections() {
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut conns = connections.lock().await;
+            conns.insert("EXPIRED".to_string(), HashMap::new());
+            conns.insert("ACTIVE".to_string(), HashMap::new());
+        }
+
+        prune_game_connections(&connections, ["EXPIRED"]).await;
+
+        let conns = connections.lock().await;
+        assert!(!conns.contains_key("EXPIRED"));
+        assert!(conns.contains_key("ACTIVE"));
+    }
+
+    #[tokio::test]
+    async fn lobby_expiry_prunes_only_the_finished_game_connections() {
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut conns = connections.lock().await;
+            conns.insert("EXPIRED".to_string(), HashMap::new());
+            conns.insert("ACTIVE".to_string(), HashMap::new());
+        }
+
+        prune_game_connections(&connections, ["EXPIRED"]).await;
+
+        let conns = connections.lock().await;
+        assert!(!conns.contains_key("EXPIRED"));
+        assert!(conns.contains_key("ACTIVE"));
     }
 }
 
