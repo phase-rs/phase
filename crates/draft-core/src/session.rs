@@ -124,6 +124,12 @@ fn apply_generate_pairings(
             actual: session.seats.len() as u8,
         });
     }
+    if round != session.current_round + 1 {
+        return Err(DraftError::InvalidTransition {
+            from: session.status,
+            action: "GeneratePairings".to_string(),
+        });
+    }
 
     let mut rng =
         ChaCha20Rng::seed_from_u64(session.config.rng_seed ^ (round as u64 * 0xDEAD_BEEF));
@@ -1746,9 +1752,46 @@ mod tests {
             1,
             "the two paired players get exactly one pairing",
         );
-        // The unpaired (bye) player is credited exactly one match win. Without the credit an
-        // odd-pod bye scores nothing and Swiss standings (sorted by match_wins) undercount it.
-        let total_match_wins: u8 = session.match_records.values().map(|r| r.match_wins).sum();
-        assert_eq!(total_match_wins, 1, "the bye player earns a match win");
+        let paired_players = session
+            .pairings
+            .iter()
+            .find(|pairing| pairing.round == 1)
+            .expect("round one pairing")
+            .players;
+        let bye = (0..session.seats.len() as u8)
+            .map(|seat| seat_player_id(&session, seat))
+            .find(|player| !paired_players.contains(player))
+            .expect("one player is unpaired in a three-player pod");
+        assert_eq!(
+            session.match_records.get(&bye).map(|record| record.match_wins),
+            Some(1),
+            "the specific unpaired player earns exactly one match win",
+        );
+        for paired_player in paired_players {
+            assert_eq!(
+                session
+                    .match_records
+                    .get(&paired_player)
+                    .map_or(0, |record| record.match_wins),
+                0,
+                "a paired player must not receive the bye win",
+            );
+        }
+
+        session.status = DraftStatus::RoundComplete;
+        assert!(matches!(
+            apply_generate_pairings(&mut session, 1),
+            Err(DraftError::InvalidTransition { .. })
+        ));
+        assert_eq!(
+            session.pairings.iter().filter(|pairing| pairing.round == 1).count(),
+            1,
+            "replaying a completed round must not append pairings",
+        );
+        assert_eq!(
+            session.match_records.get(&bye).map(|record| record.match_wins),
+            Some(1),
+            "replaying a completed round must not award the bye twice",
+        );
     }
 }
