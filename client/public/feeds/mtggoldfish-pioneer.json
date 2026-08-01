@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-31T00:00:00Z",
+  "updated": "2026-08-01T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -867,117 +867,6 @@
       ]
     },
     {
-      "name": "Orzhov Greasefang",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Bleachbone Verge"
-        },
-        {
-          "count": 4,
-          "name": "Brightclimb Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Fleeting Spirit"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 4,
-          "name": "Guardian of New Benalia"
-        },
-        {
-          "count": 4,
-          "name": "Iron-Shield Elf"
-        },
-        {
-          "count": 1,
-          "name": "Lively Dirge"
-        },
-        {
-          "count": 4,
-          "name": "Monument to Endurance"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 3,
-          "name": "Pest Control"
-        }
-      ]
-    },
-    {
       "name": "Izzet Lessons",
       "author": "MTGGoldfish",
       "colors": [
@@ -1129,6 +1018,117 @@
       ]
     },
     {
+      "name": "Orzhov Greasefang",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 4,
+          "name": "Brightclimb Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Fleeting Spirit"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
+        },
+        {
+          "count": 4,
+          "name": "Guardian of New Benalia"
+        },
+        {
+          "count": 4,
+          "name": "Iron-Shield Elf"
+        },
+        {
+          "count": 1,
+          "name": "Lively Dirge"
+        },
+        {
+          "count": 4,
+          "name": "Monument to Endurance"
+        },
+        {
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 4,
+          "name": "The Mycosynth Gardens"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 3,
+          "name": "Pest Control"
+        }
+      ]
+    },
+    {
       "name": "Izzet Phoenix",
       "author": "MTGGoldfish",
       "colors": [
@@ -1260,10 +1260,9 @@
       ]
     },
     {
-      "name": "Dimir Self-Bounce",
+      "name": "Mono-Black Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
         "B"
       ],
       "tags": [
@@ -1272,125 +1271,149 @@
       "main": [
         {
           "count": 4,
-          "name": "Boomerang Basics"
+          "name": "Unholy Annex // Ritual Chamber"
         },
         {
-          "count": 4,
-          "name": "Clearwater Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Cryogen Relic"
-        },
-        {
-          "count": 4,
-          "name": "Narset, Parter of Veils"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Fear of Isolation"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 4,
-          "name": "Hopeless Nightmare"
-        },
-        {
-          "count": 4,
-          "name": "Momentum Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Nowhere to Run"
+          "count": 3,
+          "name": "Castle Locthwain"
         },
         {
           "count": 1,
-          "name": "Otawara, Soaring City"
+          "name": "Cecil, Dark Knight"
         },
         {
-          "count": 4,
-          "name": "Shipwreck Marsh"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 2,
+          "count": 7,
           "name": "Swamp"
         },
         {
-          "count": 2,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "This Town Ain't Big Enough"
-        },
-        {
-          "count": 2,
-          "name": "Underground River"
-        },
-        {
-          "count": 4,
-          "name": "Darkslick Shores"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Petrified Hamlet"
+          "count": 1,
+          "name": "End of the Hunt"
         },
         {
           "count": 4,
           "name": "Fatal Push"
         },
         {
+          "count": 2,
+          "name": "Field of Ruin"
+        },
+        {
+          "count": 4,
+          "name": "Gifted Aetherborn"
+        },
+        {
+          "count": 1,
+          "name": "Go Blank"
+        },
+        {
+          "count": 7,
+          "name": "Swamp"
+        },
+        {
+          "count": 3,
+          "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 1,
+          "name": "Invoke Despair"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 1,
+          "name": "Morlun, Devourer of Spiders"
+        },
+        {
+          "count": 1,
+          "name": "Liliana of the Veil"
+        },
+        {
+          "count": 1,
+          "name": "Preacher of the Schism"
+        },
+        {
+          "count": 2,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
+        },
+        {
           "count": 1,
           "name": "Takenuma, Abandoned Mire"
         },
         {
+          "count": 1,
+          "name": "The Meathook Massacre"
+        },
+        {
+          "count": 1,
+          "name": "The Soul Stone"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
           "count": 4,
           "name": "Thoughtseize"
+        },
+        {
+          "count": 2,
+          "name": "Bitterbloom Bearer"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "The Meathook Massacre"
-        },
-        {
-          "count": 4,
-          "name": "Change the Equation"
+          "count": 1,
+          "name": "Duress"
         },
         {
           "count": 1,
-          "name": "Yorion, Sky Nomad"
+          "name": "Damping Sphere"
         },
         {
-          "count": 3,
-          "name": "Unlicensed Hearse"
+          "count": 1,
+          "name": "End of the Hunt"
         },
         {
-          "count": 3,
+          "count": 1,
+          "name": "Extinction Event"
+        },
+        {
+          "count": 1,
+          "name": "Go Blank"
+        },
+        {
+          "count": 2,
           "name": "Invoke Despair"
         },
         {
           "count": 2,
-          "name": "Bitter Triumph"
+          "name": "Necromentia"
+        },
+        {
+          "count": 2,
+          "name": "Ray of Enfeeblement"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "The Meathook Massacre"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
         }
       ]
     }
