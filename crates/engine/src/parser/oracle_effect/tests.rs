@@ -30289,6 +30289,31 @@ fn unbindable_search_destination_removes_move_and_attachment() {
     );
 }
 
+/// CR 110.2a fail-closed regression for a direct return with an attachment
+/// rider. The unbound controller gap must replace the whole clause, rather
+/// than leaving an Attach sub-ability to resolve without its zone change.
+#[test]
+fn unbindable_attached_return_removes_attachment() {
+    let def = parse_effect_chain(
+        "Return target Aura card from a graveyard to the battlefield under their control \
+         attached to target creature.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "change_zone_enters_under_anaphor"
+        ),
+        "the unbound attached return must fail closed: {def:#?}"
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "no executable attachment may survive below the gap: {def:#?}"
+    );
+}
+
 // --- ReturnDestination flag propagation tests ---
 
 #[test]

@@ -12218,6 +12218,16 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 attach_host: Some(host),
             },
         )) => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed before the
+            // attachment is installed. An unbound control clause lowers to an
+            // honest gap; leaving an executable Attach beneath it would attach
+            // a permanent that never entered the battlefield.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return parsed_clause(Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                ));
+            }
             let mut clause = parsed_clause(lower_targeted_action_ast(
                 TargetedImperativeAst::ReturnToBattlefield {
                     target,
