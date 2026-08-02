@@ -4000,6 +4000,20 @@ fn copy_grants_copy_layer_static(modification: &ContinuousModification) -> bool 
             // static is 604.2.)
             .filter(|def| def.mode == StaticMode::Continuous)
             .flat_map(|def| def.modifications.iter())
+            // `is_copy_layer` is total over `Layer::Copy`, so it answers `true` for
+            // a nested `CopyValues` too. That sub-case is unreachable, for the same
+            // reason `apply_continuous_effect`'s `"CopyValues must originate from a
+            // transient continuous effect"` expect is sound: every construction of
+            // `CopyValues` installs it through `add_transient_continuous_effect`
+            // (`become_copy::apply_precomputed_copy_values`,
+            // `merge::install_merge_layer_effect`) and card data never authors one,
+            // so no `StaticDefinition` — and hence no `CopiableValues` snapshot of
+            // one — can hold it. The two seams therefore disagree about whether the
+            // state is possible — this one buys a discovery generation for it, that
+            // one panics on it — and the disagreement is deliberate: the expect is
+            // where the invariant is enforced, so a future reachable case is a
+            // construction-site bug to fix there, not a case to quietly admit by
+            // special-casing it out of this totality.
             .any(ContinuousModification::is_copy_layer),
         // CR 707.9a: the unbounded retain merges the LIVE source's
         // `base_static_definitions`, which are not in this payload to inspect, so
@@ -4141,9 +4155,9 @@ fn apply_copy_sublayer_to_fixed_point(
 /// PROVENANCE ONLY — never the payload. CR 707.2c: "If a static ability generates
 /// a continuous effect that's a copy effect, the copiable values that effect
 /// grants are determined only at the time that effect first starts to apply." So
-/// once a slot has started applying, re-reading it later in the same sublayer is
-/// the SAME effect granting the SAME locked values; a rewritten payload does not
-/// mint a new one. Keying on the payload instead both contradicts that rule and
+/// re-reading a provenance that has already started is the SAME effect granting
+/// the SAME locked values; a rewritten payload does not mint a new one. Keying on
+/// the payload instead both contradicts that rule and
 /// makes the loop non-convergent by construction — two permanents that rewrite
 /// each other's static sets would produce payload-distinct identities forever,
 /// which is exactly what a generation cap used to have to paper over.
@@ -4155,7 +4169,50 @@ fn apply_copy_sublayer_to_fixed_point(
 /// CR 613.6 bug — the loop calls an effect new while the applier hands it back an
 /// already-locked affected set); and it distinguishes
 /// `GrantedStatic { grant_origin, recipient }` occurrences that a raw
-/// `(source_id, def_index, transient_id)` tuple collides on.
+/// `(source_id, def_index, transient_id)` tuple collides on. That second reason is
+/// forward-looking here, not load-bearing: `GrantedStatic` is live in the layers
+/// that share this key, but reaching it from THIS loop needs a
+/// `GrantStaticAbility` whose inner definition is copy-layer, and no card prints
+/// one (see the pool argument below). Sharing the key is still the right call —
+/// the alternative is a second identity that can drift from the one
+/// `apply_continuous_effect` enforces.
+///
+/// The three provenances are not equally precise, and this identity claims no more
+/// than each one carries. `Transient { continuous_effect_id }` names an allocated
+/// id and `GrantedStatic { grant_origin, recipient }` names a grant origin —
+/// nothing in a layer pass can make either denote a different ability.
+/// `Static { source, definition_index }` names a POSITION in
+/// `obj.static_definitions`, and [`apply_copiable_values`] assigns that vector
+/// wholesale from the copy payload. So slot `i` could in principle denote a
+/// different static ability in generation N+1 than in generation N, and the
+/// newcomer would be filtered out as already-started while the effect it displaced
+/// kept re-applying.
+///
+/// That board is not constructible today, and the residual is accepted rather than
+/// closed: `ContinuousEffectGroupKey` is the shared key `started_effect_sets` uses
+/// in every layer, so de-positioning its `Static` arm is a change to all seven
+/// layers rather than to this loop. Reaching the hazard needs a `Layer::Copy`
+/// effect that is `Static`-keyed, and no producer makes one:
+///
+/// - Both engine construction sites of a `Layer::Copy` modification —
+///   `become_copy::apply_precomputed_copy_values` and
+///   `merge::install_merge_layer_effect` — install through
+///   `add_transient_continuous_effect`, so the effect is `Transient`-keyed.
+/// - `expand_granted_static_effects` sets `def_index: None`, so a granted
+///   copy-layer static is `GrantedStatic`-keyed.
+/// - Card data is the only other producer of `StaticDefinition`s, and in the
+///   generated pool every copy-layer modification that sits inside one at all sits
+///   inside a `GenericEffect` payload — Awakening of Vitu-Ghazi, Tenth District
+///   Hero, The Curse of Fenric, The Irencrag, all `SetName` — which
+///   `effects::effect` resolves through `register_transient_effect`. No card
+///   carries a copy-layer modification in its printed `static_abilities`, so no
+///   route into an object's `static_definitions` can carry one either: the copy
+///   payload ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
+///   `RetainPrintedAbilityFromSource` graft all replay card-data statics.
+///
+/// The first card to print a copy-layer static ability directly — rather than
+/// creating its copy effect from a resolving spell or ability — is the trigger to
+/// revisit this.
 ///
 /// `mod_index` rides alongside because the group key deliberately drops it — every
 /// modification of one definition shares one CR 613.6 affected set — while this
