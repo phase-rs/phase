@@ -47,7 +47,7 @@ use engine::types::game_state::{
     GameState, PendingCast, PendingDiscardForCostResume, PersistedGameState, StackEntry,
     StackEntryKind, WaitingFor,
 };
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use engine::types::mana::ManaCost;
 
 const SOURCE: ObjectId = ObjectId(700);
@@ -112,6 +112,10 @@ fn populated_state() -> GameState {
         Box::new(damage_ability()),
         9,
     )));
+    state
+        .stack_trigger_firings
+        .insert(ObjectId(703), TriggerFiring::Ordinary);
+    state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
     // Populated so the `#[serde(skip)]` assertion in
     // `boxing_introduces_no_wrapper_level_in_the_wire_shape` discriminates. With
     // this field left `None`, that assertion could only distinguish `skip` from

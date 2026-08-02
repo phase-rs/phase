@@ -25396,6 +25396,7 @@ mod tests {
             subject_match_count: None,
             die_result: None,
         }));
+        state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
 
         let json = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&json).unwrap();
