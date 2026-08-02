@@ -105,22 +105,13 @@ fn populated_state() -> GameState {
             die_result: None,
         },
     });
-    state.pending_trigger = Some(Box::new(PendingTrigger {
-        source_id: SOURCE,
-        controller: P0,
-        condition: None,
-        ability: Box::new(damage_ability()),
-        timestamp: 9,
-        target_constraints: Vec::new(),
-        distribute: None,
-        trigger_event: None,
-        modal: None,
-        mode_abilities: Vec::new(),
-        description: None,
-        may_trigger_origin: None,
-        subject_match_count: None,
-        die_result: None,
-    }));
+    state.pending_trigger = Some(Box::new(PendingTrigger::ordinary(
+        SOURCE,
+        P0,
+        None,
+        Box::new(damage_ability()),
+        9,
+    )));
     // Populated so the `#[serde(skip)]` assertion in
     // `boxing_introduces_no_wrapper_level_in_the_wire_shape` discriminates. With
     // this field left `None`, that assertion could only distinguish `skip` from

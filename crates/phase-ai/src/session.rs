@@ -381,7 +381,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
+    use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool, WaitingFor};
     use engine::types::identifiers::ObjectId;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
@@ -696,7 +696,7 @@ mod tests {
     }
 
     /// Serde stability: the fingerprint hashes deck content, not Arc identity,
-    /// so it must survive a `GameState` serde round-trip.
+    /// so it must survive the production persistence round-trip.
     #[test]
     fn fingerprint_is_stable_across_serde_round_trip() {
         let mut state = GameState::new_two_player(42);
@@ -713,8 +713,11 @@ mod tests {
         });
 
         let before = deck_pools_fingerprint(&state);
-        let json = serde_json::to_string(&state).expect("GameState serializes");
-        let restored: GameState = serde_json::from_str(&json).expect("GameState deserializes");
+        let json = serde_json::to_string(&PersistedGameState::capture(state))
+            .expect("persisted game state serializes");
+        let restored = serde_json::from_str::<PersistedGameState>(&json)
+            .expect("persisted game state deserializes")
+            .into_game_state();
         let after = deck_pools_fingerprint(&restored);
 
         assert_eq!(
