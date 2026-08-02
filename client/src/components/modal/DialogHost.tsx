@@ -52,6 +52,8 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "UntapChoice",
+  "ChooseUntapSubset",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the

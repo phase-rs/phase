@@ -227,6 +227,21 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
+  it.each([
+    { type: "UntapChoice", data: { player: 0, candidates: [1] } },
+    { type: "ChooseUntapSubset", data: { player: 0, group: [1, 2], max: 1 } },
+  ] as const)("anchors native $type board choices but leaves them click-through", (waitingFor) => {
+    setWaitingFor(waitingFor as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
   it("anchors ward sacrifice choices but leaves them click-through", () => {
     setWaitingFor({
       type: "WardSacrificeChoice",
