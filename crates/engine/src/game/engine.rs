@@ -321,9 +321,7 @@ enum PriorityAnnouncement {
         source_name: String,
         cost: crate::types::mana::ManaCost,
     },
-    CastPreparedCopy {
-        source: ObjectId,
-    },
+    CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
 }
 
 impl PriorityAnnouncement {
@@ -465,9 +463,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             source_name,
             cost,
         },
-        PriorityAnnouncement::CastPreparedCopy { source } => {
-            GameAction::CastPreparedCopy { source }
-        }
+        PriorityAnnouncement::CastPreparedCopy(announcement) => GameAction::CastPreparedCopy {
+            source: announcement.source_id(&_access),
+        },
     }
 }
 
@@ -721,14 +719,14 @@ fn priority_preflight_candidates(
                     PriorityAnnouncement::Transform { object_id },
                 ));
             }
-            if object.prepared.is_some()
-                && effects::prepare::can_cast_prepared_copy_now(state, semantic_holder, object_id)
-            {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::CastPreparedCopy { source: object_id },
-                ));
-            }
         }
+
+        candidates.extend(
+            effects::prepare::priority_prepared_copy_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastPreparedCopy)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         let can_tap_creature = |object_id: ObjectId| {
             state.objects.get(&object_id).is_some_and(|object| {
