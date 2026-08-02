@@ -12289,6 +12289,66 @@ mod priority_reducer_census_tests {
 }
 
 #[cfg(test)]
+mod priority_facade_boundary_tests {
+    /// R18: Provider announcements remain opaque until the one engine-owned
+    /// facade. This source guard is intentionally scoped to the frozen provider
+    /// set: ordinary `GameAction` producers are not part of this boundary.
+    #[test]
+    fn facade_access_is_constructed_once_and_provider_accessors_only_borrow_it() {
+        let engine_source = include_str!("engine.rs");
+        assert_eq!(
+            engine_source
+                .matches("PriorityAnnouncementFacadeAccess::new()")
+                .count(),
+            1,
+            "the facade capability must have one constructor call"
+        );
+
+        let announcement_start = engine_source
+            .find("enum PriorityAnnouncement {")
+            .map(|offset| offset + "enum PriorityAnnouncement {".len())
+            .expect("private announcement sum exists");
+        let announcement_end = engine_source[announcement_start..]
+            .find("\n}\n\nimpl PriorityAnnouncement")
+            .map(|offset| announcement_start + offset)
+            .expect("private announcement sum closes before its family match");
+        assert!(
+            !engine_source[announcement_start..announcement_end].contains('{'),
+            "Priority announcements must carry provider-owned opaque values, not raw fields"
+        );
+
+        for provider_source in [
+            include_str!("casting.rs"),
+            include_str!("mana_sources.rs"),
+            include_str!("morph.rs"),
+            include_str!("transform.rs"),
+            include_str!("keywords.rs"),
+            include_str!("room.rs"),
+            include_str!("companion.rs"),
+            include_str!("planechase.rs"),
+            include_str!("end_continuous_effect.rs"),
+            include_str!("crew_payment.rs"),
+            include_str!("effects/prepare.rs"),
+            include_str!("effects/attach.rs"),
+        ] {
+            assert!(
+                !provider_source.contains("PriorityAnnouncementFacadeAccess::"),
+                "providers may not construct or invoke the facade capability"
+            );
+            for line in provider_source
+                .lines()
+                .filter(|line| line.contains("PriorityAnnouncementFacadeAccess"))
+            {
+                assert!(
+                    line.contains("use ") || line.contains("_access: &"),
+                    "provider capability mentions must be imports or borrowed read-only accessors: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod priority_principal_tests {
     use super::{
         apply_actionless_priority_pass_for_prospective, preflight_priority_window,
