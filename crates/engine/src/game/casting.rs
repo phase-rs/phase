@@ -9904,7 +9904,10 @@ fn face_down_cast_profile(
 /// CR 702.37c / CR 702.37b (megamorph) / CR 702.168b: true when `object_id` carries
 /// an effective morph, megamorph, or disguise keyword (printed or granted, CR 604.1) —
 /// the class of cards castable face down for the {3} alternative cost.
-fn object_has_effective_face_down_keyword(state: &GameState, object_id: ObjectId) -> bool {
+pub(crate) fn object_has_effective_face_down_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
     [
         KeywordKind::Morph,
         KeywordKind::Megamorph,
@@ -9948,7 +9951,11 @@ fn can_afford_face_down_cast(
 /// object (same `face_down_cast_profile` + `apply_face_down_entry_profile` +
 /// `Some(CastingVariant::FaceDown)` prepare), so `.is_ok()` here predicts the real
 /// face-down cast's prepare step precisely.
-fn face_down_cast_is_permitted(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+pub(crate) fn face_down_cast_is_permitted(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
     let mut simulated = state.clone();
     let profile = face_down_cast_profile(state, object_id);
     super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
