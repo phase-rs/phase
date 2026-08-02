@@ -1158,6 +1158,7 @@ mod sarkhan_dragon_ascendant_behold;
 mod scarblade_malice_delayed_dies_762;
 mod scry_choice_not_clobbered_by_triggers;
 mod scry_substituted_draw_per_card_replacement;
+mod search_landfall_double_fire_repro;
 mod secret_of_bloodbending_control_window;
 mod she_hulk_wallbreaker_becomes_blocked_4599;
 mod shelob_repro_token;

@@ -616,9 +616,33 @@ fn park_search_observer_triggers(
     events: &[GameEvent],
     events_before_drain: usize,
 ) -> ResolutionChoiceOutcome {
+    // CR 603.2 + CR 603.3b + CR 701.23: park the search's post-put/shuffle
+    // observer events for the next priority checkpoint. The ZoneChanged events
+    // for cards put onto the battlefield by the search's ChangeZone delivery
+    // were ALREADY collected (once) by the zone-change pipeline's segment /
+    // settlement collections (`append_and_collect_logical_zone_trigger_segment`
+    // / `complete_logical_zone_trigger_collection`). Those same `ZoneChanged`
+    // occurrences sit in `events[events_before_drain..]`, so collecting this
+    // whole slice again would DOUBLE-fire every entrant's observer triggers
+    // (landfall, ETB observers) — a single land entry fires landfall twice.
+    //
+    // Mirror the generic post-priority scan's `deferred_logical_zone_events`
+    // guard (engine_priority.rs): drop any `ZoneChanged` occurrence whose event
+    // is already represented in `state.deferred_triggers`. Other event kinds
+    // (EffectResolved, Shuffle, PlayerPerformedAction, ...) remain eligible so
+    // their own observers are still parked.
+    let retained_zone_events: Vec<_> = state
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .collect();
     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
         .iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+        .filter(|ev| {
+            !matches!(ev, GameEvent::ZoneChanged { .. }) || !retained_zone_events.contains(ev)
+        })
         .cloned()
         .collect();
     if !trigger_events.is_empty() {
