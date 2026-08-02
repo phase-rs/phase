@@ -61,6 +61,7 @@ use super::public_state::{
 };
 use super::sba;
 use super::splice;
+use super::transform;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -281,9 +282,7 @@ enum PriorityAnnouncement {
     SaddleMount {
         mount_id: ObjectId,
     },
-    Transform {
-        object_id: ObjectId,
-    },
+    Transform(transform::PriorityTransformAnnouncement),
     ActivateNinjutsu {
         ninjutsu_object_id: ObjectId,
         creature_to_return: ObjectId,
@@ -324,7 +323,7 @@ impl PriorityAnnouncement {
             Self::CrewVehicle { .. } => PriorityReducerFamily::CrewVehicle,
             Self::ActivateStation { .. } => PriorityReducerFamily::ActivateStation,
             Self::SaddleMount { .. } => PriorityReducerFamily::SaddleMount,
-            Self::Transform { .. } => PriorityReducerFamily::Transform,
+            Self::Transform(_) => PriorityReducerFamily::Transform,
             Self::ActivateNinjutsu { .. } => PriorityReducerFamily::ActivateNinjutsu,
             Self::CastSpellAsSneak { .. } => PriorityReducerFamily::CastSpellAsSneak,
             Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
@@ -395,7 +394,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             mount_id,
             creature_ids: Vec::new(),
         },
-        PriorityAnnouncement::Transform { object_id } => GameAction::Transform { object_id },
+        PriorityAnnouncement::Transform(announcement) => GameAction::Transform {
+            object_id: announcement.object_id(&_access),
+        },
         PriorityAnnouncement::ActivateNinjutsu {
             ninjutsu_object_id,
             creature_to_return,
@@ -590,12 +591,14 @@ fn priority_preflight_candidates(
                     },
                 ));
             }
-            if object.back_face.is_some() {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::Transform { object_id },
-                ));
-            }
         }
+
+        candidates.extend(
+            transform::priority_transform_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Transform)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         candidates.extend(
             effects::prepare::priority_prepared_copy_announcements(state, principal)

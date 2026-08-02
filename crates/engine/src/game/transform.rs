@@ -6,8 +6,47 @@ use crate::types::resolved_commands::{
 };
 use crate::types::zones::Zone;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+
+/// An engine-authored transform announcement for Priority preflight. The
+/// permanent identity remains private to the transform authority until facade
+/// conversion reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityTransformAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTransformAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// Enumerates controlled double-faced battlefield permanents as transform
+/// primers. The normal reducer and `transform_permanent` retain final legality.
+pub(in crate::game) fn priority_transform_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTransformAnnouncement> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.controller == principal.semantic_holder() && object.back_face.is_some()
+            })
+        })
+        .map(PriorityTransformAnnouncement::new)
+        .collect()
+}
 
 /// CR 701.27a: Transform a double-faced permanent — turn it to its other face.
 ///
