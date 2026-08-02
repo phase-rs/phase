@@ -304,6 +304,10 @@ pub(super) fn advance_after_empty_attackers(
 ) -> WaitingFor {
     mark_empty_attackers_end_combat(state, events);
     state.combat = None;
+    // CR 511.3: The synthetic empty-attacker path still ends this combat, so
+    // its extra-combat attacker restriction cannot survive to postcombat main.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     let _ = advance_phase_once(state, events);
@@ -3049,6 +3053,20 @@ mod tests {
                 "{name} must use advance_phase_once before auto_advance; the outer interpreter owns repetition"
             );
         }
+    }
+
+    #[test]
+    fn empty_attacker_completion_clears_the_combat_restriction() {
+        let mut state = setup();
+        state.phase = Phase::DeclareAttackers;
+        state.current_combat_attacker_restriction = Some(TargetFilter::Any);
+        state.current_combat_attacker_restriction_source = Some(ObjectId(99));
+        let mut events = Vec::new();
+
+        let _ = advance_after_empty_attackers(&mut state, &mut events);
+
+        assert!(state.current_combat_attacker_restriction.is_none());
+        assert!(state.current_combat_attacker_restriction_source.is_none());
     }
 
     #[test]
