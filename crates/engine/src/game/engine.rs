@@ -51,6 +51,7 @@ use super::mana_payment;
 use super::mana_sources;
 use super::match_flow;
 use super::mulligan;
+use super::planechase;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
@@ -275,7 +276,7 @@ enum PriorityAnnouncement {
         object_id: ObjectId,
         door: crate::game::game_object::RoomDoor,
     },
-    RollPlanarDie,
+    RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
     Equip {
         equipment_id: ObjectId,
     },
@@ -333,7 +334,7 @@ impl PriorityAnnouncement {
             Self::Foretell { .. } => PriorityReducerFamily::Foretell,
             Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
             Self::UnlockRoomDoor { .. } => PriorityReducerFamily::UnlockRoomDoor,
-            Self::RollPlanarDie => PriorityReducerFamily::RollPlanarDie,
+            Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
             Self::Equip { .. } => PriorityReducerFamily::Equip,
             Self::CrewVehicle { .. } => PriorityReducerFamily::CrewVehicle,
             Self::ActivateStation { .. } => PriorityReducerFamily::ActivateStation,
@@ -388,7 +389,7 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::UnlockRoomDoor { object_id, door } => {
             GameAction::UnlockRoomDoor { object_id, door }
         }
-        PriorityAnnouncement::RollPlanarDie => GameAction::RollPlanarDie,
+        PriorityAnnouncement::RollPlanarDie(_) => GameAction::RollPlanarDie,
         PriorityAnnouncement::Equip { equipment_id } => GameAction::Equip {
             equipment_id,
             // The Priority reducer ignores this field and enters its normal
@@ -1004,9 +1005,9 @@ fn priority_preflight_candidates(
             .map(PriorityAnnouncement::EndContinuousEffect)
             .map(PriorityPreflightCandidate::Announcement),
     );
-    if super::planechase::can_roll_planar_die(state, semantic_holder) {
+    if let Some(announcement) = planechase::priority_planar_die_announcement(state, principal) {
         candidates.push(PriorityPreflightCandidate::Announcement(
-            PriorityAnnouncement::RollPlanarDie,
+            PriorityAnnouncement::RollPlanarDie(announcement),
         ));
     }
     candidates
