@@ -37,17 +37,23 @@ pub(in crate::game) fn can_transform(state: &GameState, object_id: ObjectId) -> 
     };
     object.zone == Zone::Battlefield
         && object.back_face.is_some()
-        && !crate::game::static_abilities::object_has_static_other(
-            state,
-            object_id,
-            "CantTransform",
-        )
+        && !transform_instruction_is_noop(state, object_id)
+}
+
+/// CR 701.27 + CR 710.4 + CR 712.4c: Whether a transform instruction is a
+/// silent no-op after its subject is known to be a battlefield permanent.
+fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool {
+    let object = state
+        .objects
+        .get(&object_id)
+        .expect("transform subject was validated before checking eligibility");
+    crate::game::static_abilities::object_has_static_other(state, object_id, "CantTransform")
         // `merge_kind` distinguishes meld from a two-component mutate pile.
-        && object.merge_kind != Some(crate::game::game_object::MergeKind::Meld)
+        || object.merge_kind == Some(crate::game::game_object::MergeKind::Meld)
         // Flip cards retain their alternate face in `back_face` but never
         // transform; `is_flip_permanent` is the canonical discriminator.
-        && !object.flipped
-        && !crate::game::flip::is_flip_permanent(object)
+        || object.flipped
+        || crate::game::flip::is_flip_permanent(object)
 }
 
 /// Enumerates controlled transformable battlefield permanents as Priority
@@ -93,17 +99,16 @@ pub fn transform_permanent(
             "Only permanents on the battlefield can transform".to_string(),
         ));
     }
+
+    // A blocked, melded, or flip permanent ignores the instruction before a
+    // meld result's intentionally absent back-face payload is inspected.
+    if transform_instruction_is_noop(state, object_id) {
+        return Ok(());
+    }
     let back_face = obj
         .back_face
         .clone()
         .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))?;
-
-    // CR 701.27 + CR 710.4 + CR 712.4c: A blocked, melded, or flip permanent
-    // ignores the transform instruction. The shared predicate keeps this
-    // silent no-op aligned with Priority enumeration.
-    if !can_transform(state, object_id) {
-        return Ok(());
-    }
 
     // CR 613.7g: a double-faced permanent receives a new timestamp when it
     // transforms. All blocked/no-op early-returns above (off-battlefield,
