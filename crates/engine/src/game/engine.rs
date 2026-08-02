@@ -59,6 +59,7 @@ use super::public_state::{
     bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
     mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
+use super::room;
 use super::sba;
 use super::splice;
 use super::transform;
@@ -265,10 +266,7 @@ enum PriorityAnnouncement {
         source_id: ObjectId,
         ability_index: usize,
     },
-    UnlockRoomDoor {
-        object_id: ObjectId,
-        door: crate::game::game_object::RoomDoor,
-    },
+    UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
     RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
     Equip {
         equipment_id: ObjectId,
@@ -317,7 +315,7 @@ impl PriorityAnnouncement {
             Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
             Self::Foretell(_) => PriorityReducerFamily::Foretell,
             Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
-            Self::UnlockRoomDoor { .. } => PriorityReducerFamily::UnlockRoomDoor,
+            Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
             Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
             Self::Equip { .. } => PriorityReducerFamily::Equip,
             Self::CrewVehicle { .. } => PriorityReducerFamily::CrewVehicle,
@@ -372,9 +370,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             source_id,
             ability_index,
         },
-        PriorityAnnouncement::UnlockRoomDoor { object_id, door } => {
-            GameAction::UnlockRoomDoor { object_id, door }
-        }
+        PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
+            object_id: announcement.object_id(&_access),
+            door: announcement.door(&_access),
+        },
         PriorityAnnouncement::RollPlanarDie(_) => GameAction::RollPlanarDie,
         PriorityAnnouncement::Equip { equipment_id } => GameAction::Equip {
             equipment_id,
@@ -494,9 +493,7 @@ fn priority_preflight_candidates(
     let semantic_holder = principal.semantic_holder();
     let mut candidates = Vec::new();
     let split_second_active = super::keywords::stack_has_split_second(state);
-    let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let is_active = state.active_player == semantic_holder;
-    let stack_empty = state.stack.is_empty();
     candidates.extend(
         casting::priority_play_land_announcements(state, principal)
             .into_iter()
@@ -669,39 +666,12 @@ fn priority_preflight_candidates(
             }
         }
 
-        if is_main_phase && stack_empty && is_active {
-            for &object_id in &state.battlefield {
-                let Some(object) = state.objects.get(&object_id) else {
-                    continue;
-                };
-                if object.controller != semantic_holder
-                    || !object
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|subtype| subtype == "Room")
-                {
-                    continue;
-                }
-                let unlocks = object.room_unlocks.unwrap_or_default();
-                if !unlocks.left_unlocked {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::UnlockRoomDoor {
-                            object_id,
-                            door: crate::game::game_object::RoomDoor::Left,
-                        },
-                    ));
-                }
-                if object.back_face.is_some() && !unlocks.right_unlocked {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::UnlockRoomDoor {
-                            object_id,
-                            door: crate::game::game_object::RoomDoor::Right,
-                        },
-                    ));
-                }
-            }
-        }
+        candidates.extend(
+            room::priority_unlock_room_door_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::UnlockRoomDoor)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         if state.active_player == semantic_holder {
             for (ninjutsu_object_id, _, variant, cost) in
