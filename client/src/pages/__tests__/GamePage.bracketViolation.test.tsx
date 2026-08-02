@@ -132,6 +132,7 @@ vi.mock("../../stores/gameStore", () => ({
         gameState: storeOverrides.gameState,
         waitingFor: storeOverrides.waitingFor,
         legalActions: [],
+        endContinuousEffectOffers: [],
         autoPassRecommended: false,
         spellCosts: {},
         legalActionsByObject: {},
