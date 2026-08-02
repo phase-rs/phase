@@ -280,11 +280,7 @@ enum PriorityAnnouncement {
     },
     Transform(transform::PriorityTransformAnnouncement),
     ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
-    CastSpellAsSneak {
-        hand_object: ObjectId,
-        card_id: CardId,
-        creature_to_return: ObjectId,
-    },
+    CastSpellAsSneak(casting::PrioritySneakAnnouncement),
     CastSpellAsWebSlinging {
         hand_object: ObjectId,
         card_id: CardId,
@@ -318,7 +314,7 @@ impl PriorityAnnouncement {
             Self::SaddleMount { .. } => PriorityReducerFamily::SaddleMount,
             Self::Transform(_) => PriorityReducerFamily::Transform,
             Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
-            Self::CastSpellAsSneak { .. } => PriorityReducerFamily::CastSpellAsSneak,
+            Self::CastSpellAsSneak(_) => PriorityReducerFamily::CastSpellAsSneak,
             Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
             Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
             Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
@@ -392,14 +388,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             ninjutsu_object_id: announcement.ninjutsu_object_id(&_access),
             creature_to_return: announcement.creature_to_return(&_access),
         },
-        PriorityAnnouncement::CastSpellAsSneak {
-            hand_object,
-            card_id,
-            creature_to_return,
-        } => GameAction::CastSpellAsSneak {
-            hand_object,
-            card_id,
-            creature_to_return,
+        PriorityAnnouncement::CastSpellAsSneak(announcement) => GameAction::CastSpellAsSneak {
+            hand_object: announcement.hand_object(&_access),
+            card_id: announcement.card_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
         PriorityAnnouncement::CastSpellAsWebSlinging {
@@ -652,51 +644,12 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        if state.active_player == semantic_holder && state.phase == Phase::DeclareBlockers {
-            let unblocked_attackers: Vec<_> = super::combat::unblocked_attackers(state)
+        candidates.extend(
+            casting::priority_sneak_announcements(state, principal)
                 .into_iter()
-                .filter(|object_id| {
-                    state
-                        .objects
-                        .get(object_id)
-                        .is_some_and(|object| object.controller == semantic_holder)
-                })
-                .collect();
-            if let Some(player) = state
-                .players
-                .iter()
-                .find(|player| player.id == semantic_holder)
-            {
-                for &hand_object in &player.hand {
-                    let Some(cost) = super::keywords::effective_sneak_cost(state, hand_object)
-                    else {
-                        continue;
-                    };
-                    if !casting::can_pay_cost_after_auto_tap(
-                        state,
-                        semantic_holder,
-                        hand_object,
-                        &cost,
-                    ) {
-                        continue;
-                    }
-                    let Some(card_id) =
-                        state.objects.get(&hand_object).map(|object| object.card_id)
-                    else {
-                        continue;
-                    };
-                    for &creature_to_return in &unblocked_attackers {
-                        candidates.push(PriorityPreflightCandidate::Announcement(
-                            PriorityAnnouncement::CastSpellAsSneak {
-                                hand_object,
-                                card_id,
-                                creature_to_return,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
+                .map(PriorityAnnouncement::CastSpellAsSneak)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         let tapped_creatures: Vec<_> = state
             .battlefield

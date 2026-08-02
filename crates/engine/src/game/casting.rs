@@ -103,6 +103,42 @@ pub(in crate::game) struct PriorityActivateAbilityAnnouncement {
     ability_index: usize,
 }
 
+/// An engine-authored Sneak cast announcement for Priority preflight. The hand
+/// card and unblocked attacker remain private to Casting until facade conversion.
+pub(in crate::game) struct PrioritySneakAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+}
+
+impl PrioritySneakAnnouncement {
+    fn new(hand_object: ObjectId, card_id: CardId, creature_to_return: ObjectId) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
+
 impl PriorityActivateAbilityAnnouncement {
     fn new(source_id: ObjectId, ability_index: usize) -> Self {
         Self {
@@ -1620,6 +1656,52 @@ pub(in crate::game) fn priority_activate_ability_announcements(
                     (ability.kind == AbilityKind::Activated
                         && can_activate_ability_now(state, player, source_id, ability_index))
                     .then(|| PriorityActivateAbilityAnnouncement::new(source_id, ability_index))
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Sneak casts through the existing keyword-cost, affordability,
+/// and combat authorities for the active player in declare blockers.
+pub(in crate::game) fn priority_sneak_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PrioritySneakAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player || state.phase != crate::types::phase::Phase::DeclareBlockers {
+        return Vec::new();
+    }
+    let unblocked_attackers: Vec<_> = crate::game::combat::unblocked_attackers(state)
+        .into_iter()
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == player)
+        })
+        .collect();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            let cost = crate::game::keywords::effective_sneak_cost(state, hand_object)?;
+            if !can_pay_cost_after_auto_tap(state, player, hand_object, &cost) {
+                return None;
+            }
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id))
+        })
+        .flat_map(|(hand_object, card_id)| {
+            unblocked_attackers
+                .iter()
+                .copied()
+                .map(move |creature_to_return| {
+                    PrioritySneakAnnouncement::new(hand_object, card_id, creature_to_return)
                 })
         })
         .collect()
