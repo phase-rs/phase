@@ -171,6 +171,8 @@ impl CertifiedPactPlan {
             trigger.provenance.origin() == Some(self.receipt.provenance)
                 && trigger.controller == self.receipt.payer
                 && trigger.source_id == self.receipt.source_id
+        }) || state.deferred_triggers.iter().any(|trigger| {
+            trigger.firing() == TriggerFiring::ReceiptEligible(self.receipt.provenance)
         }) || state.pending_trigger_order.as_ref().is_some_and(|order| {
             order.groups.iter().any(|group| {
                 group.triggers.iter().any(|trigger| {
@@ -1238,16 +1240,21 @@ fn draws_are_opaque(state: &GameState, events: &[GameEvent]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_priority_for_route, FrozenCandidate, ProspectiveBudget, ProspectiveManaDecision,
-        StateCapabilityBinding, PROSPECTIVE_MAX_SEARCH_BRANCHES,
+        advance_priority_for_route, CertifiedPactPlan, FrozenCandidate, PactPlanState, PactReceipt,
+        ProspectiveBudget, ProspectiveManaDecision, StateCapabilityBinding,
+        PROSPECTIVE_MAX_SEARCH_BRANCHES,
     };
     use crate::ai_support::TacticalClass;
     use crate::game::engine::apply_actionless_priority_pass_for_prospective;
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones;
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, WaitingFor};
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
+    };
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1324,6 +1331,53 @@ mod tests {
             WaitingFor::Priority { .. }
         ));
         assert_ne!(state.priority_player, player);
+    }
+
+    #[test]
+    fn pact_plan_remains_dormant_while_matching_trigger_is_deferred() {
+        let payer = PlayerId(0);
+        let source = ObjectId(99);
+        let provenance = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(7),
+            instance: DelayedTriggerInstanceId(11),
+            source_id: source,
+        };
+        let mut state = GameState::new_two_player(42);
+        let plan = CertifiedPactPlan {
+            root: FrozenCandidate {
+                action: GameAction::PassPriority,
+                semantic_owner: payer,
+                authenticated_actor: payer,
+                tactical_class: TacticalClass::Selection,
+                capability: StateCapabilityBinding::capture(&state, payer)
+                    .expect("a complete state yields a capability binding"),
+            },
+            receipt: PactReceipt {
+                provenance,
+                payer,
+                source_id: source,
+            },
+        };
+        let pending = PendingTrigger::ordinary(
+            source,
+            payer,
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                payer,
+            )),
+            state.turn_number,
+        );
+        state
+            .deferred_triggers
+            .push(PendingTriggerContext::delayed_for_test(pending, provenance));
+
+        assert_eq!(plan.state_for(&state, payer), PactPlanState::Dormant);
     }
 
     #[test]
