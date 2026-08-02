@@ -47,7 +47,7 @@ use super::ability_utils::{
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
@@ -61,6 +61,31 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
+
+/// An engine-authored Foretell announcement for the Priority preflight. The
+/// hand object and card identity remain private to Casting until the Priority
+/// facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityForetellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityForetellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
 
 fn runtime_granted_cycling_abilities(
     state: &GameState,
@@ -1313,6 +1338,27 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
 
     let cost = ManaCost::generic(FORETELL_SPECIAL_ACTION_COST);
     can_pay_special_action_cost_after_auto_tap(state, player, &cost)
+}
+
+/// Enumerates the current holder's finite Foretell special-action primers from
+/// the existing legality and payment authority.
+pub(in crate::game) fn priority_foretell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityForetellAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            can_foretell_card(state, player, object_id)
+                .then(|| PriorityForetellAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
 }
 
 /// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through

@@ -264,10 +264,7 @@ enum PriorityAnnouncement {
         object_id: ObjectId,
         card_id: CardId,
     },
-    Foretell {
-        object_id: ObjectId,
-        card_id: CardId,
-    },
+    Foretell(casting::PriorityForetellAnnouncement),
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
@@ -331,7 +328,7 @@ impl PriorityAnnouncement {
             Self::ActivateManaSource { .. } => PriorityReducerFamily::ActivateManaSource,
             Self::UntapLandForMana { .. } => PriorityReducerFamily::UntapLandForMana,
             Self::CastSpell { .. } => PriorityReducerFamily::CastSpell,
-            Self::Foretell { .. } => PriorityReducerFamily::Foretell,
+            Self::Foretell(_) => PriorityReducerFamily::Foretell,
             Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
             Self::UnlockRoomDoor { .. } => PriorityReducerFamily::UnlockRoomDoor,
             Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
@@ -376,9 +373,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             targets: Vec::new(),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
-        PriorityAnnouncement::Foretell { object_id, card_id } => {
-            GameAction::Foretell { object_id, card_id }
-        }
+        PriorityAnnouncement::Foretell(announcement) => GameAction::Foretell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
         PriorityAnnouncement::ActivateAbility {
             source_id,
             ability_index,
@@ -948,6 +946,12 @@ fn priority_preflight_candidates(
     }
 
     if is_active {
+        candidates.extend(
+            casting::priority_foretell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Foretell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
         if let Some(player) = state
             .players
             .iter()
@@ -957,14 +961,6 @@ fn priority_preflight_candidates(
                 let Some(object) = state.objects.get(&object_id) else {
                     continue;
                 };
-                if casting::can_foretell_card(state, semantic_holder, object_id) {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::Foretell {
-                            object_id,
-                            card_id: object.card_id,
-                        },
-                    ));
-                }
                 // The reducer's Priority arm delegates this special action to
                 // `morph::play_face_down`; it owns final face legality on the
                 // clone, so the hand object is the complete fixed primer.
