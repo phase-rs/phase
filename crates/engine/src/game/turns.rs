@@ -2588,21 +2588,27 @@ fn skip_eliminated_active_turn(state: &mut GameState, events: &mut Vec<GameEvent
 /// acquiring the loop authority.
 enum AutoAdvanceStep {
     Continue,
-    Waiting(WaitingFor),
+    Waiting(Box<WaitingFor>),
+}
+
+impl AutoAdvanceStep {
+    fn waiting(waiting_for: WaitingFor) -> Self {
+        Self::Waiting(Box::new(waiting_for))
+    }
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     loop {
         match auto_advance_once(state, events) {
             AutoAdvanceStep::Continue => {}
-            AutoAdvanceStep::Waiting(waiting_for) => return waiting_for,
+            AutoAdvanceStep::Waiting(waiting_for) => return *waiting_for,
         }
     }
 }
 
 fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> AutoAdvanceStep {
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-        return AutoAdvanceStep::Waiting(state.waiting_for.clone());
+        return AutoAdvanceStep::waiting(state.waiting_for.clone());
     }
     // CR 703.4q + CR 616.1: A step-end empty-mana drain paused on a
     // player's CR 616.1 choice. Surface the prompt so the engine round-
@@ -2610,7 +2616,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
     // via the `EmptyManaPool` arm of `handle_replacement_choice`.
     if state.pending_phase_transition_progress.is_some() {
         state.deferred_step_trigger_resume = Some(state.phase);
-        return AutoAdvanceStep::Waiting(state.waiting_for.clone());
+        return AutoAdvanceStep::waiting(state.waiting_for.clone());
     }
 
     // CR 800.4: If the active player has been eliminated, skip their
@@ -2627,7 +2633,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if !should_skip_step_now(state, Phase::Untap) {
                 let candidates = untap_choice_candidates(state, state.active_player);
                 if !candidates.is_empty() {
-                    return AutoAdvanceStep::Waiting(WaitingFor::UntapChoice {
+                    return AutoAdvanceStep::waiting(WaitingFor::UntapChoice {
                         player: state.active_player,
                         candidates,
                         chosen_not_to_untap: Vec::new(),
@@ -2640,7 +2646,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 // when it untaps, so only fall through to `advance_phase`
                 // below when no subset prompt is raised.
                 if let Some(prompt) = begin_untap_or_subset_prompt(state, events, HashSet::new()) {
-                    return AutoAdvanceStep::Waiting(prompt);
+                    return AutoAdvanceStep::waiting(prompt);
                 }
                 return AutoAdvanceStep::Continue;
             }
@@ -2683,14 +2689,14 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if state.waiting_for != waiting_before_sba
                 && !matches!(state.waiting_for, WaitingFor::Priority { .. })
             {
-                return AutoAdvanceStep::Waiting(state.waiting_for.clone());
+                return AutoAdvanceStep::waiting(state.waiting_for.clone());
             }
             if let Some(prompt) =
                 crate::game::contraptions::perform_contraption_upkeep_turn_based_action(
                     state, events,
                 )
             {
-                return AutoAdvanceStep::Waiting(prompt);
+                return AutoAdvanceStep::waiting(prompt);
             }
             // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
             // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
@@ -2698,7 +2704,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // surfaced before priority — see `process_phase_triggers`.
             let event_snapshot = events.clone();
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
-                return AutoAdvanceStep::Waiting(prompt);
+                return AutoAdvanceStep::waiting(prompt);
             }
             // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
             // during the upkeep step, regardless of whether triggers fired.
@@ -2706,7 +2712,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // user's `phase_stops` / full-control preferences) is decided by
             // `run_auto_pass_loop` and the frontend, not by skipping the step
             // here. Mirrors the pattern in PreCombatMain and DeclareBlockers.
-            return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
                 player: state.active_player,
             });
         }
@@ -2733,18 +2739,18 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 return AutoAdvanceStep::Continue;
             }
             if let Some(wf) = execute_draw(state, events) {
-                return AutoAdvanceStep::Waiting(wf);
+                return AutoAdvanceStep::waiting(wf);
             }
             // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
             // CR 603.3b: surface a same-controller ordering prompt before priority.
             let event_snapshot = events.clone();
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
-                return AutoAdvanceStep::Waiting(prompt);
+                return AutoAdvanceStep::waiting(prompt);
             }
             // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
             // during the draw step (after the turn-based draw and any triggers).
             // See the Upkeep arm above for the rationale — same pattern.
-            return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
                 player: state.active_player,
             });
         }
@@ -2753,7 +2759,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // to each Saga the active player controls (turn-based action).
             if state.phase == Phase::PreCombatMain {
                 if !add_lore_counters_to_sagas(state, events) {
-                    return AutoAdvanceStep::Waiting(state.waiting_for.clone());
+                    return AutoAdvanceStep::waiting(state.waiting_for.clone());
                 }
                 super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                 // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
@@ -2765,7 +2771,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 // publishes SOS CR update.
                 let active = state.active_player;
                 if super::effects::paradigm::enqueue_offer_if_any(state, active) {
-                    return AutoAdvanceStep::Waiting(state.waiting_for.clone());
+                    return AutoAdvanceStep::waiting(state.waiting_for.clone());
                 }
             }
             // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are
@@ -2773,10 +2779,10 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 603.3b: surface a same-controller ordering prompt first.
             let event_snapshot = events.clone();
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
-                return AutoAdvanceStep::Waiting(prompt);
+                return AutoAdvanceStep::waiting(prompt);
             }
             // CR 505.6: The active player receives priority during a main phase.
-            return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
                 player: state.active_player,
             });
         }
@@ -2794,9 +2800,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 // priority; combat state is set first so it exists when the
                 // ordered begin-combat triggers later resolve.
                 if let Some(prompt) = ordering_prompt {
-                    return AutoAdvanceStep::Waiting(prompt);
+                    return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+                return AutoAdvanceStep::waiting(WaitingFor::Priority {
                     player: state.active_player,
                 });
             }
@@ -2817,7 +2823,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 508.1: Active player declares attackers as a turn-based action.
             // Built from the single engine constraints authority (per-attacker
             // legal map + aggregate compat + display badges).
-            return AutoAdvanceStep::Waiting(super::combat::build_declare_attackers_waiting_for(
+            return AutoAdvanceStep::waiting(super::combat::build_declare_attackers_waiting_for(
                 state,
             ));
         }
@@ -2847,7 +2853,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     defending,
                     &valid_block_targets,
                 );
-                return AutoAdvanceStep::Waiting(WaitingFor::DeclareBlockers {
+                return AutoAdvanceStep::waiting(WaitingFor::DeclareBlockers {
                     player: defending,
                     valid_blocker_ids,
                     valid_block_targets,
@@ -2871,19 +2877,19 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // resolve_combat_damage may pause for interactive assignment (2+ blockers).
             if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                 state.waiting_for = waiting.clone();
-                return AutoAdvanceStep::Waiting(waiting);
+                return AutoAdvanceStep::waiting(waiting);
             }
             // CR 603.3b + issue #1350: deferred triggers collapsed during
             // elimination must drain before advancing past combat damage.
             if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {
-                return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+                return AutoAdvanceStep::waiting(WaitingFor::Priority {
                     player: state.active_player,
                 });
             }
             // If triggers were placed on the stack (DamageReceived, dies, etc.),
             // grant priority so they can resolve before advancing.
             if !state.stack.is_empty() {
-                return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+                return AutoAdvanceStep::waiting(WaitingFor::Priority {
                     player: state.active_player,
                 });
             }
@@ -2913,9 +2919,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if triggers_fired {
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
                 if let Some(prompt) = ordering_prompt {
-                    return AutoAdvanceStep::Waiting(prompt);
+                    return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+                return AutoAdvanceStep::waiting(WaitingFor::Priority {
                     player: state.active_player,
                 });
             }
@@ -2941,16 +2947,16 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 603.3b: surface a same-controller ordering prompt before priority.
             let event_snapshot = events.clone();
             if let (_, Some(prompt)) = process_phase_triggers(state, &event_snapshot, events) {
-                return AutoAdvanceStep::Waiting(prompt);
+                return AutoAdvanceStep::waiting(prompt);
             }
-            return AutoAdvanceStep::Waiting(WaitingFor::Priority {
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
                 player: state.active_player,
             });
         }
         Phase::Cleanup => {
             // CR 514: Cleanup step — discard to hand size (CR 514.1), remove damage and expire effects (CR 514.2).
             if let Some(waiting) = execute_cleanup(state, events) {
-                return AutoAdvanceStep::Waiting(waiting);
+                return AutoAdvanceStep::waiting(waiting);
             }
             let _ = advance_phase_once(state, events);
             // advance_phase_once handles start_next_turn when wrapping Cleanup -> Untap
@@ -3028,7 +3034,7 @@ mod tests {
         ));
         let actual_waiting = match auto_advance_once(&mut one_unit, &mut one_unit_events) {
             AutoAdvanceStep::Continue => panic!("upkeep must surface a Priority window"),
-            AutoAdvanceStep::Waiting(waiting_for) => waiting_for,
+            AutoAdvanceStep::Waiting(waiting_for) => *waiting_for,
         };
 
         assert_eq!(actual_waiting, expected_waiting);
