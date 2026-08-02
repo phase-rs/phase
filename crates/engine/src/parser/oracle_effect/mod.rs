@@ -9073,10 +9073,8 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 608.2k + CR 401.4: self/controller-framing sibling of the above —
-    // "[you may ]put it/~ on [your choice of ]the top or bottom of its owner's
-    // library" (Arashin Sovereign). Routes the SELF form to the same
-    // Effect::PutOnTopOrBottom the owner-framing patterns produce.
+    // Self/controller-framing sibling of the owner forms: "[you may ]put it/~
+    // on [your choice of ]the top or bottom of its owner's library".
     if let Some(clause) = try_parse_self_put_on_top_or_bottom(tp, ctx) {
         return clause;
     }
@@ -11001,6 +10999,7 @@ fn try_parse_put_on_top_or_bottom(
     {
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: TargetFilter::ParentTarget,
+            chooser: TargetFilter::ParentTargetOwner,
         }));
     }
 
@@ -11035,7 +11034,10 @@ fn try_parse_put_on_top_or_bottom(
                 line_index: 0,
             });
         }
-        return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
+        return Some(parsed_clause(Effect::PutOnTopOrBottom {
+            target: filter,
+            chooser: TargetFilter::ParentTargetOwner,
+        }));
     }
 
     // Pattern 2: "the owner of target [filter] puts it ..."
@@ -11074,25 +11076,18 @@ fn try_parse_put_on_top_or_bottom(
                 line_index: 0,
             });
         }
-        return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
+        return Some(parsed_clause(Effect::PutOnTopOrBottom {
+            target: filter,
+            chooser: TargetFilter::ParentTargetOwner,
+        }));
     }
 
     None
 }
 
-/// CR 608.2k + CR 401.4: "put it/~ on [your choice of ]the top or bottom of its
-/// owner's library" — the self/controller-framing sibling of the owner-framing
-/// patterns in [`try_parse_put_on_top_or_bottom`]. Arashin Sovereign: "When this
-/// creature dies, you may put it on your choice of the top or bottom of its
-/// owner's library." The dying source's owner IS the controller the card tells to
-/// choose, so `Effect::PutOnTopOrBottom`'s owner-chooses resolution (CR 401.4)
-/// matches the "your choice" text with no new effect variant and no runtime path.
-///
-/// Scoped to the SELF reference via `resolve_it_pronoun` (CR 608.2k): a non-self
-/// "it" — a triggering object another player owns, where "your choice" is NOT the
-/// owner's choice (S.N.E.A.K. Dispatcher) — or a "that card" subject (Hinder) is
-/// declined so it stays an honest coverage gap rather than letting the wrong
-/// player choose the library position.
+/// Parse self-reference top-or-bottom forms such as Arashin Sovereign's
+/// "put it on the top or bottom ...". The self guard keeps non-self `it` and
+/// Hinder's `that card` form excluded; the controller makes this choice.
 fn try_parse_self_put_on_top_or_bottom(
     tp: TextPair,
     ctx: &mut ParseContext,
@@ -11112,15 +11107,17 @@ fn try_parse_self_put_on_top_or_bottom(
         return None;
     }
 
-    // CR 608.2k: "it"/"~" names the source only in a self context. Restrict the
-    // owner-chooses `PutOnTopOrBottom` to that case so a non-self reference (whose
-    // owner is not the "your choice" controller) is never mis-modelled.
+    // `it`/`~` names the source only in a self context. Restrict this form so a
+    // non-self reference is never assigned the controller's choice.
     let target = resolve_it_pronoun(ctx);
     if !matches!(target, TargetFilter::SelfRef) {
         return None;
     }
 
-    Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
+    Some(parsed_clause(Effect::PutOnTopOrBottom {
+        target,
+        chooser: TargetFilter::Controller,
+    }))
 }
 
 /// CR 701.57a: Parse "[player] discover[s] N/X" and return the discovering
@@ -11295,7 +11292,10 @@ fn try_parse_owner_of_target_put_second(
 
     let target = extract_owner_of_target(tp, ctx)?;
 
-    Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
+    Some(parsed_clause(Effect::PutOnTopOrBottom {
+        target,
+        chooser: TargetFilter::ParentTargetOwner,
+    }))
 }
 
 /// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."

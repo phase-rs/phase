@@ -9933,7 +9933,7 @@ pub enum WaitingFor {
         /// `repeat_until` is retained so the next iteration re-prompts.
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
-    /// CR 401.4: Owner chooses to put a permanent on top or bottom of their library.
+    /// CR 608.2d: The effect-designated player chooses the library position.
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,

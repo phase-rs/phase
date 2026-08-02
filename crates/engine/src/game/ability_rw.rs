@@ -2845,7 +2845,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Exploit { target }
         | Effect::LoseAllPlayerCounters { target }
         | Effect::Heist { target, .. }
-        | Effect::PutOnTopOrBottom { target }
         | Effect::Goad { target }
         | Effect::GoadAll { target }
         | Effect::Detain { target }
@@ -2867,6 +2866,10 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::PutOnTopOrBottom { target, chooser } => {
+            legacy_target_filter(target) || legacy_target_filter(chooser)
+        }
 
         Effect::ForceBlock {
             target, duration, ..
