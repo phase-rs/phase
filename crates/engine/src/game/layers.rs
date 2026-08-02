@@ -2120,13 +2120,18 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
     let mut zone_cache = LayerZoneObjectCache::default();
     let mut started_effect_sets = StartedContinuousEffectSets::new();
-    // Narrowed by payload rather than by "did layer 1a run":
-    // `CopyValues` carries the whole copiable static set in the modification, so
-    // `copy_grants_continuous_static` answers exactly, with no plumbing and no
-    // battlefield rescan. A clone of a vanilla creature — a permanent-duration
-    // TCE that outlives the clone — therefore costs no second rebuild per pass,
-    // which is the whole point of an index whose stated job is keeping per-flush
-    // work off `|battlefield|`.
+    // Narrowed by payload rather than by "did layer 1a run": `CopyValues` carries
+    // the whole copiable static set in the modification, so the payload answers
+    // both questions 1a needs with no plumbing and no battlefield rescan. They are
+    // two different questions and are asked separately — `copy_grants_continuous_static`
+    // for the flag returned here (does the recipient become a generator layers 2-7
+    // must see?) and the narrower `copy_grants_copy_layer_static` for continuing
+    // 1a's own discovery loop. A clone of a vanilla creature — a permanent-duration
+    // TCE that outlives the clone — therefore pays nothing extra at all, and a
+    // clone of an ordinary lord pays one rebuild here rather than a second
+    // gather-and-rebuild generation inside 1a. Only a copy-granted COPY ability
+    // pays for a generation, which is the point of an index whose stated job is
+    // keeping per-flush work off `|battlefield|`.
     let copy_added_generator = apply_copy_sublayer_to_fixed_point(
         state,
         &mut abilities_suppressed,
@@ -2171,8 +2176,9 @@ pub fn evaluate_layers(state: &mut GameState) {
     // that non-local fact, not via the rule cited here.
     //
     // `apply_copy_sublayer_to_fixed_point` already rebuilt mid-1a whenever a
-    // generation of copies added a generator, but that rebuild is scoped to 1a's
-    // own discovery loop and predates 1b by construction. This one is the layer-1
+    // generation of copies added a COPY-LAYER generator, but that rebuild is scoped
+    // to 1a's own discovery loop and predates 1b by construction. This one is the
+    // layer-1
     // exit rebuild the CR 613.2c invariant asks for; on the rare board that pays
     // both it is one extra O(battlefield) walk, the same order as the Step-1 reset
     // that already runs unconditionally.
@@ -3920,21 +3926,51 @@ fn copy_grants_continuous_static(modification: &ContinuousModification) -> bool 
     }
 }
 
-/// CR 613.2: how many discovery generations sublayer 1a may run before it stops.
+/// CR 613.2a: can applying this copy modification produce ANOTHER generation of
+/// sublayer 1a — i.e. does its payload grant a continuous static that itself
+/// generates a LAYER-1 effect?
 ///
-/// Each generation applies every started copy effect and then re-gathers; a copy
-/// effect first seen in generation `k` can only exist because a copy applied in
-/// generation `k-1` handed its recipient the static that generates it. So the
-/// bound is the maximum length of a copy-grants-a-copy-ability chain. No printed
-/// card forms a chain longer than two links (a clone of a permanent whose own
-/// static is a copy effect), and every generation past the first requires a
-/// board that already paid for one; eight leaves generous headroom while keeping
-/// the mutually-copying case — two permanents that rewrite each other's static
-/// sets and therefore keep producing payload-distinct effects forever — from
-/// spinning. `debug_assert` on exhaustion so a real non-convergent board is a
-/// test failure rather than a silent truncation; release builds stop
-/// deterministically with the last fully-ordered application in place.
-const MAX_COPY_SUBLAYER_GENERATIONS: usize = 8;
+/// Strictly narrower than [`copy_grants_continuous_static`], and the two are not
+/// interchangeable. That one asks "does the recipient become a
+/// `StaticSourceIndex` generator?", which is the right question for the layer-1
+/// exit rebuild that feeds layers 2-7 and for the incremental-flush guard.
+/// Cloning an ordinary lord answers it yes — an anthem is a continuous static —
+/// but an anthem is a layer-7c effect and can never appear in a `Layer::Copy`
+/// gather however many times 1a re-runs. Continuing the loop on that answer buys
+/// a `StaticSourceIndex::rebuild_from_state` plus a board-wide
+/// `collect_shared_active_continuous_effects` for a generation that is
+/// guaranteed to find nothing, on the very common board that merely contains a
+/// cloned lord. Only a copy-LAYER static can extend the chain.
+///
+/// Asks [`ContinuousModification::is_copy_layer`] rather than `layer()`: these
+/// are payload modifications that have never been through the gather filter, and
+/// six of `layer()`'s arms are `unreachable!()` panics.
+fn copy_grants_copy_layer_static(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::CopyValues { values, .. } => values
+            .static_definitions
+            .iter()
+            // CR 604.2 + CR 613.1: a STATIC ability is what creates a continuous
+            // effect here, so only a `Continuous` def counts. (CR 611.2, which
+            // `defs_source_continuous_effect` cites for the same test, is the
+            // resolution-generated case; the answer is identical, the rule for a
+            // static is 604.2.)
+            .filter(|def| def.mode == StaticMode::Continuous)
+            .flat_map(|def| def.modifications.iter())
+            .any(ContinuousModification::is_copy_layer),
+        // CR 707.9a: the unbounded retain merges the LIVE source's
+        // `base_static_definitions`, which are not in this payload to inspect, so
+        // it is answered conservatively — as in `copy_grants_continuous_static`.
+        // Over-answering costs at most one extra generation, which then gathers
+        // nothing fresh and exits.
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => true,
+        // The remaining `Layer::Copy` variants write no `static_definitions` at
+        // all (`SetName` is name-only, `CopyChosen`'s apply arm is a no-op, and
+        // the two single-item retains push one ability / one trigger), and every
+        // layers-2-7 variant is out of both callers' `Layer::Copy` filter.
+        _ => false,
+    }
+}
 
 /// CR 613.2a + CR 613.2c: apply sublayer 1a to a fixed point.
 ///
@@ -3950,10 +3986,41 @@ const MAX_COPY_SUBLAYER_GENERATIONS: usize = 8;
 /// CR 613.8a dependency order), never just the newly discovered tail. That
 /// matters because `depends_on` sorts every `CopyValues` ahead of the other
 /// layer-1 modifications, so a copy discovered late can legitimately need to
-/// apply before one already applied. Re-application is safe: `CopyValues` /
-/// `SetName` assign wholesale from a payload snapshot, the retains dedupe
-/// per-item, `CopyChosen` is a no-op, and `started_effect_sets` hands an
-/// already-started effect back its original affected set (CR 613.6).
+/// apply before one already applied. Re-application is safe, and CR 707.2c is
+/// why: the copiable values a copy effect grants are fixed the first time it
+/// starts to apply, so re-applying a started effect re-applies that same locked
+/// snapshot. Mechanically, `CopyValues` / `SetName` assign wholesale from the
+/// payload, the retains dedupe per item, `CopyChosen` is a no-op, and
+/// `started_effect_sets` hands an already-started effect back its original
+/// affected set (CR 613.6). Nothing is ever pruned from the started set for the
+/// same reason: an effect whose provenance slot has since been overwritten still
+/// applies the values it locked in, so dropping it would be the CR 707.2c
+/// violation, not keeping it.
+///
+/// Termination. The loop's identity ([`CopySublayerEffectId`]) is provenance,
+/// never payload, so the space it draws from is finite and does not grow during
+/// the pass:
+///
+/// - The battlefield object set is fixed for the duration of layer 1 — nothing
+///   in sublayer 1a creates, destroys or moves an object — so the `Static` and
+///   `GrantedStatic` arms of `ContinuousEffectGroupKey` range over a fixed set of
+///   `ObjectIncarnationRef`s (`incarnation` changes only on a zone change), and
+///   the `Transient` arm over the fixed id set of
+///   `state.transient_continuous_effects`.
+/// - `definition_index` and `mod_index` are bounded by the largest static set any
+///   object can hold during the pass, and no arm can mint fresh ones without
+///   bound: `apply_copiable_values` ASSIGNS `obj.static_definitions` wholesale
+///   from the payload's snapshot rather than appending,
+///   `RetainAllOtherAbilitiesFromSource` merges the source's
+///   `base_static_definitions` behind a per-item `contains` dedupe, and every
+///   other `Layer::Copy` arm writes no static at all. Each payload is itself a
+///   snapshot taken before the pass began, so the reachable static sets are fixed
+///   too.
+///
+/// Each iteration therefore either inserts at least one identity into the
+/// monotonically growing `started_ids` — bounded above by that finite space — or
+/// gathers nothing fresh and returns. So the loop terminates, with no generation
+/// cap needed to force it.
 ///
 /// Returns whether any applied copy added a `StaticSourceIndex` generator, which
 /// the caller needs for the layer-1 exit rebuild that feeds layers 2-7.
@@ -3964,13 +4031,16 @@ fn apply_copy_sublayer_to_fixed_point(
     started_effect_sets: &mut StartedContinuousEffectSets,
 ) -> bool {
     let mut started: Vec<ActiveContinuousEffect> = Vec::new();
+    let mut started_ids: HashSet<CopySublayerEffectId> = HashSet::new();
     let mut copy_added_generator = false;
 
-    for _ in 0..MAX_COPY_SUBLAYER_GENERATIONS {
+    loop {
+        // `insert` returns `false` for an identity already started, so this both
+        // selects the fresh effects and records them in one O(1)-per-effect pass.
         let fresh: Vec<ActiveContinuousEffect> =
             gather_active_effects_for_layer(state, Layer::Copy)
                 .into_iter()
-                .filter(|effect| !started.iter().any(|seen| same_copy_effect(seen, effect)))
+                .filter(|effect| started_ids.insert(copy_sublayer_effect_id(state, effect)))
                 .collect();
         if fresh.is_empty() {
             // Fixed point: this generation's gather produced nothing the
@@ -3978,10 +4048,15 @@ fn apply_copy_sublayer_to_fixed_point(
             return copy_added_generator;
         }
 
-        let fresh_added_generator = fresh
+        copy_added_generator |= fresh
             .iter()
             .any(|effect| copy_grants_continuous_static(&effect.modification));
-        copy_added_generator |= fresh_added_generator;
+        // Loop continuation is the NARROW question: only a copy-layer static can
+        // show up in the next `Layer::Copy` gather. A cloned lord answers
+        // `copy_grants_continuous_static` yes and still cannot extend the chain.
+        let fresh_added_copy_generator = fresh
+            .iter()
+            .any(|effect| copy_grants_copy_layer_static(&effect.modification));
 
         let reapplying = !started.is_empty();
         started.extend(fresh);
@@ -4005,40 +4080,64 @@ fn apply_copy_sublayer_to_fixed_point(
             );
         }
 
-        if !fresh_added_generator {
-            // Nothing this generation could add a `StaticSourceIndex` generator,
-            // so the next gather would read the same index and return the same
-            // set. Stop without paying the O(battlefield) rebuild.
+        if !fresh_added_copy_generator {
+            // Nothing this generation can put a copy-layer static on the board,
+            // so the next gather would return the same set. Stop without paying
+            // the O(battlefield) rebuild. If a NON-copy generator was added, the
+            // returned flag makes the caller do the layer-1 exit rebuild instead.
             return copy_added_generator;
         }
         // The index was built from definitions that predate these copies; refresh
         // it so the next gather can see a copy-granted copy ability.
         crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
     }
-
-    debug_assert!(
-        false,
-        "layer 1a did not converge in {MAX_COPY_SUBLAYER_GENERATIONS} generations; \
-         mutually-copying permanents rewriting each other's static definitions?"
-    );
-    copy_added_generator
 }
 
-/// CR 613.2a: identity of a layer-1 copy effect for the fixed-point loop.
+/// CR 707.2c: identity of a layer-1 copy effect for the fixed-point loop.
 ///
-/// Compares provenance AND payload. Provenance alone is not a stable name across
-/// generations: a copy effect rewrites its own recipient's `static_definitions`,
-/// so `(source_id, def_index, mod_index)` can denote a DIFFERENT modification in
-/// the next generation. Including the payload makes "already started" exact, at
-/// the cost of letting a genuinely non-convergent board keep producing new
-/// identities — which is what `MAX_COPY_SUBLAYER_GENERATIONS` bounds.
-fn same_copy_effect(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect) -> bool {
-    a.source_id == b.source_id
-        && a.def_index == b.def_index
-        && a.transient_id == b.transient_id
-        && a.mod_index == b.mod_index
-        && a.timestamp == b.timestamp
-        && a.modification == b.modification
+/// PROVENANCE ONLY — never the payload. CR 707.2c: "If a static ability generates
+/// a continuous effect that's a copy effect, the copiable values that effect
+/// grants are determined only at the time that effect first starts to apply." So
+/// once a slot has started applying, re-reading it later in the same sublayer is
+/// the SAME effect granting the SAME locked values; a rewritten payload does not
+/// mint a new one. Keying on the payload instead both contradicts that rule and
+/// makes the loop non-convergent by construction — two permanents that rewrite
+/// each other's static sets would produce payload-distinct identities forever,
+/// which is exactly what a generation cap used to have to paper over.
+///
+/// Built on [`ContinuousEffectGroupKey`], this file's canonical "which effect is
+/// this" answer, rather than a hand-rolled tuple. Two reasons: it is what
+/// `started_effect_sets` already keys on, so the loop and `apply_continuous_effect`
+/// can no longer disagree about whether an effect has started (a disagreement is a
+/// CR 613.6 bug — the loop calls an effect new while the applier hands it back an
+/// already-locked affected set); and it distinguishes
+/// `GrantedStatic { grant_origin, recipient }` occurrences that a raw
+/// `(source_id, def_index, transient_id)` tuple collides on.
+///
+/// `mod_index` rides alongside because the group key deliberately drops it — every
+/// modification of one definition shares one CR 613.6 affected set — while this
+/// loop must re-apply EACH modification of a multi-modification copy definition
+/// (`CopyValues` + its `SetName` exception, say), not just the first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CopySublayerEffectId {
+    /// `None` only for a synthetic effect carrying no static, transient or grant
+    /// provenance at all (the Ring emblem, stickers). No synthetic producer emits
+    /// a `Layer::Copy` modification today, so this is unreachable here; carrying
+    /// `source_id` keeps the identity total instead of resting on that fact.
+    group: Option<ContinuousEffectGroupKey>,
+    source_id: ObjectId,
+    mod_index: usize,
+}
+
+fn copy_sublayer_effect_id(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> CopySublayerEffectId {
+    CopySublayerEffectId {
+        group: continuous_effect_group_key(state, effect),
+        source_id: effect.source_id,
+        mod_index: effect.mod_index,
+    }
 }
 
 /// Incremental layer re-derivation for a set of freshly-entered objects.
@@ -20710,6 +20809,14 @@ mod tests {
             StaticDefinition::continuous()
                 .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
         );
+        // Same shape, but the payload's static is a LAYER-1 one — the only thing
+        // that can extend sublayer 1a's discovery chain.
+        let mut copy_static_values = plain_values.clone();
+        Arc::make_mut(&mut copy_static_values.static_definitions).push(
+            StaticDefinition::continuous().modifications(vec![ContinuousModification::SetName {
+                name: "Renamed".into(),
+            }]),
+        );
         let copy_of = |values: CopiableValues| ContinuousModification::CopyValues {
             values: Box::new(values),
             display_source: crate::game::game_object::DisplaySource::Card,
@@ -20717,16 +20824,25 @@ mod tests {
             token_image_ref: None,
         };
 
-        // The whole `Layer::Copy` set, with the expected answer for each.
+        // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
+        // COPY-LAYER generator). The two columns are the two different questions
+        // layer 1 asks, and the anthem row is where they must disagree.
         let copy_layer_cases = [
             // Payload-exact: the copiable static set travels inside the
             // modification, so no live-source read and no battlefield rescan.
-            (copy_of(anthem_values), true),
-            (copy_of(plain_values), false),
+            // An anthem makes its recipient a generator for layers 2-7 but can
+            // never appear in a `Layer::Copy` gather, so it must NOT buy a
+            // discovery generation.
+            (copy_of(anthem_values), true, false),
+            (copy_of(copy_static_values), true, true),
+            (copy_of(plain_values), false, false),
             // CR 707.9a: merges the source's whole printed set, INCLUDING its
             // `base_static_definitions`, onto the recipient (see the apply arm).
+            // The live source is not in the payload, so both answers are
+            // conservative.
             (
                 ContinuousModification::RetainAllOtherAbilitiesFromSource,
+                true,
                 true,
             ),
             // CR 707.9a: pushes ONE `AbilityDefinition` onto `obj.abilities`;
@@ -20736,12 +20852,14 @@ mod tests {
                     source_ability_index: 0,
                 },
                 false,
+                false,
             ),
             // CR 707.9a: pushes one trigger; likewise never a static.
             (
                 ContinuousModification::RetainPrintedTriggerFromSource {
                     source_trigger_index: 0,
                 },
+                false,
                 false,
             ),
             // CR 707.9b: name-only override.
@@ -20750,27 +20868,41 @@ mod tests {
                     name: "Renamed".into(),
                 },
                 false,
+                false,
             ),
             // CR 707.2c: parse-time marker whose apply arm is an explicit no-op.
-            (ContinuousModification::CopyChosen, false),
+            (ContinuousModification::CopyChosen, false, false),
         ];
-        for (modification, expected) in &copy_layer_cases {
+        for (modification, expected_any, expected_copy_layer) in &copy_layer_cases {
             assert_eq!(
                 modification.layer(),
                 Layer::Copy,
                 "{modification:?} must be a layer-1 modification for this table to be \
                  the complete `Layer::Copy` set"
             );
+            // Pins the panic-free companion to `layer()` over the same set — the
+            // invariant `is_copy_layer`'s doc claims.
+            assert!(
+                modification.is_copy_layer(),
+                "{modification:?} is in the `Layer::Copy` set, so `is_copy_layer` \
+                 must agree with `layer()`"
+            );
             assert_eq!(
                 copy_grants_continuous_static(modification),
-                *expected,
+                *expected_any,
                 "wrong generator answer for {modification:?}"
+            );
+            assert_eq!(
+                copy_grants_copy_layer_static(modification),
+                *expected_copy_layer,
+                "wrong copy-layer generator answer for {modification:?}"
             );
         }
 
         // Layers 2-7 fall to the catch-all. `AddCounterOnEnter` is one of the six
         // variants whose `layer()` is `unreachable!()`, so it is exactly the input
-        // that made the replaced `debug_assert_eq!(other.layer(), ..)` unsafe.
+        // that made the replaced `debug_assert_eq!(other.layer(), ..)` unsafe —
+        // and exactly why `is_copy_layer` exists to be asked instead.
         for modification in [
             ContinuousModification::AddCounterOnEnter {
                 counter_type: CounterType::Plus1Plus1,
@@ -20780,11 +20912,234 @@ mod tests {
             ContinuousModification::AddPower { value: 1 },
         ] {
             assert!(
+                !modification.is_copy_layer(),
+                "{modification:?} is not a layer-1 modification"
+            );
+            assert!(
                 !copy_grants_continuous_static(&modification),
                 "{modification:?} is not a layer-1 modification and must not claim to \
                  add a generator"
             );
+            assert!(
+                !copy_grants_copy_layer_static(&modification),
+                "{modification:?} is not a layer-1 modification and must not buy a \
+                 discovery generation"
+            );
         }
+    }
+
+    /// CR 707.2c + CR 613.2c: sublayer 1a runs to a FIXED POINT on the exact
+    /// construction the deleted `MAX_COPY_SUBLAYER_GENERATIONS = 8` named — "two
+    /// permanents that rewrite each other's static sets". Reaching the assertions
+    /// at all IS the termination evidence; the assertions are the CR-correctness
+    /// evidence.
+    ///
+    /// Each half of the pair is copied from a donor whose copiable values carry a
+    /// copy-LAYER static (CR 707.2), so BOTH second-generation effects exist only
+    /// because the first generation applied, in both directions at once. The board
+    /// is synthetic in the sense that no printed pair does exactly this, but every
+    /// piece is a real mechanism: a latched `CopyValues` TCE (the only way a copy
+    /// effect can originate — `apply_continuous_effect` requires `transient_id` for
+    /// it) whose payload carries a `SetName` copy exception.
+    ///
+    /// The two copy-granted renames land on neutral watchers rather than on the
+    /// pair itself, ON PURPOSE. Two permanents copying each other is a CR 613.8b
+    /// dependency LOOP, so the engine correctly discards the dependency edges and
+    /// falls back to timestamp order, under which each half's older static applies
+    /// before the newer `CopyValues` overwrites its name. That is a separate rule
+    /// from the one under test, and asserting on the pair's own names would pin
+    /// 613.8b's tie-break instead of 1a's fixed point.
+    ///
+    /// REVERT-PROBE (discriminating, run): make the loop return after its first
+    /// generation ⇒ both watchers keep their printed names and both rename
+    /// assertions fail, while the copy assertions stay green.
+    #[test]
+    fn mutually_copying_permanents_reach_a_layer_one_fixed_point() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let left = make_creature(&mut state, "Left", 1, 1, player);
+        let right = make_creature(&mut state, "Right", 1, 1, player);
+        let watcher_l = make_creature(&mut state, "Watcher L", 1, 1, player);
+        let watcher_r = make_creature(&mut state, "Watcher R", 1, 1, player);
+        let donor_p = make_creature(&mut state, "Donor P", 4, 4, player);
+        let donor_q = make_creature(&mut state, "Donor Q", 5, 5, player);
+
+        // Donor payloads: each carries a copy-layer static that renames a watcher.
+        let renames = |state: &GameState, donor: ObjectId, target: ObjectId, name: &str| {
+            let mut values = intrinsic_copiable_values(&state.objects[&donor]);
+            Arc::make_mut(&mut values.static_definitions).push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target })
+                    .modifications(vec![ContinuousModification::SetName {
+                        name: name.to_string(),
+                    }]),
+            );
+            values
+        };
+        let p_values = renames(&state, donor_p, watcher_l, "Marked by right");
+        let q_values = renames(&state, donor_q, watcher_r, "Marked by left");
+
+        let mut copy_onto = |source: ObjectId, target: ObjectId, values: CopiableValues| {
+            state.add_transient_continuous_effect(
+                source,
+                player,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                }],
+                None,
+            );
+        };
+        // `left` copies donor P onto `right`; `right` copies donor Q onto `left`.
+        copy_onto(left, right, p_values);
+        copy_onto(right, left, q_values);
+
+        // POSITIVE reach-guards, on the live field the top-of-pass reset writes and
+        // `for_each_static_effect_source` gathers: neither permanent carries a
+        // PRINTED static, so every second-generation effect below can only exist
+        // because generation 1's copy put it there.
+        assert!(
+            state.objects[&left].base_static_definitions.is_empty()
+                && state.objects[&right].base_static_definitions.is_empty(),
+            "neither half of the pair may carry a printed static, or the renames \
+             would not depend on the copies at all"
+        );
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            !state.objects[&left].static_definitions.is_empty()
+                && !state.objects[&right].static_definitions.is_empty(),
+            "each copy must have handed its recipient the donor's copy-layer static, \
+             or there is no second generation to reach a fixed point over"
+        );
+        // CR 707.2: each half took its donor's copiable P/T.
+        assert_eq!(
+            (state.objects[&right].power, state.objects[&right].toughness),
+            (Some(4), Some(4)),
+            "the right half must be a copy of donor P"
+        );
+        assert_eq!(
+            (state.objects[&left].power, state.objects[&left].toughness),
+            (Some(5), Some(5)),
+            "the left half must be a copy of donor Q"
+        );
+        // Generation 2, both directions at once: each half's copy-granted static
+        // reached its watcher inside this same layer-1 pass.
+        assert_eq!(
+            state.objects[&watcher_l].name, "Marked by right",
+            "the copy-granted static on the RIGHT half must apply inside the same \
+             layer-1 pass that applied the copy"
+        );
+        assert_eq!(
+            state.objects[&watcher_r].name, "Marked by left",
+            "the copy-granted static on the LEFT half must apply inside the same \
+             layer-1 pass that applied the copy"
+        );
+    }
+
+    /// CR 613.2a: `copy_grants_continuous_static` is the WRONG question for
+    /// CONTINUING sublayer 1a's discovery loop. An anthem makes its recipient a
+    /// `StaticSourceIndex` generator, which layers 2-7 must see, but it can never
+    /// appear in a `Layer::Copy` gather — so answering the broad question at the
+    /// continuation site charged every board holding a cloned lord for an extra
+    /// index rebuild plus an extra board-wide
+    /// `collect_shared_active_continuous_effects`, inside the module whose stated
+    /// job is keeping per-flush work off `|battlefield|`.
+    ///
+    /// Three boards differing ONLY in the copy payload's static set, measured in
+    /// board-wide gathers.
+    ///
+    /// REVERT-PROBE (discriminating, run): put `copy_grants_continuous_static`
+    /// back at the loop-continuation site ⇒ the anthem board costs one gather more
+    /// than the vanilla board and the first assertion fails.
+    #[test]
+    fn only_a_copy_layer_payload_buys_a_layer_one_discovery_generation() {
+        /// Returns (board-wide gathers during the pass, statics landed on the
+        /// recipient).
+        fn probe(payload_static: Option<StaticDefinition>) -> (usize, usize) {
+            let mut state = setup();
+            let player = PlayerId(0);
+            let template = make_creature(&mut state, "Template", 2, 2, player);
+            let recipient = make_creature(&mut state, "Recipient", 1, 1, player);
+            let caster = make_creature(&mut state, "Caster", 1, 1, player);
+            let mut values = intrinsic_copiable_values(&state.objects[&template]);
+            assert!(
+                values.static_definitions.is_empty(),
+                "the template must be vanilla so the payload static is the only variable"
+            );
+            if let Some(def) = payload_static {
+                Arc::make_mut(&mut values.static_definitions).push(def);
+            }
+            state.add_transient_continuous_effect(
+                caster,
+                player,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: recipient },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                }],
+                None,
+            );
+            reset_active_effect_collection_count();
+            evaluate_layers(&mut state);
+            (
+                active_effect_collection_count(),
+                state.objects[&recipient].static_definitions.len(),
+            )
+        }
+
+        let board_wide =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let (vanilla_gathers, vanilla_statics) = probe(None);
+        let (anthem_gathers, anthem_statics) = probe(Some(
+            StaticDefinition::continuous()
+                .affected(board_wide())
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        ));
+        // Same shape, but a `Layer::Copy` modification — the only kind that can
+        // show up in the next gather.
+        let (copy_layer_gathers, copy_layer_statics) = probe(Some(
+            StaticDefinition::continuous()
+                .affected(board_wide())
+                .modifications(vec![ContinuousModification::SetName {
+                    name: "Renamed".into(),
+                }]),
+        ));
+
+        // POSITIVE reach-guards: the payload static really landed on the recipient
+        // in both static cases, so the gather counts below are not comparing two
+        // boards where the copy did nothing.
+        assert_eq!(
+            vanilla_statics, 0,
+            "the vanilla control must land no static"
+        );
+        assert_eq!(
+            anthem_statics, 1,
+            "the anthem payload must reach the recipient"
+        );
+        assert_eq!(
+            copy_layer_statics, 1,
+            "the copy-layer payload must reach the recipient"
+        );
+
+        assert_eq!(
+            anthem_gathers, vanilla_gathers,
+            "cloning an ordinary lord must buy no layer-1 discovery generation: an \
+             anthem is a layer-7c effect and cannot appear in a `Layer::Copy` gather"
+        );
+        assert_eq!(
+            copy_layer_gathers,
+            vanilla_gathers + 1,
+            "a copy-LAYER payload static must buy exactly one discovery generation"
+        );
     }
 
     /// Shared reach-guard: run ONLY the guard from a Clean baseline and assert it
