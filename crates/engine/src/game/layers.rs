@@ -1255,6 +1255,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
