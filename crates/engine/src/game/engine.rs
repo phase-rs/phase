@@ -35,6 +35,7 @@ use super::ability_utils::{
 use super::casting;
 use super::casting_costs;
 use super::effects;
+use super::end_continuous_effect;
 use super::engine_casting;
 use super::engine_combat;
 use super::engine_modes;
@@ -316,11 +317,7 @@ enum PriorityAnnouncement {
         object_id: ObjectId,
     },
     CompanionToHand,
-    EndContinuousEffect {
-        group: crate::types::game_state::EndEffectGroupId,
-        source_name: String,
-        cost: crate::types::mana::ManaCost,
-    },
+    EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
     CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
 }
 
@@ -454,15 +451,13 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             GameAction::TurnFaceUp { object_id, x: 0 }
         }
         PriorityAnnouncement::CompanionToHand => GameAction::CompanionToHand,
-        PriorityAnnouncement::EndContinuousEffect {
-            group,
-            source_name,
-            cost,
-        } => GameAction::EndContinuousEffect {
-            group,
-            source_name,
-            cost,
-        },
+        PriorityAnnouncement::EndContinuousEffect(announcement) => {
+            GameAction::EndContinuousEffect {
+                group: announcement.group(&_access),
+                source_name: announcement.source_name(&_access).to_string(),
+                cost: announcement.cost(&_access).clone(),
+            }
+        }
         PriorityAnnouncement::CastPreparedCopy(announcement) => GameAction::CastPreparedCopy {
             source: announcement.source_id(&_access),
         },
@@ -1002,17 +997,12 @@ fn priority_preflight_candidates(
             PriorityAnnouncement::CompanionToHand,
         ));
     }
-    for offer in
-        super::end_continuous_effect::end_continuous_effect_candidates(state, semantic_holder)
-    {
-        candidates.push(PriorityPreflightCandidate::Announcement(
-            PriorityAnnouncement::EndContinuousEffect {
-                group: offer.group,
-                source_name: offer.source_name,
-                cost: offer.cost,
-            },
-        ));
-    }
+    candidates.extend(
+        end_continuous_effect::priority_end_continuous_effect_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::EndContinuousEffect)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
     if super::planechase::can_roll_planar_die(state, semantic_holder) {
         candidates.push(PriorityPreflightCandidate::Announcement(
             PriorityAnnouncement::RollPlanarDie,
