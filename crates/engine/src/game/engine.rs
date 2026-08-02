@@ -12296,10 +12296,9 @@ mod priority_facade_boundary_tests {
     #[test]
     fn facade_access_is_constructed_once_and_provider_accessors_only_borrow_it() {
         let engine_source = include_str!("engine.rs");
+        let facade_constructor = ["PriorityAnnouncementFacadeAccess::", "new()"].concat();
         assert_eq!(
-            engine_source
-                .matches("PriorityAnnouncementFacadeAccess::new()")
-                .count(),
+            engine_source.matches(&facade_constructor).count(),
             1,
             "the facade capability must have one constructor call"
         );
