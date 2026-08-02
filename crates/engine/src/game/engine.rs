@@ -50,6 +50,7 @@ use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources;
 use super::match_flow;
+use super::morph;
 use super::mulligan;
 use super::planechase;
 use super::planeswalker;
@@ -298,10 +299,7 @@ enum PriorityAnnouncement {
         creature_to_return: ObjectId,
     },
     CastSpellForFree(casting::PriorityCastFreeAnnouncement),
-    PlayFaceDown {
-        object_id: ObjectId,
-        card_id: CardId,
-    },
+    PlayFaceDown(morph::PriorityPlayFaceDownAnnouncement),
     TurnFaceUp {
         object_id: ObjectId,
     },
@@ -331,7 +329,7 @@ impl PriorityAnnouncement {
             Self::CastSpellAsSneak { .. } => PriorityReducerFamily::CastSpellAsSneak,
             Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
             Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
-            Self::PlayFaceDown { .. } => PriorityReducerFamily::PlayFaceDown,
+            Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
             Self::TurnFaceUp { .. } => PriorityReducerFamily::TurnFaceUp,
             Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
             Self::EndContinuousEffect(_) => PriorityReducerFamily::EndContinuousEffect,
@@ -431,9 +429,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             source_id: announcement.source_id(&_access),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
-        PriorityAnnouncement::PlayFaceDown { object_id, card_id } => {
-            GameAction::PlayFaceDown { object_id, card_id }
-        }
+        PriorityAnnouncement::PlayFaceDown(announcement) => GameAction::PlayFaceDown {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
         PriorityAnnouncement::TurnFaceUp { object_id } => {
             GameAction::TurnFaceUp { object_id, x: 0 }
         }
@@ -834,26 +833,12 @@ fn priority_preflight_candidates(
                 .map(PriorityAnnouncement::Foretell)
                 .map(PriorityPreflightCandidate::Announcement),
         );
-        if let Some(player) = state
-            .players
-            .iter()
-            .find(|player| player.id == semantic_holder)
-        {
-            for &object_id in &player.hand {
-                let Some(object) = state.objects.get(&object_id) else {
-                    continue;
-                };
-                // The reducer's Priority arm delegates this special action to
-                // `morph::play_face_down`; it owns final face legality on the
-                // clone, so the hand object is the complete fixed primer.
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::PlayFaceDown {
-                        object_id,
-                        card_id: object.card_id,
-                    },
-                ));
-            }
-        }
+        candidates.extend(
+            morph::priority_play_face_down_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::PlayFaceDown)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
     }
 
     for &object_id in &state.battlefield {

@@ -4,15 +4,65 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored face-down play announcement for Priority preflight. The
+/// hand object and card identity remain private to the face-down authority
+/// until the Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPlayFaceDownAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityPlayFaceDownAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+/// Enumerates the current active Priority holder's hand primers for the normal
+/// face-down-play reducer, which remains responsible for final legality.
+pub(in crate::game) fn priority_play_face_down_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayFaceDownAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player {
+        return Vec::new();
+    }
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            state
+                .objects
+                .get(&object_id)
+                .map(|object| PriorityPlayFaceDownAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
