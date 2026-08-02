@@ -30,7 +30,10 @@
 //! `Duration::Permanent` transient), the accept case panics again.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::{ContinuousModification, Effect, TargetRef};
+use engine::types::ability::{
+    ContinuousModification, Effect, FilterProp, StaticDefinition, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -132,6 +135,20 @@ fn build_lord_scenario() -> (
     engine::types::identifiers::ObjectId,
     engine::types::identifiers::ObjectId,
 ) {
+    build_lord_scenario_with(None)
+}
+
+/// [`build_lord_scenario`], plus an extra static definition on the lord's PRINTED
+/// base — so it is part of the lord's copiable values (CR 707.2) and rides along
+/// onto the Embalm token when the token copies the lord.
+fn build_lord_scenario_with(
+    extra_lord_static: Option<StaticDefinition>,
+) -> (
+    GameRunner,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+    engine::types::identifiers::ObjectId,
+) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -147,10 +164,12 @@ fn build_lord_scenario() -> (
     // 1/1 lord and a 2/2 vanilla: the two anthem instances (original + copy)
     // are each worth +1/+1, so the vanilla's toughness alone distinguishes
     // "one anthem applied" (3/3) from "both applied" (4/4).
-    let lord = scenario
-        .add_creature(P0, "Bear Umbra Lord", 1, 1)
-        .from_oracle_text(LORD_ORACLE)
-        .id();
+    let mut lord_builder = scenario.add_creature(P0, "Bear Umbra Lord", 1, 1);
+    lord_builder.from_oracle_text(LORD_ORACLE);
+    if let Some(static_def) = extra_lord_static {
+        lord_builder.with_static_definition(static_def);
+    }
+    let lord = lord_builder.id();
     let vanilla = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
 
     let mut runner = scenario.build();
@@ -196,6 +215,61 @@ fn activate_embalm(runner: &mut GameRunner, vizier: engine::types::identifiers::
         }
     }
     panic!("Embalm activation never reached an entry choice");
+}
+
+/// Drive a token parked on its entry choices all the way onto the battlefield as
+/// a copy of `copy_target`: accept the enter-as-copy replacement, name the target,
+/// then let the stack settle. Returns the token's `ObjectId`.
+fn resolve_embalm_copy_of(
+    runner: &mut GameRunner,
+    copy_target: engine::types::identifiers::ObjectId,
+) -> engine::types::identifiers::ObjectId {
+    // Bounded, not `loop`: the `Priority` arm acts on every trip, so an engine
+    // change that stops surfacing `CopyTargetChoice` would spin here forever and
+    // hang CI instead of failing. Same bound as `activate_embalm`.
+    let mut chosen = None;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept enter-as-copy replacement");
+            }
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                valid_targets,
+                ..
+            } => {
+                assert!(
+                    valid_targets.contains(&copy_target),
+                    "the intended copy target must be legal, got {valid_targets:?}"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(copy_target)),
+                    })
+                    .expect("choose copy target");
+                chosen = Some(source_id);
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected waiting_for during entry: {other:?}"),
+        }
+    }
+    let token = chosen.expect("the Embalm token never reached its copy-target choice");
+
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => break,
+        }
+    }
+    token
 }
 
 #[test]
@@ -397,46 +471,7 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
 fn a_copy_granted_static_ability_applies_in_the_pass_that_applied_the_copy() {
     let (mut runner, vizier, lord, vanilla) = build_lord_scenario();
     activate_embalm(&mut runner, vizier);
-
-    let token = 'drive: loop {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .expect("accept enter-as-copy replacement");
-            }
-            WaitingFor::CopyTargetChoice {
-                source_id,
-                valid_targets,
-                ..
-            } => {
-                assert!(
-                    valid_targets.contains(&lord),
-                    "the lord must be a legal copy target, got {valid_targets:?}"
-                );
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(lord)),
-                    })
-                    .expect("choose copy target (the lord)");
-                break 'drive source_id;
-            }
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting_for during entry: {other:?}"),
-        }
-    };
-
-    for _ in 0..16 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            _ => break,
-        }
-    }
+    let token = resolve_embalm_copy_of(&mut runner, lord);
 
     // POSITIVE reach-guards: the copy really happened AND it really is the copy
     // that put a static ability on the token, so the P/T assertions below cannot
@@ -481,5 +516,76 @@ fn a_copy_granted_static_ability_applies_in_the_pass_that_applied_the_copy() {
         (Some(2), Some(2)),
         "the original 1/1 lord must get +1/+1 from the token's copied anthem \
          (\"other creatures\", so its own anthem does not pump it)"
+    );
+}
+
+/// CR 613.2a + CR 613.2c: sublayer 1a must reach a FIXED POINT before layer 2.
+/// Applying a copy effect can hand its recipient a static ability that ITSELF
+/// generates a layer-1 continuous effect (CR 707.2c), and CR 613.2c says the
+/// characteristics standing after layer 1 finishes ARE the object's copiable
+/// values — so that second-generation copy effect belongs to the same layer 1,
+/// not to the next pass.
+///
+/// Board: the lord's printed base carries "each OTHER creature is named Faceless
+/// Reflection" (`FilterProp::Another` excludes the source from its own effect).
+/// The Embalm token copies the lord (CR 707.2), which makes the TOKEN a second
+/// source of that same static — and the token's instance, unlike the lord's,
+/// does cover the lord. So `lord.name` flips if and only if sublayer 1a ran a
+/// second generation: the lord's own instance can never rename the lord, and no
+/// later layer applies `SetName` (it is a `Layer::Copy` modification).
+///
+/// REVERT-PROBE (discriminating, RUN): cap `apply_copy_sublayer_to_fixed_point`
+/// at a single generation (return right after the first apply) ⇒ the vanilla is
+/// still renamed by generation 1 (the lord's own instance) but the lord keeps its
+/// printed name, and this test fails on the `lord.name` assertion alone.
+#[test]
+fn a_copy_granted_layer_one_static_applies_inside_the_same_layer_one_pass() {
+    const RENAMED: &str = "Faceless Reflection";
+    let renamer = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Another]),
+        ))
+        .modifications(vec![ContinuousModification::SetName {
+            name: RENAMED.to_string(),
+        }]);
+    let (mut runner, vizier, lord, vanilla) = build_lord_scenario_with(Some(renamer));
+    activate_embalm(&mut runner, vizier);
+    let token = resolve_embalm_copy_of(&mut runner, lord);
+
+    // POSITIVE reach-guards: the copy really delivered a LAYER-1 static onto the
+    // token, and the token's own copiable base carries none — so the rename
+    // asserted below cannot come from anywhere but the copy effect.
+    let token_obj = runner
+        .state()
+        .objects
+        .get(&token)
+        .expect("the Embalm token must be on the battlefield");
+    assert!(
+        token_obj.base_static_definitions.is_empty(),
+        "the token's own copiable base must carry no static, or the second \
+         generation this test probes would not depend on the copy at all"
+    );
+    assert!(
+        token_obj.static_definitions.as_slice().iter().any(|sd| sd
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::SetName { .. }))),
+        "the copy must have handed the token the lord's copy-LAYER static, or the \
+         second generation could not exist: {:?}",
+        token_obj.static_definitions.as_slice()
+    );
+
+    // Generation 1 evidence: the lord's own instance renames every OTHER creature.
+    assert_eq!(
+        runner.state().objects[&vanilla].name,
+        RENAMED,
+        "the lord's own layer-1 static must rename the vanilla creature"
+    );
+    // Generation 2 evidence: only the token's copied instance can rename the lord.
+    assert_eq!(
+        runner.state().objects[&lord].name,
+        RENAMED,
+        "the copy-granted layer-1 static must be applied inside the SAME layer-1 \
+         pass that applied the copy"
     );
 }
