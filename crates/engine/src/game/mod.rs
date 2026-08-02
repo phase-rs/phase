@@ -81,6 +81,7 @@ pub mod ledger;
 pub mod library;
 pub mod life_costs;
 pub mod life_safety;
+mod lifecycle;
 pub mod log;
 pub mod mana_abilities;
 pub mod mana_payment;
