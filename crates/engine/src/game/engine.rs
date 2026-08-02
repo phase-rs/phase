@@ -267,7 +267,7 @@ enum PriorityAnnouncement {
     ActivateAbility(casting::PriorityActivateAbilityAnnouncement),
     UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
     RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
-    Equip { equipment_id: ObjectId },
+    Equip(effects::attach::PriorityEquipAnnouncement),
     CrewVehicle(crew_payment::PriorityCrewAnnouncement),
     ActivateStation(crew_payment::PriorityStationAnnouncement),
     SaddleMount(crew_payment::PrioritySaddleAnnouncement),
@@ -295,7 +295,7 @@ impl PriorityAnnouncement {
             Self::ActivateAbility(_) => PriorityReducerFamily::ActivateAbility,
             Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
             Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
-            Self::Equip { .. } => PriorityReducerFamily::Equip,
+            Self::Equip(_) => PriorityReducerFamily::Equip,
             Self::CrewVehicle(_) => PriorityReducerFamily::CrewVehicle,
             Self::ActivateStation(_) => PriorityReducerFamily::ActivateStation,
             Self::SaddleMount(_) => PriorityReducerFamily::SaddleMount,
@@ -350,12 +350,15 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             door: announcement.door(&_access),
         },
         PriorityAnnouncement::RollPlanarDie(_) => GameAction::RollPlanarDie,
-        PriorityAnnouncement::Equip { equipment_id } => GameAction::Equip {
-            equipment_id,
-            // The Priority reducer ignores this field and enters its normal
-            // target-selection flow when the choice is not forced.
-            target_id: equipment_id,
-        },
+        PriorityAnnouncement::Equip(announcement) => {
+            let equipment_id = announcement.equipment_id(&_access);
+            GameAction::Equip {
+                equipment_id,
+                // The Priority reducer ignores this field and enters its normal
+                // target-selection flow when the choice is not forced.
+                target_id: equipment_id,
+            }
+        }
         PriorityAnnouncement::CrewVehicle(announcement) => GameAction::CrewVehicle {
             vehicle_id: announcement.vehicle_id(&_access),
             creature_ids: Vec::new(),
@@ -510,35 +513,12 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        for &object_id in &state.battlefield {
-            let Some(object) = state.objects.get(&object_id) else {
-                continue;
-            };
-            if object.controller != semantic_holder {
-                continue;
-            }
-            if object
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| subtype == "Equipment")
-                && state.battlefield.iter().copied().any(|candidate_id| {
-                    state.objects.get(&candidate_id).is_some_and(|candidate| {
-                        candidate.controller == semantic_holder
-                            && candidate
-                                .card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                })
-            {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::Equip {
-                        equipment_id: object_id,
-                    },
-                ));
-            }
-        }
+        candidates.extend(
+            effects::attach::priority_equip_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Equip)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         candidates.extend(
             transform::priority_transform_announcements(state, principal)
