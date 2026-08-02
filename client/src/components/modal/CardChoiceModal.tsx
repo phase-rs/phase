@@ -19,6 +19,7 @@ import type {
   OutsideGameChoiceEntry,
   OutsideGameSelection,
   PlayerId,
+  SerializedPlayerIdKey,
   TargetFilter,
   WaitingFor,
   Zone,
@@ -477,7 +478,10 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const lookedAt = useGameStore(
-    (s) => s.gameState?.active_library_searches?.[String(data.player)]?.looked_at,
+    (s) =>
+      s.gameState?.active_library_searches?.[
+        data.player.toString() as SerializedPlayerIdKey
+      ]?.looked_at,
   );
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
