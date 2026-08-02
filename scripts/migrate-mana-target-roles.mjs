@@ -92,6 +92,76 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const DEFAULT_FIXTURE = "crates/engine/tests/fixtures/integration_cards.json";
 
+// The curated fixture carries u64 sentinels (e.g. a `SpecificObject` id of
+// u64::MAX, 18446744073709551615) that exceed JS `Number.MAX_SAFE_INTEGER`. A
+// naive `JSON.parse`/`JSON.stringify` round-trip silently rewrites those to
+// lossy floats (`1.8446744073709552e+19`), which `serde` then rejects as
+// `invalid type: floating point ..., expected u64`. Quote big integers behind
+// this sentinel before parsing and unquote them on the way out, so the
+// migration never touches -- let alone corrupts -- a value it is not rewriting.
+// The sentinel is plain ASCII (JSON-string-safe and regex-safe); unwrapping
+// fires only when the ENTIRE string value is the sentinel followed by digits,
+// which no real card string ever is -- so collisions cannot happen.
+const BIGINT_TAG = "__phase_bigint_sentinel__";
+// Wrap oversized integer *values* as tagged strings. A naive regex can't do
+// this safely: `[`/`,` followed by 16 digits also occurs *inside* string
+// literals (card text), and quoting there would shatter the JSON. So scan
+// character by character, tracking string state (with escape handling), and
+// only wrap a number token when we're outside a string. Only pure integers of
+// 16+ digits (the precision-loss threshold; `Number.MAX_SAFE_INTEGER` is
+// 9007199254740991) are wrapped — a value that happens to be representable
+// round-trips unchanged. Floats (a `.`/`e`/`E` follows the digits) are left
+// alone; `serde` only rejected these because they were *integers* mangled into
+// float syntax.
+const quoteBigInts = (text) => {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") {
+        out += ch + (text[i + 1] ?? "");
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    // A number value starts with an optional `-` then a digit.
+    if (ch === "-" || (ch >= "0" && ch <= "9")) {
+      let j = ch === "-" ? i + 1 : i;
+      const firstDigit = j;
+      while (j < text.length && text[j] >= "0" && text[j] <= "9") j += 1;
+      const next = text[j];
+      const isInteger = next !== "." && next !== "e" && next !== "E";
+      if (isInteger && j - firstDigit >= 16) {
+        out += `"${BIGINT_TAG}${text.slice(i, j)}"`;
+      } else {
+        out += text.slice(i, j);
+      }
+      i = j;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+};
+const parseLossless = (text) => JSON.parse(quoteBigInts(text));
+const stringifyLossless = (obj) =>
+  JSON.stringify(obj).replace(
+    new RegExp(`"${BIGINT_TAG}(-?\\d+)"`, "g"),
+    (_m, digits) => digits,
+  );
+
 /**
  * Card name (as keyed in the fixture — lowercased) -> role variant.
  *
@@ -266,7 +336,7 @@ if (stateMode) {
 }
 
 const raw = readFileSync(fixturePath, "utf8");
-const db = JSON.parse(raw);
+const db = parseLossless(raw);
 const cards = db.cards ?? db;
 
 /** True when `target` is already a `ManaTargetRole` rather than a bare filter. */
@@ -356,7 +426,7 @@ if (migrated.length === 0) {
 // The fixture is tracked as ONE minified line and is expected to round-trip its
 // generator's encoding. Pretty-printing it would turn a 1-line diff into
 // hundreds of thousands of lines and make the change unreviewable.
-const out = `${JSON.stringify(db)}\n`;
+const out = `${stringifyLossless(db)}\n`;
 writeFileSync(fixturePath, out);
 
 const lineCount = out.split("\n").length - 1;
