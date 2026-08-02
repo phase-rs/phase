@@ -366,13 +366,55 @@ fn apply_action_boundary_core(
         *state = boundary_snapshot;
         return Err(err);
     }
-    let result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
             *state = boundary_snapshot;
             return Err(err);
         }
     };
+    // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
+    // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
+    // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
+    // `apply_action` realizes it itself on every route that reaches `run_post_action_pipeline`.
+    //
+    // CR 603.6a: the entry pair this realization emits IS the event that puts a permanent onto the
+    // battlefield, so every permanent must be checked for matching enters-the-battlefield triggers
+    // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
+    // Reaching here with something to realize means the action settled WITHOUT running
+    // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
+    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
+    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
+    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
+    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // `false` when nothing was parked or an earlier convergence point already consumed it
+    // (`Option::take_if`).
+    let scan_from = result.events.len();
+    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
+        let wf = match engine_priority::run_post_action_pipeline_from(
+            state,
+            &mut result.events,
+            scan_from,
+            &result.waiting_for,
+            false,
+            false,
+        ) {
+            Ok(wf) => wf,
+            Err(err) => {
+                *state = boundary_snapshot;
+                return Err(err);
+            }
+        };
+        // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
+        // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
+        // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
+        // `result.waiting_for` INTO the state at `sync_waiting_for`, and
+        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
+        // calling `finish_action_boundary`.
+        state.waiting_for = wf.clone();
+        result.waiting_for = wf;
+    }
     Ok(RawActionApplication {
         result,
         journal_start,
@@ -8938,6 +8980,15 @@ fn apply_action(
         // the action's result, not the pre-action state (fixes stale TargetSelection
         // after CancelCast).
         state.waiting_for = waiting_for.clone();
+        // CR 704.3 + CR 704.5f: a token battlefield entry postponed by an as-enters choice is
+        // realized HERE, before the pipeline below, so the CR 400.7 row is written ahead of that
+        // pipeline's SBA pass and survives a copy that enters with 0 toughness. It also puts the
+        // entry pair into this action's `events` ahead of the CR 603.2 / CR 603.6a scan — no longer
+        // the ONLY way that check runs (the action-boundary convergence in
+        // `apply_action_boundary_core` runs the same pipeline for direct-return handlers), but
+        // still the only placement that beats the SBA pass. Same gate as that boundary call, one
+        // authority; keeping it here also avoids two full pipeline passes per settling action.
+        effects::token::realize_settled_token_battlefield_entry(state, &mut events);
         let wf = engine_priority::run_post_action_pipeline(
             state,
             &mut events,

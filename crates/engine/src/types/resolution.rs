@@ -2481,6 +2481,7 @@ impl ResolutionStateWire {
         // unlabeled active trigger must never be silently reclassified here.
         crate::types::game_state::migrate_legacy_delayed_trigger_provenance(&mut value)?;
         crate::types::game_state::migrate_legacy_trigger_firing_carriers(&mut value)?;
+        crate::types::game_state::migrate_legacy_mana_target_roles(&mut value)?;
         let object = value
             .as_object()
             .expect("the checked resolution state wire remains an object");

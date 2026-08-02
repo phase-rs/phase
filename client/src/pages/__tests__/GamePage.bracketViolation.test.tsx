@@ -20,6 +20,9 @@ import type { FormatConfig } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
 import { WebSocketAdapter } from "../../adapter/ws-adapter";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { gameObjectFactory } from "../../test/factories/gameObjectFactory";
+import { gameStateFactory } from "../../test/factories/gameStateFactory";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
@@ -129,6 +132,7 @@ vi.mock("../../stores/gameStore", () => ({
         gameState: storeOverrides.gameState,
         waitingFor: storeOverrides.waitingFor,
         legalActions: [],
+        endContinuousEffectOffers: [],
         autoPassRecommended: false,
         spellCosts: {},
         legalActionsByObject: {},
@@ -203,7 +207,12 @@ vi.mock("../../components/hud/HUD", () => ({
 }));
 
 vi.mock("../../components/board/GameBoard", () => ({
-  GameBoard: () => null,
+  GameBoard: ({ effectiveMultiplayerBoardLayout }: { effectiveMultiplayerBoardLayout: string }) => (
+    <div
+      data-layout={effectiveMultiplayerBoardLayout}
+      data-testid="game-board-layout"
+    />
+  ),
 }));
 
 vi.mock("../../components/modal/EngineLostModal", () => ({
@@ -281,6 +290,7 @@ beforeEach(() => {
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
   storeOverrides.waitingFor = null;
+  usePreferencesStore.setState({ multiplayerBoardLayout: "focused" });
   capturedConcedeDialogProps = undefined;
   vi.clearAllMocks();
 });
@@ -428,6 +438,49 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     });
 
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+});
+
+describe("GamePage — multiplayer board layout during board choices", () => {
+  it("forces split visibility for an authorized untap choice at a three-player table", () => {
+    const untapCandidate = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .tapped()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(untapCandidate)
+      .untapChoice({ player: 0, candidates: [untapCandidate.id] })
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "split");
+  });
+
+  it("retains the persisted focused layout for a non-untap waiting state", () => {
+    const permanent = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(permanent)
+      .priority(0)
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
   });
 });
 

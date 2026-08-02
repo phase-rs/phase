@@ -5168,6 +5168,17 @@ pub enum TokenEntryEventEmission {
     Suppress,
 }
 
+/// CR 400.7: the three values a postponed token battlefield entry needs at flush time. The
+/// characteristics are NOT stored — they are re-snapshotted from the live object at flush, which
+/// is the whole point of postponing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTokenBattlefieldEntry {
+    pub object_id: ObjectId,
+    /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
+    pub name: String,
+    pub source_id: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -5251,10 +5262,12 @@ pub enum PendingCounterPostAction {
         enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
+    /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
+    /// `GameState::pending_token_battlefield_entry` once the ETB-counter ordering choice has
+    /// drained. It carries only the object identity — the entry's `name` / `source_id` live on the
+    /// parked record, and its characteristics are re-snapshotted from the live object at flush.
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
-        name: String,
-        source_id: ObjectId,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -8316,6 +8329,174 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 ),
         ),
     );
+    Ok(())
+}
+
+/// Upgrade `Effect::Mana.target` snapshots written before `ManaTargetRole`
+/// made the target's grammatical role explicit. The old bare `TargetFilter`
+/// cannot tell whether it named the mana recipient or the count source, so the
+/// owning card's parsed Oracle clause is the migration authority.
+///
+/// The lookup is intentionally name-based rather than shape-based: Carpet of
+/// Flowers and Spectral Searchlight both serialize ordinary player filters but
+/// assign opposite roles. Unknown cards fail restoration rather than silently
+/// changing which player receives mana or supplies its amount.
+pub(crate) fn migrate_legacy_mana_target_roles(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let object_names = value
+        .as_object()
+        .and_then(|state| state.get("objects"))
+        .and_then(serde_json::Value::as_object)
+        .map(|objects| {
+            objects
+                .iter()
+                .filter_map(|(key, object)| {
+                    let object = object.as_object()?;
+                    let id = object
+                        .get("id")
+                        .and_then(json_object_id)
+                        .or_else(|| key.parse().ok())?;
+                    let name = object.get("name")?.as_str()?;
+                    (!name.is_empty()).then(|| (id, name.to_string()))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    migrate_legacy_mana_target_roles_in_value(value, &object_names, None)
+}
+
+fn json_object_id(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())
+}
+
+fn legacy_mana_target_role(card_name: &str) -> Option<(&'static str, &'static str)> {
+    match card_name {
+        // The named player receives the produced mana. This catalog is the
+        // complete pre-`ManaTargetRole` card-data surface; add future entries
+        // only after verifying their parsed Oracle role.
+        "A Display of My Dark Power"
+        | "Barbflare Gremlin"
+        | "Belbe, Corrupted Observer"
+        | "Bigger on the Inside"
+        | "Blighted Burgeoning"
+        | "Blinkmoth Urn"
+        | "Bubbling Muck"
+        | "Buried in the Garden"
+        | "Cheering Crowd"
+        | "Color Pie"
+        | "Dawn's Reflection"
+        | "Dictate of Karametra"
+        | "Eladamri, Lord of Leaves Avatar"
+        | "Eladamri's Vineyard"
+        | "Eloren Wilds"
+        | "Elvish Guidance"
+        | "Extraplanar Lens"
+        | "Fertile Ground"
+        | "Gauntlet of Might"
+        | "Gauntlet of Power"
+        | "Glittering Frost"
+        | "Heartbeat of Spring"
+        | "High Tide"
+        | "Jetfire, Ingenious Scientist"
+        | "Keeper of Progenitus"
+        | "Lavaleaper"
+        | "Mad Science Fair Project"
+        | "Magus of the Vineyard"
+        | "Mana Flare"
+        | "Market Festival"
+        | "Organ Harvest"
+        | "Overabundance"
+        | "Overgrowth"
+        | "Priest of Forgotten Gods"
+        | "Radiant Lotus"
+        | "Red Death, Shipwrecker"
+        | "Shimmerwilds Growth"
+        | "Shizuko, Caller of Autumn"
+        | "Snowfall"
+        | "Spectral Searchlight"
+        | "Stadium Vendors"
+        | "Tangleroot"
+        | "The Fertile Lands of Saulvinia"
+        | "The Warring Triad"
+        | "Trace of Abundance"
+        | "Utopia Sprawl"
+        | "Valleymaker"
+        | "Verdant Haven"
+        | "Vernal Bloom"
+        | "Wild Growth"
+        | "Winter's Night"
+        | "Wolfwillow Haven"
+        | "Zhur-Taa Ancient" => Some(("Recipient", "recipient")),
+        // The named player supplies the production count while the ability's
+        // controller receives the mana. Jeska's Will is the affected live-save
+        // case; Rousing Refrain has the same Oracle sentence.
+        "Carpet of Flowers" | "Jeska's Will" | "Orcish Squatters Avatar" | "Rousing Refrain" => {
+            Some(("CountSource", "count_source"))
+        }
+        _ => None,
+    }
+}
+
+fn migrate_legacy_mana_target_roles_in_value(
+    value: &mut serde_json::Value,
+    object_names: &HashMap<u64, String>,
+    inherited_owner: Option<String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_mana_target_roles_in_value(
+                    value,
+                    object_names,
+                    inherited_owner.clone(),
+                )?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let source_owner = object
+                .get("source_id")
+                .and_then(json_object_id)
+                .and_then(|source_id| object_names.get(&source_id))
+                .cloned();
+            let owner = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .or(source_owner)
+                .or(inherited_owner);
+
+            let legacy_target = object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|effect_type| effect_type == "Mana")
+                .then(|| object.get("target"))
+                .flatten()
+                .filter(|target| !target.is_null() && target.get("role").is_none())
+                .cloned();
+            if let Some(target) = legacy_target {
+                let owner = owner.as_deref().ok_or_else(|| {
+                    "legacy mana target has no source card name for role migration".to_string()
+                })?;
+                let (role, field) = legacy_mana_target_role(owner).ok_or_else(|| {
+                    format!("legacy mana target on {owner:?} has no verified role migration")
+                })?;
+                object.insert(
+                    "target".to_string(),
+                    serde_json::json!({ "role": role, field: target }),
+                );
+            }
+
+            for value in object.values_mut() {
+                migrate_legacy_mana_target_roles_in_value(value, object_names, owner.clone())?;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -12690,6 +12871,15 @@ pub struct GameState {
     /// (Soul Warden) match against the fully-realized copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
+
+    /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
+    /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
+    /// object is not yet the thing that entered — `BecomeCopy` has not run and/or a mandatory
+    /// as-enters choice (CR 614.12a) is unanswered. Parked here so it survives an arbitrary number
+    /// of client round-trips; realized by the single authority
+    /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -17813,6 +18003,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
@@ -19361,6 +19552,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        pending_token_battlefield_entry: _,
         layers_dirty: _,
         static_gate_truth: _,
         trigger_index: _,
@@ -19673,6 +19865,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike
             // `layers_dirty`/`public_state_dirty` (which encode pending work),

@@ -48,10 +48,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "TriggerTargetSelection",
   "CopyTargetChoice",
   "CopyRetarget",
-  "RetargetChoice",
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "UntapChoice",
+  "ChooseUntapSubset",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
@@ -62,6 +63,12 @@ export function isClickThroughWaitingFor(
   objects?: Record<ObjectId, GameObject | undefined>,
 ): boolean {
   if (!waitingFor) return false;
+  // CR 115.7: only a one-target retarget uses the board-picker. An `All`
+  // retarget renders RetargetChoiceModal, whose card choices and confirmation
+  // button need the host to retain pointer events.
+  if (waitingFor.type === "RetargetChoice") {
+    return waitingFor.data.scope.type === "Single";
+  }
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }

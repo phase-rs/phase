@@ -288,6 +288,7 @@ export type BoardChoiceIntent =
   | "return"
   | "exile"
   | "tap"
+  | "untap"
   | "crew"
   | "saddle"
   | "station"
@@ -311,6 +312,7 @@ export type BoardChoiceSelection =
 
 export type BoardChoiceResponse =
   | { type: "SelectCards" }
+  | { type: "ChooseUntap"; objectId: ObjectId }
   | { type: "CrewVehicle"; vehicleId: ObjectId }
   | { type: "ActivateStation"; spacecraftId: ObjectId }
   | { type: "SaddleMount"; mountId: ObjectId }
@@ -327,6 +329,7 @@ export interface BoardChoiceView {
   response: BoardChoiceResponse;
   sourceId?: ObjectId;
   skipAction?: GameAction;
+  skipLabel?: "keepTapped";
   cancelAction?: GameAction;
 }
 
@@ -394,6 +397,8 @@ export function getBoardChoiceView(
         intent = "return";
       } else if (waitingFor.data.destination === "Exile") {
         intent = "exile";
+      } else if (waitingFor.data.effect_kind === "Untap") {
+        intent = "untap";
       }
       if (!intent) return null;
       const minCount = waitingFor.data.up_to === true ? waitingFor.data.min_count ?? 0 : waitingFor.data.count;
@@ -430,6 +435,27 @@ export function getBoardChoiceView(
         response: { type: "ChooseKeptPermanents" },
         sourceId: waitingFor.data.source_id,
       };
+    case "ChooseUntapSubset":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.group,
+        intent: "untap",
+        selection: { type: "rangeCount", min: 0, max: waitingFor.data.max },
+        response: { type: "SelectCards" },
+      };
+    case "UntapChoice": {
+      const objectId = waitingFor.data.candidates[0];
+      if (objectId == null) return null;
+      return {
+        player: waitingFor.data.player,
+        objectIds: [objectId],
+        intent: "untap",
+        selection: { type: "single", immediate: true },
+        response: { type: "ChooseUntap", objectId },
+        skipAction: { type: "ChooseUntap", data: { object_id: objectId, untap: false } },
+        skipLabel: "keepTapped",
+      };
+    }
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
       switch (waitingFor.data.kind.type) {
@@ -598,6 +624,8 @@ export function buildBoardChoiceAction(
   switch (choice.response.type) {
     case "SelectCards":
       return { type: "SelectCards", data: { cards: selectedIds } };
+    case "ChooseUntap":
+      return { type: "ChooseUntap", data: { object_id: choice.response.objectId, untap: true } };
     case "CrewVehicle":
       return {
         type: "CrewVehicle",
