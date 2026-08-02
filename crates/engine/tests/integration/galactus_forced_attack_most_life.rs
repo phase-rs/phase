@@ -141,20 +141,33 @@ fn galactus_forced_to_attack_most_life_opponent() {
     );
 }
 
-/// Reach-guard proving the defender is re-evaluated LIVE, not snapshotted: with the
-/// life totals swapped (P2@30 now most life), Galactus is forced to attack P2, and
-/// attacking P1 (now lower) is rejected.
+/// Reach-guard proving the defender is re-evaluated LIVE, not snapshotted at setup:
+/// build ONE fixture with P1 as the most-life opponent (30 vs 20), then swap the
+/// life totals IN PLACE before declaring. Because the requirement is recomputed
+/// from live state at declare-attackers time, attacking P1 (now the lower-life
+/// opponent) is rejected and attacking P2 (now the most-life opponent) commits —
+/// both through the production `GameAction::DeclareAttackers` path in the SAME game
+/// state. A setup-time snapshot of the required defender would still name P1 and
+/// wrongly accept the P1 declaration, so this fails on any snapshot regression.
 #[test]
 fn galactus_required_defender_reevaluated_live() {
-    let (mut wrong, galactus) = parked_galactus(20, 30, None);
-    assert!(
-        declare(&mut wrong, galactus, P1).is_err(),
-        "after the life swap P1 is no longer the most-life opponent"
-    );
+    let (mut runner, galactus) = parked_galactus(30, 20, None);
+    // Swap the life totals in place: P2 becomes the most-life opponent. (A rejected
+    // declaration commits nothing — CR 508.1a–e validate before any tap/commit — so
+    // the reject-then-accept below runs against one continuous game state.)
+    runner.state_mut().players[P1.0 as usize].life = 20;
+    runner.state_mut().players[P2.0 as usize].life = 30;
 
-    let (mut right, galactus) = parked_galactus(20, 30, None);
-    declare(&mut right, galactus, P2).expect("P2 is now the most-life opponent");
-    assert!(right.state().combat.is_some());
+    assert!(
+        declare(&mut runner, galactus, P1).is_err(),
+        "after the in-place life swap P1 is no longer the most-life opponent"
+    );
+    declare(&mut runner, galactus, P2)
+        .expect("P2 became the most-life opponent after the live swap — attacking it is legal");
+    assert!(
+        runner.state().combat.is_some(),
+        "the satisfying declaration commits in the same fixture"
+    );
 }
 
 /// CR 508.1d tie: when opponents are tied for the most life, attacking EITHER

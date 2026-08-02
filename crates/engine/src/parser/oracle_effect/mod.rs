@@ -7309,12 +7309,16 @@ fn parse_for_each_object_copy_parts(
 /// repeat an earlier choice (confirmed by the "Offering" cycle ruling —
 /// Benevolent/Infernal/Intellectual/Sylvan Offering — issue #6381). Either
 /// way, the engine index is derived from chain position, not the ordinal.
-/// CR 102.3 + CR 608.2d: Recognize the "with the most life [among
+/// CR 102.2 / CR 102.3 + CR 608.2d: Recognize the "with the most life [among
 /// your opponents]" qualifier on a "choose an opponent" instruction and lower it
 /// to the equivalent `PlayerFilter::PlayerAttribute` restriction: each candidate
 /// opponent whose life total is `>=` the maximum life total across all opponents.
-/// CR 102.3 scopes the candidate set to opponents; CR 608.2d lets the controller
-/// pick ONE qualifying opponent (resolving ties) when multiple share the maximum.
+/// CR 102.2 (two-player) / CR 102.3 (team multiplayer) scope the candidate set to
+/// opponents. For the resolution-time "choose an opponent …" consumers, CR 608.2d
+/// lets the controller pick ONE qualifying opponent (resolving ties) when multiple
+/// share the maximum. (The static forced-attack consumer reuses this SAME filter
+/// but is not a resolution-time choice — there a most-life tie is resolved under
+/// CR 508.1b/d at declare-attackers; see `parse_required_defender_selector`.)
 /// The candidate's life is read PER-CANDIDATE (`PlayerScope::ScopedPlayer`); the
 /// `value` threshold is the controller-relative max (`PlayerScope::Opponent {
 /// aggregate: Max }`), composed from existing typed enums rather than a bespoke

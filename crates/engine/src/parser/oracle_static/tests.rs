@@ -8964,6 +8964,32 @@ fn forced_attack_defender_static_bare_opponent_selector() {
 }
 
 #[test]
+fn forced_attack_defender_static_rejects_unmodelled_rider() {
+    // Honesty guard (CR 604.1): the ONLY permitted tail after "… each combat if
+    // able" is an `unless` clause that begins immediately. An unmodelled rider
+    // wedged between the recurring-combat suffix and `unless` must make the whole
+    // line decline — never parse as if the rider were absent (which would silently
+    // drop text and mark the card falsely supported).
+    //
+    // Reach-guard: the SAME line WITHOUT the rider parses (proving the rejection is
+    // the rider's doing, not an unrelated failure).
+    let ok = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        ok.is_some(),
+        "reach-guard: the rider-free line must still parse"
+    );
+    let with_rider = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able and gains flying unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        with_rider.is_none(),
+        "an unmodelled rider before `unless` must not be swallowed — the line declines",
+    );
+}
+
+#[test]
 fn flavor_labeled_non_forced_attack_line_is_not_hijacked() {
     // Anti-hijack: the flavor-label strip must not manufacture a forced-attack
     // static from an unrelated labeled line. `parse_forced_attack_defender_static`

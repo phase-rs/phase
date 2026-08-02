@@ -2464,12 +2464,19 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     None
 }
 
-/// CR 102.3 + CR 608.2d: the required defending player class after "attacks ".
-/// Currently "a[n] opponent[ with the most life [among your opponents]]".
-/// Structured as sequential combinators so a future "a[n] player" (relation
-/// `All`) arm slots in without disturbing the opponent path. Reuses the shared
-/// `parse_opponent_most_life_restriction` selector (CR 102.3 candidate scoping +
-/// CR 608.2d tie resolution) rather than re-deriving the `PlayerAttribute` shape.
+/// CR 102.2 / CR 102.3 + CR 508.1b / CR 508.1d: the required defending player
+/// class after "attacks ". Currently "a[n] opponent[ with the most life [among
+/// your opponents]]". CR 102.2 (two-player) / CR 102.3 (team multiplayer) scope
+/// the candidate set to opponents. This lowers to a static attack REQUIREMENT (CR
+/// 508.1d), re-evaluated each declare-attackers step; when the class holds more
+/// than one legal defender (e.g. a most-life tie) CR 508.1b — the active player
+/// announcing which player each attacker attacks — is where the player picks among
+/// the tied legal defenders. NOT CR 608.2d: that rule governs choices offered
+/// while resolving a spell or ability, not this continuous static requirement.
+/// Structured as sequential combinators so a future "a[n] player" (relation `All`)
+/// arm slots in without disturbing the opponent path. Reuses the shared
+/// `parse_opponent_most_life_restriction` selector rather than re-deriving the
+/// `PlayerAttribute` shape.
 fn parse_required_defender_selector(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(input)?;
     let (input, _) = tag("opponent").parse(input)?;
@@ -2495,10 +2502,12 @@ fn parse_attacks_required_defender_nom(input: &str) -> OracleResult<'_, PlayerFi
     Ok((input, filter))
 }
 
-/// CR 508.1d + CR 604.1 / CR 604.2 + CR 102.3: "<subject> attacks <player-class>
-/// each combat if able [unless <condition>]" — a static attack requirement whose
-/// defending player is a live-evaluated class (Galactus: "an opponent with the
-/// most life among your opponents"). Emits
+/// CR 508.1d + CR 508.1b + CR 604.1 / CR 604.2 + CR 102.2 / CR 102.3: "<subject>
+/// attacks <player-class> each combat if able [unless <condition>]" — a static
+/// attack requirement (CR 508.1d) whose defending player is a live-evaluated class
+/// (Galactus: "an opponent with the most life among your opponents"; CR 102.2 /
+/// CR 102.3 scope "opponent", CR 508.1b covers the active player's choice among
+/// tied legal defenders). Emits
 /// `MustAttackPlayer { RequiredDefender::Matching { filter } }`, re-evaluated each
 /// declare-attackers step by the combat resolver.
 ///
@@ -2534,9 +2543,17 @@ fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefiniti
     // `unless` gate (CR 604.1) — otherwise decline so an unrecognized rider cannot
     // yield a half-parsed static (coverage stays honest / red).
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if rest.trim().is_empty() {
+    let rest = rest.trim();
+    if rest.is_empty() {
         return Some(def);
     }
+    // The ONLY permitted tail is an `unless` clause, and it must begin RIGHT HERE.
+    // Requiring `rest` to start with `unless ` (rather than letting the whole-text
+    // `unless` scan below find it anywhere) is what stops an unmodelled rider
+    // between the recurring-combat suffix and `unless` from being silently
+    // swallowed — e.g. "... each combat if able <rider> unless <cond>" must decline,
+    // not parse as if the rider were absent.
+    tag::<_, _, OracleError<'_>>("unless ").parse(rest).ok()?;
     let tp = TextPair::new(text, &lower);
     def.condition = Some(super::shared::parse_unless_static_condition(&tp)?);
     Some(def)
