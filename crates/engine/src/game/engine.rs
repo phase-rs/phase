@@ -266,31 +266,17 @@ enum PriorityAnnouncement {
     ActivateAbility(casting::PriorityActivateAbilityAnnouncement),
     UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
     RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
-    Equip {
-        equipment_id: ObjectId,
-    },
-    CrewVehicle {
-        vehicle_id: ObjectId,
-    },
-    ActivateStation {
-        spacecraft_id: ObjectId,
-    },
-    SaddleMount {
-        mount_id: ObjectId,
-    },
+    Equip { equipment_id: ObjectId },
+    CrewVehicle { vehicle_id: ObjectId },
+    ActivateStation { spacecraft_id: ObjectId },
+    SaddleMount { mount_id: ObjectId },
     Transform(transform::PriorityTransformAnnouncement),
     ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
     CastSpellAsSneak(casting::PrioritySneakAnnouncement),
-    CastSpellAsWebSlinging {
-        hand_object: ObjectId,
-        card_id: CardId,
-        creature_to_return: ObjectId,
-    },
+    CastSpellAsWebSlinging(casting::PriorityWebSlingingAnnouncement),
     CastSpellForFree(casting::PriorityCastFreeAnnouncement),
     PlayFaceDown(morph::PriorityPlayFaceDownAnnouncement),
-    TurnFaceUp {
-        object_id: ObjectId,
-    },
+    TurnFaceUp { object_id: ObjectId },
     CompanionToHand(companion::PriorityCompanionAnnouncement),
     EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
     CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
@@ -315,7 +301,7 @@ impl PriorityAnnouncement {
             Self::Transform(_) => PriorityReducerFamily::Transform,
             Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
             Self::CastSpellAsSneak(_) => PriorityReducerFamily::CastSpellAsSneak,
-            Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
+            Self::CastSpellAsWebSlinging(_) => PriorityReducerFamily::CastSpellAsWebSlinging,
             Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
             Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
             Self::TurnFaceUp { .. } => PriorityReducerFamily::TurnFaceUp,
@@ -394,16 +380,14 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             creature_to_return: announcement.creature_to_return(&_access),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
-        PriorityAnnouncement::CastSpellAsWebSlinging {
-            hand_object,
-            card_id,
-            creature_to_return,
-        } => GameAction::CastSpellAsWebSlinging {
-            hand_object,
-            card_id,
-            creature_to_return,
-            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-        },
+        PriorityAnnouncement::CastSpellAsWebSlinging(announcement) => {
+            GameAction::CastSpellAsWebSlinging {
+                hand_object: announcement.hand_object(&_access),
+                card_id: announcement.card_id(&_access),
+                creature_to_return: announcement.creature_to_return(&_access),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            }
+        }
         PriorityAnnouncement::CastSpellForFree(announcement) => GameAction::CastSpellForFree {
             object_id: announcement.object_id(&_access),
             card_id: announcement.card_id(&_access),
@@ -651,54 +635,12 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        let tapped_creatures: Vec<_> = state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|object_id| {
-                state.objects.get(object_id).is_some_and(|object| {
-                    object.controller == semantic_holder
-                        && object.tapped
-                        && object
-                            .card_types
-                            .core_types
-                            .contains(&crate::types::card_type::CoreType::Creature)
-                })
-            })
-            .collect();
-        if let Some(player) = state
-            .players
-            .iter()
-            .find(|player| player.id == semantic_holder)
-        {
-            for &hand_object in &player.hand {
-                if super::keywords::effective_web_slinging_cost(state, semantic_holder, hand_object)
-                    .is_none()
-                {
-                    continue;
-                }
-                let Some(card_id) = state.objects.get(&hand_object).map(|object| object.card_id)
-                else {
-                    continue;
-                };
-                for &creature_to_return in &tapped_creatures {
-                    if casting::can_cast_spell_as_web_slinging_now(
-                        state,
-                        semantic_holder,
-                        hand_object,
-                        creature_to_return,
-                    ) {
-                        candidates.push(PriorityPreflightCandidate::Announcement(
-                            PriorityAnnouncement::CastSpellAsWebSlinging {
-                                hand_object,
-                                card_id,
-                                creature_to_return,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
+        candidates.extend(
+            casting::priority_web_slinging_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellAsWebSlinging)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
     }
 
     if is_active {

@@ -111,6 +111,43 @@ pub(in crate::game) struct PrioritySneakAnnouncement {
     creature_to_return: ObjectId,
 }
 
+/// An engine-authored Web Slinging cast announcement for Priority preflight.
+/// The hand card and tapped creature remain private to Casting until facade
+/// conversion reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityWebSlingingAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+}
+
+impl PriorityWebSlingingAnnouncement {
+    fn new(hand_object: ObjectId, card_id: CardId, creature_to_return: ObjectId) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
+
 impl PrioritySneakAnnouncement {
     fn new(hand_object: ObjectId, card_id: CardId, creature_to_return: ObjectId) -> Self {
         Self {
@@ -1702,6 +1739,64 @@ pub(in crate::game) fn priority_sneak_announcements(
                 .copied()
                 .map(move |creature_to_return| {
                     PrioritySneakAnnouncement::new(hand_object, card_id, creature_to_return)
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Web Slinging casts through the existing keyword and casting
+/// authorities, retaining its exact tapped-creature return domain.
+pub(in crate::game) fn priority_web_slinging_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityWebSlingingAnnouncement> {
+    let player = principal.semantic_holder();
+    let tapped_creatures: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.controller == player
+                    && object.tapped
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Creature)
+            })
+        })
+        .collect();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            crate::game::keywords::effective_web_slinging_cost(state, player, hand_object)?;
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id))
+        })
+        .flat_map(|(hand_object, card_id)| {
+            tapped_creatures
+                .iter()
+                .copied()
+                .filter_map(move |creature_to_return| {
+                    can_cast_spell_as_web_slinging_now(
+                        state,
+                        player,
+                        hand_object,
+                        creature_to_return,
+                    )
+                    .then(|| {
+                        PriorityWebSlingingAnnouncement::new(
+                            hand_object,
+                            card_id,
+                            creature_to_return,
+                        )
+                    })
                 })
         })
         .collect()
