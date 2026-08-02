@@ -561,10 +561,11 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         FilterProp::CanEnchant { target } => CharacteristicKinds::ABILITIES
             .union(target_filter_characteristic_reads_at(target, depth)),
         // CR 302.6 + CR 702.10: haste is a keyword read; the creature check is a
-        // typeline read.
-        FilterProp::HasHasteOrControlledSinceTurnBegan => {
-            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
-        }
+        // typeline read; and the `summoning_sick` continuity fallback is re-armed
+        // by every layer-2 control change (CR 613.1b).
+        FilterProp::HasHasteOrControlledSinceTurnBegan => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
 
         // ---- CR 613.1d (layer 4): typeline reads. ----
         FilterProp::HasSupertype { .. }
@@ -679,7 +680,23 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         FilterProp::ControllerChoseLabel { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::AttackedThisTurn { .. }
+        // CR 108.3 fixes the RIGHT operand (the matched object's owner) at game
+        // start, but this prop is a two-operand relation: the `ControllerRef`
+        // LEFT operand resolves against the effect source's live controller
+        // (CR 109.5 — "you" on a static ability is the current controller of the
+        // object it is on), and layer 2 rewrites that (CR 613.1b). An immutable
+        // right operand does not make the relation immutable.
+        | FilterProp::Owned { .. }
+        // CR 302.6: reads the `summoning_sick` continuity flag, which layer 2
+        // re-arms for every permanent whose controller changed (CR 613.1b).
+        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::CountersPutOnThisTurn { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 702.95e: a pair breaks when either half changes controller (layer 2,
+        // CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the
+        // unpaired verdict reads both kinds.
+        FilterProp::Unpaired => {
+            CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES)
+        }
 
         // ---- Undeterminable: conservatively every kind. ----
         // CR 109.4: an arbitrary player predicate over the object's controller
@@ -691,15 +708,18 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 109.1: identity exclusion. Against the ability's own parent target
         // this is pure object identity and reads nothing; against any other
         // reference the excluded set is filter-derived and could be anything.
-        FilterProp::DistinctFrom { reference } => match reference.as_ref() {
-            TargetFilter::ParentTarget => CharacteristicKinds::EMPTY,
-            _ => CharacteristicKinds::ALL,
-        },
+        FilterProp::DistinctFrom { reference } => {
+            if matches!(reference.as_ref(), TargetFilter::ParentTarget) {
+                CharacteristicKinds::EMPTY
+            } else {
+                CharacteristicKinds::ALL
+            }
+        }
 
         // ---- Reads no layer-writable characteristic. ----
-        // Token identity, zone, ownership (CR 108.3), combat state, per-object
-        // designations, per-turn ledgers, stack shape, and the fail-closed
-        // unparsed leaf. Enumerated explicitly (no wildcard).
+        // Token identity, zone, combat state, per-object designations, per-turn
+        // ledgers, stack shape, and the fail-closed unparsed leaf. Enumerated
+        // explicitly (no wildcard).
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
@@ -719,12 +739,9 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::HasAdventure
         | FilterProp::WasKicked
         | FilterProp::InZone { .. }
-        // CR 108.3: owner is fixed at game start; no layer writes it.
-        | FilterProp::Owned { .. }
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::Another
-        | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
         | FilterProp::InTrackedSet { .. }
         | FilterProp::Suspected
@@ -734,7 +751,6 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
-        | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -13656,6 +13672,142 @@ mod tests {
                 FaceControllerScope::AssumeOwn
             ),
             "a definitely-matching alternative admits even beside an unknown"
+        );
+    }
+}
+
+/// Building-block coverage for the characteristic-dependence classifier
+/// (`filter_prop_characteristic_reads_at`). These pin the invariants the
+/// classifier documents in prose, at the level of the primitive rather than of
+/// any one card, so a future variant cannot drift into the wrong kind group.
+#[cfg(test)]
+mod characteristic_read_classification_tests {
+    use super::*;
+    use crate::types::ability::{AttachmentKind, SourceExclusion};
+
+    /// Wraps a single prop in the minimal `Typed` filter: no type filters and no
+    /// controller scope, so the reported kinds come from the prop alone.
+    fn only(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![prop],
+            ..TypedFilter::default()
+        })
+    }
+
+    /// CR 613.1b: layer 2 can move an object across any controller scope a
+    /// `ControllerRef` names, so every `FilterProp` that carries one reads the
+    /// CONTROLLER kind. The classifier states this invariant in prose; this test
+    /// is what makes the next `ControllerRef`-carrying variant fail loudly if it
+    /// is filed under a group that omits CONTROLLER.
+    #[test]
+    fn every_controller_ref_carrying_prop_reads_the_controller_kind() {
+        let props = [
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::ProtectorMatches {
+                controller: ControllerRef::You,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+                exclude_source: SourceExclusion::Include,
+            },
+            FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura],
+                controller: Some(ControllerRef::You),
+            },
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::NameMatchesAnyPermanent {
+                controller: Some(ControllerRef::You),
+            },
+        ];
+        assert_eq!(
+            props.len(),
+            8,
+            "the ControllerRef-carrying FilterProp roster grew or shrank — extend \
+             this list so the invariant stays fully pinned"
+        );
+        for prop in props {
+            assert!(
+                target_filter_characteristic_reads(&only(prop.clone()))
+                    .contains(CharacteristicKinds::CONTROLLER),
+                "{prop:?} scopes its verdict by a ControllerRef, which CR 613.1b \
+                 lets layer 2 rewrite — it must report a CONTROLLER read"
+            );
+        }
+    }
+
+    /// CR 108.3 fixes the owner, but `Owned` is a two-operand relation and only
+    /// its right operand is immutable; the left operand is the source's live
+    /// controller (CR 109.5), which layer 2 rewrites (CR 613.1b).
+    #[test]
+    fn owned_reads_the_controller_kind_despite_an_immutable_owner() {
+        for controller in [
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            ControllerRef::ScopedPlayer,
+        ] {
+            assert!(
+                target_filter_characteristic_reads(&only(FilterProp::Owned { controller }))
+                    .contains(CharacteristicKinds::CONTROLLER),
+                "an immutable owner operand does not make the owner-vs-controller \
+                 relation immutable"
+            );
+        }
+    }
+
+    /// CR 702.95e: a soulbond pair breaks when either half changes controller
+    /// (layer 2, CR 613.1b) or stops being a creature (layer 4, CR 613.1d).
+    #[test]
+    fn unpaired_reads_the_controller_and_card_type_kinds() {
+        let kinds = target_filter_characteristic_reads(&only(FilterProp::Unpaired));
+        assert!(
+            kinds.contains(CharacteristicKinds::CONTROLLER),
+            "CR 702.95e: gaining control of either half breaks the pair"
+        );
+        assert!(
+            kinds.contains(CharacteristicKinds::CARD_TYPES),
+            "CR 702.95e: either half ceasing to be a creature breaks the pair"
+        );
+    }
+
+    /// CR 302.6: the summoning-sickness continuity flag is re-armed for every
+    /// permanent whose controller changed, so both props that read it depend on
+    /// layer 2 (CR 613.1b).
+    #[test]
+    fn continuity_props_read_the_controller_kind() {
+        assert!(
+            target_filter_characteristic_reads(&only(
+                FilterProp::ControlledContinuouslySinceTurnBegan
+            ))
+            .contains(CharacteristicKinds::CONTROLLER),
+            "a control change re-arms the continuity flag this prop reads"
+        );
+
+        let enlist = target_filter_characteristic_reads(&only(
+            FilterProp::HasHasteOrControlledSinceTurnBegan,
+        ));
+        assert!(
+            enlist.contains(CharacteristicKinds::CONTROLLER),
+            "the continuity fallback of the haste-or-continuity prop is layer-2 movable"
+        );
+        assert!(
+            enlist.contains(CharacteristicKinds::ABILITIES),
+            "CR 702.10: the haste branch is a keyword read"
+        );
+        assert!(
+            enlist.contains(CharacteristicKinds::CARD_TYPES),
+            "CR 302.6: the creature-typeline guard is a layer-4 read"
         );
     }
 }

@@ -3707,11 +3707,12 @@ struct LiveCharacteristicReads {
 ///
 /// ```text
 /// global    := ⋃ dynamic-magnitude kinds     // every live modification's magnitude
+///            ∪ ⋃ live condition kinds        // every live effect's retained condition
 ///            ∪ ⋃ Continuous condition kinds  // every live Continuous static's condition
 /// ReadKinds := global ∪ ⋃ affected-filter kinds  // every live modification's affected filter
 /// ```
 ///
-/// All three channels are unioned UNCONDITIONALLY. An earlier design gated the
+/// All four channels are unioned UNCONDITIONALLY. An earlier design gated the
 /// affected-filter channel on the write set already intersecting, which is
 /// unsound: a board whose only name-sensitive read lives in another static's
 /// affected filter has an empty base union, so the gate would never notice a
@@ -3720,7 +3721,7 @@ struct LiveCharacteristicReads {
 /// The affected-filter channel is reported separately because it is the only
 /// one attributable to a single effect, and CR 613.6 puts an effect's own
 /// affected filter out of reach of its own writes — see
-/// [`AffectedFilterReadTally`]. The other two channels are board-level and
+/// [`AffectedFilterReadTally`]. The other three channels are board-level and
 /// admit no such exclusion.
 ///
 /// Walks early-exit the moment the union saturates to
@@ -3742,6 +3743,20 @@ fn live_characteristic_reads(
             ));
         }
         affected = affected.union(target_filter_characteristic_reads(&e.affected_filter));
+        // CR 611.2c + CR 611.3a: CR 611.2c locks in the affected SET of a
+        // resolution-created continuous effect, but nothing locks in its
+        // enabling condition — a retained recipient-context condition is
+        // re-evaluated per recipient on every pass, exactly like the
+        // "isn't locked in" static-ability effect of CR 611.3a. The condition
+        // gates WHETHER the effect applies at all, so it is a board-level read
+        // and belongs in `global`, NOT in the per-effect `affected` channel
+        // that CR 613.6 lets an effect exclude from its own writes. This is the
+        // single authority for the condition channel: every
+        // `ActiveContinuousEffect` producer — printed statics, granted-inner
+        // statics and resolution-created transients — converges here.
+        if let Some(condition) = e.condition.as_ref() {
+            global = global.union(static_condition_characteristic_reads(condition));
+        }
     }
     if !global.union(affected).is_all() {
         // CR 611.3a: a Continuous static's enabling condition re-evaluates as the

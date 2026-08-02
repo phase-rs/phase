@@ -11485,7 +11485,8 @@ mod tests {
         /// itself a P/T writer and would satisfy the relation on its own reach.
         /// The count anthem's affected set is therefore "creatures you control"
         /// while the entrant enters under the OPPONENT (mirroring
-        /// `controller_theft_count_anthem_board`), which makes `SetToughness`
+        /// `controller_keyed_count_anthem_with_control_theft_board`), which makes
+        /// `SetToughness`
         /// the only entrant-reaching writer and gives the revert-check SetPT-arm
         /// granularity rather than whole-kind granularity.
         fn tough_count_anthem_with_set_toughness_board() -> GameState {
@@ -12038,6 +12039,176 @@ mod tests {
                 "the incremental entry must derive the same board as a full re-evaluation"
             );
             assert_pt_identical(&normal, &forced, "CR 613.6 self-exclusion carve-out");
+        }
+
+        // ------------------------------------------------------------------
+        // RESOLUTION-CREATED continuous effects (CR 611.2c + CR 611.3a).
+        //
+        // A `TransientContinuousEffect` is the third `ActiveContinuousEffect`
+        // producer, alongside printed statics and granted-inner statics. It is
+        // the only one whose affected set is FROZEN (CR 611.2c) while its
+        // enabling condition stays LIVE (CR 611.3a), so it is the only one
+        // where the affected-filter channel reports EMPTY and the condition is
+        // the sole live read. Both boards below build that effect through the
+        // single construction authority — see `install_gated_transient` for
+        // which production path produces this shape and which does NOT.
+        // ------------------------------------------------------------------
+
+        /// Install a resolution-created continuous effect that RETAINS its
+        /// enabling condition, through the single construction authority
+        /// (`GameState::add_transient_continuous_effect`), one effect per
+        /// recipient.
+        ///
+        /// CR 611.2c: the affected set is already frozen to `SpecificObject` —
+        /// a filter that reads NO layer-writable characteristic — which is what
+        /// every transient looks like once its effect has begun. CR 611.3a: the
+        /// condition rides alongside and stays live, re-evaluated on every
+        /// later pass. That asymmetry (frozen set, live gate) is what these two
+        /// boards exercise.
+        ///
+        /// REACHABILITY: `Effect::GenericEffect` is NOT the producer of this
+        /// shape. Per CR 608.2h + CR 611.2d its resolver determines an
+        /// in-effect "if <condition>" exactly once, at resolution, and installs
+        /// the transient with `condition: None`
+        /// (`effects/effect.rs::resolve`). A conditioned transient comes from
+        /// riders that hand a `StaticDefinition`'s condition straight to the
+        /// constructor — `effects/counter.rs::apply_source_static` (the
+        /// `CounterSourceRider::LosesAbilities` rider) is the live example. So
+        /// these fixtures call the constructor exactly the way that rider does.
+        fn install_gated_transient(
+            state: &mut GameState,
+            source: ObjectId,
+            recipients: &[ObjectId],
+            mods: Vec<crate::types::ability::ContinuousModification>,
+            condition: crate::types::ability::StaticCondition,
+        ) {
+            for &id in recipients {
+                state.add_transient_continuous_effect(
+                    source,
+                    PlayerId(0),
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject { id },
+                    mods.clone(),
+                    Some(condition.clone()),
+                );
+            }
+        }
+
+        /// (3.1) TRANSIENT CONDITION READ CHANNEL. The only live read of card
+        /// types on this board lives in the CONDITION of a resolution-created
+        /// continuous effect whose affected set is already frozen to
+        /// `SpecificObject` (CR 611.2c), i.e. to an EMPTY-read filter. A
+        /// separate printed layer-4 `AddType{Land}` (CR 613.1d) reaches the
+        /// entrant, so the Land population that condition counts moves for
+        /// every pre-existing recipient.
+        ///
+        /// CR 611.2c freezes the affected SET and nothing else; CR 611.3a keeps
+        /// the gate re-evaluating on every pass, here per recipient
+        /// (`FilterProp::Another`). Pre-entry each 2/2 recipient sees exactly
+        /// 1 OTHER Land so `GE 2` is OFF; post-entry it sees 2 and turns ON
+        /// (3/3).
+        ///
+        /// DISCRIMINATING because the transient is the ONLY condition on the
+        /// board: drop the condition channel from `live_characteristic_reads`
+        /// and `ReadKinds` loses CardTypes entirely. Stage 4 then exempts the
+        /// layer-4 writer under CR 613.6 — the only other CardTypes read is its
+        /// OWN affected filter — the entry stays on the incremental path, and
+        /// the pre-existing recipients keep a stale 2/2.
+        fn transient_condition_read_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    760 + i,
+                    &format!("TransientBear{i}"),
+                    vec![],
+                ));
+            }
+            // CR 613.1d: printed layer-4 type-changer, unconditional. Every
+            // creature is also a Land, so it reaches the entrant and MOVES the
+            // counted population.
+            let to_land = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddType {
+                    core_type: CoreType::Land,
+                }],
+            );
+            install_static_enchantment(&mut state, 762, "Land Conversion", vec![to_land]);
+            let source = install_static_enchantment(&mut state, 763, "Other-Lands Grant", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ],
+                // Recipient-relative: "two or more OTHER Lands".
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                properties: vec![FilterProp::Another],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 2 },
+                },
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn type_rewrite_entry_escalates_through_transient_condition_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_condition_read_board, |s| {
+                    add_colorless_creature_entry(s, 764)
+                });
+            assert!(
+                escalated,
+                "a resolution-created effect's retained condition is a LIVE read \
+                 (CR 611.3a), so a layer-4 type rewrite reaching the entrant moves \
+                 the population it counts — the entry must escalate"
+            );
+            // Non-vacuity: CR 611.2c really did freeze the affected set, so the
+            // affected-filter channel reports EMPTY and the condition channel is
+            // the only thing that can put CardTypes in ReadKinds.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                            && tce.condition.is_some()
+                    }),
+                "the grant must have resolved into SpecificObject-bound transients \
+                 that still carry their condition"
+            );
+            // Non-vacuity: the gate is genuinely OFF before the entry, so the 3/3
+            // below is the entrant's doing and not an already-buffed board.
+            let mut pre = transient_condition_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "TransientBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry each recipient sees only 1 OTHER Land, so GE 2 is OFF"
+            );
+            assert_eq!(
+                pts_named(&forced, "TransientBear"),
+                vec![(Some(3), Some(3)); 2],
+                "the full pass counts the entrant once layer 4 makes it a Land, so \
+                 each recipient sees 2 OTHER Lands and the gate turns ON"
+            );
+            assert_eq!(
+                pts_named(&normal, "TransientBear"),
+                pts_named(&forced, "TransientBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient condition read channel");
         }
 
         /// Assert every battlefield object's computed power/toughness/loyalty and
