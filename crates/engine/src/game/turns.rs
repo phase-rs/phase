@@ -2645,11 +2645,11 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 return AutoAdvanceStep::Continue;
             }
             // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
-            advance_phase(state, events);
+            let _ = advance_phase_once(state, events);
         }
         Phase::Upkeep => {
             if should_skip_step_now(state, Phase::Upkeep) {
-                advance_phase(state, events);
+                let _ = advance_phase_once(state, events);
                 return AutoAdvanceStep::Continue;
             }
             // CR 500.4 + CR 503.1: "As a step or phase begins, if there are
@@ -2729,7 +2729,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 && state.extra_phase_resume.is_empty())
                 || should_skip_step_now(state, Phase::Draw)
             {
-                advance_phase(state, events);
+                let _ = advance_phase_once(state, events);
                 return AutoAdvanceStep::Continue;
             }
             if let Some(wf) = execute_draw(state, events) {
@@ -2802,7 +2802,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             }
             if combat::has_potential_attackers(state) {
                 state.combat = Some(crate::game::combat::CombatState::default());
-                advance_phase(state, events);
+                let _ = advance_phase_once(state, events);
                 // Continue to DeclareAttackers
             } else {
                 // CR 508.8: No attackers possible and no begin-combat
@@ -2887,7 +2887,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            advance_phase(state, events);
+            let _ = advance_phase_once(state, events);
             // Continue to EndCombat
         }
         Phase::EndCombat => {
@@ -2919,7 +2919,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            advance_phase(state, events);
+            let _ = advance_phase_once(state, events);
             // Continue to PostCombatMain
         }
         Phase::End => {
@@ -2952,8 +2952,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if let Some(waiting) = execute_cleanup(state, events) {
                 return AutoAdvanceStep::Waiting(waiting);
             }
-            advance_phase(state, events);
-            // advance_phase handles start_next_turn when wrapping Cleanup -> Untap
+            let _ = advance_phase_once(state, events);
+            // advance_phase_once handles start_next_turn when wrapping Cleanup -> Untap
             // Continue loop to process next turn's phases
         }
     }
