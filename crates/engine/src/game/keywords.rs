@@ -1124,16 +1124,13 @@ pub fn ninjutsu_family_activatable_sources(
     hand_sources.chain(command_sources).collect()
 }
 
-/// Enumerates the active holder's finite Ninjutsu-family primers through the
+/// Enumerates the Priority holder's finite Ninjutsu-family primers through the
 /// existing source, timing, cost, and return-creature authorities.
 pub(in crate::game) fn priority_ninjutsu_announcements(
     state: &GameState,
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityNinjutsuAnnouncement> {
     let player = principal.semantic_holder();
-    if state.active_player != player {
-        return Vec::new();
-    }
     ninjutsu_family_activatable_sources(state, player)
         .into_iter()
         .filter_map(|(ninjutsu_object_id, _, variant, cost)| {
@@ -2053,6 +2050,25 @@ mod tests {
         }
 
         (state, attacker_id, ninja_id)
+    }
+
+    #[test]
+    fn priority_offers_ninjutsu_to_an_active_teams_non_active_member() {
+        let (mut state, _, _) = setup_ninjutsu_scenario();
+        state.format_config = crate::types::format::FormatConfig::two_headed_giant();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("an active-team priority holder has a principal");
+
+        assert_eq!(
+            priority_ninjutsu_announcements(&state, &principal).len(),
+            1,
+            "a teammate of the active player may take ninjutsu during the team's priority"
+        );
     }
 
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose
