@@ -9012,6 +9012,70 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         }
     }
 
+    // CR 109.4 + CR 603.7c + CR 608.2c: Anaphoric subjects that only bind inside a
+    // DELAYED triggered ability created by a parent ability. These pronouns have
+    // no antecedent in a standalone printed trigger, so they are recognized ONLY
+    // when parsing a delayed-trigger condition (`ctx.in_delayed_trigger`, set by
+    // `try_parse_whenever_this_turn`). This keeps a standalone printed trigger that
+    // happens to contain the same words honestly coverage-red rather than binding
+    // its source to `Any`.
+    if ctx.in_delayed_trigger {
+        // CR 201.5: text referring to the object it's on (here the trigger
+        // source, via a gendered pronoun) means just that object → `SelfRef`.
+        // Nominative-only
+        // ("he "/"she ") and guarded on the following damage verb, mirroring the
+        // "it enters" bare-pronoun precedent above: a gendered pronoun naming the
+        // trigger SOURCE is always nominative, and in this delayed combat-damage
+        // rider class it is always the damage dealer. Object/possessive case
+        // ("him "/"her <noun>") is intentionally excluded — it never denotes the
+        // trigger source. `rest` (verb intact) is returned so `try_parse_event`'s
+        // subject-led damage arm consumes "deals combat damage …".
+        if let Ok((rest, ())) =
+            value((), alt((tag::<_, _, OracleError<'_>>("he "), tag("she ")))).parse(text)
+        {
+            if alt((
+                value((), tag::<_, _, OracleError<'_>>("deals ")),
+                value((), tag("deal ")),
+            ))
+            .parse(rest)
+            .is_ok()
+            {
+                return (TargetFilter::SelfRef, rest);
+            }
+        }
+
+        // CR 608.2c + CR 603.7c: plural-set anaphora → `ParentTarget`. Compose the
+        // quantifier axis (one `alt`) with the noun axis (one `alt`), per the
+        // "compose, don't enumerate permutations" convention. "those creatures" /
+        // "any of those creatures" back-references the set the parent ability
+        // established (Love's declared attackers, Kang's per-opponent tap
+        // targets). The quantifier prefix is semantically inert on the trigger's
+        // fire predicate (any single member firing satisfies it) and is consumed
+        // only so the noun matches; `bind_contextual_filter_to_condition` binds
+        // `ParentTarget` → `Or[SpecificObject…]` at delayed-trigger creation.
+        let after_quantifier = opt(alt((
+            tag::<_, _, OracleError<'_>>("any of "),
+            tag("either of "),
+            tag("one of "),
+            tag("each of "),
+        )))
+        .parse(text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(text);
+        if let Ok((rest, ())) = value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("those creatures"),
+                tag("those permanents"),
+                tag("those cards"),
+            )),
+        )
+        .parse(after_quantifier)
+        {
+            return (TargetFilter::ParentTarget, rest);
+        }
+    }
+
     // "equipped creature" / "enchanted creature/land/permanent" / "enchanted <basic-type>"
     // → AttachedTo. The Enchant keyword already constrains the attach target's type,
     // so `AttachedTo` alone is sufficient here (CR 702.5a). Utopia Sprawl's
@@ -12757,22 +12821,54 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         .parse(after_target)
         .ok()?;
 
+    // CR 508.1 + CR 603.2c: a leading "exactly " flags an EQ attacker-count
+    // constraint (Love on the Battlefield's "attack with exactly two creatures").
+    // Optional; when absent, the trailing quantifier axis below decides.
+    let (after_exactly, exactly) = opt(tag::<_, _, OracleError<'_>>("exactly "))
+        .parse(after_with)
+        .ok()?;
+
     // Parse the count word/digit. `parse_number` already maps "one"→1 as well as
     // digits and other number-words; do NOT add a duplicate `value(1, tag("one"))`.
-    let (after_n, n) = nom_primitives::parse_number.parse(after_with).ok()?;
-    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more "))
-        .parse(after_n)
-        .ok()?;
+    let (after_n, n) = nom_primitives::parse_number.parse(after_exactly).ok()?;
+
+    // CR 508.1 + CR 603.2c: trailing quantifier axis — " or more " (GE, the legacy
+    // form) or " or fewer " (LE) — composed as one `alt`.
+    let (after_quantifier, trailing) = opt(alt((
+        value(Comparator::GE, tag::<_, _, OracleError<'_>>(" or more ")),
+        value(Comparator::LE, tag(" or fewer ")),
+    )))
+    .parse(after_n)
+    .ok()?;
+
+    // CR 508.1: resolve the comparator with no silent default. Leading "exactly"
+    // → EQ; else a trailing quantifier decides; else a bare "attack with N
+    // creatures" (no quantifier) is deliberately NOT matched here — `trailing?`
+    // returns `None` for that bare form, preserving the pre-existing behavior
+    // exactly and avoiding newly defaulting it to EQ (which would over-narrow
+    // legacy GE cards).
+    let comparator = if exactly.is_some() {
+        Comparator::EQ
+    } else {
+        trailing?
+    };
 
     if n < 1 {
         return None;
     }
 
+    // The " or more "/" or fewer " tags consumed their surrounding spaces, but the
+    // EQ path ("exactly two creatures") leaves a leading space before the head
+    // noun. Consume it uniformly (no-op for the already-stripped trailing arms).
+    let after_quantifier = nom::character::complete::space0::<_, OracleError<'_>>(after_quantifier)
+        .map(|(rest, _)| rest)
+        .unwrap_or(after_quantifier);
+
     // Capture the head-noun type phrase once for both count==1 and count>1.
     // Count==1 needs only the matcher's valid_card gate; count>1 additionally
     // uses AttackersDeclaredCount when the type phrase narrows beyond bare
     // "creatures".
-    let (filter, remainder) = parse_type_phrase(after_or_more);
+    let (filter, remainder) = parse_type_phrase(after_quantifier);
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
     // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
     // at the condition boundary — the caller already split the effect text off,
@@ -12807,9 +12903,12 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     if attacks_you {
         def.attack_target_filter = Some(AttackTargetFilter::Player);
     }
-    if n == 1 {
+    if n == 1 && comparator == Comparator::GE {
         // CR 508.1 + CR 603.2c: the matcher's "at least one attacker matching
-        // valid_card" gate is the whole "one or more" condition.
+        // valid_card" gate is the whole "one or more" condition. Restricted to GE:
+        // "exactly one" / "one or fewer" (EQ/LE) must enforce the count exactly and
+        // therefore fall through to the `AttackersDeclaredCount` path below instead
+        // of firing on 2+ attackers.
         def.valid_card = Some(filter);
         return Some((mode, def));
     }
@@ -12834,7 +12933,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
                 filter: count_filter,
             }
         },
-        comparator: Comparator::GE,
+        comparator,
         count: n,
     });
 

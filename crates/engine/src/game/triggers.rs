@@ -6692,8 +6692,21 @@ fn effect_uses_parent_target(effect: &Effect) -> bool {
         Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
             matches!(target, TargetFilter::ParentTarget)
         }
-        Effect::GenericEffect { target, .. } => {
+        // CR 608.2c: "those creatures gain <keyword> until end of turn" lowers to a
+        // `GenericEffect` whose granted static ability is `affected: ParentTarget`
+        // while the effect's own `target` slot stays `None` (Love on the
+        // Battlefield). Recognize BOTH the direct-target form and the
+        // static-ability-affected form so the batched-attack anaphor ("those
+        // creatures") seeds the declared attackers into `ability.targets`.
+        Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } => {
             matches!(target, Some(TargetFilter::ParentTarget))
+                || static_abilities
+                    .iter()
+                    .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget)))
         }
         _ => effect
             .target_filter()
@@ -8050,6 +8063,64 @@ pub(crate) fn filter_consumed_trigger_events(
     filter_consumed_trigger_events_from(events, 0, consumed)
 }
 
+/// CR 603.2c + CR 510.2: Expand a multi-fire `WheneverEvent` `DamageDone`
+/// trigger's aggregate `CombatDamageDealtToPlayer` matches into one synthetic
+/// per-source `DamageDealt` event per matching (source, defending player)
+/// occurrence, so each firing binds `TriggeringSource`/`EventContextAmount` to a
+/// single creature. CR 510.2 deals all combat damage in a step simultaneously, so
+/// one combat-damage step can emit SEVERAL aggregate events at once — one per
+/// defending player (multiplayer / batched attacks split across opponents, e.g.
+/// Love on the Battlefield). Every such aggregate in the batch is expanded, not
+/// just the first `.find()` match, so a rider that hits two defenders fires for
+/// each (source, player) occurrence. Each returned pair carries the originating
+/// aggregate's event index for consumed-occurrence tracking. Returns the matched
+/// event unchanged (paired with `matched_index`) for every other case
+/// (non-`WheneverEvent`, or no aggregate match — e.g. a `SelfRef` source already
+/// matching the per-source `DamageDealt` event directly, or a non-damage trigger).
+fn expand_multi_fire_damage_occurrences(
+    condition: &crate::types::ability::DelayedTriggerCondition,
+    events: &[GameEvent],
+    matched_index: usize,
+    matched_event: &GameEvent,
+    state: &GameState,
+    source_context: Option<&TriggerSourceContext>,
+) -> Vec<(usize, GameEvent)> {
+    use crate::types::ability::DelayedTriggerCondition;
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
+        return vec![(matched_index, matched_event.clone())];
+    };
+    let Some(source_context) = source_context else {
+        return vec![(matched_index, matched_event.clone())];
+    };
+    // CR 603.2c: a single trigger event (the combat-damage step) can contain
+    // multiple occurrences. Expand EVERY matching aggregate
+    // `CombatDamageDealtToPlayer` in the batch — one per defending player — into
+    // its per-source synthetic `DamageDealt` events, tagging each with the source
+    // aggregate's index. `matching_damage_done_events` is empty for non-aggregate
+    // listeners (SelfRef) and non-`DamageDone` triggers, so this scan is inert for
+    // every case handled by the unchanged-fallback below.
+    let expanded: Vec<(usize, GameEvent)> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
+        .flat_map(|(idx, event)| {
+            super::trigger_matchers::matching_damage_done_events(
+                event,
+                trigger,
+                source_context,
+                state,
+            )
+            .into_iter()
+            .map(move |synth| (idx, synth))
+        })
+        .collect();
+    if expanded.is_empty() {
+        vec![(matched_index, matched_event.clone())]
+    } else {
+        expanded
+    }
+}
+
 fn delayed_trigger_to_context(
     state: &GameState,
     trigger: DelayedTrigger,
@@ -8120,7 +8191,30 @@ fn collect_matching_delayed_triggers(
             if delayed.one_shot {
                 to_remove.push((idx, event_index, trigger_event));
             } else {
-                to_fire.push((delayed.clone(), event_index, trigger_event));
+                // CR 603.2c + CR 510.2: A MULTI-FIRE WheneverEvent DamageDone
+                // trigger that matched the AGGREGATE `CombatDamageDealtToPlayer`
+                // event fires ONCE PER matching (source, defending player)
+                // occurrence — each creature dealing combat damage is a separate
+                // occurrence (CR 603.2c), and one simultaneous combat-damage step
+                // (CR 510.2) can deal to several defenders at once (multiplayer /
+                // batched attacks). Expand EVERY matching aggregate in the batch —
+                // not just the first `.find()` match — into per-source synthetic
+                // `DamageDealt` events so `TriggeringSource` / `EventContextAmount`
+                // bind to each specific source (Love on the Battlefield's
+                // per-creature "+1/+1 counter on it"), for every defender hit.
+                // Non-aggregate matches and non-DamageDone conditions fire once on
+                // the matched event unchanged. Each occurrence carries its own
+                // originating aggregate index for consumed-occurrence tracking.
+                for (occ_index, occurrence) in expand_multi_fire_damage_occurrences(
+                    &delayed.condition,
+                    events,
+                    event_index,
+                    &trigger_event,
+                    state,
+                    delayed.ability.trigger_source.as_ref(),
+                ) {
+                    to_fire.push((delayed.clone(), occ_index, occurrence));
+                }
             }
         } else if match scope {
             DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
@@ -8544,7 +8638,7 @@ fn delayed_trigger_event_with_index(
             })
             .map(|(idx, event)| (idx, event.clone())),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
-        DelayedTriggerCondition::WheneverEvent { trigger } => {
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
             let source_context = source_context?;
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events

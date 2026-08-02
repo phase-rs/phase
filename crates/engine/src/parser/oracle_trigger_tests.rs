@@ -2686,7 +2686,7 @@ fn hunters_insight_class_builds_whenever_event_delayed_trigger() {
     else {
         panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
     };
-    let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::DamageDone);
@@ -8093,7 +8093,7 @@ fn trigger_dalkovan_encampment_delayed_you_attack() {
     let Effect::CreateDelayedTrigger { condition, .. } = delayed_effect else {
         panic!("expected CreateDelayedTrigger, got {delayed_effect:?}");
     };
-    let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::YouAttack);
@@ -10815,7 +10815,7 @@ fn high_tide_delayed_trigger_taps_for_mana_mode_and_filter() {
     assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
 
     let Effect::CreateDelayedTrigger {
-        condition: DelayedTriggerCondition::WheneverEvent { trigger },
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
         effect,
         ..
     } = &*ability.effect
@@ -10921,7 +10921,7 @@ fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
         .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
         .expect("Bubbling Muck must parse a CreateDelayedTrigger");
     let Effect::CreateDelayedTrigger {
-        condition: DelayedTriggerCondition::WheneverEvent { trigger },
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
         effect,
         ..
     } = &*ability.effect

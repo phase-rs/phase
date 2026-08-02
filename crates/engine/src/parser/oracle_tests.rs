@@ -10539,7 +10539,7 @@ fn spell_temporal_whenever_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
@@ -10952,7 +10952,7 @@ fn spell_temporal_phase_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
@@ -10977,7 +10977,7 @@ fn spell_temporal_enters_line_builds_delayed_trigger() {
     else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
