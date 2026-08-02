@@ -535,6 +535,7 @@ mod issue_4663_chosen_x_ptcomparison_targets;
 mod issue_4752_blood_artist_each_player_sacrifice;
 mod issue_4759_chandras_ignition_single_target;
 mod issue_4772_too_evil_to_stay_dead;
+mod issue_4779_do_same_for_type;
 mod issue_4786_wrenn_realmbreaker;
 mod issue_4792_isochron_scepter;
 mod issue_4824_light_paws_aura_attach;

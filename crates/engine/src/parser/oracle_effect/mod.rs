@@ -26049,6 +26049,30 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
     }
 }
 
+/// Replace the card-type predicate in a direct card selector while preserving
+/// a tracked-set provenance wrapper when it is the direct selector.
+///
+/// CR 608.2c: a "do the same for <type>" continuation repeats the antecedent
+/// instruction with a different card-type restriction. `TrackedSetFiltered`
+/// records a prior action's selected/revealed set, so only its nested predicate
+/// changes; replacing the wrapper would discard the "this way" provenance.
+fn replace_type_filters(filter: &mut TargetFilter, replacement: &[TypeFilter]) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            typed.type_filters = replacement.to_vec();
+            true
+        }
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            let TargetFilter::Typed(typed) = filter.as_mut() else {
+                return false;
+            };
+            typed.type_filters = replacement.to_vec();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// CR 608.2 + CR 107.2: Rewrite target-scoped `QuantityRef` variants to their
 /// controller-scoped equivalents across an ability tree. Under
 /// `player_scope: All` / `Opponent` / etc., the resolver rebinds
@@ -29543,11 +29567,9 @@ pub(crate) fn parse_effect_chain_ir(
             // or engine variant. Placed after the scoped/before the targeted
             // forms; the three subjects are disjoint ("each …" / "for <type>" /
             // "target opponent …").
-            if let Some(new_filter) = sequence::try_parse_do_the_same_for_type(normalized_text) {
-                let new_type_filters = match new_filter {
-                    TargetFilter::Typed(t) => t.type_filters,
-                    _ => Vec::new(),
-                };
+            if let Some(new_type_filters) =
+                sequence::try_parse_do_the_same_for_type(normalized_text)
+            {
                 let mut cloned = prev_effect;
                 // Retype every `Typed` target the antecedent exposes (Estrid's
                 // mass `ChangeZoneAll`). Only emit the clone when a substitution
@@ -29556,10 +29578,7 @@ pub(crate) fn parse_effect_chain_ir(
                 // verbatim — fall through to a documented strict-failure instead.
                 let mut swapped = false;
                 each_target_filter_mut(&mut cloned, &mut |tf| {
-                    if let TargetFilter::Typed(existing) = tf {
-                        existing.type_filters = new_type_filters.clone();
-                        swapped = true;
-                    }
+                    swapped |= replace_type_filters(tf, &new_type_filters);
                 });
                 if swapped {
                     builder

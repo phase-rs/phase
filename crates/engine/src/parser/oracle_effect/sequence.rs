@@ -1749,10 +1749,12 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
         // and Merfolk" (type list) — fail the recognizer and stay glued exactly
         // as before, keeping this change's blast radius to the handled class.
-        // The first-sentence slice bounds the recognizer's whole-consumption
-        // check to this clause (later sentences are chunked separately).
-        let do_the_same_head = trimmed.split('.').next().unwrap_or(trimmed);
-        if try_parse_do_the_same_for_type(do_the_same_head).is_some() {
+        // The complete recognizer covers a terminal continuation. A following
+        // comma-"then" clause (Glimpse of Tomorrow) is segmented by the same
+        // grammar, so we do not weaken the pure-type whole-consumption rule.
+        if try_parse_do_the_same_for_type(trimmed).is_some()
+            || starts_do_the_same_for_type_before_then(after_then)
+        {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
         if starts_clause_text_or_conjugated(after_then)
@@ -7958,7 +7960,7 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 /// effect-replication directive that repeats the immediately-preceding sibling
 /// action for a DIFFERENT card type (Estrid, the Masked: "Return all non-Aura
 /// enchantment cards from your graveyard to the battlefield, then do the same
-/// for Aura cards."). Returns the new type filter; the chunk loop clones the
+/// for Aura cards."). Returns the replacement type filters; the chunk loop clones the
 /// antecedent effect and swaps its `type_filters` for these — the same
 /// antecedent-clone mechanic `try_parse_scoped_does_the_same` uses for the
 /// player-scoped fanout, so no new disposition, effect variant, or resolver is
@@ -7978,7 +7980,7 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
 /// (modulo a trailing period) by a non-empty typed filter, so unrelated
 /// "do/repeat …" tails fall through to normal dispatch rather than being
 /// swallowed.
-pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<TargetFilter> {
+pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilter>> {
     let lower = text.to_lowercase();
     let ((), rest) = nom_on_lower(text, &lower, |i| {
         let (i, _) = opt(tag("then ")).parse(i)?;
@@ -7997,11 +7999,35 @@ pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<TargetFilter>
     // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
     // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
     // Merfolk") is already rejected by the non-empty `remainder` guard above.
-    match &filter {
+    pure_type_substitution(filter)
+}
+
+/// Recognize a pure type-substitution segment when it is immediately followed
+/// by another comma-"then" clause in the same sentence. The separator is parsed
+/// as grammar, rather than manually slicing the sentence, so the terminal
+/// recognizer remains strict about its complete input.
+fn starts_do_the_same_for_type_before_then(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let Ok((_, type_text)) = preceded(
+        tag::<_, _, OracleError<'_>>("do the same for "),
+        terminated(take_until(", then "), tag(", then ")),
+    )
+    .parse(lower.as_str()) else {
+        return false;
+    };
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    remainder.trim().is_empty() && pure_type_substitution(filter).is_some()
+}
+
+/// The modeled continuation replaces exactly one card-type predicate. Richer
+/// target predicates remain strict failures until their replacement grammar is
+/// modeled end-to-end.
+fn pure_type_substitution(filter: TargetFilter) -> Option<Vec<TypeFilter>> {
+    match filter {
         TargetFilter::Typed(t)
             if !t.type_filters.is_empty() && t.properties.is_empty() && t.controller.is_none() =>
         {
-            Some(filter)
+            Some(t.type_filters)
         }
         _ => None,
     }
@@ -8297,23 +8323,14 @@ mod tests {
     // chunk loop clones the antecedent effect and swaps just its `type_filters`.
     #[test]
     fn do_the_same_for_type_accepts_clean_type_substitution() {
-        match try_parse_do_the_same_for_type("then do the same for Aura cards.") {
-            Some(TargetFilter::Typed(t)) => {
-                assert!(
-                    t.type_filters
-                        .iter()
-                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Aura")),
-                    "expected an Aura type substitution, got {:?}",
-                    t.type_filters
-                );
-                assert!(
-                    t.properties.is_empty(),
-                    "must carry no FilterProp predicate"
-                );
-                assert!(t.controller.is_none(), "must carry no controller scope");
-            }
-            other => panic!("expected a clean Aura type substitution, got {other:?}"),
-        }
+        let type_filters = try_parse_do_the_same_for_type("then do the same for Aura cards.")
+            .expect("expected a clean Aura type substitution");
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Aura")),
+            "expected an Aura type substitution, got {type_filters:?}"
+        );
         assert!(
             try_parse_do_the_same_for_type("do the same for creature cards").is_some(),
             "a bare creature-card substitution is also clean"
@@ -8340,6 +8357,22 @@ mod tests {
                 "must reject the unmodeled continuation {phrasing:?}"
             );
         }
+    }
+
+    #[test]
+    fn do_the_same_for_type_segment_before_following_then_is_strict() {
+        assert!(
+            starts_do_the_same_for_type_before_then(
+                "do the same for Aura cards, then put the rest on the bottom of your library"
+            ),
+            "a pure Aura continuation may be followed by another then-clause"
+        );
+        assert!(
+            !starts_do_the_same_for_type_before_then(
+                "do the same for creature cards with mana value 2 and 3, then shuffle"
+            ),
+            "richer continuation must not gain support merely because another clause follows"
+        );
     }
 
     // Guard: the recognizer must NOT swallow unrelated "same" phrases or a
