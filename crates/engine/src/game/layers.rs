@@ -2131,14 +2131,18 @@ pub fn evaluate_layers(state: &mut GameState) {
             &mut started_effect_sets,
         );
     }
-    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
-        // Sticker ability text is appended after the top-of-pass reset/copy
-        // application, so a sticker can turn a non-generator into a continuous
-        // static source mid-pass. Refresh the generator index before the main
-        // gather so those sticker-granted statics participate in this pass
-        // without broadening the non-sticker top-of-pass rebuild contract.
-        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+    let stickers_applied =
+        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids);
+    // Narrowed by payload rather than by "did layer 1a run":
+    // `CopyValues` carries the whole copiable static set in the modification, so
+    // `copy_grants_continuous_static` answers exactly, with no plumbing and no
+    // battlefield rescan. A clone of a vanilla creature — a permanent-duration
+    // TCE that outlives the clone — therefore costs no second rebuild per pass,
+    // which is the whole point of an index whose stated job is keeping per-flush
+    // work off `|battlefield|`.
+    let copy_added_generator = ordered_copy
+        .iter()
+        .any(|effect| copy_grants_continuous_static(&effect.modification));
 
     // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
     // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
@@ -2150,6 +2154,31 @@ pub fn evaluate_layers(state: &mut GameState) {
         if let Some(obj) = state.objects.get_mut(&id) {
             seed_live_characteristics_from_base(obj);
         }
+    }
+
+    // Both producers say the same thing: layer 1 can turn a non-generator into a
+    // continuous static source mid-pass, and the top-of-pass index was built from
+    // the just-reset BASE definitions, which predate that. Refresh the generator
+    // index before the main gather so those statics participate in this pass,
+    // without broadening the top-of-pass rebuild contract for boards that have
+    // neither.
+    //
+    // CR 613.2a + CR 613.2c: a copy effect can hand a permanent a static ability
+    // its copiable base does not carry (an embalm token copying a Painter's
+    // Servant). After all of layer 1 has been applied the object's characteristics
+    // ARE its copiable values, so a static granted there must generate effects for
+    // layers 2-7 of THIS pass, not the next one.
+    //
+    // Sticker ability text is likewise appended after the top-of-pass reset/copy
+    // application.
+    //
+    // Placed below the 1b face-down reseed so the rebuild observes the whole of
+    // layer 1, which is the invariant CR 613.2c actually states. 1b only ever
+    // clears statics (`apply_face_down_creature_characteristics` clears live and
+    // base alike), so ordering the two the other way is inert today — but only via
+    // that non-local fact, not via the rule cited here.
+    if copy_added_generator || stickers_applied {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
     }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
@@ -3810,6 +3839,51 @@ fn effect_is_restricted_to_incremental_recipients(
     }
 }
 
+/// CR 613.2a + CR 613.2c: does applying this layer-1 copy modification hand its
+/// recipient a continuous static ability — i.e. can it turn a non-generator into a
+/// `StaticSourceIndex` generator mid-pass?
+///
+/// Mirrors the index's own classification predicate
+/// (`static_source_index::object_sources_continuous_effect`): a generator is an
+/// object carrying a `StaticMode::Continuous` def. `CopyValues` carries its whole
+/// copiable static set in the modification payload and `apply_copiable_values`
+/// assigns that set wholesale, so the answer is exact — no id plumbing out of the
+/// apply path, and no battlefield rescan. The other copy-layer modifications
+/// either provably write no static definitions or read the live source instead of
+/// a payload; those are answered conservatively, over-including in the direction
+/// the index's own doctrine calls safe (over-include, never under-include).
+fn copy_grants_continuous_static(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::CopyValues { values, .. } => values
+            .static_definitions
+            .iter()
+            .any(|def| def.mode == StaticMode::Continuous),
+        // CR 707.9b: name-only override; never writes `static_definitions`.
+        ContinuousModification::SetName { .. } => false,
+        // CR 707.2c: parse-time marker whose apply arm is an explicit no-op. The
+        // real copy is the latched `CopyValues` TCE, which sits in this same
+        // bucket and is classified on its own payload.
+        ContinuousModification::CopyChosen => false,
+        // CR 707.9a: trigger-set retention only.
+        ContinuousModification::RetainPrintedTriggerFromSource { .. } => false,
+        // CR 707.9a: these read the live source rather than a payload, so the
+        // retained set is not inspectable from the modification.
+        ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource => true,
+        // Not a copy-layer modification. Its caller filters to `Layer::Copy`
+        // first, so this is unreachable by construction; it answers in the safe
+        // direction rather than silently claiming "adds no generator".
+        other => {
+            debug_assert_eq!(
+                other.layer(),
+                Layer::Copy,
+                "copy_grants_continuous_static is defined only for layer-1 copy modifications"
+            );
+            true
+        }
+    }
+}
+
 /// Incremental layer re-derivation for a set of freshly-entered objects.
 ///
 /// Mirrors the PER-OBJECT subset of `evaluate_layers` for `entered_ids` only:
@@ -3857,6 +3931,17 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
     let stickers_changed =
         crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
+    // the full pass. A copy applied here could only add a generator by landing on
+    // a recipient, and it cannot: `recipient_ids` is `entered_ids` alone, because
+    // an attached entrant — the one way a pre-existing host joins the set — is
+    // rejected outright by `entered_object_blocks_incremental` guard (3); and a
+    // copy TCE naming a fresh entrant can only have been installed by that same
+    // entry, which called `layers_dirty.mark_full()` (`game_state.rs`,
+    // `apply_resolved_continuous_effect`) and so made this flush a full pass. A
+    // rebuild here would guard nothing reachable, and the version of this guard
+    // that fans a granted static over `recipient_ids` alone would not even agree
+    // with the full pass, which derives it board-wide.
     let active_effects = if stickers_changed {
         // Incremental resets clear the entered/attached recipients back to base,
         // so retained stickers must be re-applied before the restricted main
