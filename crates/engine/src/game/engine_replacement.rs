@@ -1905,14 +1905,33 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    // CR 608.3c + CR 614.12a: a permanent spell that paused on its
+    // enter-as-copy choice keeps its spell-resolution frame until this answer
+    // has applied the copy. Complete the spell-specific epilogue before entry
+    // events replay, so those triggers see the same cast provenance as an
+    // unpaused permanent resolution. The post-replacement dispatch that
+    // surfaced this choice is its direct child, so retire that exact dispatch
+    // first; only then does the spell-resolution frame own the stack top.
+    state.finish_active_paused_post_replacement_dispatch();
+    if state
+        .active_spell_resolution()
+        .is_some_and(|ctx| ctx.object_id == source_id)
+    {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("matching spell-resolution frame was checked above");
+        apply_pending_spell_resolution(state, &ctx, events);
+    }
     if let Some(waiting_for) =
         finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
     {
         return Ok(waiting_for);
     }
-    Ok(WaitingFor::Priority {
+    state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
-    })
+    };
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 fn finish_copy_target_choice_entry(
@@ -1985,6 +2004,15 @@ fn finish_copy_target_choice_entry(
                 source_id,
                 &events[delivery_start..],
             );
+            // CR 603.3b + CR 608.2c: the entry has completed before its ETB
+            // trigger's target-selection prompt is exposed. Retire the parent
+            // carrier now; otherwise the selected trigger would later try to
+            // resolve while this completed spell or ability still owns it.
+            // The paused post-replacement drain is part of that parent
+            // completion. Retire its exact top dispatch before asking the
+            // carrier predicate whether the source resolution can settle.
+            state.finish_active_paused_post_replacement_dispatch();
+            super::engine::settle_resolving_stack_entry_before_trigger_selection(state);
             return Ok(Some(waiting_for));
         }
         state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
@@ -2604,7 +2632,7 @@ pub(crate) fn apply_pending_spell_resolution(
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
         });
         if has_warp {
-            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller);
+            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller, events);
         }
     }
 

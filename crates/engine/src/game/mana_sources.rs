@@ -51,6 +51,31 @@ pub(crate) struct LiveManaOutputUnit {
     pub restrictions: Vec<ManaRestriction>,
 }
 
+/// The reducer-owned Priority entry point for a selected mana source.
+///
+/// This is intentionally a route rather than a legality result. The normal
+/// reducer remains responsible for validating the frozen selection before it
+/// activates the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PriorityManaRoute {
+    LandTap,
+    NonlandActivation,
+}
+
+/// Classifies a source using its current characteristics, matching the
+/// reducer's Priority mana-action partition.
+pub(crate) fn priority_mana_route(
+    state: &GameState,
+    selection: &ManaSourceSelection,
+) -> Option<PriorityManaRoute> {
+    let object = state.objects.get(&selection.source.object_id)?;
+    if object.card_types.core_types.contains(&CoreType::Land) {
+        Some(PriorityManaRoute::LandTap)
+    } else {
+        Some(PriorityManaRoute::NonlandActivation)
+    }
+}
+
 impl ManaSourcePenalty {
     /// High-order auto-tap bucket. **Lower = preferred.** The sort caller
     /// composes this with `card_tier` (land vs creature-animated vs dork vs
@@ -5179,6 +5204,57 @@ mod tests {
             player: PlayerId(0),
         };
         forest
+    }
+
+    #[test]
+    fn priority_mana_route_uses_current_source_characteristics() {
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let artifact_object = state.objects.get_mut(&artifact).unwrap();
+        artifact_object
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        Arc::make_mut(&mut artifact_object.abilities).push(verge_ability(ManaColor::Green));
+
+        let selections = activatable_mana_source_selections(&state, PlayerId(0));
+        let forest_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == forest)
+            .expect("Forest fallback supplies a mana selection");
+        let artifact_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == artifact)
+            .expect("mana artifact supplies a mana selection");
+
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::LandTap)
+        );
+        assert_eq!(
+            priority_mana_route(&state, artifact_selection),
+            Some(PriorityManaRoute::NonlandActivation)
+        );
+
+        state
+            .objects
+            .get_mut(&forest)
+            .expect("Forest remains a live object")
+            .card_types
+            .core_types
+            .clear();
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::NonlandActivation),
+            "the route follows current characteristics; the clone reducer later rejects a stale selection"
+        );
     }
 
     #[test]
