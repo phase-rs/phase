@@ -4117,7 +4117,7 @@ pub(super) fn handle_resolution_choice(
                 return Ok(action_result_outcome(events, state.waiting_for.clone()));
             }
 
-            turns::advance_phase(state, events);
+            let _ = turns::advance_phase_once(state, events);
             return Ok(ResolutionChoiceOutcome::WaitingFor(turns::auto_advance(
                 state, events,
             )));

@@ -306,7 +306,7 @@ pub(super) fn advance_after_empty_attackers(
     state.combat = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    advance_phase(state, events);
+    let _ = advance_phase_once(state, events);
     auto_advance(state, events)
 }
 
