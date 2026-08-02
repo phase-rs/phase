@@ -21,7 +21,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, DamageKindFilter, DelayedTriggerCondition, Effect,
-    QuantityExpr, TargetFilter, TriggerDefinition, TurnGate, WheneverEventExpiry,
+    QuantityExpr, TargetFilter, TargetRef, TriggerDefinition, TurnGate, WheneverEventExpiry,
 };
 use engine::types::game_state::GameState;
 use engine::types::phase::Phase;
@@ -298,5 +298,171 @@ fn until_next_turn_rider_survives_intervening_turn_then_purges() {
         runner.state().delayed_triggers.is_empty(),
         "CR 603.7b / CR 502.4: the rider is purged at the controller's next turn's \
          untap step (does not leak into later turns)"
+    );
+}
+
+fn hand_len(runner: &GameRunner, player: engine::types::player::PlayerId) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.hand.len())
+        .unwrap_or(0)
+}
+
+/// Install the Kang rider bound to a REAL chosen creature via `ParentTarget`
+/// ("any of THOSE creatures" — the goaded creatures). `resolved.targets` carries
+/// the chosen object so `bind_contextual_filter_to_condition` resolves the
+/// `ParentTarget` source to it, mirroring production resolution of Kang's tap/goad
+/// clause. Installed through `resolve_ability_chain`, the same path production uses.
+fn install_kang_parent_target_rider(
+    state: &mut GameState,
+    source: engine::types::identifiers::ObjectId,
+    chosen: engine::types::identifiers::ObjectId,
+) {
+    let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+    trigger.damage_kind = DamageKindFilter::CombatOnly;
+    trigger.valid_source = Some(TargetFilter::ParentTarget);
+    trigger.valid_target = Some(TargetFilter::Player);
+    let inner = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: WheneverEventExpiry::UntilControllersNextTurn {
+                    after: TurnGate::AfterCreationTurn,
+                },
+            },
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+    );
+    let mut resolved = build_resolved_from_def(&def, source, P0);
+    // The chosen goaded creature: `ParentTarget` binds to it at install.
+    resolved.targets = vec![TargetRef::Object(chosen)];
+    let mut events = Vec::new();
+    resolve_ability_chain(state, &resolved, &mut events, 0)
+        .expect("Kang ParentTarget rider installs via resolve_ability_chain");
+}
+
+/// Advance (auto-passing/declining everything) until `player` is the active player
+/// AND the engine is waiting for them to declare attackers — WITHOUT auto-declining
+/// that declaration, so the caller can drive a real attack.
+fn advance_to_declare_attackers(runner: &mut GameRunner, player: engine::types::player::PlayerId) {
+    use engine::types::game_state::WaitingFor;
+    for _ in 0..400 {
+        if runner.state().active_player == player
+            && matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareAttackers { .. }
+            )
+        {
+            return;
+        }
+        if !pump(runner) {
+            break;
+        }
+    }
+    panic!(
+        "never reached {player:?}'s declare-attackers (now turn {}, active {:?}, phase {:?}, wf {:?})",
+        runner.state().turn_number,
+        runner.state().active_player,
+        runner.state().phase,
+        runner.state().waiting_for,
+    );
+}
+
+/// Gap C FIRING (MED review follow-up): the load-bearing behavioral claim is that
+/// an "until your next turn" rider actually FIRES on the opponent's turn, bound to
+/// the goaded creature via `ParentTarget`. This drives the full production pipeline:
+/// install a `ParentTarget` rider on a real chosen creature, run that creature
+/// through unblocked combat against the controller on the intervening turn, and
+/// assert the controller DREW — then cross into the controller's next turn and
+/// prove the rider expired. A revert of the `UntilControllersNextTurn` expiry
+/// purges the rider at the creating turn's cleanup, so it never fires here (draw
+/// assertion fails); a revert of the untap purge leaks it (expiry assertion fails).
+#[test]
+fn until_next_turn_parent_target_rider_fires_on_intervening_turn_then_expires() {
+    use super::rules::AttackTarget;
+    use engine::types::GameAction;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Kang Dynasty", "Enchantment.")
+        .id();
+    // P1's creature is the goaded "any of those creatures" — the rider's
+    // ParentTarget source. It attacks P0 (its controller) on P1's turn.
+    let goaded = scenario.add_creature(P1, "Goaded Bear", 2, 2).id();
+    for i in 0..12 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Lib {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Lib {i}"));
+    }
+    let mut runner = scenario.build();
+
+    install_kang_parent_target_rider(runner.state_mut(), source, goaded);
+    assert_eq!(runner.state().delayed_triggers.len(), 1, "rider installed");
+
+    // Advance into P1's (intervening) turn, stopping at P1's declare-attackers.
+    advance_to_declare_attackers(&mut runner, P1);
+    let p0_hand_before = hand_len(&runner, P0);
+    let p0_life_before = runner.life(P0);
+
+    // P1's goaded creature attacks P0, unblocked (P0 controls no creatures).
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(goaded, AttackTarget::Player(P0))],
+            bands: vec![],
+        })
+        .expect("P1 declares the goaded attacker against P0");
+
+    // Drive blockers/combat-damage/the fired rider through the production pump
+    // until the controller draws (the rider resolved) or the flow stalls.
+    let mut drew = false;
+    for _ in 0..200 {
+        if hand_len(&runner, P0) > p0_hand_before {
+            drew = true;
+            break;
+        }
+        if !pump(&mut runner) {
+            break;
+        }
+    }
+
+    assert!(
+        drew,
+        "the ParentTarget rider FIRED on the opponent's turn: the goaded creature \
+         dealt combat damage to a player, so the controller drew a card"
+    );
+    assert_eq!(
+        hand_len(&runner, P0),
+        p0_hand_before + 1,
+        "exactly one draw from the single combat-damage occurrence"
+    );
+    assert_eq!(
+        runner.life(P0),
+        p0_life_before - 2,
+        "CR 120.2a: the goaded 2/2 dealt its combat damage to P0 (attack resolved)"
+    );
+
+    // Cross into the controller's next turn: the multi-fire rider is purged at untap.
+    let opponent_turn = runner.state().turn_number;
+    advance_past_turn(&mut runner, opponent_turn);
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "advanced to the controller's next turn"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "CR 603.7b / CR 502.4: the rider is purged at the controller's next turn's untap"
     );
 }
