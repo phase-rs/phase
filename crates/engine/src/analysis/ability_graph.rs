@@ -892,6 +892,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
+        // CR 122.1 + CR 603.2c: the reproduced counter kind is event-derived (not
+        // statically known), so it projects onto no fixed resource axis — like
+        // `MoveCounters`, it is Unmodeled.
+        | Effect::ReproduceEventCounters { .. }
         | Effect::Animate { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::RegisterBending { .. }

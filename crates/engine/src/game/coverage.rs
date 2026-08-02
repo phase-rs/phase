@@ -2590,6 +2590,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count,
+        } => {
+            d.push(("reproduce counters".into(), format!("{per_kind_count:?}")));
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::RemoveCounter {
             counter_type,
             count,

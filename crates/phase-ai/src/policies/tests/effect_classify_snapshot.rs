@@ -17,7 +17,9 @@
 //!    `SetTapState`), and a spread of formerly-wildcarded variants now proven
 //!    to return `Contextual`.
 
-use engine::types::ability::{Effect, EffectScope, QuantityExpr, TapStateChange, TargetFilter};
+use engine::types::ability::{
+    Effect, EffectScope, EventCounterReproductionCount, QuantityExpr, TapStateChange, TargetFilter,
+};
 use engine::types::counter::CounterType;
 use engine::types::zones::{EtbTapState, Zone};
 
@@ -63,6 +65,15 @@ fn beneficial_classifications_unchanged() {
             counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
+        }),
+        EffectPolarity::Beneficial
+    );
+    // CR 122.1 + CR 603.2c: reproducing the triggering event's counters onto a
+    // controlled permanent is a self-buff line (Captain Marvel, Apex Avenger).
+    assert_eq!(
+        effect_polarity(&Effect::ReproduceEventCounters {
+            target: TargetFilter::SelfRef,
+            per_kind_count: EventCounterReproductionCount::SameNumber,
         }),
         EffectPolarity::Beneficial
     );

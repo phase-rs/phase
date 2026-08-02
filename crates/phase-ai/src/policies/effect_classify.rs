@@ -76,6 +76,12 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
             counter_sign_polarity(counter_type)
         }
+        // CR 122.1: reproduced counters land on a controlled permanent (self-buff
+        // line); the kind is event-derived at resolution so there is no static
+        // `counter_type` to sign — classify by design intent (the dominant real
+        // kind is +1/+1). Revisit to Contextual if a "-1/-1 onto opponents"
+        // reproduction axis is added.
+        Effect::ReproduceEventCounters { .. } => EffectPolarity::Beneficial,
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire

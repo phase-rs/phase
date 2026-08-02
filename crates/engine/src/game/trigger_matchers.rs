@@ -2146,9 +2146,17 @@ pub(super) fn match_counter_added(
         object_id,
         counter_type,
         count,
+        actor,
     } = event
     {
         if !valid_card_matches(trigger, state, *object_id, source_context) {
+            return false;
+        }
+        // CR 603.2c: "whenever you put …" / "whenever an opponent puts …" gates
+        // on the player who placed the counters. No-op when `valid_target` is
+        // `None` (the passive "counters are put on ~" form, which every existing
+        // counter-added card uses).
+        if !valid_player_matches(trigger, state, *actor, source_context) {
             return false;
         }
         // CR 714.2a: Apply counter filter (type + optional threshold crossing).
@@ -11614,6 +11622,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         };
 
         // Trigger for chapter 1 (threshold=1) should fire: 0 < 1 <= 1
@@ -11682,6 +11691,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 3,
+            actor: PlayerId(0),
         };
         assert!(
             match_counter_added(
@@ -11729,6 +11739,7 @@ mod tests {
             object_id: normal_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 3,
+            actor: PlayerId(0),
         };
         assert!(
             match_counter_added(
@@ -11754,6 +11765,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Plus1Plus1,
             count: 2,
+            actor: PlayerId(0),
         };
         let p1p1_trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
             .valid_card(TargetFilter::SelfRef)
@@ -11792,6 +11804,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 2, // Added 2 at once
+            actor: PlayerId(0),
         };
 
         // Both chapter 1 (threshold=1) and chapter 2 (threshold=2) should fire
@@ -11862,6 +11875,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Plus1Plus1,
             count: 1,
+            actor: PlayerId(0),
         };
 
         let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
@@ -11902,6 +11916,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         };
 
         // Filter with no threshold fires on any addition of the matching type

@@ -464,6 +464,9 @@ fn redundancy_delta(
         | Effect::ChooseCard { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        // CR 122.1 + CR 603.2c: reproduction has no static zero-count redundancy
+        // check (the count is event-derived).
+        | Effect::ReproduceEventCounters { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }

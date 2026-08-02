@@ -16129,6 +16129,27 @@ fn try_parse_verb_and_target<'a>(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && scan_contains_phrase(lower, "counter")
     {
+        // CR 122.1 + CR 603.2c: reproduce the triggering event's counters ("put
+        // the same number and kind of counters" / "put one of each of those
+        // kinds of counters"). Detected before the generic put-counter path so
+        // the reproduction phrasing is not mis-read as a literal counter name.
+        if let Some((effect @ Effect::ReproduceEventCounters { .. }, rem, _multi_target)) =
+            counter::try_parse_reproduce_event_counters(lower, text, ctx)
+        {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(match effect {
+                    Effect::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    } => ZoneCounterImperativeAst::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    },
+                    _ => unreachable!("guarded by the match arm above"),
+                })),
+                rem,
+            ));
+        }
         if let Some((
             Effect::PutCounter {
                 counter_type,

@@ -1672,6 +1672,9 @@ pub(crate) fn extract_player_from_event(
         // TriggeringPlayer` fell back to the ability controller, hitting the
         // wrong player (Suture Priest #560, Bloodchief Ascension #546).
         GameEvent::ZoneChanged { record, .. } => Some(record.controller),
+        // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
+        // counter-placement trigger is the player who put the counters.
+        GameEvent::CounterAdded { actor, .. } => Some(*actor),
         _ => None,
     }
 }

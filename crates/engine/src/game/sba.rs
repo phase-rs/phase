@@ -4390,6 +4390,7 @@ mod tests {
             object_id: id,
             counter_type: CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         }];
 
         check_state_based_actions(&mut state, &mut events);

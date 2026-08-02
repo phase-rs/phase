@@ -1248,6 +1248,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
+        // CR 122.1: reproduces counters — carries no conjure card name.
+        | Effect::ReproduceEventCounters { .. }
         | Effect::Animate { .. }
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }

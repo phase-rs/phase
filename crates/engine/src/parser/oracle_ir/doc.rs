@@ -1507,6 +1507,8 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::DoublePT { .. } => {}
         Effect::DoublePTAll { .. } => {}
         Effect::MoveCounters { .. } => {}
+        // CR 122.1: leaf counter effect — no printed-slot self-reference.
+        Effect::ReproduceEventCounters { .. } => {}
         Effect::Animate { .. } => {}
         Effect::RegisterBending { .. } => {}
         Effect::Cleanup { .. } => {}

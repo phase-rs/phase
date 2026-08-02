@@ -805,6 +805,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PutCounter
         | EffectKind::PutCounterAll
         | EffectKind::MultiplyCounter
+        | EffectKind::ReproduceEventCounters
         | EffectKind::DoublePT
         | EffectKind::DoublePTAll
         | EffectKind::MoveCounters

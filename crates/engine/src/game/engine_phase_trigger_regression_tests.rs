@@ -1834,6 +1834,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
         ability: Box::new(ability),
         trigger_event: None,
+        trigger_events: Vec::new(),
         trigger_match_count: None,
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -1884,6 +1885,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
         ability: Box::new(ability),
         trigger_event: None,
+        trigger_events: Vec::new(),
         trigger_match_count: None,
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {

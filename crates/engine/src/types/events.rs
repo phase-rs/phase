@@ -1036,6 +1036,11 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        // CR 122.1 + CR 603.2c: the player who put the counters, so "whenever
+        // you/an opponent put one or more counters" triggers can gate on the
+        // actor. Defaults to `PlayerId(0)` on pre-field serialized fixtures.
+        #[serde(default)]
+        actor: PlayerId,
     },
     /// Digital-only Alchemy (no CR entry): a card's intensity increased by
     /// `amount`. Emitted per affected card so consumers (triggers that watch for

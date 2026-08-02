@@ -9146,6 +9146,93 @@ fn trigger_intervening_if_discarded_card_has_madness() {
     );
 }
 
+/// CR 603.4 + CR 205.3: "if it's [not] a <subtype>" derives its core type from
+/// the subtype, NOT a hardcoded creature lock. Registered on the GENERAL
+/// intervening-if path, the recognizer intercepts non-creature subjects too, so a
+/// non-creature subtype ("Equipment" → artifact, "Aura" → enchantment) must build
+/// a filter with the MATCHING core type. A creature lock would make the inner
+/// filter unsatisfiable (an Equipment is never a creature) and a negated clause
+/// `Not(<never-true>)` would invert to always-true — firing FOR the very subtype
+/// it was meant to exclude. Both the negated and plain forms are checked.
+#[test]
+fn trigger_intervening_if_noncreature_subtype_derives_core_type() {
+    // Negated artifact subtype: filter must carry Artifact (not Creature) so the
+    // Not-gate is satisfiable.
+    let (_, condition) = extract_if_condition("if it's not an Equipment, draw a card");
+    let Some(TriggerCondition::Not { condition }) = condition else {
+        panic!("expected negated intervening-if, got {condition:?}");
+    };
+    let TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    } = condition.as_ref()
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "Equipment must derive the Artifact core type, not a creature lock: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.type_filters.contains(&TypeFilter::Creature),
+        "Equipment filter must not be locked to Creature: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Equipment".to_string())),
+        "Equipment subtype must be preserved: {:?}",
+        tf.type_filters
+    );
+
+    // Plain (non-negated) enchantment subtype: same core-type derivation.
+    let (_, condition) = extract_if_condition("if it's an Aura, draw a card");
+    let Some(TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    }) = condition
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Enchantment),
+        "Aura must derive the Enchantment core type: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.type_filters.contains(&TypeFilter::Creature),
+        "Aura filter must not be locked to Creature: {:?}",
+        tf.type_filters
+    );
+}
+
+/// CR 603.4 + CR 205.3: A genuine creature subtype ("Kree", Captain Marvel) still
+/// derives the Creature core type — the core-type derivation must not regress the
+/// creature-recipient case that motivated the recognizer.
+#[test]
+fn trigger_intervening_if_creature_subtype_still_creature() {
+    let (_, condition) = extract_if_condition("if it's not a Kree, draw a card");
+    let Some(TriggerCondition::Not { condition }) = condition else {
+        panic!("expected negated intervening-if, got {condition:?}");
+    };
+    let TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    } = condition.as_ref()
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Kree must derive the Creature core type: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Kree".to_string())),
+        "Kree subtype must be preserved: {:?}",
+        tf.type_filters
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players

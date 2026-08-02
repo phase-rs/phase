@@ -741,6 +741,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            // CR 122.1: the log line names the counters and recipient; the placing
+            // player is implied by the entry's stack/ability context, consistent
+            // with every other counter-placement log line (actor deliberately
+            // not surfaced).
+            ..
         } => vec![
             num(*count as i32),
             text(" "),

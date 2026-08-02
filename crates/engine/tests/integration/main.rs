@@ -62,6 +62,7 @@ mod bring_to_light_free_cast_2880;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
 mod captain_america_throw;
+mod captain_marvel_apex_avenger;
 mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;

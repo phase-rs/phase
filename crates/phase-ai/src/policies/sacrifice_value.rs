@@ -673,6 +673,7 @@ mod tests {
         state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
             ability: Box::new(sacrifice),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {

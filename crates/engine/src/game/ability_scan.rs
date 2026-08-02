@@ -991,6 +991,17 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        // CR 122.1 + CR 603.2c: the per-kind magnitude is event-derived (not a
+        // `QuantityExpr`), so only the reproduction target is scanned; mirrors
+        // `MultiplyCounter`.
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count: _,
+        } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
         Effect::Animate { .. } => Axes::CONSERVATIVE,
         Effect::ReturnAsAura { .. } => Axes::CONSERVATIVE,
         Effect::RegisterBending { kind: _ } => Axes::NONE,
@@ -5359,6 +5370,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::HideawayConceal { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::DoublePT { .. }
         | Effect::MoveCounters { .. }
         | Effect::Animate { .. }
@@ -5761,6 +5773,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::HideawayConceal { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::DoublePT { .. }
         | Effect::MoveCounters { .. }
         | Effect::Animate { .. }
@@ -6040,6 +6053,9 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
+        // CR 122.1 + CR 603.2c: may prompt for Aragorn's "up to one target"
+        // and may enter the CR 614 replacement pipeline — classify MayPrompt.
+        | Effect::ReproduceEventCounters { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::DoublePT { .. }
@@ -6313,6 +6329,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::DoublePT { .. }

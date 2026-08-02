@@ -65,6 +65,13 @@ pub struct OptionalEffectFrame {
     pub ability: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
+    /// CR 603.2c + CR 608.2: the plural batched-trigger event list mirroring
+    /// `GameState::current_trigger_events`, so an effect that reads the whole
+    /// event batch (e.g. `Effect::ReproduceEventCounters`) still sees every
+    /// occurrence when the "may" decision resumes resolution — the singular
+    /// `trigger_event` alone drops the batch's other occurrences.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_events: Vec<GameEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_match_count: Option<u32>,
 }
@@ -3114,6 +3121,9 @@ impl LegacyOptionalEffectWire {
         Ok(Some(OptionalEffectFrame {
             ability,
             trigger_event: self.pending_optional_trigger_event,
+            // Legacy wire predates the plural batch; empty is the correct default
+            // (no in-flight reproduction on a legacy-serialized optional frame).
+            trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
         }))
     }
@@ -4185,6 +4195,7 @@ mod tests {
         optional_effect.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
             ability: Box::new(resolved_draw(6)),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         }));
         optional_effect
@@ -4603,6 +4614,7 @@ mod tests {
             OptionalEffectFrame {
                 ability: Box::new(resolved_draw(102)),
                 trigger_event: None,
+                trigger_events: Vec::new(),
                 trigger_match_count: None,
             },
         );
@@ -5429,6 +5441,7 @@ mod tests {
         buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
             ability: Box::new(resolved_draw(151)),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));
