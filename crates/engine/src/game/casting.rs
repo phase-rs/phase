@@ -70,6 +70,31 @@ pub(in crate::game) struct PriorityForetellAnnouncement {
     card_id: CardId,
 }
 
+/// An engine-authored normal-spell announcement for the Priority preflight.
+/// The zone-aware casting authority captures the object and printed card
+/// identity; target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastSpellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityCastSpellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
 impl PriorityForetellAnnouncement {
     fn new(object_id: ObjectId, card_id: CardId) -> Self {
         Self { object_id, card_id }
@@ -1357,6 +1382,23 @@ pub(in crate::game) fn priority_foretell_announcements(
             let object = state.objects.get(&object_id)?;
             can_foretell_card(state, player, object_id)
                 .then(|| PriorityForetellAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
+
+/// Enumerates normal spell casts from every zone exposed by the existing
+/// casting-permission authority for the current Priority holder.
+pub(in crate::game) fn priority_cast_spell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastSpellAnnouncement> {
+    let player = principal.semantic_holder();
+    spell_objects_available_to_cast(state, player)
+        .into_iter()
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            can_cast_object_now(state, player, object_id)
+                .then(|| PriorityCastSpellAnnouncement::new(object_id, object.card_id))
         })
         .collect()
 }

@@ -260,10 +260,7 @@ enum PriorityAnnouncement {
     TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
     ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
     UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
-    CastSpell {
-        object_id: ObjectId,
-        card_id: CardId,
-    },
+    CastSpell(casting::PriorityCastSpellAnnouncement),
     Foretell(casting::PriorityForetellAnnouncement),
     ActivateAbility {
         source_id: ObjectId,
@@ -327,7 +324,7 @@ impl PriorityAnnouncement {
             Self::TapLandForMana { .. } => PriorityReducerFamily::TapLandForMana,
             Self::ActivateManaSource { .. } => PriorityReducerFamily::ActivateManaSource,
             Self::UntapLandForMana { .. } => PriorityReducerFamily::UntapLandForMana,
-            Self::CastSpell { .. } => PriorityReducerFamily::CastSpell,
+            Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
             Self::Foretell(_) => PriorityReducerFamily::Foretell,
             Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
             Self::UnlockRoomDoor { .. } => PriorityReducerFamily::UnlockRoomDoor,
@@ -367,9 +364,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::UntapLandForMana(announcement) => GameAction::UntapLandForMana {
             object_id: announcement.object_id(&_access),
         },
-        PriorityAnnouncement::CastSpell { object_id, card_id } => GameAction::CastSpell {
-            object_id,
-            card_id,
+        PriorityAnnouncement::CastSpell(announcement) => GameAction::CastSpell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
             targets: Vec::new(),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
@@ -631,19 +628,12 @@ fn priority_preflight_candidates(
     );
 
     if !split_second_active {
-        for object_id in casting::spell_objects_available_to_cast(state, semantic_holder) {
-            let Some(object) = state.objects.get(&object_id) else {
-                continue;
-            };
-            if casting::can_cast_object_now(state, semantic_holder, object_id) {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::CastSpell {
-                        object_id,
-                        card_id: object.card_id,
-                    },
-                ));
-            }
-        }
+        candidates.extend(
+            casting::priority_cast_spell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
         for (object_id, source_id, _) in casting::hand_cast_free_candidates(state, semantic_holder)
         {
             if let Some(object) = state.objects.get(&object_id) {
