@@ -11710,7 +11710,7 @@ mod tests {
                 .find(|o| o.name == "Insect")
                 .expect("entrant on battlefield");
             assert!(
-                entrant.keywords.contains(&Keyword::Flying),
+                entrant.has_keyword(&Keyword::Flying),
                 "the entrant must actually be a recipient of the layer-6 grant"
             );
             assert_pt_identical(&normal, &forced, "disjoint-kind non-escalation");
