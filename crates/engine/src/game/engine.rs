@@ -10424,6 +10424,13 @@ fn handle_play_land(
             ));
         }
     }
+    // CR 305.1 + CR 116.2a: A land play is a special action only during a
+    // main phase of the player's turn while the stack is empty.
+    if !state.stack.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "Can only play lands while the stack is empty".to_string(),
+        ));
+    }
 
     // CR 305.2 + CR 505.6b: Validate land limit.
     // Base limit is max_lands_per_turn (normally 1), plus any additional drops
@@ -10453,22 +10460,10 @@ fn handle_play_land(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
     }
-    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
-    // half of "play" (a land play is a special action, not a cast), so this gate
-    // is the land-side counterpart to the cast-gate check in
-    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
-    // hand"). The card's current zone is the discriminator.
+    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
+    // play-from-zone and per-land prohibitions for every legal source zone.
     if let Some(obj) = state.objects.get(&object_id) {
-        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-            return Err(EngineError::ActionNotAllowed(
-                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
-            ));
-        }
-        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
-        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
-        // be played") — the filter-scoped counterpart to the blanket
-        // `CantPlayLand` check above.
-        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
             return Err(EngineError::ActionNotAllowed(
                 "A temporary effect prevents playing this land (CR 305.1)".to_string(),
             ));

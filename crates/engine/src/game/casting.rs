@@ -1017,6 +1017,17 @@ pub(crate) fn is_blocked_by_cant_play_lands(
     })
 }
 
+/// CR 305.1 + CR 116.2a: Per-object land-play restrictions apply regardless
+/// of the zone from which a permission lets the player play the land.
+pub(crate) fn land_play_is_permitted_by_restrictions(
+    state: &GameState,
+    player: PlayerId,
+    land_obj: &GameObject,
+) -> bool {
+    !is_blocked_by_cant_play_lands(state, player, land_obj)
+        && !is_blocked_by_prohibit_play_from_zone(state, land_obj, player)
+}
+
 /// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
 /// abilities, optionally exempting mana abilities via the single classifier.
 ///
@@ -1633,7 +1644,7 @@ pub(in crate::game) fn priority_play_land_announcements(
                             .contains(&crate::types::card_type::CoreType::Land)
                 });
             if is_playable_land
-                && !is_blocked_by_cant_play_lands(state, land_resource_owner, object)
+                && land_play_is_permitted_by_restrictions(state, land_resource_owner, object)
             {
                 announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
             }
@@ -1641,19 +1652,25 @@ pub(in crate::game) fn priority_play_land_announcements(
     }
     for (object_id, _) in graveyard_lands_playable_by_permission(state, land_resource_owner) {
         if let Some(object) = state.objects.get(&object_id) {
-            announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
         }
     }
     if let Some((object_id, _)) =
         top_of_library_land_playable_by_permission(state, land_resource_owner)
     {
         if let Some(object) = state.objects.get(&object_id) {
-            announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
         }
     }
     for (object_id, _) in exile_lands_playable_by_permission(state, land_resource_owner) {
         if let Some(object) = state.objects.get(&object_id) {
-            announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
         }
     }
     announcements
