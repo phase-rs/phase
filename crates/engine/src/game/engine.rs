@@ -262,10 +262,7 @@ enum PriorityAnnouncement {
     UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
     CastSpell(casting::PriorityCastSpellAnnouncement),
     Foretell(casting::PriorityForetellAnnouncement),
-    ActivateAbility {
-        source_id: ObjectId,
-        ability_index: usize,
-    },
+    ActivateAbility(casting::PriorityActivateAbilityAnnouncement),
     UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
     RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
     Equip {
@@ -314,7 +311,7 @@ impl PriorityAnnouncement {
             Self::UntapLandForMana(_) => PriorityReducerFamily::UntapLandForMana,
             Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
             Self::Foretell(_) => PriorityReducerFamily::Foretell,
-            Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
+            Self::ActivateAbility(_) => PriorityReducerFamily::ActivateAbility,
             Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
             Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
             Self::Equip { .. } => PriorityReducerFamily::Equip,
@@ -363,12 +360,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             object_id: announcement.object_id(&_access),
             card_id: announcement.card_id(&_access),
         },
-        PriorityAnnouncement::ActivateAbility {
-            source_id,
-            ability_index,
-        } => GameAction::ActivateAbility {
-            source_id,
-            ability_index,
+        PriorityAnnouncement::ActivateAbility(announcement) => GameAction::ActivateAbility {
+            source_id: announcement.source_id(&_access),
+            ability_index: announcement.ability_index(&_access),
         },
         PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
             object_id: announcement.object_id(&_access),
@@ -536,29 +530,12 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        for (&source_id, object) in &state.objects {
-            if object.controller != semantic_holder {
-                continue;
-            }
-            for (ability_index, ability) in casting::activated_ability_definitions(state, source_id)
-            {
-                if ability.kind == crate::types::ability::AbilityKind::Activated
-                    && casting::can_activate_ability_now(
-                        state,
-                        semantic_holder,
-                        source_id,
-                        ability_index,
-                    )
-                {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::ActivateAbility {
-                            source_id,
-                            ability_index,
-                        },
-                    ));
-                }
-            }
-        }
+        candidates.extend(
+            casting::priority_activate_ability_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateAbility)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         for &object_id in &state.battlefield {
             let Some(object) = state.objects.get(&object_id) else {

@@ -95,6 +95,37 @@ pub(in crate::game) struct PriorityCastFreeAnnouncement {
     source_id: ObjectId,
 }
 
+/// An engine-authored activated-ability announcement for Priority preflight.
+/// The source identity and resolved ability index remain private to Casting
+/// until the facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityActivateAbilityAnnouncement {
+    source_id: ObjectId,
+    ability_index: usize,
+}
+
+impl PriorityActivateAbilityAnnouncement {
+    fn new(source_id: ObjectId, ability_index: usize) -> Self {
+        Self {
+            source_id,
+            ability_index,
+        }
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+
+    pub(in crate::game) fn ability_index(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> usize {
+        self.ability_index
+    }
+}
+
 impl PriorityCastFreeAnnouncement {
     fn new(object_id: ObjectId, card_id: CardId, source_id: ObjectId) -> Self {
         Self {
@@ -1567,6 +1598,29 @@ pub(in crate::game) fn priority_cast_free_announcements(
             state.objects.get(&object_id).map(|object| {
                 PriorityCastFreeAnnouncement::new(object_id, object.card_id, source_id)
             })
+        })
+        .collect()
+}
+
+/// Enumerates the current holder's finite activated-ability primers through the
+/// existing activation-definition and legality authorities.
+pub(in crate::game) fn priority_activate_ability_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityActivateAbilityAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .objects
+        .iter()
+        .filter(|(_, object)| object.controller == player)
+        .flat_map(|(&source_id, _)| {
+            activated_ability_definitions(state, source_id)
+                .into_iter()
+                .filter_map(move |(ability_index, ability)| {
+                    (ability.kind == AbilityKind::Activated
+                        && can_activate_ability_now(state, player, source_id, ability_index))
+                    .then(|| PriorityActivateAbilityAnnouncement::new(source_id, ability_index))
+                })
         })
         .collect()
 }
