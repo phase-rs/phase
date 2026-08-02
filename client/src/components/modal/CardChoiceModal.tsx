@@ -476,8 +476,19 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const lookedAt = useGameStore(
+    (s) => s.gameState?.active_library_searches?.[String(data.player)]?.looked_at,
+  );
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  // The engine records every card the searching player looked at. `cards`
+  // remains the legal-selection subset; rendering the full engine-provided
+  // look set lets a library-search modal show the remaining library while
+  // keeping non-matching cards unselectable.
+  const displayedCards = lookedAt
+    ? Array.from(new Set([...lookedAt.map(([, , identity]) => identity.object_id), ...data.cards]))
+    : data.cards;
+  const selectableCards = new Set(data.cards);
   const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
@@ -520,23 +531,27 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
+        {displayedCards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selectedSet.has(id);
+          const isSelectable = selectableCards.has(id);
           return (
             <motion.button
               key={id}
+              disabled={!isSelectable}
               className={`relative shrink-0 rounded-lg transition ${
                 isSelected
                   ? "z-10 ring-2 ring-emerald-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                  : isSelectable
+                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                    : "cursor-not-allowed opacity-40"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              animate={{ opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4, y: 0, scale: 1 }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
+              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+              onClick={() => isSelectable && toggleSelect(id)}
               {...hoverProps(id)}
             >
               <CardImage
