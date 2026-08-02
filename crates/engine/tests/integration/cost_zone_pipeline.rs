@@ -8591,6 +8591,7 @@ fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
     let mut ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(target)],
         source,
@@ -8774,6 +8775,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
     let mut top_ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(top_target)],
         top_source,

@@ -385,8 +385,8 @@ mod tests {
     #[test]
     fn targeted_and_loyalty_mana_abilities_are_not_development_sources() {
         use engine::types::ability::{
-            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
-            TargetFilter,
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, ManaTargetRole,
+            QuantityExpr, TargetFilter,
         };
 
         let mana_effect = || Effect::Mana {
@@ -435,7 +435,9 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: Some(TargetFilter::Player),
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
             },
         );
         targeted.cost = Some(AbilityCost::Tap);

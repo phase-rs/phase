@@ -12,7 +12,7 @@ use super::super::oracle_nom::enters_under::{
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -1734,6 +1734,29 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
+        // CR 608.2c: "..., then do the same for <type> cards" continues the
+        // antecedent action for a sibling card type (Estrid, the Masked: "Return
+        // all non-Aura enchantment cards ... to the battlefield, then do the same
+        // for Aura cards."). The "do the same" verb is not in the imperative-verb
+        // table `starts_clause_text_or_conjugated` checks, so — exactly like the
+        // villainous-choice guard above — without this the continuation is glued
+        // into the prior clause and silently dropped (#4779: Auras never return).
+        //
+        // Gate the split on the SAME recognizer the chunk loop uses
+        // (`try_parse_do_the_same_for_type`), so ONLY a clean pure-type
+        // substitution is split off. Richer forms this PR does not model —
+        // Gruesome Menagerie's "creature cards with mana value 2 and 3"
+        // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
+        // and Merfolk" (type list) — fail the recognizer and stay glued exactly
+        // as before, keeping this change's blast radius to the handled class.
+        // The complete recognizer covers a terminal continuation. A following
+        // comma-"then" clause (Glimpse of Tomorrow) is segmented by the same
+        // grammar, so we do not weaken the pure-type whole-consumption rule.
+        if try_parse_do_the_same_for_type(trimmed).is_some()
+            || starts_do_the_same_for_type_before_then(after_then)
+        {
+            return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
+        }
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
@@ -2221,6 +2244,11 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("gain control ")),
     ))
     .or(alt((
+        // CR 701.46a: "adapt N" is an imperative keyword action, so it can start
+        // a chained clause ("Convert Jetfire, then adapt 3.", Jetfire Air
+        // Guardian). Placed in this 20-arm group to stay within nom's 21-tuple
+        // limit.
+        value((), tag("adapt ")),
         value((), tag("gain ")),
         value((), tag("get ")),
         value((), tag("have ")),
@@ -7928,6 +7956,83 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
     }
 }
 
+/// CR 608.2c: Parse "[then] do the same for <type> cards/permanents." — an
+/// effect-replication directive that repeats the immediately-preceding sibling
+/// action for a DIFFERENT card type (Estrid, the Masked: "Return all non-Aura
+/// enchantment cards from your graveyard to the battlefield, then do the same
+/// for Aura cards."). Returns the replacement type filters; the chunk loop clones the
+/// antecedent effect and swaps its `type_filters` for these — the same
+/// antecedent-clone mechanic `try_parse_scoped_does_the_same` uses for the
+/// player-scoped fanout, so no new disposition, effect variant, or resolver is
+/// needed (both produce an ordinary sibling `Effect`).
+///
+/// Distinct from the two sibling forms: the keyword-list form
+/// (`try_parse_repeat_process_for_keywords`, tried first, replicates per
+/// keyword) and the target-opponent form (`try_parse_does_the_same_clause`,
+/// deferred — the opponent acts on their OWN objects via a mid-chain target
+/// slot). This form is the SAME action on the SAME zones for a sibling type, so
+/// a straight clone-and-retype is rules-correct (CR 608.2c: the antecedent
+/// action is replicated verbatim modulo the stated substitution). Covers the
+/// class ("do the same for <type>"), not Estrid alone.
+///
+/// Combinators only: `opt`/`tag`/`alt` for the prefix, then the shared
+/// `parse_type_phrase` for the filter. Requires the phrase to be fully consumed
+/// (modulo a trailing period) by a non-empty typed filter, so unrelated
+/// "do/repeat …" tails fall through to normal dispatch rather than being
+/// swallowed.
+pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilter>> {
+    let lower = text.to_lowercase();
+    let ((), rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let (filter, remainder) = parse_type_phrase(rest.trim().trim_end_matches('.').trim());
+    if !remainder.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    // Only a PURE card-type substitution is modeled: the continuation swaps the
+    // antecedent's `type_filters` wholesale (Estrid: non-Aura enchantment → Aura).
+    // Reject any filter that also carries `FilterProp` predicates (Gruesome
+    // Menagerie's "creature cards with mana value 2 and 3") or a `controller`
+    // scope — those need a full replacement-filter/cardinality grammar and must
+    // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
+    // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
+    // Merfolk") is already rejected by the non-empty `remainder` guard above.
+    pure_type_substitution(filter)
+}
+
+/// Recognize a pure type-substitution segment when it is immediately followed
+/// by another comma-"then" clause in the same sentence. The separator is parsed
+/// as grammar, rather than manually slicing the sentence, so the terminal
+/// recognizer remains strict about its complete input.
+fn starts_do_the_same_for_type_before_then(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let Ok((_, type_text)) = preceded(
+        tag::<_, _, OracleError<'_>>("do the same for "),
+        terminated(take_until(", then "), tag(", then ")),
+    )
+    .parse(lower.as_str()) else {
+        return false;
+    };
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    remainder.trim().is_empty() && pure_type_substitution(filter).is_some()
+}
+
+/// The modeled continuation replaces exactly one card-type predicate. Richer
+/// target predicates remain strict failures until their replacement grammar is
+/// modeled end-to-end.
+fn pure_type_substitution(filter: TargetFilter) -> Option<Vec<TypeFilter>> {
+    match filter {
+        TargetFilter::Typed(t)
+            if !t.type_filters.is_empty() && t.properties.is_empty() && t.controller.is_none() =>
+        {
+            Some(t.type_filters)
+        }
+        _ => None,
+    }
+}
+
 /// CR 608.2c + CR 601.2c: Parse "[then] target opponent does the same / does so."
 /// — an effect-replication directive (The Wedding of River Song). The clause has
 /// no effect of its own; it *would* replicate the immediately-preceding sibling
@@ -8211,6 +8316,63 @@ mod tests {
                 "should reject {phrasing:?}"
             );
         }
+    }
+
+    // CR 608.2c: the "do the same for <type>" continuation recognizer accepts
+    // ONLY a clean, whole card-type substitution (Estrid's "Aura cards") — the
+    // chunk loop clones the antecedent effect and swaps just its `type_filters`.
+    #[test]
+    fn do_the_same_for_type_accepts_clean_type_substitution() {
+        let type_filters = try_parse_do_the_same_for_type("then do the same for Aura cards.")
+            .expect("expected a clean Aura type substitution");
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Aura")),
+            "expected an Aura type substitution, got {type_filters:?}"
+        );
+        assert!(
+            try_parse_do_the_same_for_type("do the same for creature cards").is_some(),
+            "a bare creature-card substitution is also clean"
+        );
+    }
+
+    // Guard: continuations carrying a `FilterProp` predicate, a multi-type list,
+    // or the broader "repeat this process for" family are NOT modeled by the
+    // type-substitution path and must be rejected, so they stay strict-failing
+    // until the full replacement-filter/cardinality grammar lands (Gruesome
+    // Menagerie, Grim Captain's Call, Firemind's Foresight) — CR #1: a flagged
+    // gap beats a silent misparse.
+    #[test]
+    fn do_the_same_for_type_rejects_unmodeled_continuations() {
+        for phrasing in [
+            "do the same for creature cards with mana value 2 and 3",
+            "do the same for Vampire, Dinosaur, and Merfolk",
+            "do the same for creature cards with flying",
+            "repeat this process for instant cards",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_type(phrasing),
+                None,
+                "must reject the unmodeled continuation {phrasing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn do_the_same_for_type_segment_before_following_then_is_strict() {
+        assert!(
+            starts_do_the_same_for_type_before_then(
+                "do the same for Aura cards, then put the rest on the bottom of your library"
+            ),
+            "a pure Aura continuation may be followed by another then-clause"
+        );
+        assert!(
+            !starts_do_the_same_for_type_before_then(
+                "do the same for creature cards with mana value 2 and 3, then shuffle"
+            ),
+            "richer continuation must not gain support merely because another clause follows"
+        );
     }
 
     // Guard: the recognizer must NOT swallow unrelated "same" phrases or a
