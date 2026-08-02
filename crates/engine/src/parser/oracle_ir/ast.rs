@@ -7,8 +7,8 @@ use crate::types::ability::{
     CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
     CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DoorLockOp, Duration, Effect,
     EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat,
-    PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetFilter,
 };
@@ -1592,10 +1592,15 @@ pub(crate) enum CostResourceImperativeAst {
     Mana {
         produced: ManaProduction,
         restrictions: Vec<ManaSpendRestriction>,
-        /// CR 115.1 + CR 115.7: Player target for mana effects whose count
-        /// references a target player (e.g. Jeska's Will mode 1 — "Add {R} for
-        /// each card in target opponent's hand"). `None` for the common case.
-        target: Option<TargetFilter>,
+        /// CR 601.2c: Role-scoped player targets for this mana production
+        /// (recipient and/or count source). This is a TRANSPORT field on the
+        /// cost-resource intermediate AST — it carries whatever role
+        /// `try_parse_add_mana_effect_with_context` stamped, unchanged, and
+        /// `lower_cost_resource_ast` puts it back on `Effect::Mana`. It must
+        /// mirror `Effect::Mana::target`'s type exactly: re-deciding or
+        /// flattening the role here would silently drop a count source on the
+        /// cost-resource path.
+        target: Option<ManaTargetRole>,
     },
     Damage {
         amount: QuantityExpr,

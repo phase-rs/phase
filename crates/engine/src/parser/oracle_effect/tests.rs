@@ -44,6 +44,22 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
     );
 }
 
+#[test]
+fn do_the_same_type_rewrite_does_not_overwrite_logical_target_leaves() {
+    let original = TargetFilter::And {
+        filters: vec![TargetFilter::Typed(TypedFilter::creature())],
+    };
+    let mut filter = original.clone();
+    assert!(
+        !replace_type_filters(&mut filter, &[TypeFilter::Subtype("Aura".to_string())]),
+        "a logical target composition is not a direct card selector"
+    );
+    assert_eq!(
+        filter, original,
+        "the type-substitution path must not rewrite unrelated logical leaves"
+    );
+}
+
 // ── MSH-F Sub-Plan A: Cosmic Cube — dynamic mana-value cast permission ──
 
 /// Recursively find the first `CastFromZone` effect's constraint in an
@@ -24234,8 +24250,14 @@ fn parse_put_on_top_or_bottom_possessive() {
         AbilityKind::Spell,
     );
     assert!(
-        matches!(*def.effect, Effect::PutOnTopOrBottom { .. }),
-        "Expected PutOnTopOrBottom, got {:?}",
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                chooser: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        ),
+        "Expected an owner-chosen PutOnTopOrBottom, got {:?}",
         def.effect
     );
 }
@@ -24311,6 +24333,7 @@ fn parse_aether_gust_effect_chain() {
             &*sub.effect,
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::ParentTarget,
+                chooser: TargetFilter::ParentTargetOwner,
             }
         ),
         "Expected ParentTarget PutOnTopOrBottom continuation, got {:?}",
@@ -35836,12 +35859,82 @@ fn that_player_adds_mana_injects_scoped_player_recipient() {
         } => {
             assert_eq!(
                 target,
-                Some(TargetFilter::ScopedPlayer),
-                "subject-predicate path must stamp ScopedPlayer recipient"
+                Some(crate::types::ability::ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer
+                }),
+                "subject-predicate path must stamp a ScopedPlayer RECIPIENT role"
             );
         }
         other => panic!("expected Effect::Mana, got {other:?}"),
     }
+}
+
+/// Matrix row 16 (BLOCKER B1) — the SUBJECT-PREDICATE stamping route must
+/// COMBINE, not clobber.
+///
+/// CR 601.2c: there are TWO places in the parser where a subject-derived
+/// recipient is stamped onto an already-parsed `Effect::Mana` — the subject-led
+/// wrapper in `oracle_effect/mana.rs` and subject-predicate classification here.
+/// Both carried the identical `if target.is_none()` idiom, which silently
+/// DISCARDED the recipient whenever the inner clause had already produced a
+/// count source. Fixing only one route fixes the card and leaves the class
+/// broken.
+///
+/// Asserting `Both` (not merely "non-`None`") is what fails a plain
+/// `ManaTargetRole::Recipient { .. }` wrap — the exact mistake a mechanical
+/// compiler-driven sweep would make here.
+#[test]
+fn that_player_adds_for_each_target_opponent_combines_recipient_and_count_source() {
+    use crate::types::ability::{ControllerRef as CR, ManaTargetRole, TypedFilter};
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause(
+        "that player adds {R} for each card in target opponent's hand.",
+        &mut ctx,
+    );
+
+    // Positive reach guard: the sentence must reach `Effect::Mana` at all, so
+    // the role assertion below cannot pass vacuously on an `Unimplemented`.
+    let Effect::Mana { target, .. } = &clause.effect else {
+        panic!("expected Effect::Mana, got {:?}", clause.effect);
+    };
+
+    assert_eq!(
+        target,
+        &Some(ManaTargetRole::Both {
+            recipient: TargetFilter::ScopedPlayer,
+            count_source: TargetFilter::Typed(TypedFilter::default().controller(CR::Opponent)),
+        }),
+        "the stripped subject is the RECIPIENT and the for-each clause is the \
+         COUNT SOURCE — two independent instances of 'target' (CR 601.2c)"
+    );
+}
+
+/// Paired over-application negative for the test above: the SAME route with NO
+/// inner count source must still yield a plain `Recipient`. A `with_recipient`
+/// that always promoted to `Both` would surface a phantom second target slot.
+#[test]
+fn that_player_adds_without_a_count_source_stays_recipient_only() {
+    use crate::types::ability::ManaTargetRole;
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause("that player adds {R}.", &mut ctx);
+    let Effect::Mana { target, .. } = &clause.effect else {
+        panic!("expected Effect::Mana, got {:?}", clause.effect);
+    };
+    assert_eq!(
+        target,
+        &Some(ManaTargetRole::Recipient {
+            recipient: TargetFilter::ScopedPlayer
+        }),
+        "a bare subject-led mana declares ONE role, not a phantom count source"
+    );
 }
 
 /// CR 503.1a + CR 608.2d (issue #1535): Braids, Conjurer Adept — "at the
@@ -36729,6 +36822,47 @@ fn intensify_parser_maps_source_and_owned_scopes() {
             amount: QuantityExpr::Fixed { value: 3 },
         } if subtype == "Chorus"
     ));
+}
+
+/// The controller-specific "if you discard a card this way" continuation shares
+/// the generic reflexive connector with the player-anaphor forms used by Chains.
+/// Great Desert Hellion must retain its conditioned intensify rider.
+#[test]
+fn great_desert_hellion_unless_discard_keeps_conditioned_intensify() {
+    let parsed = parse_oracle_text(
+        "Starting intensity 1\nMenace\nAt the beginning of your upkeep, sacrifice Great Desert Hellion unless you discard a card. If you discard a card this way, Great Desert Hellion intensifies by 1.",
+        "Great Desert Hellion",
+        &[],
+        &["Creature".to_string()],
+        &["Hellion".to_string()],
+    );
+    let upkeep = parsed
+        .triggers
+        .iter()
+        .find(|trigger| matches!(trigger.phase, Some(Phase::Upkeep)))
+        .expect("expected Great Desert Hellion's upkeep trigger");
+    let intensify = upkeep
+        .execute
+        .as_deref()
+        .and_then(|ability| ability.sub_ability.as_deref())
+        .expect("expected an intensify rider after the unless-discard action");
+    assert!(
+        matches!(
+            intensify.effect.as_ref(),
+            Effect::Intensify {
+                scope: IntensityScope::Source,
+                amount: QuantityExpr::Fixed { value: 1 },
+            }
+        ),
+        "upkeep rider must remain source intensify, got {:?}",
+        intensify.effect
+    );
+    assert_eq!(
+        intensify.condition,
+        Some(AbilityCondition::effect_performed()),
+        "intensify must be gated on the optional discard succeeding, got {:?}",
+        intensify.condition
+    );
 }
 
 #[test]
@@ -46506,6 +46640,245 @@ fn repeat_process_directive_ignores_non_repeat_flip_branch() {
     assert!(
         try_parse_repeat_process_directive("if you win the flip, draw a card", &mut ctx).is_none(),
         "a non-repeat flip branch must not be absorbed by the repeat directive"
+    );
+}
+
+/// CR 608.2c: "..., then do the same for <type> cards" replicates the antecedent
+/// mass zone-change for a sibling card type — the antecedent action is repeated
+/// verbatim modulo the stated type substitution, preserving zones and controller.
+/// Estrid, the Masked's ult ("Return all non-Aura enchantment cards from your
+/// graveyard to the battlefield, then do the same for Aura cards.") must emit TWO
+/// returns: the non-Aura enchantments, then the Auras.
+///
+/// Building-block level: exercises the "do the same for <type>" clause class, not
+/// Estrid alone. Regression guard for #4779 (Auras never returned because the
+/// comma-"then do the same" tail was glued into the first clause and dropped).
+#[test]
+fn do_the_same_for_type_replicates_mass_zone_change_with_swapped_type() {
+    use crate::types::zones::Zone;
+    let parsed = parse_oracle_text(
+        "Return all non-Aura enchantment cards from your graveyard to the battlefield, then do the same for Aura cards.",
+        "Estrid, the Masked",
+        &[],
+        &["Planeswalker".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "expected one ability, got {:?}",
+        parsed.abilities
+    );
+    let primary = &parsed.abilities[0];
+
+    // Primary: return all NON-Aura enchantment cards, graveyard -> battlefield.
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*primary.effect
+    else {
+        panic!("primary must be ChangeZoneAll, got {:?}", primary.effect);
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+    assert_eq!(*destination, Zone::Battlefield);
+    let TargetFilter::Typed(pt) = target else {
+        panic!("primary target must be Typed, got {target:?}");
+    };
+    assert!(
+        pt.type_filters.iter().any(|t| matches!(
+            t,
+            TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Aura")
+        )),
+        "primary must exclude Auras (Non(Aura)), got {:?}",
+        pt.type_filters
+    );
+
+    // Sub-ability: the "do the same for Aura cards" clone — same zones and
+    // controller as the antecedent, with the type swapped to Aura and the
+    // Non(Aura) exclusion dropped.
+    let sub = primary
+        .sub_ability
+        .as_ref()
+        .expect("expected a 'do the same for Aura cards' sub-ability");
+    let Effect::ChangeZoneAll {
+        origin: sub_origin,
+        destination: sub_dest,
+        target: sub_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("sub-ability must be ChangeZoneAll, got {:?}", sub.effect);
+    };
+    assert_eq!(
+        *sub_origin,
+        Some(Zone::Graveyard),
+        "Aura return must keep the graveyard origin"
+    );
+    assert_eq!(
+        *sub_dest,
+        Zone::Battlefield,
+        "Aura return must keep the battlefield destination"
+    );
+    let TargetFilter::Typed(st) = sub_target else {
+        panic!("sub target must be Typed, got {sub_target:?}");
+    };
+    assert!(
+        st.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Aura")),
+        "sub-ability must return Aura cards, got {:?}",
+        st.type_filters
+    );
+    assert!(
+        !st.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(_))),
+        "sub-ability must NOT inherit the antecedent's Non(Aura) exclusion, got {:?}",
+        st.type_filters
+    );
+    assert_eq!(
+        st.controller, pt.controller,
+        "Aura return must keep the antecedent's controller (You)"
+    );
+}
+
+/// CR 608.2c: the type substitution must reach a filtered tracked
+/// set without replacing its provenance wrapper. Glimpse of Tomorrow's second
+/// instruction acts only on Aura permanents revealed by its preceding reveal;
+/// changing the outer target to Typed(Aura) would instead discard "this way".
+#[test]
+fn do_the_same_for_type_retypes_nested_tracked_set_filter() {
+    let primary = parse_effect_chain(
+        "Put all non-Aura permanent cards revealed this way onto the battlefield, then do the same for Aura cards.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::ChangeZoneAll {
+        target: primary_target,
+        ..
+    } = &*primary.effect
+    else {
+        panic!("primary must be ChangeZoneAll, got {:?}", primary.effect);
+    };
+    let TargetFilter::TrackedSetFiltered {
+        id: primary_id,
+        filter: primary_filter,
+        ..
+    } = primary_target
+    else {
+        panic!("primary must preserve the revealed-card tracked set, got {primary_target:?}");
+    };
+    assert!(
+        matches!(
+            primary_filter.as_ref(),
+            TargetFilter::Typed(typed)
+                if typed.type_filters.iter().any(|filter| matches!(
+                    filter,
+                    TypeFilter::Non(inner)
+                        if matches!(&**inner, TypeFilter::Subtype(subtype) if subtype == "Aura")
+                ))
+        ),
+        "primary must retain the non-Aura restriction, got {primary_filter:?}"
+    );
+
+    let sub = primary
+        .sub_ability
+        .as_ref()
+        .expect("expected the Aura continuation");
+    let Effect::ChangeZoneAll {
+        target: continuation_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("continuation must be ChangeZoneAll, got {:?}", sub.effect);
+    };
+    let TargetFilter::TrackedSetFiltered {
+        id: continuation_id,
+        filter: continuation_filter,
+        ..
+    } = continuation_target
+    else {
+        panic!(
+            "continuation must retain the revealed-card tracked set, got {continuation_target:?}"
+        );
+    };
+    assert_eq!(
+        continuation_id, primary_id,
+        "both instructions must refer to the same revealed-card set"
+    );
+    assert!(
+        matches!(
+            continuation_filter.as_ref(),
+            TargetFilter::Typed(typed)
+                if typed.type_filters.iter().any(
+                    |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Aura")
+                )
+        ),
+        "continuation must select Auras inside the tracked set, got {continuation_filter:?}"
+    );
+}
+
+/// CR 608.2c: Glimpse of Tomorrow keeps its Aura partition and its later
+/// rest-placement instruction in one sentence. This guards the comma-then
+/// boundary between the continuation and the following cleanup clause.
+#[test]
+fn glimpse_of_tomorrow_keeps_aura_partition_and_rest_placement() {
+    fn contains_aura_tracked_set(def: &AbilityDefinition) -> bool {
+        let current = matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                target:
+                    TargetFilter::TrackedSetFiltered {
+                        filter,
+                        ..
+                    },
+                ..
+            } if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed)
+                    if typed.type_filters.iter().any(
+                        |type_filter| matches!(
+                            type_filter,
+                            TypeFilter::Subtype(subtype) if subtype == "Aura"
+                        )
+                    )
+            )
+        );
+        current
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(contains_aura_tracked_set)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_aura_tracked_set)
+    }
+
+    let parsed = parse_oracle_text(
+        "Suspend 3—{R}{R}\nShuffle all permanents you own into your library, then reveal that many cards from the top of your library. Put all non-Aura permanent cards revealed this way onto the battlefield, then do the same for Aura cards, then put the rest on the bottom of your library in a random order.",
+        "Glimpse of Tomorrow",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.abilities.iter().any(contains_aura_tracked_set),
+        "Glimpse must retain the Aura continuation inside its revealed-card tracked set"
+    );
+    let json = serde_json::to_string(&parsed).expect("serialize Glimpse parse");
+    assert!(
+        // allow-noncombinator: test assertion checks the serialized AST, not parser dispatch
+        !json.contains("\"Unimplemented\""),
+        "Glimpse's handled sentence must not leave an unimplemented clause: {json}"
+    );
+    assert!(
+        // allow-noncombinator: test assertion checks the serialized AST, not parser dispatch
+        json.contains("\"type\":\"PutAtLibraryPosition\"")
+            && json.contains("\"position\":{\"type\":\"Bottom\"}"),
+        "Glimpse must retain the later rest-on-bottom placement: {json}"
     );
 }
 

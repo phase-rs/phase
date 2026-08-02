@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-01T00:00:00Z",
+  "updated": "2026-08-02T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -782,28 +782,44 @@
       ],
       "main": [
         {
-          "count": 8,
-          "name": "Swamp"
+          "count": 3,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
         },
         {
           "count": 4,
           "name": "Deceit"
         },
         {
-          "count": 3,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 4,
-          "name": "Superior Spider-Man"
+          "count": 1,
+          "name": "M.O.D.O.K."
         },
         {
           "count": 2,
-          "name": "Bitter Triumph"
+          "name": "Hidden Lair"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
         },
         {
           "count": 4,
@@ -811,93 +827,81 @@
         },
         {
           "count": 4,
-          "name": "Winternight Stories"
+          "name": "Duress"
         },
         {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
+          "count": 3,
+          "name": "Stock Up"
         },
         {
           "count": 1,
           "name": "Strategic Betrayal"
         },
         {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 3,
-          "name": "Bender's Waterskin"
-        },
-        {
           "count": 1,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 3,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 2,
           "name": "Cavern of Souls"
         },
         {
-          "count": 1,
-          "name": "Stock Up"
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 3,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 9,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Quantum Riddler"
+          "name": "Deadly Cover-Up"
         },
         {
           "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Qarsi Revenant"
-        },
-        {
-          "count": 3,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
+          "name": "M.O.D.O.K."
         },
         {
           "count": 2,
-          "name": "Stab"
+          "name": "Disdainful Stroke"
         },
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 2,
+          "name": "Malcolm, Alluring Scoundrel"
         },
         {
           "count": 1,
           "name": "Negate"
         },
         {
-          "count": 1,
-          "name": "Ghost Vacuum"
+          "count": 4,
+          "name": "Preacher of the Schism"
+        },
+        {
+          "count": 2,
+          "name": "Oildeep Gearhulk"
         },
         {
           "count": 1,
-          "name": "Petrified Hamlet"
+          "name": "Strategic Betrayal"
         }
       ]
     },

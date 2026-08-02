@@ -1158,6 +1158,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.zone_changes_this_turn.clear();
     state.batched_zone_change_trigger_fired.clear();
     state.battlefield_entries_this_turn.clear();
+    // CR 514.2 + CR 400.7: the cleanup step is where "this turn" state ends, which is the authority
+    // for this reset; CR 400.7 names the two ledgers above that it defends. Defence in depth only —
+    // a parked token battlefield entry is realized within the action that settles, and every
+    // prompt-abandonment path clears it, so none should reach a turn boundary. One that did would
+    // write its row onto the NEXT turn's freshly cleared ledger — an "entered this turn" answer for
+    // an entry that happened last turn. Mirrors the `deferred_entry_events` clears in
+    // `elimination.rs` / `scenario_db.rs`.
+    state.pending_token_battlefield_entry = None;
     // CR 701.26 + CR 603.4: reset per-object tap counts so "first time it became
     // tapped this turn" intervening-ifs start fresh each turn.
     state.object_tap_count_this_turn.clear();

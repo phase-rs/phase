@@ -35,14 +35,20 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// Check if a typed ability definition represents a mana ability (CR 605).
 /// CR 605.3: Mana abilities produce mana and resolve immediately without using the stack.
-/// CR 605.1a: A mana ability cannot have targets. If the effect produces mana but the
-/// ability has targeting (e.g., via `multi_target`), it must use the stack instead.
-/// Currently `Effect::Mana` has no embedded target field and no `AbilityCost` variant
-/// implies targeting, so this check is defensive — if future variants introduce
-/// targeting on mana-producing abilities, this guard ensures correctness.
+/// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
+/// `ManaTargetRole` naming its recipient and/or count-source player targets;
+/// any declared role means the ability targets and must use the stack. The
+/// `multi_target` mechanism is checked alongside it.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
+    // declared filters: ANY declared role — recipient or count source — means
+    // the ability names a target and therefore uses the stack (Jeska's Will
+    // mode 1: "Add {R} for each card in target opponent's hand").
+    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
+    // makes this not-a-mana-ability under today's behavior, and this change
+    // must not widen mana-ability status for any shipping card.
     let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref(),
+        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
         _ => return false,
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
@@ -4272,6 +4278,61 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// Matrix rows 15c + 20 — CR 605.1a classification is unchanged. This reader
+    /// also bypasses `Effect::target_filter()`.
+    ///
+    /// CR 605.1a: a mana ability "doesn't require a target." Any declared role —
+    /// recipient OR count source, context-ref or not — means the ability names a
+    /// target and must use the stack. Writing this with `surfaced_filters()`
+    /// would wrongly PROMOTE the ten context-ref cards to mana abilities, letting
+    /// them resolve without the stack. The `target: None` positive is the reach
+    /// guard: a blanket `return false` would satisfy every negative below.
+    #[test]
+    fn is_mana_ability_classification_unchanged_for_every_fixture_role() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+
+        let mk = |target| {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target,
+                },
+            )
+        };
+
+        for (name, role) in mana_fixture_roles() {
+            assert!(
+                !is_mana_ability(&mk(Some(role))),
+                "{name}: a declared mana role means the ability targets (CR 605.1a)                  and must use the stack"
+            );
+        }
+
+        // Jeska's Will shape: a COUNT-SOURCE-only role is still a target.
+        assert!(
+            !is_mana_ability(&mk(Some(
+                crate::types::ability::ManaTargetRole::CountSource {
+                    count_source: crate::types::ability::TargetFilter::Player,
+                }
+            ))),
+            "a count-source-only mana ability targets and is not a mana ability"
+        );
+
+        // Reach guard / positive: an unqualified mana ability IS one.
+        assert!(
+            is_mana_ability(&mk(None)),
+            "an unqualified mana ability (Cabal Coffers class) is still a mana ability"
+        );
+    }
+
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
@@ -6319,11 +6380,17 @@ mod tests {
         .expect("Treasure should activate into a color prompt");
 
         // O(N!) pre-fix blows far past this; O(N) post-fix stays well under it.
+        // The bound carries slack for parallel-schedule noise: MANA_READINESS_CALLS
+        // is a bare process-global, so any CONCURRENTLY-running test that exercises
+        // mana readiness increments it between this test's store(0) and load. The
+        // detector's discrimination survives the slack — the O(N!) regression this
+        // guards against produces >= 6! = 720 calls at N = 6, 15x over this bound,
+        // while observed schedule pollution is single-digit.
         assert!(
-            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 4 * N,
+            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 8 * N,
             "readiness calls must be linear in N (got {}, bound {})",
             MANA_READINESS_CALLS.load(Ordering::Relaxed),
-            4 * N
+            8 * N
         );
 
         let WaitingFor::ChooseManaColor {

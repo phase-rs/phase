@@ -5280,50 +5280,30 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                     )
                 })
         })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
+        .or_else(|| parse_external_entry_plain_suffix(stripped))
+}
+
+/// CR 614.1c: Parse the external-entry tap-state grammar. The type-phrase
+/// subject is arbitrary, while verb number, battlefield wording, and tap state
+/// vary independently; parse those axes once rather than adding suffix arms.
+fn parse_external_entry_plain_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
+    type VE<'a> = OracleError<'a>;
+    let (_, (subject, (_, enters_tapped))) = terminated(
+        pair(
+            take_until::<_, _, VE>(" enter"),
+            preceded(
+                pair(tag(" enter"), opt(tag("s"))),
+                pair(
+                    opt(tag(" the battlefield")),
+                    alt((value(true, tag(" tapped")), value(false, tag(" untapped")))),
+                ),
+            ),
+        ),
+        eof::<&str, VE<'_>>,
+    )
+    .parse(input)
+    .ok()?;
+    Some((subject, ExternalEntryKind::Plain { enters_tapped }))
 }
 
 fn build_external_entry_replacement(
@@ -11448,8 +11428,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementCondition, ShieldKind, ZoneRef,
+        AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementCondition, ShieldKind, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -17038,6 +17018,55 @@ mod tests {
         }
     }
 
+    // CR 614.1c: the untapped-entry counterpart of the tapped-entry short-vs-long
+    // templating gap (see `frozen_aether_enters_the_battlefield_tapped_long_form`
+    // above) — Vigorous Farming prints "Lands you control enter the battlefield
+    // untapped." where the `spelunking_lands_you_control_enter_untapped` test
+    // above uses the short "enter untapped" simplification.
+    #[test]
+    fn vigorous_farming_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Lands you control enter the battlefield untapped.",
+            "Vigorous Farming",
+        )
+        .expect("long-form 'enter the battlefield untapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // The controller-scoped Or-filter shape (mirroring
+    // `frozen_aether_enters_the_battlefield_tapped_long_form`) must also parse
+    // for the untapped long form.
+    #[test]
+    fn opponents_control_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter the battlefield untapped.",
+            "Untapped Aether",
+        )
+        .expect("long-form 'enter the battlefield untapped' with Or-filter subject must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => assert_eq!(filters.len(), 3),
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
+
     #[test]
     fn archelos_untapped_other_permanents_enter_untapped() {
         let def = parse_replacement_line(
@@ -20463,6 +20492,64 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(ReplacementCondition::ExceptFirstDrawInDrawStep)
+        );
+    }
+
+    /// Issue #5653 + CR 608.2c: the full Chains of Mephistopheles / Magus of
+    /// the Chains text carries two trailing sentences after the "discards a
+    /// card instead" antecedent — "If the player discards a card this way,
+    /// they draw a card. If the player doesn't discard a card this way, they
+    /// mill a card." Both must attach as typed `EffectOutcome` gates on the
+    /// execute chain's Draw/Mill sub-abilities, not run unconditionally.
+    #[test]
+    fn parses_chains_full_text_gates_draw_and_mill_on_discard_outcome() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement must parse");
+
+        let discard = def.execute.as_deref().expect("execute chain present");
+        assert!(
+            matches!(&*discard.effect, Effect::Discard { .. }),
+            "the antecedent effect must be Discard, got {:?}",
+            discard.effect
+        );
+
+        let draw = discard
+            .sub_ability
+            .as_deref()
+            .expect("Draw sub-ability must be present");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "the first follow-on effect must be Draw, got {:?}",
+            draw.effect
+        );
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::effect_performed()),
+            "\"if the player discards a card this way\" must gate Draw on \
+             whether the discard actually happened, got {:?}",
+            draw.condition
+        );
+
+        let mill = draw
+            .sub_ability
+            .as_deref()
+            .expect("Mill sub-ability must be present");
+        assert!(
+            matches!(&*mill.effect, Effect::Mill { .. }),
+            "the second follow-on effect must be Mill, got {:?}",
+            mill.effect
+        );
+        assert_eq!(
+            mill.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "\"if the player doesn't discard a card this way\" must gate Mill \
+             on the discard having failed, got {:?}",
+            mill.condition
         );
     }
 

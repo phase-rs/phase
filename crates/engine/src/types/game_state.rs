@@ -5168,6 +5168,17 @@ pub enum TokenEntryEventEmission {
     Suppress,
 }
 
+/// CR 400.7: the three values a postponed token battlefield entry needs at flush time. The
+/// characteristics are NOT stored — they are re-snapshotted from the live object at flush, which
+/// is the whole point of postponing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTokenBattlefieldEntry {
+    pub object_id: ObjectId,
+    /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
+    pub name: String,
+    pub source_id: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -5251,10 +5262,12 @@ pub enum PendingCounterPostAction {
         enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
+    /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
+    /// `GameState::pending_token_battlefield_entry` once the ETB-counter ordering choice has
+    /// drained. It carries only the object identity — the entry's `name` / `source_id` live on the
+    /// parked record, and its characteristics are re-snapshotted from the live object at flush.
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
-        name: String,
-        source_id: ObjectId,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -9933,7 +9946,7 @@ pub enum WaitingFor {
         /// `repeat_until` is retained so the next iteration re-prompts.
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
-    /// CR 401.4: Owner chooses to put a permanent on top or bottom of their library.
+    /// CR 608.2d: The effect-designated player chooses the library position.
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
@@ -12690,6 +12703,15 @@ pub struct GameState {
     /// (Soul Warden) match against the fully-realized copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
+
+    /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
+    /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
+    /// object is not yet the thing that entered — `BecomeCopy` has not run and/or a mandatory
+    /// as-enters choice (CR 614.12a) is unanswered. Parked here so it survives an arbitrary number
+    /// of client round-trips; realized by the single authority
+    /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -17813,6 +17835,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
@@ -19361,6 +19384,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        pending_token_battlefield_entry: _,
         layers_dirty: _,
         static_gate_truth: _,
         trigger_index: _,
@@ -19673,6 +19697,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike
             // `layers_dirty`/`public_state_dirty` (which encode pending work),
