@@ -1287,8 +1287,10 @@ mod tests {
             capability: StateCapabilityBinding::capture(state, player)
                 .expect("a complete state yields a capability binding"),
         };
-        let mut budget = ProspectiveBudget::default();
-        budget.forced_transitions_remaining = 1;
+        let mut budget = ProspectiveBudget {
+            forced_transitions_remaining: 1,
+            ..Default::default()
+        };
 
         let permit = budget
             .issue_forced_progress(candidate(&state))
