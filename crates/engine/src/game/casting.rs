@@ -86,6 +86,43 @@ pub(in crate::game) struct PriorityPlayLandAnnouncement {
     card_id: CardId,
 }
 
+/// An engine-authored once-per-turn free-cast announcement for the Priority
+/// preflight. The production permission authority retains the source provenance
+/// while target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastFreeAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+    source_id: ObjectId,
+}
+
+impl PriorityCastFreeAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId, source_id: ObjectId) -> Self {
+        Self {
+            object_id,
+            card_id,
+            source_id,
+        }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+}
+
 impl PriorityPlayLandAnnouncement {
     fn new(object_id: ObjectId, card_id: CardId) -> Self {
         Self { object_id, card_id }
@@ -1516,6 +1553,22 @@ pub(in crate::game) fn priority_play_land_announcements(
         }
     }
     announcements
+}
+
+/// Enumerates only the production OncePerTurn free-cast permission tuples for
+/// the current Priority holder. Unlimited permissions remain normal casts.
+pub(in crate::game) fn priority_cast_free_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastFreeAnnouncement> {
+    hand_cast_free_candidates(state, principal.semantic_holder())
+        .into_iter()
+        .filter_map(|(object_id, source_id, _)| {
+            state.objects.get(&object_id).map(|object| {
+                PriorityCastFreeAnnouncement::new(object_id, object.card_id, source_id)
+            })
+        })
+        .collect()
 }
 
 /// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through

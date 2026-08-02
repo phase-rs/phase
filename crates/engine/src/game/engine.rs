@@ -297,11 +297,7 @@ enum PriorityAnnouncement {
         card_id: CardId,
         creature_to_return: ObjectId,
     },
-    CastSpellForFree {
-        object_id: ObjectId,
-        card_id: CardId,
-        source_id: ObjectId,
-    },
+    CastSpellForFree(casting::PriorityCastFreeAnnouncement),
     PlayFaceDown {
         object_id: ObjectId,
         card_id: CardId,
@@ -334,7 +330,7 @@ impl PriorityAnnouncement {
             Self::ActivateNinjutsu { .. } => PriorityReducerFamily::ActivateNinjutsu,
             Self::CastSpellAsSneak { .. } => PriorityReducerFamily::CastSpellAsSneak,
             Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
-            Self::CastSpellForFree { .. } => PriorityReducerFamily::CastSpellForFree,
+            Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
             Self::PlayFaceDown { .. } => PriorityReducerFamily::PlayFaceDown,
             Self::TurnFaceUp { .. } => PriorityReducerFamily::TurnFaceUp,
             Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
@@ -429,14 +425,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             creature_to_return,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
-        PriorityAnnouncement::CastSpellForFree {
-            object_id,
-            card_id,
-            source_id,
-        } => GameAction::CastSpellForFree {
-            object_id,
-            card_id,
-            source_id,
+        PriorityAnnouncement::CastSpellForFree(announcement) => GameAction::CastSpellForFree {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+            source_id: announcement.source_id(&_access),
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
         PriorityAnnouncement::PlayFaceDown { object_id, card_id } => {
@@ -538,18 +530,12 @@ fn priority_preflight_candidates(
                 .map(PriorityAnnouncement::CastSpell)
                 .map(PriorityPreflightCandidate::Announcement),
         );
-        for (object_id, source_id, _) in casting::hand_cast_free_candidates(state, semantic_holder)
-        {
-            if let Some(object) = state.objects.get(&object_id) {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::CastSpellForFree {
-                        object_id,
-                        card_id: object.card_id,
-                        source_id,
-                    },
-                ));
-            }
-        }
+        candidates.extend(
+            casting::priority_cast_free_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellForFree)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         for (&source_id, object) in &state.objects {
             if object.controller != semantic_holder {
