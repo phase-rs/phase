@@ -6857,21 +6857,20 @@ pub(crate) fn abandon_ceased_pending_trigger(
         // per-entry tables when an entry leaves the stack.
         state.stack_paid_facts.remove(&entry_id);
         state.stack_trigger_event_batches.remove(&entry_id);
-        let pending_firing = state
-            .pending_trigger_firing
-            .expect("ceased pending trigger must retain its firing carrier");
-        let stack_firing = state
-            .stack_trigger_firings
-            .remove(&entry_id)
-            .expect("ceased pending trigger must retain its stack firing carrier");
-        assert_eq!(
-            pending_firing, stack_firing,
-            "ceased pending trigger carriers must agree"
-        );
-        super::lifecycle::record_delayed_terminal(
-            pending_firing,
-            super::lifecycle::DelayedTerminalDisposition::Removed,
-        );
+        let pending_firing = state.pending_trigger_firing;
+        let stack_firing = state.stack_trigger_firings.remove(&entry_id);
+        if let (Some(pending_firing), Some(stack_firing)) = (pending_firing, stack_firing) {
+            debug_assert_eq!(
+                pending_firing, stack_firing,
+                "ceased pending trigger carriers must agree"
+            );
+            if pending_firing == stack_firing {
+                super::lifecycle::record_delayed_terminal(
+                    pending_firing,
+                    super::lifecycle::DelayedTerminalDisposition::Removed,
+                );
+            }
+        }
     }
     state.pending_trigger = None;
     state.pending_trigger_firing = None;
@@ -11370,7 +11369,7 @@ pub mod tests {
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
-        TrackedSetId,
+        TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -11381,6 +11380,55 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn abandon_ceased_pending_trigger_recovers_when_its_stack_firing_was_pruned() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vanished trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(1),
+            instance: DelayedTriggerInstanceId(1),
+            source_id: source,
+        };
+        let source_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let vanished_entry = ObjectId(99);
+        state.pending_trigger_entry = Some(vanished_entry);
+        state.pending_trigger_firing = Some(TriggerFiring::ReceiptEligible(origin));
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        abandon_ceased_pending_trigger(&mut state, &source_ability);
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger_firing.is_none());
+        assert!(state.pending_trigger_event_batch.is_empty());
+        assert!(!state.stack_trigger_firings.contains_key(&vanished_entry));
+        assert_eq!(
+            state.pending_trigger_abandons,
+            vec!["Vanished trigger source (stack entry 99)"],
+        );
+        assert!(
+            !facts.receipt_terminalized(origin),
+            "a firing already pruned with its vanished stack entry must not be terminalized twice"
+        );
     }
 
     #[test]
