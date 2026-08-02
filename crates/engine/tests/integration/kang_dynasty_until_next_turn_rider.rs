@@ -85,6 +85,87 @@ fn chapter_rider_parses_until_next_turn_expiry_and_parent_target() {
     );
 }
 
+/// Scope-evidence class guard (PR #6884): "until your next turn, whenever …"
+/// delayed triggers on cards OTHER than Kang Dynasty. The parse-diff showed 12
+/// such cards whose CreateDelayedTrigger `duration` field changed — this pins the
+/// two signatures so the class behavior can't silently regress:
+///   - Sig 1 (Don't Move / A Display / Davriel class): a plain inner effect →
+///     the "until your next turn" moves ENTIRELY to the WheneverEvent expiry and
+///     the creator ability keeps no `duration`.
+///   - Sig 2 (Jace, Architect of Thought / Tamiyo class): an inner "… until end
+///     of turn" buff → the "until your next turn" still moves to the expiry, and
+///     the residual `UntilEndOfTurn` surfaces on the creator ability.
+/// In BOTH cases the load-bearing fix is identical and correct: the expiry is
+/// `UntilControllersNextTurn`, so the trigger fires on opponents' turns instead
+/// of being purged at the creating turn's cleanup (the pre-fix default-EndOfTurn
+/// behavior, CR 603.7b).
+#[test]
+fn until_next_turn_delayed_trigger_relocates_duration_to_expiry_across_class() {
+    fn delayed_ability(def: &AbilityDefinition) -> &AbilityDefinition {
+        let mut cur = def;
+        loop {
+            if matches!(&*cur.effect, Effect::CreateDelayedTrigger { .. }) {
+                return cur;
+            }
+            cur = cur
+                .sub_ability
+                .as_deref()
+                .expect("class fixture must contain a CreateDelayedTrigger");
+        }
+    }
+
+    // Sig 1: plain inner effect (Don't Move's "destroy it").
+    let sig1 = parse_effect_chain(
+        "Until your next turn, whenever a creature becomes tapped, destroy it.",
+        AbilityKind::Spell,
+    );
+    let sig1_ability = delayed_ability(&sig1);
+    let Effect::CreateDelayedTrigger { condition, .. } = &*sig1_ability.effect else {
+        unreachable!();
+    };
+    let DelayedTriggerCondition::WheneverEvent { expiry, .. } = condition else {
+        panic!("expected WheneverEvent, got {condition:?}");
+    };
+    assert_eq!(
+        *expiry,
+        WheneverEventExpiry::UntilControllersNextTurn {
+            after: TurnGate::AfterCreationTurn,
+        },
+        "sig1: 'until your next turn' must land on the expiry"
+    );
+    assert_eq!(
+        sig1_ability.duration, None,
+        "sig1: a plain inner effect leaves no residual duration on the creator ability"
+    );
+
+    // Sig 2: inner "… until end of turn" buff (Jace, Architect of Thought's +1).
+    let sig2 = parse_effect_chain(
+        "Until your next turn, whenever a creature an opponent controls attacks, \
+         it gets -1/-0 until end of turn.",
+        AbilityKind::Spell,
+    );
+    let sig2_ability = delayed_ability(&sig2);
+    let Effect::CreateDelayedTrigger { condition, .. } = &*sig2_ability.effect else {
+        unreachable!();
+    };
+    let DelayedTriggerCondition::WheneverEvent { expiry, .. } = condition else {
+        panic!("expected WheneverEvent, got {condition:?}");
+    };
+    assert_eq!(
+        *expiry,
+        WheneverEventExpiry::UntilControllersNextTurn {
+            after: TurnGate::AfterCreationTurn,
+        },
+        "sig2: 'until your next turn' must STILL land on the expiry, not be shadowed \
+         by the inner 'until end of turn'"
+    );
+    assert_eq!(
+        sig2_ability.duration,
+        Some(engine::types::ability::Duration::UntilEndOfTurn),
+        "sig2: the inner buff's residual 'until end of turn' surfaces on the creator ability"
+    );
+}
+
 /// Turn-structure pump (auto no-attacks/blocks, drain trigger order, no-op
 /// cleanup discard, pass priority).
 fn pump(runner: &mut GameRunner) -> bool {

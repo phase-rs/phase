@@ -377,3 +377,42 @@ fn parse_shape_exactly_two_and_delayed_damage_rider() {
         other => panic!("expected PutCounter, got {other:?}"),
     }
 }
+
+/// Scope-evidence class guard (PR #6884, signatures 3 & 4): the "attack with
+/// exactly two creatures" recognition is a CLASS fix, not a one-off for Love on
+/// the Battlefield. Alluring Suitor is the sibling card whose YouAttack trigger
+/// gained the same `AttackersDeclaredCount { EQ, 2 }` condition and `you` target
+/// scope. Before the fix the constraint was dropped, so the transform over-fired
+/// on any attack; pinning it here proves the class improvement and guards the
+/// sibling from regressing independently of Love's runtime tests.
+#[test]
+fn parse_shape_alluring_suitor_exactly_two_attack_constraint() {
+    // Verified Oracle text (Scryfall, front face): "When you attack with exactly
+    // two creatures, transform this creature."
+    let parsed = parse_oracle_text(
+        "When you attack with exactly two creatures, transform this creature.",
+        "Alluring Suitor",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::YouAttack)
+        .expect("YouAttack trigger");
+
+    match trigger
+        .condition
+        .as_ref()
+        .expect("exactly-two count constraint present (not dropped → no over-fire)")
+    {
+        TriggerCondition::AttackersDeclaredCount {
+            comparator, count, ..
+        } => {
+            assert_eq!(*comparator, Comparator::EQ, "exactly → EQ");
+            assert_eq!(*count, 2, "two");
+        }
+        other => panic!("expected AttackersDeclaredCount, got {other:?}"),
+    }
+}
