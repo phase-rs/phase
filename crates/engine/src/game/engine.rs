@@ -46,6 +46,7 @@ use super::engine_replacement;
 use super::engine_resolution_choices;
 use super::engine_stack;
 use super::interaction;
+use super::keywords;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources;
@@ -278,10 +279,7 @@ enum PriorityAnnouncement {
         mount_id: ObjectId,
     },
     Transform(transform::PriorityTransformAnnouncement),
-    ActivateNinjutsu {
-        ninjutsu_object_id: ObjectId,
-        creature_to_return: ObjectId,
-    },
+    ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
     CastSpellAsSneak {
         hand_object: ObjectId,
         card_id: CardId,
@@ -319,7 +317,7 @@ impl PriorityAnnouncement {
             Self::ActivateStation { .. } => PriorityReducerFamily::ActivateStation,
             Self::SaddleMount { .. } => PriorityReducerFamily::SaddleMount,
             Self::Transform(_) => PriorityReducerFamily::Transform,
-            Self::ActivateNinjutsu { .. } => PriorityReducerFamily::ActivateNinjutsu,
+            Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
             Self::CastSpellAsSneak { .. } => PriorityReducerFamily::CastSpellAsSneak,
             Self::CastSpellAsWebSlinging { .. } => PriorityReducerFamily::CastSpellAsWebSlinging,
             Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
@@ -390,12 +388,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::Transform(announcement) => GameAction::Transform {
             object_id: announcement.object_id(&_access),
         },
-        PriorityAnnouncement::ActivateNinjutsu {
-            ninjutsu_object_id,
-            creature_to_return,
-        } => GameAction::ActivateNinjutsu {
-            ninjutsu_object_id,
-            creature_to_return,
+        PriorityAnnouncement::ActivateNinjutsu(announcement) => GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: announcement.ninjutsu_object_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
         },
         PriorityAnnouncement::CastSpellAsSneak {
             hand_object,
@@ -650,35 +645,12 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        if state.active_player == semantic_holder {
-            for (ninjutsu_object_id, _, variant, cost) in
-                super::keywords::ninjutsu_family_activatable_sources(state, semantic_holder)
-            {
-                if !super::keywords::ninjutsu_timing_ok(&state.phase, &variant)
-                    || !casting::can_pay_ability_mana_cost_after_auto_tap(
-                        state,
-                        semantic_holder,
-                        ninjutsu_object_id,
-                        None,
-                        &cost,
-                    )
-                {
-                    continue;
-                }
-                for creature_to_return in super::keywords::returnable_creatures_for_variant(
-                    state,
-                    semantic_holder,
-                    &variant,
-                ) {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::ActivateNinjutsu {
-                            ninjutsu_object_id,
-                            creature_to_return,
-                        },
-                    ));
-                }
-            }
-        }
+        candidates.extend(
+            keywords::priority_ninjutsu_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateNinjutsu)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         if state.active_player == semantic_holder && state.phase == Phase::DeclareBlockers {
             let unblocked_attackers: Vec<_> = super::combat::unblocked_attackers(state)
