@@ -29,8 +29,30 @@ impl PriorityTransformAnnouncement {
     }
 }
 
-/// Enumerates controlled double-faced battlefield permanents as transform
-/// primers. The normal reducer and `transform_permanent` retain final legality.
+/// CR 701.27 + CR 710.4 + CR 712.4c: Whether a battlefield permanent can
+/// transform rather than silently ignoring the instruction.
+pub(in crate::game) fn can_transform(state: &GameState, object_id: ObjectId) -> bool {
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    object.zone == Zone::Battlefield
+        && object.back_face.is_some()
+        && !crate::game::static_abilities::object_has_static_other(
+            state,
+            object_id,
+            "CantTransform",
+        )
+        // `merge_kind` distinguishes meld from a two-component mutate pile.
+        && object.merge_kind != Some(crate::game::game_object::MergeKind::Meld)
+        // Flip cards retain their alternate face in `back_face` but never
+        // transform; `is_flip_permanent` is the canonical discriminator.
+        && !object.flipped
+        && !crate::game::flip::is_flip_permanent(object)
+}
+
+/// Enumerates controlled transformable battlefield permanents as Priority
+/// primers. `can_transform` is shared with the reducer so accepted primers
+/// always perform the advertised face change.
 pub(in crate::game) fn priority_transform_announcements(
     state: &GameState,
     principal: &PriorityPrincipal,
@@ -40,9 +62,11 @@ pub(in crate::game) fn priority_transform_announcements(
         .iter()
         .copied()
         .filter(|object_id| {
-            state.objects.get(object_id).is_some_and(|object| {
-                object.controller == principal.semantic_holder() && object.back_face.is_some()
-            })
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == principal.semantic_holder())
+                && can_transform(state, *object_id)
         })
         .map(PriorityTransformAnnouncement::new)
         .collect()
@@ -69,48 +93,17 @@ pub fn transform_permanent(
             "Only permanents on the battlefield can transform".to_string(),
         ));
     }
-
-    // CR 701.27: "Can't transform" prevents this action. The effect invoking
-    // the transform resolves as if it had happened successfully — silent no-op.
-    if crate::game::static_abilities::object_has_static_other(state, object_id, "CantTransform") {
-        return Ok(());
-    }
-
-    // CR 712.4c: Unlike other double-faced cards, meld cards cannot be
-    // transformed or converted; any instruction to do so is ignored. Key on the
-    // TYPED meld discriminator (`merge_kind == Some(MergeKind::Meld)`) rather than
-    // `merged_components.len() == 2`: a two-creature MUTATE permanent ALSO has
-    // `merged_components.len() == 2` (set at `merge.rs`), so a length check would
-    // wrongly block a mutate pile containing a DFC from transforming. The melded
-    // survivor renders the RESULT (a non-DFC) and has no back face to flip.
-    if state
-        .objects
-        .get(&object_id)
-        .is_some_and(|o| o.merge_kind == Some(crate::game::game_object::MergeKind::Meld))
-    {
-        return Ok(());
-    }
-
-    // CR 701.27a + CR 701.27c: only permanents represented by double-faced
-    // tokens and double-faced cards can transform; if a spell or ability
-    // instructs a player to transform anything else, nothing happens. A CR 710
-    // flip card is a SINGLE-faced card whose alternative characteristics are
-    // reached by flipping (CR 710.4), never by transforming — and applying the
-    // double-faced applicator to one would swap the mana cost and color that
-    // CR 710.1c holds fixed. `flip::is_flip_permanent` is the single authority:
-    // `flip::stash_flip_face` re-stamps `LayoutKind::Flip` on WHICHEVER half is
-    // parked in `back_face`, so the tag survives a flip, a zone exit (which
-    // reverts the flip and re-stashes the alternative half), and a later return
-    // to the battlefield. The `flipped` status is kept as a redundant second
-    // arm so a stash that some other path zeroed still cannot be transformed.
-    if obj.flipped || crate::game::flip::is_flip_permanent(obj) {
-        return Ok(());
-    }
-
     let back_face = obj
         .back_face
         .clone()
         .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))?;
+
+    // CR 701.27 + CR 710.4 + CR 712.4c: A blocked, melded, or flip permanent
+    // ignores the transform instruction. The shared predicate keeps this
+    // silent no-op aligned with Priority enumeration.
+    if !can_transform(state, object_id) {
+        return Ok(());
+    }
 
     // CR 613.7g: a double-faced permanent receives a new timestamp when it
     // transforms. All blocked/no-op early-returns above (off-battlefield,
@@ -474,6 +467,34 @@ mod tests {
         assert!(!obj.transformed, "transform should have been blocked");
         assert_eq!(obj.name, "Werewolf Front");
         assert!(events.is_empty(), "no Transformed event should be emitted");
+    }
+
+    #[test]
+    fn priority_omits_a_permanent_that_cannot_transform() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let id = setup_dfc(&mut state);
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::Other("CantTransform".to_string()))
+                .affected(TargetFilter::SelfRef),
+        );
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_transform_announcements(&state, &principal).is_empty(),
+            "Priority must not announce a transform that the reducer silently ignores"
+        );
     }
 
     #[test]
