@@ -5396,6 +5396,24 @@ enum ChoiceListShape {
     SharedNoun,
 }
 
+/// Parse one complete counter noun phrase in a distributed choice list.
+///
+/// The counter-type parser intentionally admits open-ended named counters, but
+/// a distributed item is valid only when that name is followed by the complete
+/// singular or plural counter noun. This keeps bare noun disjunctions from
+/// reaching the counter-choice branch builder.
+fn parse_full_counter_noun(input: &str) -> Option<(CounterType, QuantityExpr)> {
+    let (count, rest) = parse_count_expr(input.trim())?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>(" counters"),
+        tag(" counter"),
+    )))
+    .parse(rest)
+    .ok()?;
+    Some((counter_type, count))
+}
+
 /// CR 122.1b: keyword counters distribute over a single shared noun. Recognize
 /// the "shared-noun" disjunctive list shape: ONE leading article, a list of
 /// bare keyword adjectives, and ONE trailing "counter" — e.g. "a menace,
@@ -5429,6 +5447,39 @@ fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
     Some(items)
 }
 
+/// Classify a counter-choice list and validate every member for the classified
+/// shape. This is the single authority for the priority order and guards shared
+/// by context-free callers and the branch-reparsing parser.
+fn classify_counter_choice_list(input: &str) -> Option<(ChoiceListShape, Vec<&str>)> {
+    let (shape, items) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a counter from among ").parse(input) {
+            (ChoiceListShape::FromAmong, split_choice_list_items(rest)?)
+        } else if let Some(items) = recognize_shared_noun_counter_list(input) {
+            (ChoiceListShape::SharedNoun, items)
+        } else {
+            (
+                ChoiceListShape::Distributed,
+                split_choice_list_items(input)?,
+            )
+        };
+
+    if items.len() < 2 || items.iter().any(|item| item.trim().is_empty()) {
+        return None;
+    }
+
+    let valid = match shape {
+        ChoiceListShape::Distributed => items
+            .iter()
+            .all(|item| parse_full_counter_noun(item).is_some()),
+        ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => items.iter().all(|item| {
+            all_consuming(nom_primitives::parse_strict_counter_type)
+                .parse(item.trim())
+                .is_ok()
+        }),
+    };
+    valid.then_some((shape, items))
+}
+
 /// CR 122.1 + CR 608.2d: Context-free classifier for a disjunctive
 /// counter-choice list. Given the choices payload (the text BETWEEN
 /// "your choice of " and " on TARGET"), recognize which of the three list
@@ -5458,50 +5509,15 @@ fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
 pub(crate) fn classify_and_parse_counter_choice_list(
     choices_text: &str,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
-    let (shape, choice_items) =
-        match tag::<_, _, OracleError<'_>>("a counter from among ")(choices_text) {
-            Ok((rest, _)) => (ChoiceListShape::FromAmong, split_choice_list_items(rest)?),
-            // CR 122.1b: keyword counters distribute over a single noun; only
-            // classify as SharedNoun when the shape matches AND every item is a
-            // recognized counter type — otherwise distributed lists and
-            // non-counter lists leak through. Fall through to Distributed when
-            // the strict guard fails.
-            Err(_) => match recognize_shared_noun_counter_list(choices_text) {
-                Some(items)
-                    if items.len() >= 2
-                        && items.iter().all(|item| {
-                            all_consuming(nom_primitives::parse_strict_counter_type)
-                                .parse(item.trim())
-                                .is_ok()
-                        }) =>
-                {
-                    (ChoiceListShape::SharedNoun, items)
-                }
-                _ => (
-                    ChoiceListShape::Distributed,
-                    split_choice_list_items(choices_text)?,
-                ),
-            },
-        };
-
-    if choice_items.len() < 2 {
-        return None;
-    }
+    let (shape, choice_items) = classify_counter_choice_list(choices_text)?;
 
     let mut entries: Vec<(CounterType, QuantityExpr)> = Vec::with_capacity(choice_items.len());
     for item in &choice_items {
         let item = item.trim();
-        if item.is_empty() {
-            return None;
-        }
         let entry = match shape {
             // CR 122.1: full counter noun phrase ("a +1/+1 counter", "two charge
             // counters"). Parse count then counter type from the remainder.
-            ChoiceListShape::Distributed => {
-                let (count, rest) = parse_count_expr(item)?;
-                let (_after, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-                (counter_type, count)
-            }
+            ChoiceListShape::Distributed => parse_full_counter_noun(item)?,
             // CR 122.1b: bare keyword name ("first strike"); count is one.
             ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
                 let (_rest, counter_type) =
@@ -5549,17 +5565,14 @@ fn try_parse_put_counter_choice(
     // (Reluctant Role Model: "put a flying, lifelink, or +1/+1 counter on it").
     // Both resolve to the same `ChooseOneOf` of `PutCounter` branches — the
     // controller still picks one kind at resolution. The bare form is allowed
-    // ONLY for the strictly-validated SharedNoun/FromAmong shapes (every item
-    // must name a real counter type), so noun-phrase disjunctions like "put a
-    // creature or a land into play" never misclassify as a counter choice.
-    let explicit_choice;
+    // only when every distributed item is a complete counter noun phrase, so
+    // noun-phrase disjunctions like "put a creature or a land into play" never
+    // misclassify as a counter choice.
     let after_choice_original = if let Some(((), rest)) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("put your choice of ")).parse(i)
     }) {
-        explicit_choice = true;
         rest
     } else {
-        explicit_choice = false;
         nom_on_lower(tp.original, tp.lower, |i| value((), tag("put ")).parse(i))?.1
     };
 
@@ -5567,62 +5580,14 @@ fn try_parse_put_counter_choice(
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
-    // Split the post-"on" choices into individual items via nom combinators.
-    // Three list shapes (CR 122.1 + CR 608.2d), classified in priority order:
-    //   1. FromAmong  — "a counter from among X, Y, ..., and Z" (bare keywords)
-    //   2. SharedNoun — "a X, Y, ..., or Z counter" (one leading article + bare
-    //      keyword adjectives + one trailing "counter")
-    //   3. Distributed — "a A counter, a B counter, or a C counter" / binary
-    //      ("a A counter or a B counter"), each item a full counter noun phrase.
-    // CR 122.1b: both FromAmong and SharedNoun name bare keywords; each branch
-    // is later synthesized as "a <keyword> counter".
+    // The shared classifier validates FromAmong, SharedNoun, and Distributed
+    // lists before branch reparsing. In particular, a bare distributed list is
+    // accepted only when every item is a complete counter noun phrase.
     let choices_text = choices_tp.original;
-    let (shape, choice_items) =
-        match tag::<_, _, OracleError<'_>>("a counter from among ")(choices_text) {
-            Ok((rest, _)) => (ChoiceListShape::FromAmong, split_choice_list_items(rest)?),
-            // CR 122.1b: keyword counters distribute over a single noun; CR
-            // 608.2d: choice made at resolution; CR 601.2c: shared target at
-            // cast. Only classify as SharedNoun when the shape matches AND every
-            // item is a recognized counter type — otherwise distributed lists
-            // ("a +1/+1 counter, ...") and non-counter lists ("a red or blue
-            // creature") would leak through. Fall through to Distributed when
-            // the strict guard fails.
-            Err(_) => match recognize_shared_noun_counter_list(choices_text) {
-                Some(items)
-                    if items.len() >= 2
-                        && items.iter().all(|item| {
-                            all_consuming(nom_primitives::parse_strict_counter_type)
-                                .parse(item.trim())
-                                .is_ok()
-                        }) =>
-                {
-                    (ChoiceListShape::SharedNoun, items)
-                }
-                // The bare "put <list> on ..." form has no "your choice of"
-                // disambiguator, so it must NOT fall through to the permissive
-                // Distributed shape — that would let arbitrary "A or B" noun
-                // phrases reach the counter-branch builder. Require the strict
-                // SharedNoun/FromAmong shapes for the bare form.
-                _ if !explicit_choice => return None,
-                _ => (
-                    ChoiceListShape::Distributed,
-                    split_choice_list_items(choices_text)?,
-                ),
-            },
-        };
-
-    // Require at least 2 branches.
-    if choice_items.len() < 2 {
-        return None;
-    }
+    let (shape, choice_items) = classify_counter_choice_list(choices_text)?;
 
     let target_text = target_tp.original.trim().trim_end_matches('.');
     if target_text.is_empty() {
-        return None;
-    }
-
-    // Validate each choice item is non-empty.
-    if choice_items.iter().any(|item| item.trim().is_empty()) {
         return None;
     }
 

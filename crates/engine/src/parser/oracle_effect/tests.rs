@@ -39762,6 +39762,88 @@ fn choose_one_of_detects_shared_target_counter_choice() {
 }
 
 #[test]
+fn dwarven_armorer_bare_distributed_counter_choice_preserves_cost_and_branches() {
+    use crate::types::counter::CounterType;
+
+    let parsed = parse_oracle_text(
+        "{R}, {T}, Discard a card: Put a +0/+1 counter or a +1/+0 counter on target creature.",
+        "Dwarven Armorer",
+        &[],
+        &["Creature".to_string()],
+        &["Dwarf".to_string()],
+    );
+
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Dwarven Armorer must produce exactly one activated ability: {:#?}",
+        parsed.abilities
+    );
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    let AbilityCost::Composite { costs } = ability
+        .cost
+        .as_ref()
+        .expect("Dwarven Armorer must retain its activation costs")
+    else {
+        panic!(
+            "expected composite mana, tap, discard cost, got {:?}",
+            ability.cost
+        );
+    };
+    assert_eq!(costs.len(), 3);
+    assert!(matches!(
+        &costs[0],
+        AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards,
+                generic: 0,
+            }
+        } if shards == &vec![ManaCostShard::Red]
+    ));
+    assert!(matches!(&costs[1], AbilityCost::Tap));
+    assert!(matches!(
+        &costs[2],
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            ..
+        }
+    ));
+
+    assert!(matches!(&*ability.effect, Effect::TargetOnly { .. }));
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the shared target must lead to the counter-choice sub-ability");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected ChooseOneOf after shared target, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 2);
+
+    let expected = [(0, 1), (1, 0)];
+    for (branch, (power, toughness)) in branches.iter().zip(expected) {
+        assert!(
+            matches!(
+                &*branch.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::PowerToughness { power: actual_power, toughness: actual_toughness },
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                } if (*actual_power, *actual_toughness) == (power, toughness)
+            ),
+            "expected +{power}/+{toughness} ParentTarget counter branch, got {:?}",
+            branch.effect
+        );
+    }
+}
+
+#[test]
 fn choose_one_of_detects_from_among_counter_choice() {
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -39971,6 +40053,38 @@ fn classify_counter_choice_list_rejects_non_counter_and_singletons() {
     assert!(
         classify_and_parse_counter_choice_list("a +1/+1 counter").is_none(),
         "single-item list must return None"
+    );
+}
+
+#[test]
+fn bare_distributed_counter_choice_rejects_non_counter_noun_disjunction() {
+    // Positive reach guard: the bare distributed path is live and fully
+    // supported before the hostile phrase is checked.
+    let valid = parse_effect_chain(
+        "Put a +0/+1 counter or a +1/+0 counter on target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*valid.effect, Effect::TargetOnly { .. })
+            && valid
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2)),
+        "a valid bare distributed counter list must reach ChooseOneOf: {valid:?}"
+    );
+
+    let hostile = parse_effect_chain(
+        "Put a red or blue creature on target creature.",
+        AbilityKind::Spell,
+    );
+    let is_counter_choice = matches!(&*hostile.effect, Effect::TargetOnly { .. })
+        && hostile.sub_ability.as_deref().is_some_and(|sub| {
+            matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. }
+                if branches.iter().all(|branch| matches!(&*branch.effect, Effect::PutCounter { .. })))
+        });
+    assert!(
+        !is_counter_choice,
+        "bare non-counter noun disjunction must not reach counter branches: {hostile:?}"
     );
 }
 
