@@ -11386,6 +11386,21 @@ mod tests {
             pts
         }
 
+        /// `pts_named`'s twin for boards where a layer-1 `SetName` override
+        /// (CR 707.9b) rewrites the live name: selects on the PRINTED name,
+        /// which `reset_recipient_to_base` restores at the top of every pass.
+        fn pts_base_named(state: &GameState, prefix: &str) -> Vec<(Option<i32>, Option<i32>)> {
+            let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|o| o.base_name.starts_with(prefix))
+                .map(|o| (o.power, o.toughness))
+                .collect();
+            pts.sort();
+            pts
+        }
+
         /// A `Continuous` static definition over `affected` applying `mods`.
         fn continuous_static(
             affected: TargetFilter,
@@ -12042,54 +12057,66 @@ mod tests {
         }
 
         // ------------------------------------------------------------------
-        // RESOLUTION-CREATED continuous effects (CR 611.2c + CR 611.3a).
+        // RESOLUTION-CREATED continuous effects (CR 611.2b + CR 611.2c).
         //
         // A `TransientContinuousEffect` is the third `ActiveContinuousEffect`
         // producer, alongside printed statics and granted-inner statics. It is
-        // the only one whose affected set is FROZEN (CR 611.2c) while its
-        // enabling condition stays LIVE (CR 611.3a), so it is the only one
-        // where the affected-filter channel reports EMPTY and the condition is
-        // the sole live read. Both boards below build that effect through the
-        // single construction authority — see `install_gated_transient` for
-        // which production path produces this shape and which does NOT.
+        // the only one whose affected set is FROZEN (CR 611.2c) while its two
+        // gates stay LIVE, so it is the only one where the affected-filter
+        // channel reports EMPTY and a gate is the sole live read. Those gates
+        // are the "for as long as" DURATION (CR 611.2b) and the retained
+        // CONDITION, which is the source definition's own CR 611.3a gate
+        // carried along; `transient_effect_is_live` consults exactly that pair.
+        // Every board below builds its effect through the single construction
+        // authority — see `install_gated_transient` for which production path
+        // produces this shape and which does NOT.
         // ------------------------------------------------------------------
 
-        /// Install a resolution-created continuous effect that RETAINS its
-        /// enabling condition, through the single construction authority
+        /// Install a resolution-created continuous effect that RETAINS a gate,
+        /// through the single construction authority
         /// (`GameState::add_transient_continuous_effect`), one effect per
         /// recipient.
         ///
         /// CR 611.2c: the affected set is already frozen to `SpecificObject` —
         /// a filter that reads NO layer-writable characteristic — which is what
-        /// every transient looks like once its effect has begun. CR 611.3a: the
-        /// condition rides alongside and stays live, re-evaluated on every
-        /// later pass. That asymmetry (frozen set, live gate) is what these two
-        /// boards exercise.
+        /// every transient looks like once its effect has begun. The gate rides
+        /// alongside and stays live: a `Duration::ForAsLongAs` re-evaluates per
+        /// pass because CR 611.2b makes the effect last exactly as long as its
+        /// stated condition holds, and a retained `condition` re-evaluates
+        /// because it is the source `StaticDefinition`'s own CR 611.3a gate.
+        /// That asymmetry (frozen set, live gate) is what these boards
+        /// exercise.
         ///
-        /// REACHABILITY: `Effect::GenericEffect` is NOT the producer of this
-        /// shape. Per CR 608.2h + CR 611.2d its resolver determines an
-        /// in-effect "if <condition>" exactly once, at resolution, and installs
-        /// the transient with `condition: None`
+        /// REACHABILITY: `Effect::GenericEffect` is NOT the producer of the
+        /// retained-`condition` shape. Per CR 608.2h + CR 611.2d its resolver
+        /// determines an in-effect "if <condition>" exactly once, at
+        /// resolution, and installs the transient with `condition: None`
         /// (`effects/effect.rs::resolve`). A conditioned transient comes from
         /// riders that hand a `StaticDefinition`'s condition straight to the
         /// constructor — `effects/counter.rs::apply_source_static` (the
-        /// `CounterSourceRider::LosesAbilities` rider) is the live example. So
-        /// these fixtures call the constructor exactly the way that rider does.
+        /// `CounterSourceRider::LosesAbilities` rider) is the live example, and
+        /// no shipped card gives that rider a condition yet, so the
+        /// `condition`-gated boards below are preventive. The
+        /// `Duration::ForAsLongAs` shape needs no such caveat: it is what the
+        /// parser emits for any "for as long as …" clause it can read
+        /// (`parser/oracle_nom/duration.rs`), and gain-control, phasing and
+        /// copy effects install it today.
         fn install_gated_transient(
             state: &mut GameState,
             source: ObjectId,
             recipients: &[ObjectId],
             mods: Vec<crate::types::ability::ContinuousModification>,
-            condition: crate::types::ability::StaticCondition,
+            duration: Duration,
+            condition: Option<crate::types::ability::StaticCondition>,
         ) {
             for &id in recipients {
                 state.add_transient_continuous_effect(
                     source,
                     PlayerId(0),
-                    Duration::UntilEndOfTurn,
+                    duration.clone(),
                     TargetFilter::SpecificObject { id },
                     mods.clone(),
-                    Some(condition.clone()),
+                    condition.clone(),
                 );
             }
         }
@@ -12102,18 +12129,24 @@ mod tests {
         /// entrant, so the Land population that condition counts moves for
         /// every pre-existing recipient.
         ///
-        /// CR 611.2c freezes the affected SET and nothing else; CR 611.3a keeps
-        /// the gate re-evaluating on every pass, here per recipient
+        /// CR 611.2c freezes the affected SET and nothing else; the retained
+        /// gate is the source definition's own CR 611.3a condition, so it keeps
+        /// re-evaluating on every pass, here per recipient
         /// (`FilterProp::Another`). Pre-entry each 2/2 recipient sees exactly
         /// 1 OTHER Land so `GE 2` is OFF; post-entry it sees 2 and turns ON
         /// (3/3).
         ///
         /// DISCRIMINATING because the transient is the ONLY condition on the
-        /// board: drop the condition channel from `live_characteristic_reads`
+        /// board: drop the `e.condition` channel from `live_characteristic_reads`
         /// and `ReadKinds` loses CardTypes entirely. Stage 4 then exempts the
         /// layer-4 writer under CR 613.6 — the only other CardTypes read is its
         /// OWN affected filter — the entry stays on the incremental path, and
-        /// the pre-existing recipients keep a stale 2/2.
+        /// the pre-existing recipients keep a stale 2/2. The entry-perturbation
+        /// probe cannot rescue it: the entrant is not a Land until layer 4 has
+        /// run, so `entered_object_perturbs_static_condition` sees no
+        /// perturbation. The recipient-context gate is what keeps this board on
+        /// the `e.condition` channel — `transient_source_level_condition_read_board`
+        /// covers the source-level twin, which that channel never sees.
         fn transient_condition_read_board() -> GameState {
             use crate::types::ability::{ContinuousModification, StaticCondition};
             let mut state = setup();
@@ -12145,8 +12178,9 @@ mod tests {
                     ContinuousModification::AddPower { value: 1 },
                     ContinuousModification::AddToughness { value: 1 },
                 ],
+                Duration::UntilEndOfTurn,
                 // Recipient-relative: "two or more OTHER Lands".
-                StaticCondition::QuantityComparison {
+                Some(StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(TypedFilter {
@@ -12158,7 +12192,7 @@ mod tests {
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 2 },
-                },
+                }),
             );
             state.layers_dirty = crate::types::game_state::LayersDirty::Full;
             state
@@ -12212,8 +12246,9 @@ mod tests {
         }
 
         /// (3.2) TRANSIENT SOURCE-LEVEL GATE. Same frozen-set/live-gate
-        /// asymmetry, but the gate is a plain SOURCE-LEVEL presence check
-        /// (CR 611.3a) instead of a recipient-context count, and NOTHING on the
+        /// asymmetry, but the gate is a plain SOURCE-LEVEL presence check (the
+        /// source definition's own CR 611.3a condition, carried onto the
+        /// transient) instead of a recipient-context count, and NOTHING on the
         /// board writes the kinds it reads. That makes the entry-perturbation
         /// probe the only disjunct that can catch it: an opponent's creature
         /// entering flips `IsPresent{creature an opponent controls}` from OFF
@@ -12248,15 +12283,16 @@ mod tests {
                     ContinuousModification::AddPower { value: 3 },
                     ContinuousModification::AddToughness { value: 3 },
                 ],
+                Duration::UntilEndOfTurn,
                 // CR 109.5: a resolved effect RETAINS its controller, so "an
                 // opponent" is read against P0. OFF on this board.
-                StaticCondition::IsPresent {
+                Some(StaticCondition::IsPresent {
                     filter: Some(TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
                         controller: Some(ControllerRef::Opponent),
                         ..Default::default()
                     })),
-                },
+                }),
             );
             state.layers_dirty = crate::types::game_state::LayersDirty::Full;
             state
@@ -12293,6 +12329,320 @@ mod tests {
                 "the escalated entry must derive the same board as a full re-evaluation"
             );
             assert_pt_identical(&normal, &forced, "transient source-level gate");
+        }
+
+        /// The name a layer-1 override (CR 707.9b) stamps onto every creature on
+        /// the (3.3)/(3.4) boards.
+        const OVERRIDDEN_NAME: &str = "Cloned Bear";
+
+        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
+        /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
+        /// false and every gather strips it off the effect it pushes.
+        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+            crate::types::ability::StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Named {
+                            name: OVERRIDDEN_NAME.to_string(),
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        /// Two 2/2 recipients, a printed LAYER-1 `SetName` override (CR 707.9b)
+        /// over creatures, and one +1/+1 transient per recipient gated on
+        /// `install_gate`.
+        ///
+        /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
+        /// condition and a `ForAsLongAs` duration are both evaluated inside
+        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
+        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
+        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
+        /// within one pass. (A retained recipient-context condition is instead
+        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
+        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
+        /// the entrant is still printed-named there — that divergence is exactly
+        /// the staleness these boards catch.
+        ///
+        /// Nothing else on the board is a creature, so the overridden-name
+        /// population is exactly the creature count: 2 before the entry, 3
+        /// after, which moves a `GE 3` gate from OFF to ON.
+        fn transient_name_count_gate_board(
+            install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
+        ) -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    780 + i,
+                    &format!("NameBear{i}"),
+                    vec![],
+                ));
+            }
+            // CR 707.9b: a layer-1 copiable-value name override, which MOVES the
+            // counted population by reaching the entrant.
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetName {
+                    name: OVERRIDDEN_NAME.to_string(),
+                }],
+            );
+            install_static_enchantment(&mut state, 782, "Mass Renaming", vec![rename]);
+            let source = install_static_enchantment(&mut state, 783, "Name-Gated Grant", vec![]);
+            install_gate(&mut state, source, &bears);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3.3) TRANSIENT SOURCE-LEVEL CONDITION, READ CHANNEL. The twin of
+        /// (3.1) with the recipient context removed. A source-level condition
+        /// never reaches `ActiveContinuousEffect::condition`:
+        /// `gather_transient_continuous_effects` strips it (only a
+        /// recipient-context condition is retained), and while the gate is OFF
+        /// the effect is not gathered at all. So the ONLY way NameText enters
+        /// `ReadKinds` is the walk over `state.transient_continuous_effects`.
+        ///
+        /// DISCRIMINATING: drop that walk and `ReadKinds` holds only the
+        /// CardTypes its affected filters read, which is disjoint from the
+        /// layer-1 `SetName` writer's `{NameText}` — the relation exits at
+        /// stage 3, the entry stays incremental, and the recipients keep a
+        /// stale 2/2 while a full pass says 3/3. The perturbation probe cannot
+        /// rescue it either: the entrant still carries its printed name when
+        /// the probe runs, so it does not perturb the overridden-name count.
+        fn transient_source_level_condition_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            transient_name_count_gate_board(|state, source, bears| {
+                install_gated_transient(
+                    state,
+                    source,
+                    bears,
+                    vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ],
+                    Duration::UntilEndOfTurn,
+                    Some(overridden_name_count_at_least(3)),
+                )
+            })
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_transient_source_level_condition_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_source_level_condition_read_board, |s| {
+                    add_colorless_creature_entry(s, 784)
+                });
+            assert!(
+                escalated,
+                "a source-level gate on a resolution-created effect is stripped from \
+                 the gathered effect, so only the transient walk can put NameText in \
+                 ReadKinds — a layer-1 name override reaching the entrant must escalate"
+            );
+            // Non-vacuity: the gate really is the board-wide count — no
+            // `FilterProp::Another`, nothing else recipient-relative — so it is
+            // source-level and every gather strips it before the `e.condition`
+            // channel could ever see it.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                    }),
+                "the fixture must install SpecificObject-bound transients whose gate is \
+                 source-level, or the `e.condition` channel would cover this board"
+            );
+            let mut pre = transient_source_level_condition_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_base_named(&pre, "NameBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry only 2 permanents carry the overridden name, so GE 3 is OFF"
+            );
+            assert_eq!(
+                pts_base_named(&forced, "NameBear"),
+                vec![(Some(3), Some(3)); 2],
+                "layer 1 renames the entrant too, making it the third — the gate turns ON"
+            );
+            assert_eq!(
+                pts_base_named(&normal, "NameBear"),
+                pts_base_named(&forced, "NameBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient source-level condition reads");
+        }
+
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
+        /// with the gate moved from `tce.condition` into
+        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
+        /// long as its stated condition holds). `transient_effect_is_live`
+        /// evaluates it in the same gather, and no gather ever copies a
+        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
+        /// is invisible to every channel except the transient walk.
+        ///
+        /// DISCRIMINATING: drop `transient_duration_condition` from
+        /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
+        /// as in (3.3) — recipients keep a stale 2/2.
+        fn transient_duration_gate_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            transient_name_count_gate_board(|state, source, bears| {
+                install_gated_transient(
+                    state,
+                    source,
+                    bears,
+                    vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ],
+                    Duration::ForAsLongAs {
+                        condition: overridden_name_count_at_least(3),
+                    },
+                    None,
+                )
+            })
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_transient_duration_gate_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_duration_gate_read_board, |s| {
+                    add_colorless_creature_entry(s, 785)
+                });
+            assert!(
+                escalated,
+                "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
+                 it reads are live reads — a layer-1 name override reaching the entrant \
+                 must escalate"
+            );
+            // Non-vacuity: the gate lives in the DURATION, not in `condition`,
+            // so no `tce.condition` channel could have covered this board.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        tce.condition.is_none()
+                            && matches!(tce.duration, Duration::ForAsLongAs { .. })
+                    }),
+                "the fixture must gate purely through `Duration::ForAsLongAs`"
+            );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_base_named(&pre, "NameBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry only 2 permanents carry the overridden name, so the \
+                 duration has not started"
+            );
+            assert_eq!(
+                pts_base_named(&forced, "NameBear"),
+                vec![(Some(3), Some(3)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration holds"
+            );
+            assert_eq!(
+                pts_base_named(&normal, "NameBear"),
+                pts_base_named(&forced, "NameBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient duration gate reads");
+        }
+
+        /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
+        /// of (3.2) with the gate moved into the duration: Master Thief's "for
+        /// as long as you control this creature" shape, inverted to an
+        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// board writes the kinds the gate reads, so the read union cannot see
+        /// the flip — while the duration is unmet the effect is not gathered at
+        /// all and `all_writes` is empty, which exits the kind relation at
+        /// stage 1.
+        ///
+        /// DISCRIMINATING: drop `transient_duration_condition` from
+        /// `transient_gate_conditions` and the probe's transient arm sees only
+        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
+        /// stays incremental, and the frozen recipients keep a stale 2/2 while
+        /// a full pass says 5/5.
+        fn transient_duration_gate_probe_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    790 + i,
+                    &format!("DurationBear{i}"),
+                    vec![],
+                ));
+            }
+            let source =
+                install_static_enchantment(&mut state, 792, "Opponent-Gated Duration", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+                // CR 611.2b + CR 109.5: the duration is re-read every pass and
+                // "an opponent" stays bound to the resolver, P0.
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::Opponent),
+                            ..Default::default()
+                        })),
+                    },
+                },
+                None,
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn opponent_entry_escalates_through_transient_duration_gate() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_duration_gate_probe_board, |s| {
+                    add_colorless_creature_entry_under(s, 793, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
+                 an entry that starts a `for as long as` duration must escalate or every \
+                 frozen recipient keeps a stale board"
+            );
+            // Non-vacuity: the gate lives in the DURATION only.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        tce.condition.is_none()
+                            && matches!(tce.duration, Duration::ForAsLongAs { .. })
+                    }),
+                "the fixture must gate purely through `Duration::ForAsLongAs`"
+            );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "DurationBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry no opponent controls a creature, so the duration never started"
+            );
+            assert_eq!(
+                pts_named(&forced, "DurationBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the opponent's entrant starts the duration for every frozen recipient"
+            );
+            assert_eq!(
+                pts_named(&normal, "DurationBear"),
+                pts_named(&forced, "DurationBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient duration gate probe");
         }
 
         /// Assert every battlefield object's computed power/toughness/loyalty and

@@ -3701,7 +3701,7 @@ struct LiveCharacteristicReads {
 }
 
 /// CR 613.1: the union of layer-writable characteristic kinds that the CURRENT
-/// board actually READS, per the three live read channels.
+/// board actually READS, per the live read channels.
 ///
 /// Entrant-independent, so the entry-flush gate computes it once per flush:
 ///
@@ -3709,10 +3709,11 @@ struct LiveCharacteristicReads {
 /// global    := ⋃ dynamic-magnitude kinds     // every live modification's magnitude
 ///            ∪ ⋃ live condition kinds        // every live effect's retained condition
 ///            ∪ ⋃ Continuous condition kinds  // every live Continuous static's condition
+///            ∪ ⋃ transient gate kinds        // every INSTALLED transient's duration + condition
 /// ReadKinds := global ∪ ⋃ affected-filter kinds  // every live modification's affected filter
 /// ```
 ///
-/// All four channels are unioned UNCONDITIONALLY. An earlier design gated the
+/// All five channels are unioned UNCONDITIONALLY. An earlier design gated the
 /// affected-filter channel on the write set already intersecting, which is
 /// unsound: a board whose only name-sensitive read lives in another static's
 /// affected filter has an empty base union, so the gate would never notice a
@@ -3721,8 +3722,30 @@ struct LiveCharacteristicReads {
 /// The affected-filter channel is reported separately because it is the only
 /// one attributable to a single effect, and CR 613.6 puts an effect's own
 /// affected filter out of reach of its own writes — see
-/// [`AffectedFilterReadTally`]. The other three channels are board-level and
+/// [`AffectedFilterReadTally`]. The other four channels are board-level and
 /// admit no such exclusion.
+///
+/// WHAT CONVERGES WHERE. The `e.condition` channel below is NOT a single
+/// authority over every gate on the board, and must not be documented as one:
+///
+/// * printed and granted-inner Continuous statics reach it (gathered with
+///   their condition intact), and are ALSO covered by the source walk below,
+///   which is what sees a static whose gate is currently OFF;
+/// * a transient reaches it only when its gate is currently ON *and* the
+///   condition is recipient-context, because
+///   [`gather_transient_continuous_effects`] skips a transient that is not
+///   live and strips a source-level condition from the effect it pushes. Both
+///   discarded shapes are exactly the ones an entry can flip, hence the
+///   separate walk over `state.transient_continuous_effects`;
+/// * the ring/emblem/sticker producers (`stickers.rs`, and the two `condition:
+///   None` sites in this file) carry no condition at all today, so they
+///   contribute nothing through any channel.
+///
+/// `active_combat_assignment_rule_effects_from_static_definitions` /
+/// `collect_transient_combat_assignment_rule_effects` duplicate the same
+/// retain/strip logic for `ActiveCombatAssignmentRuleEffect`; those effects
+/// change CR 613.11 rules, not characteristics, so they are outside this union
+/// — but a future condition channel added here needs patching there too.
 ///
 /// Walks early-exit the moment the union saturates to
 /// [`CharacteristicKinds::ALL`].
@@ -3750,12 +3773,31 @@ fn live_characteristic_reads(
         // "isn't locked in" static-ability effect of CR 611.3a. The condition
         // gates WHETHER the effect applies at all, so it is a board-level read
         // and belongs in `global`, NOT in the per-effect `affected` channel
-        // that CR 613.6 lets an effect exclude from its own writes. This is the
-        // single authority for the condition channel: every
-        // `ActiveContinuousEffect` producer — printed statics, granted-inner
-        // statics and resolution-created transients — converges here.
+        // that CR 613.6 lets an effect exclude from its own writes. Covers the
+        // gathered producers only — see the walks below for what this channel
+        // structurally cannot see.
         if let Some(condition) = e.condition.as_ref() {
             global = global.union(static_condition_characteristic_reads(condition));
+        }
+    }
+    // CR 611.2b + CR 611.2c: both gates of a resolution-created effect — its
+    // "for as long as" duration and its retained enabling condition — decide
+    // WHETHER the effect applies at all, so both are board-level reads.
+    //
+    // Walked straight off `state.transient_continuous_effects` rather than off
+    // `active_effects`, because neither shape that matters survives that
+    // projection: `gather_transient_continuous_effects` skips a transient whose
+    // gate is currently OFF (an OFF gate is exactly the one an entry can turn
+    // ON), and it strips a source-level condition from the effect it pushes,
+    // leaving `e.condition == None` above.
+    if !global.union(affected).is_all() {
+        for tce in &state.transient_continuous_effects {
+            if global.union(affected).is_all() {
+                break;
+            }
+            for condition in transient_gate_conditions(tce) {
+                global = global.union(static_condition_characteristic_reads(condition));
+            }
         }
     }
     if !global.union(affected).is_all() {
@@ -4197,16 +4239,18 @@ fn active_effects_force_incremental_escalation(
 
 /// Scan every live continuous-effect generator for an enabling `condition` that
 /// is board-population-dependent AND that one of the `entered_ids` actually
-/// perturbs. Two generator channels are walked, matching the two
-/// `ActiveContinuousEffect` sources that carry a condition:
+/// perturbs. Two generator channels are walked, matching the two kinds of
+/// generator that carry a condition:
 ///
 ///  * PRINTED (and granted-inner) CONTINUOUS `StaticDefinition`s, over the same
 ///    source set as `collect_shared_active_continuous_effects`
 ///    (`for_each_static_effect_source`), reading each definition's `condition`.
-///  * RESOLUTION-CREATED `TransientContinuousEffect`s, reading `tce.condition`.
-///    CR 611.2c locks in a resolved effect's affected SET, not its gate, so a
-///    transient's condition stays live and flips on entry exactly like a printed
-///    one — see the transient walk below for why it has no truth-delta stage.
+///  * RESOLUTION-CREATED `TransientContinuousEffect`s, reading BOTH gates that
+///    [`transient_effect_is_live`] consults, via [`transient_gate_conditions`]:
+///    the "for as long as" duration (CR 611.2b) and the retained enabling
+///    condition. CR 611.2c locks in a resolved effect's affected SET, not
+///    either gate, so both flip on entry while the frozen set goes stale with
+///    them — see the transient walk below for why it has no truth-delta stage.
 ///
 /// O((active-source-count + transient-count) × entered-count); short-circuits on
 /// the first match.
@@ -4297,12 +4341,15 @@ fn any_active_static_condition_perturbed_by_entry(
     if found {
         return true;
     }
-    // CR 611.2c + CR 611.3a: the walk above sees only PRINTED (and granted-inner)
+    // CR 611.2b + CR 611.2c: the walk above sees only PRINTED (and granted-inner)
     // static definitions. A continuous effect created by the resolution of a
-    // spell or ability keeps its enabling condition LIVE — CR 611.2c locks in the
-    // affected SET, and nothing else — so a source-level population gate riding
-    // on a transient flips on entry exactly like a printed one, and every
-    // recipient frozen into that effect's set goes stale with it.
+    // spell or ability keeps BOTH of its gates live — CR 611.2c locks in the
+    // affected SET, and nothing else — so a population-dependent gate riding on
+    // a transient flips on entry while every recipient frozen into that effect's
+    // set goes stale with it. Both gates are walked through
+    // `transient_gate_conditions`: the "for as long as" duration is CR 611.2b
+    // (Master Thief), and the retained condition is the source definition's own
+    // CR 611.3a gate (`effects/counter.rs::apply_source_static`).
     //
     // No truth-delta stage here: `static_gate_truth` is keyed by
     // `(source, def_index)` over printed definitions, and a transient has no
@@ -4312,19 +4359,17 @@ fn any_active_static_condition_perturbed_by_entry(
     // ships a wrong board — and it matches the recipient-context arm above,
     // which also escalates on perturbation with no cache consult.
     state.transient_continuous_effects.iter().any(|tce| {
-        let Some(condition) = tce.condition.as_ref() else {
-            return false;
-        };
-        if !static_condition_uses_object_population(condition) {
-            return false;
-        }
         // CR 109.5: a resolved spell or ability RETAINS its controller, so "you"
-        // in the retained gate names `tce.controller` — not whoever controls the
-        // source object now (that reading is only correct for static abilities).
+        // in either retained gate names `tce.controller` — not whoever controls
+        // the source object now (that reading is only correct for static
+        // abilities).
         let ctx = FilterContext::from_source_with_controller(tce.source_id, tce.controller);
-        entered_ids
-            .iter()
-            .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
+        transient_gate_conditions(tce).any(|condition| {
+            static_condition_uses_object_population(condition)
+                && entered_ids
+                    .iter()
+                    .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
+        })
     })
 }
 
@@ -5563,8 +5608,46 @@ pub(crate) fn gather_transient_continuous_effects(
     }
 }
 
-fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+/// CR 611.2b: the enabling condition a `"for as long as …"` DURATION carries.
+///
+/// Single authority for "which condition does `tce.duration` gate on". The
+/// liveness evaluator ([`transient_duration_holds`]), the read union
+/// ([`live_characteristic_reads`]) and the entry-perturbation probe
+/// ([`any_active_static_condition_perturbed_by_entry`]) all ask through here,
+/// so a second condition-bearing `Duration` variant is wired into all three by
+/// editing one function.
+fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&StaticCondition> {
     let Duration::ForAsLongAs { ref condition } = tce.duration else {
+        return None;
+    };
+    Some(condition)
+}
+
+/// CR 611.2b + CR 611.2c: every condition that gates whether a
+/// resolution-created continuous effect is live on THIS pass.
+///
+/// CR 611.2c freezes such an effect's affected SET when it begins and nothing
+/// else, so both gates below stay live and can flip long after that set is
+/// fixed:
+///
+/// * the `"for as long as …"` DURATION (CR 611.2b — Master Thief's "gain
+///   control of target artifact for as long as you control this creature");
+/// * the retained enabling CONDITION, which is the source `StaticDefinition`'s
+///   own CR 611.3a gate riding along on the transient
+///   (`effects/counter.rs::apply_source_static`).
+///
+/// [`transient_effect_is_live`] consults exactly this pair, so any channel that
+/// must see "what could turn this effect on or off" walks the same pair.
+fn transient_gate_conditions(
+    tce: &TransientContinuousEffect,
+) -> impl Iterator<Item = &StaticCondition> {
+    transient_duration_condition(tce)
+        .into_iter()
+        .chain(tce.condition.as_ref())
+}
+
+fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    let Some(condition) = transient_duration_condition(tce) else {
         return true;
     };
 
