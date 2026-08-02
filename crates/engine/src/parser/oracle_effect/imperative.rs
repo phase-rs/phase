@@ -49,15 +49,16 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_anaphoric_target_ref, parse_event_context_ref, parse_fight_target, parse_mass_type_union,
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    parse_type_phrase_with_ctx, parse_word_bounded, resolve_pronoun_target,
-    resolve_singular_exiled_card_target, TargetSyntax,
+    match_mass_union_separator, parse_anaphoric_target_ref, parse_event_context_ref,
+    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_type_phrase, parse_type_phrase_with_ctx, parse_word_bounded,
+    resolve_pronoun_target, resolve_singular_exiled_card_target, starts_with_type_word,
+    TargetSyntax,
 };
 use super::super::oracle_util::{
-    contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
-    starts_with_possessive, TextPair,
+    contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
+    parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
+    split_around, starts_with_possessive, TextPair,
 };
 
 /// CR 611.2 + CR 601.2f + CR 118.7: Parse the transient (this-turn)
@@ -2625,6 +2626,32 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
     run(lower).ok().map(|(_, result)| result)
 }
 
+/// CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1 + CR 406.2: map a single zone word to
+/// its [`Zone`] — the one lexical zone-word→`Zone` mapping shared by every
+/// zone-union recognizer in this module (`try_parse_multi_zone_player_exile`,
+/// `parse_trailing_zone_union`, and the `Choose`-a-zone parsers).
+///
+/// The three per-player zones (CR 401.1 library, CR 402.1 hand, CR 404.1
+/// graveyard) each also match their plural form, which — with no possessive —
+/// denotes "every player's `<zone>`" (each player owns their own such zone,
+/// CR 400.1) in a whole-zone union. The plural arm precedes the singular so the
+/// longer form wins. Exile (CR 406.2) is a single zone shared by all players
+/// (CR 400.1), so it has no per-player instance and no plural form.
+fn parse_zone_word(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        value(
+            Zone::Graveyard,
+            alt((tag::<_, _, E>("graveyards"), tag("graveyard"))),
+        ),
+        value(Zone::Hand, alt((tag("hands"), tag("hand")))),
+        value(Zone::Library, alt((tag("libraries"), tag("library")))),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(input)
+}
+
 /// Parse output of the multi-zone player-exile recognizer: remaining input paired
 /// with the owner axis and the origin-zone union. Named so the inner `nom`
 /// combinator signature stays under `clippy::type_complexity`.
@@ -2646,14 +2673,6 @@ type MultiZonePlayerExileParse<'a> = (&'a str, (ControllerRef, Vec<Zone>));
 pub(super) fn try_parse_multi_zone_player_exile(
     rest_lower: &str,
 ) -> Option<(ControllerRef, Vec<Zone>)> {
-    fn zone_word(input: &str) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
-        alt((
-            value(Zone::Graveyard, tag::<_, _, OracleError<'_>>("graveyard")),
-            value(Zone::Hand, tag("hand")),
-            value(Zone::Library, tag("library")),
-        ))
-        .parse(input)
-    }
     fn run(input: &str) -> Result<MultiZonePlayerExileParse<'_>, nom::Err<OracleError<'_>>> {
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("cards from "),
@@ -2677,7 +2696,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             value(ControllerRef::You, tag("your ")),
         ))
         .parse(input)?;
-        let (mut input, first) = zone_word(input)?;
+        let (mut input, first) = parse_zone_word(input)?;
         let mut zones = vec![first];
         // Additional zones joined by " and " / ", and " / ", " (oxford comma).
         loop {
@@ -2689,7 +2708,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             .parse(input) else {
                 break;
             };
-            let Ok((after_zone, zone)) = zone_word(after_sep) else {
+            let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
                 break;
             };
             if !zones.contains(&zone) {
@@ -2710,6 +2729,101 @@ pub(super) fn try_parse_multi_zone_player_exile(
         return None;
     }
     Some((owner, zones))
+}
+
+/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
+/// `<zone(s)>`" — a heterogeneous mass exile whose operand unions a battlefield
+/// permanent population with one or more whole-zone populations (every card in
+/// every player's graveyard / hand / library, keyed by owner per CR 400.3).
+/// Ultimate Nullification ("Exile all creatures and graveyards") is the
+/// exemplar. Generalizes to any permutation ("… creatures and artifacts and
+/// graveyards", "… creatures and graveyards and hands").
+///
+/// The permanent legs are parsed by [`parse_mass_type_union`] (CR 205.2a +
+/// CR 205.3a — a card-type/subtype union) and scoped to the battlefield via
+/// `InZone`; the trailing zone legs become an all-cards (`TypeFilter::Card`),
+/// all-owners (`controller: None`) leg carrying the zone union on `InAnyZone`.
+/// The two are merged into one `Or`, so the resolving `ChangeZoneAll` scans
+/// `extract_zones()` = Battlefield ∪ zone-union and moves every match to exile
+/// simultaneously (CR 608.2f) — one instruction, never a battlefield wipe plus
+/// an orphaned zone conjunct.
+///
+/// Declines (`None`) unless a permanent leg is followed by at least one zone leg
+/// AND the operand is fully consumed (only trailing punctuation may remain), so
+/// pure type unions ("all creatures and artifacts") keep the existing type-union
+/// path and no trailing fragment is ever silently dropped.
+pub(super) fn try_parse_mass_exile_permanents_and_zones(
+    rest: &str,
+    rest_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    // The operand must LEAD with a permanent-type leg; pure-zone and zone-first
+    // forms are declined so existing behavior is untouched. Uses the shared
+    // type-word predicate combinator, never a raw-text dispatch.
+    if !starts_with_type_word(rest_lower) {
+        return None;
+    }
+    // CR 205.2a + CR 205.3a: consume the leading permanent-type union
+    // ("creatures", "creatures and artifacts", …); `rem` is the untyped tail
+    // (e.g. " and graveyards").
+    let (perm_filter, rem) = parse_mass_type_union(rest, ctx);
+    // CR 404.1 + CR 108.2: the trailing whole-zone union — declines if absent.
+    let zones = parse_trailing_zone_union(&rem.to_lowercase())?;
+    // CR 109.2: a bare card-type description ("creatures", no zone word / "card")
+    // means permanents of that type on the battlefield — so scope the permanent
+    // legs to the battlefield. This also makes `ChangeZoneAll::extract_zones`
+    // yield Battlefield ∪ zone-union; without it the zone leg would shadow the
+    // scan and battlefield permanents would never be collected.
+    let perm_scoped = super::add_filter_props(
+        perm_filter,
+        &[FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }],
+    );
+    // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone word (no
+    // possessive) is every player's such zone, so the leg is `TypeFilter::Card`
+    // (CR 108.2) with `controller` left `None` (every owner).
+    let zone_leg =
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]));
+    Some(merge_or_filters(perm_scoped, zone_leg))
+}
+
+/// CR 404.1 + CR 108.2: parse a trailing whole-zone union tail after the
+/// permanent legs of a mass exile — a leading union separator, then one or more
+/// bare zone words ("graveyards", "hands", "libraries"), each optionally
+/// preceded by "all "/"each ". A bare zone word (no possessive) denotes every
+/// card in that zone across all owners. Returns the deduped zone list, or `None`
+/// when there is no leading separator, no zone word, or a trailing fragment that
+/// would be silently dropped. Mirrors the separator/consumption discipline of
+/// [`try_parse_multi_zone_player_exile`].
+fn parse_trailing_zone_union(rem_lower: &str) -> Option<Vec<Zone>> {
+    fn strip_leg_quantifier(input: &str) -> &str {
+        alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+            .parse(input)
+            .map(|(rest, _)| rest)
+            .unwrap_or(input)
+    }
+    // Leading separator joining the permanent legs to the first zone leg.
+    let sep_len = match_mass_union_separator(rem_lower)?;
+    let (mut input, first) = parse_zone_word(strip_leg_quantifier(&rem_lower[sep_len..])).ok()?;
+    let mut zones = vec![first];
+    // Additional zone legs joined by the same mass-union separators.
+    while let Some(sep) = match_mass_union_separator(input) {
+        let Ok((next, zone)) = parse_zone_word(strip_leg_quantifier(&input[sep..])) else {
+            break;
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+        input = next;
+    }
+    // Full-consumption guard: nothing but sentence punctuation may remain, so no
+    // trailing fragment is orphaned into an unsupported child node.
+    let tail = input.trim_start().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
+    if !tail.is_empty() {
+        return None;
+    }
+    Some(zones)
 }
 
 pub(super) fn parse_search_and_creation_ast(
@@ -4560,25 +4674,13 @@ fn parse_choose_zone_connector(
 fn parse_choose_zone_list(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
     type E<'a> = OracleError<'a>;
 
-    let (rest, first) = parse_choose_zone(input)?;
-    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_choose_zone)).parse(rest)?;
+    let (rest, first) = parse_zone_word(input)?;
+    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_zone_word)).parse(rest)?;
     let mut zones = vec![first];
     if let Some(second) = second {
         zones.push(second);
     }
     Ok((rest, zones))
-}
-
-fn parse_choose_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
-    type E<'a> = OracleError<'a>;
-
-    alt((
-        value(Zone::Graveyard, tag::<_, _, E>("graveyard")),
-        value(Zone::Library, tag("library")),
-        value(Zone::Hand, tag("hand")),
-        value(Zone::Exile, tag("exile")),
-    ))
-    .parse(input)
 }
 
 /// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
@@ -8460,6 +8562,23 @@ pub(super) fn parse_exile_ast(
                         .controller(owner)
                         .properties(vec![crate::types::ability::FilterProp::InAnyZone { zones }]),
                 ),
+                all: true,
+                enter_with_counters: vec![],
+                multi_target: None,
+            });
+        }
+        // CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all <permanent
+        // types> and <zone(s)>" — a heterogeneous union of a battlefield
+        // permanent population and whole-zone (graveyard/hand/library)
+        // populations (Ultimate Nullification: "Exile all creatures and
+        // graveyards"). Recognized before the type-only union path below, which
+        // parses only the permanent leg and orphans the trailing zone leg as an
+        // unsupported child clause. `origin: None` defers the multi-zone scan to
+        // `extract_zones()` (Battlefield ∪ zone-union) carried on the filter.
+        if let Some(target) = try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx) {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target,
                 all: true,
                 enter_with_counters: vec![],
                 multi_target: None,
