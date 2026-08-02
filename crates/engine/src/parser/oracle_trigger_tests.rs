@@ -21826,8 +21826,13 @@ fn neyith_fight_or_become_blocked_not_split() {
 }
 
 #[test]
-fn state_change_event_head_allow_list_is_closed() {
+fn state_change_event_head_shape_is_open() {
+    // OPEN over the complement: any single participle/designation word after
+    // `becomes`/`become`/`is`/`are` is an event HEAD SHAPE. Whether the resulting
+    // half is SUPPORTED is the single-event mode parser's verdict, not this
+    // combinator's (see `unadmitted_state_change_head_yields_an_honest_unknown_arm`).
     for ok in [
+        // Complements with a supported standalone mode.
         "becomes tapped, draw a card",
         "become tapped this turn",
         "becomes monstrous, destroy target permanent",
@@ -21836,6 +21841,30 @@ fn state_change_event_head_allow_list_is_closed() {
         "are turned face up",
         "is dealt damage, destroy it",
         "are dealt damage",
+        // Complements the CLOSED list excluded for zero corpus demand. Each has a
+        // probe-verified standalone mode, so admitting them is a strict gain.
+        "becomes untapped",
+        "becomes attached to a creature",
+        "becomes crewed",
+        // CR 106.12a: a distinct event with its own `TapsForMana` mode. Admitting
+        // the head is correct — the half lands on that mode.
+        "is tapped for mana",
+        // Complements with NO standalone mode: still admitted here, and land on
+        // `TriggerMode::Unknown` downstream, which coverage reports as unsupported.
+        "is turned face down, draw a card",
+        "is returned to your hand",
+        "is phased out",
+        "is tapped",
+        "is monstrous",
+        // CR 509.1h: the fused-mode complement is admitted HERE. The fused mode is
+        // protected one layer up, by `is_existing_compound_mode` — see
+        // `blocks_or_becomes_blocked_stays_fused_not_split`.
+        "becomes blocked by a creature",
+        "become blocked, draw a card",
+        // The `becomes` voice has NO non-event exclusion (zero printings), so a
+        // comparison predicate in that voice is admitted. Known exposure, pinned by
+        // `becomes_voice_non_event_predicate_is_unguarded_but_honest`.
+        "becomes greater than 4",
     ] {
         assert!(
             parse_state_change_event_start(ok).is_ok(),
@@ -21843,19 +21872,18 @@ fn state_change_event_head_allow_list_is_closed() {
         );
     }
     for bad in [
-        "becomes blocked by a creature",
-        "become blocked, draw a card",
-        "becomes attached to a creature",
-        "becomes untapped",
-        "becomes crewed",
-        "is tapped for mana",
-        "is tapped",
-        "is monstrous",
+        // CR 603.2 / CR 603.8: the ONE measured non-event surface form. Scoped to the
+        // `is`/`are` voice. This list is deliberately NOT the whole comparison-
+        // predicate class — see `parse_non_event_complement` and
+        // `comparison_predicate_siblings_are_unguarded_but_honest`.
         "are tied for most life",
         "is tied for most common",
+        "is tied for greatest power",
+        // No state-change head at all.
         "monstrously large",
         "tapped",
         "enters",
+        "is 4/4",
     ] {
         assert!(
             parse_state_change_event_start(bad).is_err(),
@@ -21878,10 +21906,12 @@ fn state_change_head_terminates_subject_span() {
         extract_subject_text("this creature becomes monstrous"),
         "this creature"
     );
-    // Negative: not an admissible head, so the span is returned unchanged.
+    // CR 106.12a: `is tapped for mana` is a real event with its own `TapsForMana`
+    // mode, so the OPEN head terminates the subject span at it. Under the closed
+    // allow-list this returned the whole string.
     assert_eq!(
         extract_subject_text("enchanted forest is tapped for mana"),
-        "enchanted forest is tapped for mana"
+        "enchanted forest"
     );
     // Non-movement: still terminates at the OLD lexicon's "blocks", not at "becomes".
     assert_eq!(extract_subject_text("~ blocks or becomes blocked"), "~");
@@ -21901,46 +21931,206 @@ fn state_change_head_terminates_subject_span() {
     assert_eq!(triggers[1].mode, TriggerMode::DamageReceived);
 }
 
-/// The OWED REFACTOR, captured as an executable specification rather than only as a
-/// doc comment on `parse_state_change_event_start` (CodeRabbit review on PR #6831).
-///
-/// `parse_state_change_event_start` is a closed allow-list, and it is a DETECTION
-/// list: a state-change head it does not admit makes the second branch vanish with
-/// NO `Effect::Unimplemented` and no diagnostic — the same silent-wrong signature as
-/// the bug this family was written to fix. This test documents the intended end
-/// state: detect the OPEN head shape (`becomes|is|are <participle>`) and route an
-/// unadmitted complement to a strict failure, demoting the allow-list from "what we
-/// recognize" to "what we support".
-///
-/// `#[ignore]`d deliberately — it asserts behavior the engine does NOT have yet, and
-/// nothing changes it. It is safe to leave red-when-run: zero printed cards carry any
-/// unadmitted disjunctive state-change head today (verified over the whole corpus),
-/// so this is a latent-honesty gap, not a live misparse. Un-ignore it when
-/// implementing the open-head routing.
+/// CR 603.1 + CR 603.2: an unadmitted state-change complement must still produce
+/// its own trigger arm, and that arm must be HONESTLY RED.
+/// (Requested on PR #6831 as `unadmitted_state_change_head_should_be_a_strict_failure`
+/// and renamed here for accuracy: the carrier is the trigger MODE, not
+/// `Effect::Unimplemented` — measured, `unimpl == false` on BOTH arms, because the
+/// effect parses fine and only the event is unmodelled. The coverage half of that
+/// request lives in
+/// `tests/integration/disjunctive_state_change_head_coverage_honesty.rs`.)
 #[test]
-#[ignore = "documents the owed open-head refactor; the engine does not do this yet"]
-fn unadmitted_state_change_head_should_be_a_strict_failure() {
-    // An unadmitted complement ("turned face down" is not in the allow-list).
+fn unadmitted_state_change_head_yields_an_honest_unknown_arm() {
     let triggers = parse_trigger_lines(
         "When this creature enters or is turned face down, draw a card.",
         "~",
     );
-    // TODAY (the gap): one trigger, zero markers, card reports as supported.
-    // INTENDED: either two triggers, or one plus an honest strict failure for the
-    // unclaimed branch. The assertion below is the intended state.
-    assert!(
-        triggers.len() == 2
-            || triggers.iter().any(|d| {
-                d.execute
-                    .as_ref()
-                    .is_some_and(|a| format!("{:?}", a.effect).contains("Unimplemented"))
-            }),
-        "an unadmitted state-change head must not silently vanish; got {:?}",
+    assert_eq!(
+        triggers.len(),
+        2,
+        "the unadmitted head must still produce its own arm, got {:?}",
         triggers
             .iter()
             .map(|d| format!("{:?}", d.mode))
             .collect::<Vec<_>>()
     );
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("When ~ is turned face down".to_string())
+    );
+    assert_eq!(
+        triggers[1].description.as_deref(),
+        Some("When ~ is turned face down, draw a card.")
+    );
+}
+
+/// CR 603.2 / CR 603.8 + CR 508.1m: an `or` inside a trigger's CONDITION is a
+/// condition disjunction, not an event list.
+#[test]
+fn condition_disjunction_is_not_an_event_disjunction() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while you have the most life or are tied for most life, you draw a card and you lose 1 life.",
+        "Preacher of the Schism",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert!(
+        triggers[0]
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("the most life or are tied for most life"),
+        "the while-gate disjunction must survive unsplit, got {:?}",
+        triggers[0].description
+    );
+
+    let triggers = parse_trigger_lines(
+        "When the chosen color isn't the most common color among nontoken permanents the chosen player controls or is tied for most common, sacrifice this enchantment.",
+        "Call to Arms",
+    );
+    assert_eq!(triggers.len(), 1);
+    match &triggers[0].mode {
+        TriggerMode::Unknown(payload) => assert!(
+            payload.contains("controls or is tied for most common"),
+            "the state-trigger predicate must survive unsplit, got {payload:?}"
+        ),
+        other => panic!("expected Call to Arms to stay a single Unknown, got {other:?}"),
+    }
+}
+
+/// CR 603.2e + CR 106.12a + CR 702.122e: complements the CLOSED allow-list excluded
+/// for zero corpus demand now split correctly and land on real supported modes.
+#[test]
+fn open_head_admits_previously_excluded_complements() {
+    for (text, expected) in [
+        (
+            "When this creature enters or becomes untapped, draw a card.",
+            TriggerMode::Untaps,
+        ),
+        (
+            "When this creature enters or becomes crewed, draw a card.",
+            TriggerMode::BecomesCrewed,
+        ),
+        (
+            "When this creature enters or is tapped for mana, draw a card.",
+            TriggerMode::TapsForMana,
+        ),
+    ] {
+        let triggers = parse_trigger_lines(text, "~");
+        assert_eq!(triggers.len(), 2, "{text}");
+        assert_eq!(triggers[0].mode, TriggerMode::ChangesZone, "{text}");
+        assert_eq!(triggers[1].mode, expected, "{text}");
+        assert_eq!(
+            triggers[1].valid_card,
+            Some(TargetFilter::SelfRef),
+            "{text}"
+        );
+    }
+}
+
+/// CR 603.2e + CR 602.2: `becomes tapped or a player activates an ability …` is ONE
+/// trigger, not two.
+#[test]
+fn becomes_tapped_or_player_activates_stays_single() {
+    for (text, name) in [
+        (
+            "Whenever enchanted artifact becomes tapped or a player activates an ability of enchanted artifact without {T} in its activation cost, this Aura deals 2 damage to that artifact's controller.",
+            "Artifact Possession",
+        ),
+        (
+            "Whenever an artifact becomes tapped or a player activates an artifact's ability without {T} in its activation cost, this enchantment deals 1 damage to that artifact's controller.",
+            "Haunting Wind",
+        ),
+        (
+            "Whenever an artifact an opponent controls becomes tapped or an opponent activates an artifact's ability without {T} in its activation cost, you gain 1 life.",
+            "Powerleech",
+        ),
+    ] {
+        let triggers = parse_trigger_lines(text, name);
+        assert_eq!(triggers.len(), 1, "{name} must not split");
+        assert_eq!(triggers[0].mode, TriggerMode::Taps, "{name}");
+        let desc = triggers[0].description.as_deref().unwrap_or_default();
+        assert!(
+            desc.contains("or a player activates") || desc.contains("or an opponent activates"),
+            "{name}: the player-action half must survive unsplit, got {desc:?}"
+        );
+    }
+}
+
+/// KNOWN EXPOSURE E1 (CR 603.1 + CR 603.2).
+#[test]
+fn head_shape_inside_the_subject_truncates_but_stays_honest() {
+    let triggers = parse_trigger_lines(
+        "Whenever a creature that is enchanted attacks or dies, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert!(
+        matches!(triggers[0].valid_card, Some(TargetFilter::Typed(_))),
+        "arm 1 must keep its typed subject filter, got {:?}",
+        triggers[0].valid_card
+    );
+    assert!(
+        triggers[0]
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("a creature that is enchanted attacks"),
+        "arm 1 must be the untruncated original half, got {:?}",
+        triggers[0].description
+    );
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever a creature that dies".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
+}
+
+/// KNOWN EXPOSURE E2.
+#[test]
+fn comparison_predicate_siblings_are_unguarded_but_honest() {
+    for (text, expected_unknown) in [
+        (
+            "Whenever this creature attacks while your life total is greater than 20 or is less than 5, draw a card.",
+            "Whenever ~ is less than 5",
+        ),
+        (
+            "Whenever this creature attacks while your life total is even or is odd, draw a card.",
+            "Whenever ~ is odd",
+        ),
+    ] {
+        let triggers = parse_trigger_lines(text, "~");
+        assert_eq!(triggers.len(), 2, "{text}");
+        assert_eq!(triggers[0].mode, TriggerMode::Attacks, "{text}");
+        assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef), "{text}");
+        assert_eq!(
+            triggers[1].mode,
+            TriggerMode::Unknown(expected_unknown.to_string()),
+            "{text}"
+        );
+        assert_eq!(triggers[1].valid_card, None, "{text}");
+    }
+}
+
+/// KNOWN EXPOSURE E3.
+#[test]
+fn becomes_voice_non_event_predicate_is_unguarded_but_honest() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature attacks while its power becomes greater than 4 or becomes less than 2, draw a card.",
+        "~",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        triggers[1].mode,
+        TriggerMode::Unknown("Whenever ~ becomes less than 2".to_string())
+    );
+    assert_eq!(triggers[1].valid_card, None);
 }
 
 #[test]

@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{one_of, space1};
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value};
+use nom::character::complete::{alpha1, one_of, space1};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -7741,14 +7741,21 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // Patterns already handled as dedicated compound TriggerMode variants
     // (EntersOrAttacks, AttacksOrBlocks, EntersOrHauntedCreatureDies) — do not split these.
     //
-    // CR 509.1h: "blocks or becomes blocked" (the fused BlocksOrBecomesBlocked mode,
-    // 53 corpus trigger lines) needs NO entry in this list. It is already held one
-    // function away by `parse_state_change_event_start`'s closed allow-list, which does
-    // not admit `blocked` — pinned by `state_change_event_head_allow_list_is_closed`,
-    // `blocks_or_becomes_blocked_stays_fused_not_split` and
-    // `neyith_fight_or_become_blocked_not_split`, i.e. at exactly the seam a future
-    // widener would edit. A duplicate guard here reds zero tests when removed and costs
-    // a `scan_contains` phrase walk on every " or " trigger line.
+    // CR 509.1h: "blocks or becomes blocked" is the fused `BlocksOrBecomesBlocked`
+    // mode. Its surface form is the `tag("blocks or becomes blocked")` inside
+    // `try_parse_event` (this file, at `oracle_trigger.rs:10225`; the tag itself is at
+    // :10622). This entry is LOAD-BEARING under the OPEN head
+    // (`parse_state_change_event_start`), which admits `becomes blocked` like any
+    // other complement. It was provably dead under the closed allow-list, which is
+    // why the base commit had it in neither place; ablation now measures real
+    // breakage: 53 corpus cards reach this seam, and dropping the entry splits them
+    // into `Blocks` + `BecomesBlocked`, losing the attacker-side `valid_target`
+    // filter from the `Blocks` arm. Pinned by
+    // `blocks_or_becomes_blocked_stays_fused_not_split`.
+    //
+    // (92 corpus cards contain the phrase; `strip_reminder_text` removes it from 37
+    // of them — bushido reminder text — leaving 55 retained, of which 53 reach this
+    // seam. The other 2 are claimed by an earlier dispatch path.)
     fn is_existing_compound_mode(cond_lower: &str) -> bool {
         is_enters_or_haunted_creature_dies_compound(cond_lower)
             || scan_contains(cond_lower, "enters or attacks")
@@ -7757,8 +7764,38 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             // CR 702.29d: "cycle or discard" is a dedicated compound mode
             // (CycledOrDiscarded) — do not split.
             || scan_contains(cond_lower, "cycle or discard")
+            // CR 509.1h: the fused BlocksOrBecomesBlocked mode — see above.
+            || scan_contains(cond_lower, "blocks or becomes blocked")
     }
-    if is_existing_compound_mode(cond_lower) {
+
+    // CR 701.14 + CR 603.2c: a SEPARATE question from the one above — "would
+    // splitting here produce a DUPLICATE arm?" Deliberately not folded into
+    // `is_existing_compound_mode`, whose question ("does a dedicated compound
+    // TriggerMode own this line?") is sharp and should stay that way: there is no
+    // fused `FightOrBecomesBlocked` mode.
+    //
+    // Neyith of the Dire Hunt ("Whenever one or more creatures you control fight or
+    // become blocked, draw a card.") parses as `TriggerMode::Fight` with the
+    // "or become blocked" leg silently dropped. That drop is PRE-EXISTING behavior,
+    // byte-identical to the base commit, and this predicate does NOT fix it. What it
+    // prevents is worse: `fight` is absent from `parse_event_verb_start`, so
+    // `extract_subject_text` cannot cut the subject at it and the reconstructed second
+    // half ("...creatures you control fight become blocked") re-matches the `fight`
+    // arm, yielding a DUPLICATE `Fight` trigger — double card draw on one fight event
+    // (CR 603.2c). Pinned by `neyith_fight_or_become_blocked_not_split`.
+    //
+    // The general fix that would delete this predicate is admitting `fight`/`fights`
+    // to an event-head lexicon so the subject span can terminate at it; that touches
+    // the nine-consumer accounting this change preserves and is out of scope here.
+    //
+    // Deliberately NOT added: `fights or becomes blocked` (the singular of Neyith's
+    // plural). Zero printed cards carry it, so it would ablate to zero breakage and
+    // could not be pinned.
+    fn suppresses_duplicate_event_arm(cond_lower: &str) -> bool {
+        scan_contains(cond_lower, "fight or become blocked")
+    }
+
+    if is_existing_compound_mode(cond_lower) || suppresses_duplicate_event_arm(cond_lower) {
         return None;
     }
 
@@ -7934,127 +7971,156 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
     alt((combat_or_zone, player_actions, simple_event_verbs)).parse(input)
 }
 
-/// CR 603.2e: the intransitive state-change / passive trigger-event head family —
-/// the "becomes …" and "is/are …" voices.
+/// CR 603.2e: the intransitive state-change / passive trigger-event head — the
+/// "becomes …" and "is/are …" voices.
 ///
-/// A SCOPE-LIMITED sibling of `parse_event_verb_start`, not a voice-disjoint one.
-/// That combinator already carries passive and copular heads of its own
+/// OPEN OVER THE COMPLEMENT. This is a SHAPE detector, not a support list. Any single
+/// participle/designation word after the head marks an event head; whether the
+/// resulting half denotes a MODELLED event is decided downstream by the real
+/// single-event mode parser (`try_parse_event`, this file), and an unmodelled one
+/// becomes `TriggerMode::Unknown`, which every coverage authority already reports as
+/// unsupported (`game/coverage.rs`: `is_card_supported`, `check_trigger`,
+/// `build_trigger_item`). A closed allow-list here was a DETECTION list, so an
+/// unadmitted complement made the second branch VANISH while the card still reported
+/// as supported — parser coverage green with a rules-bearing branch lost. Measured:
+/// "enters or is turned face down" yielded ONE trigger and `is_card_supported == true`;
+/// it now yields two, the second honestly `Unknown`. Pinned by
+/// `unadmitted_state_change_head_yields_an_honest_unknown_arm` and, at the coverage
+/// authority, by `tests/integration/disjunctive_state_change_head_coverage_honesty.rs`.
+///
+/// CR 603.2e is cited for the SEMANTICS IT STATES and no more: a "becomes" trigger
+/// event fires only at the transition, not while the state persists, and not when a
+/// permanent enters already in that state. It says "SOME trigger events use the word
+/// 'becomes'" — it does NOT license "every `becomes X` is a trigger event", and this
+/// combinator must not be read as deriving its openness from it.
+///
+/// A SCOPE-LIMITED sibling of `parse_event_verb_start`, not a voice-disjoint one. That
+/// combinator already carries passive and copular heads of its own
 /// (`passive_player_actions`' "is/are sacrificed" and "is/are exiled";
 /// `simple_event_verbs`' "becomes the target of …"), so "active voice lives there,
-/// passive voice lives here" would be a false rule and would send the next
-/// contributor to the wrong lexicon. The reason this is a separate combinator is
-/// CALL-SITE SCOPE: the head lexicon has nine consumers, seven of which must stay
-/// narrow (see `parse_event_head_start`), so the new heads are composed at exactly
-/// the two that need them rather than widened into the shared one — which is left
-/// byte-identical.
+/// passive voice lives here" would be a false rule. The reason this is a separate
+/// combinator is CALL-SITE SCOPE: the head lexicon has nine consumers and seven must
+/// stay narrow (see `parse_event_head_start`), so the state-change voices are composed
+/// at exactly the two that need them. `parse_event_verb_start` is left byte-identical.
 ///
-/// CR 603.2e is the AUTHORIZING rule: it names "becomes" as a trigger-event word
-/// (its own examples are "becomes attached" and "becomes blocked") and draws the
-/// event-vs-state line this allow-list encodes.
+/// TWO productions, one per grammatical voice. The ASYMMETRY IS MEASURED, NOT DERIVED:
+///   * `is`/`are` consults `parse_non_event_complement` because TWO LIVE CORPUS CARDS
+///     require it (Preacher of the Schism, Call to Arms — see that fn's doc).
+///   * `becomes`/`become` has NO exclusion because ZERO corpus cards use that voice for
+///     a non-event predicate, so no exclusion is pinnable. This is NOT a claim that
+///     `becomes X` is always an event: measured, "…attacks while its power becomes
+///     greater than 4 or becomes less than 2, …" splits and drops half its while-gate
+///     exactly like Preacher. That shape has no printing; a guard for it would ablate
+///     to zero breakage and be unpinnable. It fails coverage-RED (arm 2 lands on
+///     `Unknown`, `card_face_gaps` non-empty), and it is pinned as known behavior by
+///     `becomes_voice_non_event_predicate_is_unguarded_but_honest`.
 ///
-/// TWO productions, one per grammatical voice — NOT a head x complement product.
-/// The voices have DISJOINT complement sets: "is monstrous" and "is tapped" are
-/// STATES, not events (CR 603.2e), and "is tapped for mana" is a different event
-/// entirely (CR 106.12a — 33 corpus cards). A product would match all three.
+/// KNOWN EXPOSURE — the head shape can also match INSIDE a subject noun phrase, which
+/// truncates the subject span used to rebuild the second half. Measured on
+/// "Whenever a creature that is enchanted attacks or dies, draw a card.": arm 1 is
+/// correct, arm 2 becomes `Unknown("Whenever a creature that dies")` with
+/// `valid_card = None`, losing `HasAttachment{Aura}` — a Supported -> Unsupported flip
+/// for that (synthetic) card. Zero printings: WotC templates this adjectivally
+/// ("enchanted creature"), never as a copular relative clause. Truncation leaves a
+/// dangling "that"/"which", so the arm cannot parse and coverage goes red rather than
+/// silent. Pinned by `head_shape_inside_the_subject_truncates_but_stays_honest`. The
+/// general fix — have `extract_subject_text` skip head matches inside an unclosed
+/// relative clause — is owed only if such a card is printed.
 ///
-/// CLOSED ALLOW-LIST, not an open `becomes <participle>` head. Every complement
-/// has a probe-verified standalone single-event `TriggerMode`, so each half of a
-/// split lands on fully supported ground:
-///   becomes/become monstrous -> TriggerMode::BecomeMonstrous (CR 701.37a-b)
-///   becomes/become tapped    -> TriggerMode::Taps            (CR 701.26a + CR 603.2e)
-///   is/are turned face up    -> TriggerMode::TurnFaceUp      (CR 116.2b + CR 708.7)
-///   is/are dealt damage      -> TriggerMode::DamageReceived  (CR 120.1)
+/// Bare stative complements need NO exclusion and deliberately have none: probed,
+/// "enters or is tapped" / "or is monstrous" / "or is attacking" each split and land
+/// arm 2 on `TriggerMode::Unknown` — honestly red, which is the correct outcome for a
+/// state that no `TriggerMode` claims. Zero corpus cards use those shapes.
 ///
-/// OWED REFACTOR (not this change): this allow-list is a DETECTION list, so an
-/// unadmitted complement makes the second branch VANISH with no
-/// `Effect::Unimplemented` at all — measured, "enters or is turned face down" yields
-/// one trigger and the card reports as supported, which is the same silent-wrong
-/// signature as the bug this family fixes. The stronger long-term seam is to detect
-/// the OPEN head shape (`becomes|is|are <participle>`) and route unadmitted
-/// complements to `Effect::unimplemented`, demoting this list from "what we
-/// recognize" to "what we support". That is a better consolidation trigger than the
-/// lexicon-count trigger recorded on `parse_event_head_start`.
+/// Complements the previous closed list excluded for zero corpus demand now work for
+/// free, each landing on a registered mode (`game/trigger_matchers.rs`):
+///   becomes untapped              -> TriggerMode::Untaps         (CR 603.2e)
+///   becomes attached to a creature-> TriggerMode::Attached       (CR 603.2e)
+///   becomes crewed                -> TriggerMode::BecomesCrewed  (CR 702.122e)
+///   is/are tapped for mana        -> TriggerMode::TapsForMana    (CR 106.12a)
+///   is/are dealt damage           -> TriggerMode::DamageReceived (CR 120.1)
+/// Zero printed cards carry the first four disjunctive shapes today (measured over the
+/// whole corpus: the `becomes untapped` disjunctions on Giant Oyster, Merieke Ri
+/// Berit, Tawnos's Coffin, Coffin Queen and The Pandorica all sit in ACTIVATED-ability
+/// lines that route to `parse_self_disjunctive_event_trigger` and still do not reach
+/// this seam), so `open_head_admits_previously_excluded_complements` is a FORWARD
+/// guard.
 ///
-/// DELIBERATE EXCLUSIONS. Stated by REASON, not by a raw corpus line count: counts
-/// here proved method-sensitive (whether reminder text is stripped, whether a card or
-/// a line is the unit) and three measurements of "is/are tied for" disagreed, so they
-/// are not carried. Note the two reasons are NOT interchangeable — some of these are
-/// excluded because they never reach this seam, and others because they DO reach it
-/// and admitting them would break a card that is correct today:
-///   - "becomes blocked" / "become blocked" — CR 509.1h, the fused
-///     `BlocksOrBecomesBlocked` mode. Admitting it would split that whole class,
-///     plus Neyith's plural "fight or become blocked". This is the load-bearing
-///     exclusion; `blocks_or_becomes_blocked_stays_fused_not_split`,
-///     `neyith_fight_or_become_blocked_not_split`, and
-///     `state_change_event_head_allow_list_is_closed` all red if it is admitted.
-///   - "is/are tapped for mana" — CR 106.12a, a distinct event with its own
-///     `TapsForMana` mode.
-///   - "becomes untapped" — UNREACHABLE. The disjunctive shape does occur (Giant
-///     Oyster, Merieke Ri Berit, Tawnos's Coffin with the head second; The Pandorica
-///     and Coffin Queen with it first), but in every case inside an ACTIVATED-ability
-///     line, which routes to `parse_self_disjunctive_event_trigger` rather than here.
-///     Zero reach this seam.
-///   - "becomes attached/crewed/plotted/saddled/renowned", "is/are turned face down"
-///     — no disjunctive occurrence found.
-///   - "becomes the target of …" — already covered by `parse_event_verb_start`.
-///   - "is monstrous" / "is tapped" — states, not events (CR 603.2e).
-///   - "is/are tied for …" — REACHABLE AND LOAD-BEARING, so excluded on the
-///     categorical ground rather than on reachability: it is a comparison predicate,
-///     not an event. `Preacher of the Schism` ("Whenever this creature attacks while
-///     you have the most life or are tied for most life, …") does reach
-///     `split_or_event_compound` and parses correctly TODAY as one
-///     `TriggerMode::Attacks`; admitting the head would split its intervening-if
-///     condition into a bogus second arm. `Call to Arms` reaches the seam too.
-///     `state_change_event_head_allow_list_is_closed` pins the rejection.
+/// CR 509.1h: `becomes blocked` / `become blocked` ARE admitted here. The fused
+/// `BlocksOrBecomesBlocked` mode is protected one layer up by
+/// `is_existing_compound_mode` — see that guard's comment for the measured 53 cards.
 fn parse_state_change_event_start(input: &str) -> OracleResult<'_, ()> {
     alt((
         preceded(
             alt((tag("becomes "), tag("become "))),
-            parse_becomes_state_complement,
+            parse_open_state_complement,
         ),
         preceded(
             alt((tag("is "), tag("are "))),
-            parse_passive_event_complement,
+            preceded(not(parse_non_event_complement), parse_open_state_complement),
         ),
     ))
     .parse(input)
 }
 
-/// CR 701.37a-b (monstrosity) + CR 701.26a + CR 603.2e (tap): copular "becomes"
-/// followed by a designation/status the permanent ENTERS — the entering is the
-/// event, per CR 603.2e.
+/// CR 603.1 + CR 603.2: the OPEN complement — one participle/designation word
+/// terminated at a word boundary.
 ///
-/// The complement is VOICE-SCOPED: it is only ever reached after `becomes `/
-/// `become `, so the "is/are tapped for mana" exclusion (CR 106.12a) is enforced
-/// by `parse_passive_event_complement`'s allow-list, not here. The printed wording
-/// CR 106.12a names is `is/are tapped for mana`; `becomes tapped for mana` appears
-/// on 0 printed cards, and the fact that such a hypothetical line would map to
-/// `Taps` is a PRE-EXISTING gap in the single-event mode parser, not this
-/// allow-list's concern. The `tapped` complement's boundary is therefore
-/// deliberately space-permissive (`parse_event_word` peeks eof/space/`,`/`.`):
-/// that permissiveness is load-bearing at `extract_subject_text`, where it
-/// is what lets "When this creature becomes tapped during your turn or is dealt
-/// damage, destroy it." split correctly into [Taps, DamageReceived] — a qualifier
-/// may sit between the head and the `or`. The load-bearing part is `space1` in
-/// `parse_event_boundary`: dropping that arm (not adding a `for `-negative-lookahead,
-/// which would only reject "tapped for mana") is what would reintroduce the
-/// Cryoshatter-class garbage reconstruction, where a narrow subject terminator
-/// rebuilds "When enchanted creature becomes tapped is dealt damage".
-/// `state_change_head_terminates_subject_span` pins the qualifier case.
-fn parse_becomes_state_complement(input: &str) -> OracleResult<'_, ()> {
-    alt((parse_event_word("monstrous"), parse_event_word("tapped"))).parse(input)
+/// The governing rules are the general trigger-condition / trigger-event rules, NOT
+/// CR 603.2e: this combinator is VOICE-AGNOSTIC — reached from both the
+/// `becomes`/`become` arm and the `is`/`are` arm — and 603.2e speaks specifically
+/// about the word "becomes", so it cannot govern roughly half of these inputs. It
+/// stays scoped to the `becomes` arm in `parse_state_change_event_start`. `parse_event_boundary` peeks eof/space/`,`/`.`, and its `space1` arm
+/// is load-bearing: a qualifier may sit between the head and the `or`, which is what
+/// lets "becomes tapped during your turn or is dealt damage" split into
+/// [Taps, DamageReceived] (`state_change_head_terminates_subject_span`).
+///
+/// One word is sufficient and correct. Detection only needs to know THAT a head
+/// starts here: the `" or "` gate consumes the answer as a bool, and
+/// `extract_subject_text` uses `scan_split_at_phrase`, which returns the prefix BEFORE
+/// the match start, so the consumed length is never used as a span.
+fn parse_open_state_complement(input: &str) -> OracleResult<'_, ()> {
+    value((), terminated(alpha1, parse_event_boundary)).parse(input)
 }
 
-/// Passive-participle heads. CR 116.2b + CR 708.7: turning a face-down permanent
-/// face up is a special action, hence an event. CR 120.1: an object deals damage to
-/// a battle, creature, planeswalker or player — that dealing is the event the
-/// "is/are dealt damage" head names.
-fn parse_passive_event_complement(input: &str) -> OracleResult<'_, ()> {
-    alt((
-        parse_event_word("turned face up"),
-        parse_event_word("dealt damage"),
-    ))
-    .parse(input)
+/// CR 603.2 + CR 603.8: reject ONE measured non-event surface form after `is`/`are`.
+///
+/// SCOPE, STATED HONESTLY: this is `tag("tied for ")` — one surface form, NOT the
+/// comparison-predicate class. It does not match `is greater than N`, `is less than
+/// N`, `is even`, or `is odd`, and it is not claimed to.
+///
+/// Why this form. "is/are tied for <superlative>" is a GAME STATE inside a trigger
+/// condition, never a trigger event of its own. It appears either inside a state
+/// trigger's condition (CR 603.8 — Call to Arms) or inside a trailing `while` state
+/// gate on an event trigger (CR 508.1m — Preacher of the Schism). An `or` joining such
+/// predicates is a CONDITION disjunction; splitting it converts one condition into two
+/// independent trigger conditions (CR 603.1) and changes the ability. Dropping this
+/// entry regresses exactly those two corpus cards — Preacher loses half its while-gate
+/// AND gains a bogus third arm (flipping Supported -> Unsupported), and Call to Arms'
+/// state-trigger predicate splits into two garbage `Unknown` arms. Pinned by
+/// `condition_disjunction_is_not_an_event_disjunction` and by the reject list in
+/// `state_change_event_head_shape_is_open`.
+///
+/// Why NOT generalized to the class. The unguarded siblings have ZERO printings, so a
+/// broader combinator would ablate to zero breakage and be unpinnable — the same
+/// disqualification applied to the rejected `fights or becomes blocked` guard. They
+/// also fail coverage-RED rather than silently: measured, "…attacks while your life
+/// total is greater than 20 or is less than 5, …" yields `[Attacks (half the gate),
+/// Unknown("Whenever ~ is less than 5")]` with a non-empty `card_face_gaps`. Pinned as
+/// known behavior by `comparison_predicate_siblings_are_unguarded_but_honest`. And if
+/// the class ever does need recognising, the right authority is `parse_inner_condition`
+/// (`oracle_nom/condition.rs`, the declared single authority for game-state
+/// conditions) consulted from the splitter — NOT a second private negative list here.
+///
+/// Reached ONLY from the `is`/`are` arm; `becomes tied for` has no printing.
+///
+/// Do NOT add stative or differently-modelled complements here. `is tapped for mana`
+/// is a real event with its own `TapsForMana` mode (CR 106.12a) and MUST split;
+/// `is tapped` / `is monstrous` are states whose halves already land on
+/// `TriggerMode::Unknown`, i.e. honestly red without an entry. Measured: adding any of
+/// the three changes zero cards, so each would be an unpinnable non-requirement.
+fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("tied for ")).parse(input)
 }
 
 /// CR 603.1b + CR 603.2e: the FULL trigger-event head lexicon — active-voice
@@ -8068,15 +8134,28 @@ fn parse_passive_event_complement(input: &str) -> OracleResult<'_, ()> {
 /// `continues_serial_event_condition` — each with a named counterexample or a
 /// measured zero-demand justification at its own site.
 ///
-/// This file now hosts FIVE event-head lexicons: `parse_event_verb_start`,
-/// `parse_bare_shared_event_verb`, `parse_shared_object_verb_head`,
-/// `parse_cross_subject_phrase_start`, and this family — each scoped to one
-/// question and reached from a named consumer set. Consolidation into a single
-/// parameterized combinator becomes OWED when either (a) a sixth lexicon is
-/// proposed in this file, or (b) any one of them acquires a second consumer gate.
-/// At that point the scoping axis is real shared structure and must become a
-/// parameter (a voice/scope enum), not another sibling function; until then each is
-/// a leaf answering exactly one question.
+/// This file hosts FOUR hand-maintained event-head lexicons —
+/// `parse_event_verb_start`, `parse_bare_shared_event_verb`,
+/// `parse_shared_object_verb_head`, `parse_cross_subject_phrase_start` — plus ONE
+/// open shape detector, `parse_state_change_event_start`, which enumerates no
+/// complements at all. Each is scoped to one question and reached from a named
+/// consumer set. Consolidation into a single parameterized combinator becomes OWED
+/// when either (a) a FIFTH hand-maintained event-head lexicon is proposed in this
+/// file, or (b) any one of the four acquires a second consumer gate. At that point
+/// the scoping axis is real shared structure and must become a parameter (a
+/// voice/scope enum), not another sibling function; until then each is a leaf
+/// answering exactly one question.
+///
+/// NOT in that count, because they answer a DIFFERENT question. The four above (and
+/// the open shape) all answer "does an event head start here?". These answer "should
+/// this line be split at all?" and are negative/guard predicates, so adding one does
+/// not move the consolidation trigger: `parse_non_event_complement` (one non-event
+/// surface form after `is`/`are`), `is_existing_compound_mode` ("does a dedicated
+/// compound `TriggerMode` own this whole line?"), and
+/// `suppresses_duplicate_event_arm` ("would splitting here produce a duplicate
+/// arm?"). A future contributor adding a guard phrase belongs in one of those three
+/// and owes nothing here; a future contributor adding an event-head lexicon owes the
+/// consolidation.
 fn parse_event_head_start(input: &str) -> OracleResult<'_, ()> {
     alt((parse_event_verb_start, parse_state_change_event_start)).parse(input)
 }
