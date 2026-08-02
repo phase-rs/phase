@@ -25528,10 +25528,15 @@ mod tests {
             },
         });
 
+        let mut trusted_state = raw.clone();
+        // Trusted envelopes declare their resolution-wire mode. Only bare
+        // historical raw snapshots receive the implicit v1 discriminator.
+        trusted_state["resolution_state_version"] = serde_json::Value::from(1);
+
         for persisted in [
-            raw.clone(),
+            raw,
             serde_json::json!({
-                "state": raw,
+                "state": trusted_state,
             }),
         ] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
