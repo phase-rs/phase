@@ -1400,7 +1400,11 @@ pub fn begin_untap_or_subset_prompt(
         });
     }
     execute_untap_with_choices(state, events, &chosen_not_to_untap);
-    advance_phase(state, events);
+    // CR 500.5: Untap completion owns one phase-entry hop. The production
+    // `auto_advance` loop remains responsible for repeating through any
+    // skipped successor, so a bounded prospective unit cannot inherit that
+    // loop authority through this helper.
+    let _ = advance_phase_once(state, events);
     None
 }
 
@@ -3040,6 +3044,27 @@ mod tests {
         assert_eq!(actual_waiting, expected_waiting);
         assert_eq!(one_unit, production);
         assert_eq!(one_unit_events, production_events);
+    }
+
+    #[test]
+    fn untap_completion_commits_only_one_phase_hop_before_auto_advance_repeats() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.steps_to_skip[PlayerId(0).0 as usize].insert(Phase::Upkeep, 1);
+
+        assert!(
+            begin_untap_or_subset_prompt(&mut state, &mut Vec::new(), HashSet::new()).is_none()
+        );
+        assert_eq!(
+            state.phase,
+            Phase::Upkeep,
+            "untap completion commits its successor but does not consume an upkeep skip"
+        );
+
+        let waiting = auto_advance(&mut state, &mut Vec::new());
+        assert_eq!(state.phase, Phase::Draw);
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
     }
 
     #[test]
