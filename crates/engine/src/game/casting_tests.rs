@@ -139,6 +139,35 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
     );
 }
 
+#[test]
+fn priority_offers_an_opponents_ability_when_its_activator_filter_allows_it() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(9_005),
+        PlayerId(1),
+        "Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    );
+    ability.activator_filter = Some(crate::types::ability::PlayerFilter::All);
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    let principal = super::super::engine::priority_principal_for_preflight(&state)
+        .expect("the synchronized priority window has a principal");
+
+    assert_eq!(
+        priority_activate_ability_announcements(&state, &principal).len(),
+        1,
+        "Priority must offer an ability to a player explicitly allowed to activate it"
+    );
+}
+
 fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
     let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
     for _ in 0..count {

@@ -1702,7 +1702,6 @@ pub(in crate::game) fn priority_activate_ability_announcements(
     state
         .objects
         .iter()
-        .filter(|(_, object)| object.controller == player)
         .flat_map(|(&source_id, _)| {
             activated_ability_definitions(state, source_id)
                 .into_iter()
