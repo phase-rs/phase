@@ -25,7 +25,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{RequiredDefender, StaticMode};
 use crate::types::zones::Zone;
 
 // ---------------------------------------------------------------------------
@@ -207,7 +207,9 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
         must_attack.modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddStaticMode {
-                mode: StaticMode::MustAttackPlayer { player },
+                mode: StaticMode::MustAttackPlayer {
+                    player: RequiredDefender::Fixed { player },
+                },
             } if *player == PlayerId(1)
         )),
         "token must be required to attack the opponent"
@@ -305,7 +307,10 @@ fn encore_three_player_one_token_per_opponent_then_sacrificed_at_end_step() {
             .find_map(|ce| {
                 ce.modifications.iter().find_map(|m| match m {
                     ContinuousModification::AddStaticMode {
-                        mode: StaticMode::MustAttackPlayer { player },
+                        mode:
+                            StaticMode::MustAttackPlayer {
+                                player: RequiredDefender::Fixed { player },
+                            },
                     } => Some(*player),
                     _ => None,
                 })

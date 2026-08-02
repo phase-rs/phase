@@ -23065,7 +23065,7 @@ mod tests {
         );
         object.static_definitions.push(
             StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1),
+                player: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -23080,7 +23080,7 @@ mod tests {
             .get_mut(&ObjectId(500))
             .unwrap()
             .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1),
+            player: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]

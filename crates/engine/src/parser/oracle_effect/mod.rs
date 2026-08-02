@@ -7320,7 +7320,7 @@ fn parse_for_each_object_copy_parts(
 /// aggregate: Max }`), composed from existing typed enums rather than a bespoke
 /// `MostLife` sibling. Consumes the qualifier text; returns the parsed
 /// restriction so the caller can attach it to `ChoiceType::Opponent`.
-fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
+pub(crate) fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = preceded(
         tag(" with the most life"),
         opt(tag(" among your opponents")),

@@ -6160,7 +6160,7 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::new(
                 crate::types::statics::StaticMode::MustAttackPlayer {
-                    player: PlayerId(1),
+                    player: PlayerId(1).into(),
                 },
             ));
         let goaded = make_creature(&mut state, 2);

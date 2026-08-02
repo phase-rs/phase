@@ -19,8 +19,8 @@ use crate::types::resolved_commands::{
     ResolvedCombatMembershipReplayInvariantError,
 };
 use crate::types::statics::{
-    AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
-    StaticModeKind,
+    AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement,
+    RequiredDefender, StaticMode, StaticModeKind,
 };
 use crate::types::zones::Zone;
 
@@ -3146,10 +3146,50 @@ pub(crate) fn must_attack_player_directives_for_creature(
     state: &GameState,
     obj: &GameObject,
 ) -> Vec<(PlayerId, Option<ObjectId>)> {
-    super::functioning_abilities::active_static_definitions(state, obj)
-        .filter_map(|sd| match sd.mode {
-            StaticMode::MustAttackPlayer { player } => Some((player, sd.source_object)),
-            _ => None,
+    // CR 508.1d + CR 611.2 / CR 604.2: MustAttackPlayer directives; the required
+    // defender may be a resolution-time snapshot (`Fixed`, ForceAttack/Encore) or
+    // a live static class (`Matching`, Galactus) re-evaluated each
+    // declare-attackers step. Collect (defender, source_object, source_controller)
+    // triples first so the `active_static_definitions` borrow is dropped before we
+    // call `matches_player_scope`, which re-borrows `state.players`.
+    let directives: Vec<(RequiredDefender, Option<ObjectId>, Option<PlayerId>)> =
+        super::functioning_abilities::active_static_definitions(state, obj)
+            .filter_map(|sd| match &sd.mode {
+                StaticMode::MustAttackPlayer { player } => {
+                    Some((player.clone(), sd.source_object, sd.source_controller))
+                }
+                _ => None,
+            })
+            .collect();
+    directives
+        .into_iter()
+        .flat_map(|(defender, src, src_ctrl)| match defender {
+            // CR 611.2: a snapshotted id — used verbatim.
+            RequiredDefender::Fixed { player } => vec![(player, src)],
+            // CR 604.1 / CR 604.2 + CR 102.3: re-evaluate the class each check.
+            // "you"/"your opponents" resolves to the static's controller (the
+            // graft-time snapshot, else the carrier's controller). Yields ALL
+            // players in the class (e.g. every opponent tied for the most life);
+            // the max-requirement solver (CR 508.1d) then forces attacking one.
+            RequiredDefender::Matching { filter } => {
+                let controller = src_ctrl.unwrap_or(obj.controller);
+                let source_id = src.unwrap_or(obj.id);
+                // Deliberate O(n^2): `matches_player_scope` re-`find`s the player
+                // by id (game/effects/mod.rs), so passing each `p.id` re-scans the
+                // (tiny) player set. Reusing the canonical evaluator is worth the
+                // redundant lookup at 2-6 players; a batch `players_matching_scope`
+                // helper is the future extraction if a hot path ever appears.
+                state
+                    .players
+                    .iter()
+                    .filter(|p| {
+                        crate::game::effects::matches_player_scope(
+                            state, p.id, &filter, controller, source_id,
+                        )
+                    })
+                    .map(|p| (p.id, src))
+                    .collect()
+            }
         })
         .collect()
 }
@@ -12143,7 +12183,7 @@ mod tests {
             // so it changes no assertion; it upholds the no-`affected:None` invariant.
             .push(
                 StaticDefinition::new(StaticMode::MustAttackPlayer {
-                    player: PlayerId(2),
+                    player: PlayerId(2).into(),
                 })
                 .affected(TargetFilter::SelfRef),
             );
@@ -12216,7 +12256,7 @@ mod tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::MustAttackPlayer {
-                    player: PlayerId(1),
+                    player: PlayerId(1).into(),
                 })
                 .affected(TargetFilter::SelfRef)
                 .source_object(ObjectId(9000)),
@@ -12236,7 +12276,7 @@ mod tests {
         for src in [ObjectId(9001), ObjectId(9002)] {
             defs.push(
                 StaticDefinition::new(StaticMode::MustAttackPlayer {
-                    player: PlayerId(1),
+                    player: PlayerId(1).into(),
                 })
                 .affected(TargetFilter::SelfRef)
                 .source_object(src),
@@ -12244,7 +12284,7 @@ mod tests {
         }
         defs.push(
             StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(2),
+                player: PlayerId(2).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(9003)),
@@ -12677,7 +12717,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(2),
+                player: PlayerId(2).into(),
             }));
 
         // Attacking the wrong player (P1) while P2 is a legal target: illegal. New
@@ -12786,7 +12826,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1),
+                player: PlayerId(1).into(),
             }));
 
         // New contract (CR 508.1d): the MustAttackPlayer requirement is scored by the
@@ -12806,7 +12846,7 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1),
+                player: PlayerId(1).into(),
             }));
         let planeswalker = create_planeswalker(&mut state, PlayerId(1), "Required Player's Walker");
 

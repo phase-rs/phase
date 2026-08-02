@@ -2464,6 +2464,84 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     None
 }
 
+/// CR 102.3 + CR 608.2d: the required defending player class after "attacks ".
+/// Currently "a[n] opponent[ with the most life [among your opponents]]".
+/// Structured as sequential combinators so a future "a[n] player" (relation
+/// `All`) arm slots in without disturbing the opponent path. Reuses the shared
+/// `parse_opponent_most_life_restriction` selector (CR 102.3 candidate scoping +
+/// CR 608.2d tie resolution) rather than re-deriving the `PlayerAttribute` shape.
+fn parse_required_defender_selector(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(input)?;
+    let (input, _) = tag("opponent").parse(input)?;
+    // Optional "with the most life [among your opponents]" qualifier; fall back to
+    // the bare `Opponent` class when the qualifier is absent ("an opponent").
+    match super::oracle_effect::parse_opponent_most_life_restriction(input) {
+        Ok((rest, filter)) => Ok((rest, filter)),
+        Err(_) => Ok((input, PlayerFilter::Opponent)),
+    }
+}
+
+/// CR 508.1d: `attacks <player-class> each combat if able` — the required-attack
+/// predicate. Consumes the verb, the defender selector, and the recurring-combat
+/// suffix, returning the selected `PlayerFilter` for the required defender.
+fn parse_attacks_required_defender_nom(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("attacks ").parse(input)?;
+    let (input, filter) = parse_required_defender_selector(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" each combat if able"),
+        tag(" each turn if able"),
+    ))
+    .parse(input)?;
+    Ok((input, filter))
+}
+
+/// CR 508.1d + CR 604.1 / CR 604.2 + CR 102.3: "<subject> attacks <player-class>
+/// each combat if able [unless <condition>]" — a static attack requirement whose
+/// defending player is a live-evaluated class (Galactus: "an opponent with the
+/// most life among your opponents"). Emits
+/// `MustAttackPlayer { RequiredDefender::Matching { filter } }`, re-evaluated each
+/// declare-attackers step by the combat resolver.
+///
+/// The dispatcher receives the self-ref-normalized line WITHOUT the CR 207.2c /
+/// CR 207.2d ability-/flavor-word label stripped (Galactus's line arrives as
+/// "Insatiable Hunger — ~ attacks …"), so this wrapper tries the line as-is, then
+/// strips a leading flavor label via `strip_flavor_word_with_name` and retries
+/// ONCE on the body — mirroring the single-hop retry in
+/// `parse_static_line_multi_inner`. The strip is class-general (any leading
+/// flavor label preceding this static form) and safe: a false-positive strip
+/// yields a body that fails the strict subject / "attacks … each combat if able"
+/// match and returns `None`. The full Oracle line (label included) is preserved
+/// as the definition's description for display / round-trip.
+pub(crate) fn parse_forced_attack_defender_static(text: &str) -> Option<StaticDefinition> {
+    parse_forced_attack_defender_static_body(text).or_else(|| {
+        let (_label, body) = super::oracle_modal::strip_flavor_word_with_name(text)?;
+        parse_forced_attack_defender_static_body(&body).map(|def| def.description(text.to_string()))
+    })
+}
+
+fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (subject_lower, filter, rest) =
+        nom_primitives::scan_preceded(&lower, parse_attacks_required_defender_nom)?;
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    let mut def = StaticDefinition::new(StaticMode::MustAttackPlayer {
+        player: RequiredDefender::Matching { filter },
+    })
+    .affected(affected)
+    .description(text.to_string());
+    // Consume an optional trailing period; any remaining tail MUST be a recognized
+    // `unless` gate (CR 604.1) — otherwise decline so an unrecognized rider cannot
+    // yield a half-parsed static (coverage stays honest / red).
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if rest.trim().is_empty() {
+        return Some(def);
+    }
+    let tp = TextPair::new(text, &lower);
+    def.condition = Some(super::shared::parse_unless_static_condition(&tp)?);
+    Some(def)
+}
+
 /// CR 702.122a / 702.171a / 702.184c: nom parser for the crew/saddle/station
 /// power-contribution modifier predicate. Composes the named action-list prefix
 /// (which records the affected keyword actions) with the modifier tail.
