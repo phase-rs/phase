@@ -309,9 +309,9 @@ impl PriorityAnnouncement {
     fn family(&self) -> PriorityReducerFamily {
         match self {
             Self::PlayLand(_) => PriorityReducerFamily::PlayLand,
-            Self::TapLandForMana { .. } => PriorityReducerFamily::TapLandForMana,
-            Self::ActivateManaSource { .. } => PriorityReducerFamily::ActivateManaSource,
-            Self::UntapLandForMana { .. } => PriorityReducerFamily::UntapLandForMana,
+            Self::TapLandForMana(_) => PriorityReducerFamily::TapLandForMana,
+            Self::ActivateManaSource(_) => PriorityReducerFamily::ActivateManaSource,
+            Self::UntapLandForMana(_) => PriorityReducerFamily::UntapLandForMana,
             Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
             Self::Foretell(_) => PriorityReducerFamily::Foretell,
             Self::ActivateAbility { .. } => PriorityReducerFamily::ActivateAbility,
