@@ -708,13 +708,10 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // CR 109.1: identity exclusion. Against the ability's own parent target
         // this is pure object identity and reads nothing; against any other
         // reference the excluded set is filter-derived and could be anything.
-        FilterProp::DistinctFrom { reference } => {
-            if matches!(reference.as_ref(), TargetFilter::ParentTarget) {
-                CharacteristicKinds::EMPTY
-            } else {
-                CharacteristicKinds::ALL
-            }
-        }
+        FilterProp::DistinctFrom { reference } => match reference.as_ref() {
+            TargetFilter::ParentTarget => CharacteristicKinds::EMPTY,
+            _ => CharacteristicKinds::ALL,
+        },
 
         // ---- Reads no layer-writable characteristic. ----
         // Token identity, zone, combat state, per-object designations, per-turn
@@ -13694,6 +13691,186 @@ mod characteristic_read_classification_tests {
         })
     }
 
+    /// CR 613.1b: does this `FilterProp` scope its verdict by a `ControllerRef`?
+    ///
+    /// EXHAUSTIVE and wildcard-free, which is the whole point: adding a
+    /// `FilterProp` variant fails to compile here until it is classified, and a
+    /// variant classified as a carrier must also get a sample in
+    /// `every_controller_ref_carrying_prop_reads_the_controller_kind` below —
+    /// which then proves the classifier reports a CONTROLLER read for it. The
+    /// compiler pins the classification; the roster/`carries_controller_ref`
+    /// cross-check below pins that the roster does not drift the other way.
+    fn carries_controller_ref(prop: &FilterProp) -> bool {
+        match prop {
+            // The `ControllerRef`-carrying roster. Layer 2 can move an object
+            // across any scope these name (CR 613.1b), so
+            // `filter_prop_characteristic_reads_at` must report CONTROLLER for
+            // every one of them.
+            FilterProp::Attacking { .. }
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::NameMatchesAnyPermanent { .. } => true,
+            // Everything else carries no `ControllerRef` of its own. Several
+            // still read CONTROLLER for other reasons (`Unpaired` via CR
+            // 702.95e, the CR 302.6 continuity props, the nested-filter
+            // recursers); this classifier answers only "does the variant carry
+            // the field", never "does it read the kind".
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::ControllerMatches { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::Unblocked
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::ConvokedSource
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::CanEnchant { .. }
+            | FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedToSource
+            | FilterProp::AttachedToRecipient
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PtComparison { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::AnyOf { .. }
+            | FilterProp::Not { .. }
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+    }
+
+    /// The `ControllerRef`-carrying roster read out of the `FilterProp`
+    /// DECLARATION, so the roster below cannot silently fall behind the enum.
+    ///
+    /// Source-scanned rather than hand-counted on purpose: a hand-maintained
+    /// count can only ever restate the list standing next to it, which is what
+    /// the previous `assert_eq!(props.len(), 8)` did. Scanning `ability.rs`
+    /// gives an authority the test cannot edit, so adding a variant with a
+    /// `ControllerRef` field turns the roster assertion RED until a sample for
+    /// it is added — and `carries_controller_ref` then forces the sample to be
+    /// classified, and the CONTROLLER assertion forces the classifier to be
+    /// right about it.
+    fn declared_controller_ref_carriers() -> Vec<String> {
+        let src = include_str!("../types/ability.rs");
+        let decl = "pub enum FilterProp {";
+        let start = src.find(decl).expect("FilterProp declaration");
+        let body = &src[start + decl.len()..];
+        let body = &body[..body.find("\n}").expect("end of FilterProp")];
+
+        let mut carriers = Vec::new();
+        let mut current: Option<&str> = None;
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            // Doc comments name `ControllerRef` in prose; they declare nothing.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // A variant header is the only thing at one indent level that opens
+            // with an uppercase letter; its fields sit one level deeper.
+            if let Some(header) = line
+                .strip_prefix("    ")
+                .filter(|l| l.starts_with(char::is_uppercase))
+            {
+                current = Some(header.trim_end_matches([' ', '{', ',', '(']));
+            }
+            if let (true, Some(name)) = (trimmed.contains("ControllerRef"), current) {
+                carriers.push(name.to_string());
+            }
+        }
+        carriers.sort_unstable();
+        carriers.dedup();
+        assert!(
+            !carriers.is_empty(),
+            "scanned zero carriers — the FilterProp declaration moved or its \
+             formatting changed, so this gate is no longer scanning anything"
+        );
+        carriers
+    }
+
+    /// The variant name of a `FilterProp` sample, which is what `Debug` prints
+    /// first and is the only handle a value gives onto its own variant.
+    fn variant_name(prop: &FilterProp) -> String {
+        let debug = format!("{prop:?}");
+        debug
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .expect("Debug output opens with the variant name")
+            .to_string()
+    }
+
     /// CR 613.1b: layer 2 can move an object across any controller scope a
     /// `ControllerRef` names, so every `FilterProp` that carries one reads the
     /// CONTROLLER kind. The classifier states this invariant in prose; this test
@@ -13731,12 +13908,23 @@ mod characteristic_read_classification_tests {
                 controller: Some(ControllerRef::You),
             },
         ];
+        let mut sampled: Vec<String> = props.iter().map(variant_name).collect();
+        sampled.sort_unstable();
+        sampled.dedup();
         assert_eq!(
-            props.len(),
-            8,
-            "the ControllerRef-carrying FilterProp roster grew or shrank — extend \
-             this list so the invariant stays fully pinned"
+            sampled,
+            declared_controller_ref_carriers(),
+            "the sampled roster and the `ControllerRef`-carrying variants declared \
+             in `types/ability.rs` have diverged — add a sample for every new \
+             carrier so the CR 613.1b invariant below stays fully covered"
         );
+        for prop in &props {
+            assert!(
+                carries_controller_ref(prop),
+                "{prop:?} is in the ControllerRef roster but `carries_controller_ref` \
+                 classifies it as a non-carrier — one of the two is wrong"
+            );
+        }
         for prop in props {
             assert!(
                 target_filter_characteristic_reads(&only(prop.clone()))
