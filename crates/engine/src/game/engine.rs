@@ -254,12 +254,8 @@ enum PriorityAnnouncement {
         object_id: ObjectId,
         card_id: CardId,
     },
-    TapLandForMana {
-        selection: crate::types::mana::ManaSourceSelection,
-    },
-    ActivateManaSource {
-        selection: crate::types::mana::ManaSourceSelection,
-    },
+    TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
+    ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
     UntapLandForMana {
         object_id: ObjectId,
     },
@@ -370,12 +366,12 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::PlayLand { object_id, card_id } => {
             GameAction::PlayLand { object_id, card_id }
         }
-        PriorityAnnouncement::TapLandForMana { selection } => {
-            GameAction::TapLandForMana { selection }
-        }
-        PriorityAnnouncement::ActivateManaSource { selection } => {
-            GameAction::ActivateManaSource { selection }
-        }
+        PriorityAnnouncement::TapLandForMana(announcement) => GameAction::TapLandForMana {
+            selection: announcement.selection(&_access).clone(),
+        },
+        PriorityAnnouncement::ActivateManaSource(announcement) => GameAction::ActivateManaSource {
+            selection: announcement.selection(&_access).clone(),
+        },
         PriorityAnnouncement::UntapLandForMana { object_id } => {
             GameAction::UntapLandForMana { object_id }
         }
@@ -622,18 +618,20 @@ fn priority_preflight_candidates(
         }
     }
 
-    for selection in mana_sources::activatable_mana_source_selections(state, semantic_holder) {
-        let announcement = match mana_sources::priority_mana_route(state, &selection) {
-            Some(mana_sources::PriorityManaRoute::LandTap) => {
-                PriorityAnnouncement::TapLandForMana { selection }
-            }
-            Some(mana_sources::PriorityManaRoute::NonlandActivation) => {
-                PriorityAnnouncement::ActivateManaSource { selection }
-            }
-            None => continue,
-        };
-        candidates.push(PriorityPreflightCandidate::Announcement(announcement));
-    }
+    let (land_mana_announcements, nonland_mana_announcements) =
+        mana_sources::priority_mana_announcements(state, principal).into_partitioned();
+    candidates.extend(
+        land_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::TapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    candidates.extend(
+        nonland_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::ActivateManaSource)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
     if let Some(lands) = state.lands_tapped_for_mana.get(&semantic_holder) {
         for &object_id in lands {
             candidates.push(PriorityPreflightCandidate::Announcement(
@@ -12815,6 +12813,37 @@ mod priority_principal_tests {
             preflight_priority_window(&state),
             PriorityPreflight::Actionable {
                 family: PriorityReducerFamily::PlayLand
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_routes_basic_land_mana_through_the_mana_provider() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let forest = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let forest = state
+            .objects
+            .get_mut(&forest)
+            .expect("new battlefield Forest exists");
+        forest.card_types.core_types.push(CoreType::Land);
+        forest.card_types.subtypes.push("Forest".to_string());
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::TapLandForMana,
             }
         );
         assert_eq!(state, before);

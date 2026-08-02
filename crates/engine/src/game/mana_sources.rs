@@ -33,7 +33,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
 use super::mana_payment;
 use super::restrictions;
@@ -62,6 +62,65 @@ pub(crate) enum PriorityManaRoute {
     NonlandActivation,
 }
 
+/// An engine-authored land-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityLandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
+
+impl PriorityLandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
+
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
+
+/// An engine-authored nonland-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityNonlandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
+
+impl PriorityNonlandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
+
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
+
+/// The provider's complete, family-partitioned mana announcements. The
+/// partition is intentionally opaque: only the Priority facade can consume it
+/// through its internal access capability.
+pub(in crate::game) struct PriorityManaAnnouncements {
+    land_taps: Vec<PriorityLandManaAnnouncement>,
+    nonland_activations: Vec<PriorityNonlandManaAnnouncement>,
+}
+
+impl PriorityManaAnnouncements {
+    pub(in crate::game) fn into_partitioned(
+        self,
+    ) -> (
+        Vec<PriorityLandManaAnnouncement>,
+        Vec<PriorityNonlandManaAnnouncement>,
+    ) {
+        (self.land_taps, self.nonland_activations)
+    }
+}
+
 /// Classifies a source using its current characteristics, matching the
 /// reducer's Priority mana-action partition.
 pub(crate) fn priority_mana_route(
@@ -73,6 +132,32 @@ pub(crate) fn priority_mana_route(
         Some(PriorityManaRoute::LandTap)
     } else {
         Some(PriorityManaRoute::NonlandActivation)
+    }
+}
+
+/// Enumerates the mana provider's complete finite Priority announcements for
+/// the authenticated Priority holder. The normal reducer remains responsible
+/// for validating the frozen selection when the announcement is replayed.
+pub(in crate::game) fn priority_mana_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> PriorityManaAnnouncements {
+    let mut land_taps = Vec::new();
+    let mut nonland_activations = Vec::new();
+    for selection in activatable_mana_source_selections(state, principal.semantic_holder()) {
+        match priority_mana_route(state, &selection) {
+            Some(PriorityManaRoute::LandTap) => {
+                land_taps.push(PriorityLandManaAnnouncement::new(selection));
+            }
+            Some(PriorityManaRoute::NonlandActivation) => {
+                nonland_activations.push(PriorityNonlandManaAnnouncement::new(selection));
+            }
+            None => {}
+        }
+    }
+    PriorityManaAnnouncements {
+        land_taps,
+        nonland_activations,
     }
 }
 
