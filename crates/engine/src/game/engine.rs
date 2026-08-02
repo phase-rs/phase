@@ -494,7 +494,9 @@ fn priority_preflight_candidates(
     let semantic_holder = principal.semantic_holder();
     let mut candidates = Vec::new();
     let split_second_active = super::keywords::stack_has_split_second(state);
+    let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let is_active = state.active_player == semantic_holder;
+    let stack_empty = state.stack.is_empty();
     candidates.extend(
         casting::priority_play_land_announcements(state, principal)
             .into_iter()
