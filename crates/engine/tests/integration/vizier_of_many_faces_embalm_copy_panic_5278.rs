@@ -279,7 +279,11 @@ fn embalm_copy_of_bear_survives_and_carries_stamped_exceptions() {
 
     // Accept the enter-as-copy replacement, then pick the Bear to copy. This is
     // the exact sequence that panicked before the fix.
-    let token = 'drive: loop {
+    // Bounded, not `loop`, for the same reason as `resolve_embalm_copy_of`: the
+    // `Priority` arm acts on every trip, so an engine change that stops surfacing
+    // `CopyTargetChoice` would spin here forever and hang CI instead of failing.
+    let mut chosen = None;
+    for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { .. } => {
                 runner
@@ -299,14 +303,16 @@ fn embalm_copy_of_bear_survives_and_carries_stamped_exceptions() {
                         target: Some(TargetRef::Object(target)),
                     })
                     .expect("choose copy target (Bear)");
-                break 'drive source_id;
+                chosen = Some(source_id);
+                break;
             }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
             other => panic!("unexpected waiting_for during entry: {other:?}"),
         }
-    };
+    }
+    let token = chosen.expect("the Embalm token never reached its copy-target choice");
 
     // Drain any residual priority so SBAs run.
     for _ in 0..16 {
@@ -394,7 +400,9 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
     // Decline the enter-as-copy replacement (index 1 = decline on an optional
     // replacement). The token stays a copy of Vizier (0/0) with the Embalm
     // exceptions already stamped at creation, then dies to CR 704.5f.
-    let token = loop {
+    // Bounded for the same CI-hang reason as the drive loop above.
+    let mut declined = None;
+    for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { candidates, .. } => {
                 // Positive reach-guard: the enter-as-copy replacement really
@@ -415,14 +423,16 @@ fn embalm_copy_declined_enters_as_zero_zero_and_dies() {
                 runner
                     .act(GameAction::ChooseReplacement { index: 1 })
                     .expect("decline enter-as-copy replacement");
-                break entering;
+                declined = Some(entering);
+                break;
             }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
             other => panic!("unexpected waiting_for before decline: {other:?}"),
         }
-    };
+    }
+    let token = declined.expect("the Embalm token never reached its enter-as-copy choice");
 
     // Drain to let SBAs run.
     for _ in 0..16 {
@@ -526,7 +536,17 @@ fn a_copy_granted_static_ability_applies_in_the_pass_that_applied_the_copy() {
 /// values — so that second-generation copy effect belongs to the same layer 1,
 /// not to the next pass.
 ///
-/// Board: the lord's printed base carries "each OTHER creature is named Faceless
+/// Board: SYNTHETIC, and deliberately so. No printed card carries a board-wide
+/// `SetName` static — on real cards `SetName` shows up as a copy EXCEPTION,
+/// paired with `CopyValues` inside `additional_modifications` (Vizier's own
+/// Embalm line is one). What is being tested here is the building block, not a
+/// card: `SetName` is the only `Layer::Copy` modification with an observable that
+/// no later layer can also write, which is what makes the assertion below
+/// attribute the change to sublayer 1a and nothing else. The mechanism it stands
+/// in for — a copy handing its recipient a static that is itself a layer-1 effect
+/// — is real and is what CR 707.2c is about.
+///
+/// So: the lord's printed base carries "each OTHER creature is named Faceless
 /// Reflection" (`FilterProp::Another` excludes the source from its own effect).
 /// The Embalm token copies the lord (CR 707.2), which makes the TOKEN a second
 /// source of that same static — and the token's instance, unlike the lord's,
