@@ -2640,9 +2640,7 @@ fn collect_target_slots_inner(
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(EngineError::ActionNotAllowed(
-                    "No legal targets available".to_string(),
-                ));
+                return Err(no_legal_target_slots());
             }
             acc.push(TargetSelectionSlot {
                 legal_targets,
