@@ -3526,10 +3526,23 @@ fn prepare_incremental_flush(
     // population sensitivity) nor the source-side guard above sees that case: the
     // copy's source is a pre-existing permanent and its filter counts nothing.
     //
+    // That same `restrict_to` intersection is why the guard asks
+    // `effect_can_reach_incremental_recipients` rather than firing on the mere
+    // presence of a copy: a `SelfRef` / `SpecificObject` copy that names a
+    // PRE-EXISTING permanent — the ordinary shape, every resolved clone on the
+    // board carries one — applies to the empty set on this path, so it can hand no
+    // recipient anything, and escalating for it would put every board that has
+    // ever cast a clone back on the O(|battlefield|) full pass this module exists
+    // to avoid. A copy that does name a recipient still escalates; so does any
+    // copy whose affected set is a predicate, since that set is not decidable
+    // here.
+    //
     // O(active-effect-count), and zero on the overwhelmingly common board with no
     // copy effect at all.
     if active_effects.iter().any(|effect| {
-        effect.layer == Layer::Copy && copy_grants_continuous_static(&effect.modification)
+        effect.layer == Layer::Copy
+            && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+            && copy_grants_continuous_static(&effect.modification)
     }) {
         return None;
     }
@@ -3861,15 +3874,45 @@ fn incremental_recipient_ids(
     recipients
 }
 
+/// The single object an effect's `affected_filter` provably names, when it names
+/// one by id at all. `None` means the filter is a PREDICATE over the board
+/// (`Typed`, `And`, `Or`, ...) whose membership can only be decided by evaluating
+/// it against every object — which neither caller below does, so each supplies
+/// its own conservative answer for that case.
+///
+/// An id-naming filter is exactly the case where the affected set is known
+/// without a board scan. (No CR annotation: this decides nothing about the rules,
+/// it only reports what a filter's shape already tells us.)
+fn effect_names_single_affected_object(effect: &ActiveContinuousEffect) -> Option<ObjectId> {
+    match &effect.affected_filter {
+        TargetFilter::SelfRef => Some(effect.source_id),
+        TargetFilter::SpecificObject { id } => Some(*id),
+        _ => None,
+    }
+}
+
+/// Is this effect provably CONFINED to the incremental recipients — i.e. can the
+/// restricted pass reproduce it in full? Unknown affected sets answer `false`
+/// (escalate on doubt): a board-wide filter also touches pre-existing objects
+/// that the incremental arm never resets.
 fn effect_is_restricted_to_incremental_recipients(
     effect: &ActiveContinuousEffect,
     recipient_ids: &BTreeSet<ObjectId>,
 ) -> bool {
-    match &effect.affected_filter {
-        TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
-        TargetFilter::SpecificObject { id } => recipient_ids.contains(id),
-        _ => false,
-    }
+    effect_names_single_affected_object(effect).is_some_and(|id| recipient_ids.contains(&id))
+}
+
+/// Can this effect REACH at least one incremental recipient? The dual question to
+/// [`effect_is_restricted_to_incremental_recipients`], and deliberately not the
+/// same predicate: the two agree on an id-naming filter (a set of one is confined
+/// iff it is reached) but their conservative answers for an unknown affected set
+/// are OPPOSITE, because both must escalate on doubt and doubt sits on different
+/// sides of the two questions.
+fn effect_can_reach_incremental_recipients(
+    effect: &ActiveContinuousEffect,
+    recipient_ids: &BTreeSet<ObjectId>,
+) -> bool {
+    effect_names_single_affected_object(effect).is_none_or(|id| recipient_ids.contains(&id))
 }
 
 /// CR 613.2a + CR 613.2c: does applying this layer-1 copy modification hand its
@@ -4167,9 +4210,18 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // static-source index rebuild and shared active-effect collection.
 
     // Step 2: Copy effects first (Layer 1), restricted to recipient objects.
+    //
+    // `effect_can_reach_incremental_recipients` drops a copy that provably names a
+    // NON-recipient — the ordinary resolved-clone shape. `apply_continuous_effect_to`
+    // would skip every one of its objects at the `restrict_to` test anyway, so this
+    // changes no state; what it buys is an accurate `copy_effects.is_empty()` below,
+    // which is what decides whether this flush pays a second board-wide gather.
     let copy_effects: Vec<ActiveContinuousEffect> = active_effects
         .iter()
-        .filter(|effect| effect.layer == Layer::Copy)
+        .filter(|effect| {
+            effect.layer == Layer::Copy
+                && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+        })
         .cloned()
         .collect();
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
@@ -4201,13 +4253,16 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // `apply_continuous_effect_to` restricts an ordinary board-wide
     // `affected_filter` to `recipient_ids` rather than requiring
     // `TargetFilter::SpecificObject`. What rules that case out is the escalation
-    // guard in `prepare_incremental_flush`: any active copy whose payload grants a
-    // continuous static sends the whole flush to `evaluate_layers`, so no copy
-    // surviving to this line can turn a recipient into a `StaticSourceIndex`
-    // generator. The index built there still names exactly the right sources and a
-    // rebuild would find the identical set. (It would also be the wrong repair
-    // anyway: a guard that fans a copy-granted static over `recipient_ids` alone
-    // would not agree with the full pass, which derives it board-wide.)
+    // guard in `prepare_incremental_flush`: any active copy that can REACH a
+    // recipient and whose payload grants a continuous static sends the whole flush
+    // to `evaluate_layers`. The copies it lets through are exactly those confined
+    // to a named non-recipient, which the `copy_effects` filter above then drops —
+    // so either way no copy surviving to this line can turn a recipient into a
+    // `StaticSourceIndex` generator. The index built there still names exactly the
+    // right sources and a rebuild would find the identical set. (It would also be
+    // the wrong repair anyway: a guard that fans a copy-granted static over
+    // `recipient_ids` alone would not agree with the full pass, which derives it
+    // board-wide.)
     //
     // The re-collect below is not dead weight, though. A copy changes its
     // recipients' characteristics, and a pre-existing generator's
@@ -20755,11 +20810,14 @@ mod tests {
         evaluate_layers(&mut state);
 
         let entrant = make_creature(&mut state, "Entrant", 1, 1, player);
+        // Reach-guard asked of the guard ITSELF, not of a neighbouring field: this
+        // is the exact predicate `prepare_incremental_flush` consults first, and it
+        // reads the LIVE `static_definitions`. If it answered true the escalation
+        // below would be its doing and this test would stop probing the copy guard.
         assert!(
-            state.objects[&entrant].base_static_definitions.is_empty(),
-            "the entrant's own base must carry no static, or the existing \
-             `entered_object_blocks_incremental` guard would escalate instead and \
-             this test would stop probing the copy guard"
+            !entered_object_blocks_incremental(&state, &state.objects[&entrant]),
+            "the entrant must be an ordinary entry, or the existing \
+             `entered_object_blocks_incremental` guard would escalate instead"
         );
 
         crate::game::perf_counters::reset();
@@ -20781,6 +20839,104 @@ mod tests {
         assert!(
             !state.objects[&entrant].static_definitions.is_empty(),
             "the board-wide copy must have handed the entrant the payload's static"
+        );
+    }
+
+    /// The other side of that guard: a copy effect that provably names a
+    /// PRE-EXISTING permanent must NOT escalate. This is the ordinary resolved
+    /// clone — every Clone / Vizier copy on a board carries a `SpecificObject`
+    /// (or `SelfRef`) filter naming one permanent — so escalating on the mere
+    /// PRESENCE of a copy would drop every board that has ever resolved one back
+    /// onto the O(|battlefield|) full pass this module exists to avoid.
+    ///
+    /// It is sound because the incremental arm applies copies through
+    /// `apply_continuous_effect_to(state, effect, &recipient_ids, ..)`: a filter
+    /// naming a non-recipient intersects `recipient_ids` to the empty set, so it
+    /// can hand the entrant nothing, and the clone's own copy-granted static —
+    /// already live on it from the earlier full pass, never reset here — is picked
+    /// up by the top-of-pass `StaticSourceIndex` rebuild like any other generator.
+    /// The differential assertion below is what pins that: the entrant must come
+    /// out of the incremental flush wearing the CLONE's anthem.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): drop
+    /// `effect_can_reach_incremental_recipients` from the guard ⇒
+    /// `layers_full_eval == 1` / `layers_incremental == 0` and the two branch
+    /// assertions fail.
+    #[test]
+    fn entry_incremental_stays_incremental_for_a_copy_naming_a_pre_existing_object() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let template = make_creature(&mut state, "Template", 2, 2, player);
+        let mut copied_values = intrinsic_copiable_values(&state.objects[&template]);
+        Arc::make_mut(&mut copied_values.static_definitions).push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        // The clone exists BEFORE the flush under test, and the copy effect names
+        // it — the shape a resolved clone actually has on a live board.
+        let clone = make_creature(&mut state, "Clone", 1, 1, player);
+        let caster = make_creature(&mut state, "Caster", 1, 1, player);
+        state.add_transient_continuous_effect(
+            caster,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: clone },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copied_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+
+        // POSITIVE reach-guards, both on the live fields the guard consults: the
+        // copy really did land, so `copy_grants_continuous_static` answers TRUE for
+        // this effect and the only thing keeping the flush incremental is the reach
+        // test. Without this the assertions below would pass for the wrong reason.
+        assert!(
+            !state.objects[&clone].static_definitions.is_empty(),
+            "the clone must be carrying the payload's continuous static, or the \
+             guard's copy branch is never exercised"
+        );
+
+        let entrant = make_creature(&mut state, "Entrant", 1, 1, player);
+        // Same reach-guard as the escalating sibling, asked of the predicate itself
+        // (it reads the LIVE `static_definitions`, not the base).
+        assert!(
+            !entered_object_blocks_incremental(&state, &state.objects[&entrant]),
+            "the entrant must be an ordinary entry, or the incremental arm would be \
+             refused for a reason unrelated to the copy guard"
+        );
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "a copy confined to a pre-existing permanent cannot reach the entrant, \
+             so the flush must stay incremental"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 0,
+            "no full pass may be forced by a copy the entrant is out of reach of"
+        );
+        // CR 613.2c: after layer 1 the clone's copied static is part of the board,
+        // so its anthem must reach the entrant on THIS path — 1/1 printed, +1/+0
+        // from the clone.
+        assert_eq!(
+            (
+                state.objects[&entrant].power,
+                state.objects[&entrant].toughness
+            ),
+            (Some(2), Some(1)),
+            "the entrant must still receive the clone's copy-granted anthem"
         );
     }
 
