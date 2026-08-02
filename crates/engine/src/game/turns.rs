@@ -2583,7 +2583,9 @@ fn process_phase_triggers(
 /// phase-entry pipeline rather than fabricating a replacement priority prompt.
 fn skip_eliminated_active_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.phase = Phase::Cleanup;
-    advance_phase(state, events);
+    // CR 800.4 + CR 500.5: Cleanup-to-Untap is one transition unit; any
+    // subsequently skipped step remains work for the outer interpreter.
+    let _ = advance_phase_once(state, events);
 }
 
 /// One production turn-interpreter iteration. The outer [`auto_advance`] loop
