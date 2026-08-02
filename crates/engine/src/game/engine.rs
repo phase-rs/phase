@@ -253,10 +253,7 @@ impl PriorityAnnouncementFacadeAccess {
 /// enum is intentionally private: it is neither an action protocol nor an AI
 /// candidate API, and conversion is confined to the facade below.
 enum PriorityAnnouncement {
-    PlayLand {
-        object_id: ObjectId,
-        card_id: CardId,
-    },
+    PlayLand(casting::PriorityPlayLandAnnouncement),
     TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
     ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
     UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
@@ -320,7 +317,7 @@ enum PriorityAnnouncement {
 impl PriorityAnnouncement {
     fn family(&self) -> PriorityReducerFamily {
         match self {
-            Self::PlayLand { .. } => PriorityReducerFamily::PlayLand,
+            Self::PlayLand(_) => PriorityReducerFamily::PlayLand,
             Self::TapLandForMana { .. } => PriorityReducerFamily::TapLandForMana,
             Self::ActivateManaSource { .. } => PriorityReducerFamily::ActivateManaSource,
             Self::UntapLandForMana { .. } => PriorityReducerFamily::UntapLandForMana,
@@ -352,9 +349,10 @@ impl PriorityAnnouncement {
 fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAction {
     let _access = PriorityAnnouncementFacadeAccess::new();
     match announcement {
-        PriorityAnnouncement::PlayLand { object_id, card_id } => {
-            GameAction::PlayLand { object_id, card_id }
-        }
+        PriorityAnnouncement::PlayLand(announcement) => GameAction::PlayLand {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
         PriorityAnnouncement::TapLandForMana(announcement) => GameAction::TapLandForMana {
             selection: announcement.selection(&_access).clone(),
         },
@@ -504,107 +502,13 @@ fn priority_preflight_candidates(
     let semantic_holder = principal.semantic_holder();
     let mut candidates = Vec::new();
     let split_second_active = super::keywords::stack_has_split_second(state);
-    let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let is_active = state.active_player == semantic_holder;
-    let stack_empty = state.stack.is_empty();
-
-    let land_resource_owner = principal.land_resource_owner();
-    let land_limit =
-        state
-            .max_lands_per_turn
-            .saturating_add(super::static_abilities::additional_land_drops(
-                state,
-                land_resource_owner,
-            ));
-    let lands_played = if state.format_config.topology().has_shared_team_turns() {
-        state
-            .players
-            .iter()
-            .find(|player| player.id == land_resource_owner)
-            .map(|player| player.lands_played_this_turn)
-            .unwrap_or(0)
-    } else {
-        state.lands_played_this_turn
-    };
-    if is_main_phase
-        && stack_empty
-        && is_active
-        && lands_played < land_limit
-        && !super::static_abilities::player_has_static_other(
-            state,
-            land_resource_owner,
-            "CantPlayLand",
-        )
-    {
-        if let Some(player) = state
-            .players
-            .iter()
-            .find(|player| player.id == land_resource_owner)
-        {
-            for &object_id in &player.hand {
-                let Some(object) = state.objects.get(&object_id) else {
-                    continue;
-                };
-                let is_playable_land = object
-                    .card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-                    || object.back_face.as_ref().is_some_and(|back_face| {
-                        back_face.layout_kind == Some(crate::types::card::LayoutKind::Modal)
-                            && back_face
-                                .card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Land)
-                    });
-                if is_playable_land
-                    && !casting::is_blocked_by_cant_play_lands(state, land_resource_owner, object)
-                {
-                    candidates.push(PriorityPreflightCandidate::Announcement(
-                        PriorityAnnouncement::PlayLand {
-                            object_id,
-                            card_id: object.card_id,
-                        },
-                    ));
-                }
-            }
-        }
-        for (object_id, _) in
-            casting::graveyard_lands_playable_by_permission(state, land_resource_owner)
-        {
-            if let Some(object) = state.objects.get(&object_id) {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::PlayLand {
-                        object_id,
-                        card_id: object.card_id,
-                    },
-                ));
-            }
-        }
-        if let Some((object_id, _)) =
-            casting::top_of_library_land_playable_by_permission(state, land_resource_owner)
-        {
-            if let Some(object) = state.objects.get(&object_id) {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::PlayLand {
-                        object_id,
-                        card_id: object.card_id,
-                    },
-                ));
-            }
-        }
-        for (object_id, _) in
-            casting::exile_lands_playable_by_permission(state, land_resource_owner)
-        {
-            if let Some(object) = state.objects.get(&object_id) {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::PlayLand {
-                        object_id,
-                        card_id: object.card_id,
-                    },
-                ));
-            }
-        }
-    }
+    candidates.extend(
+        casting::priority_play_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::PlayLand)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
 
     let (land_mana_announcements, nonland_mana_announcements) =
         mana_sources::priority_mana_announcements(state, principal).into_partitioned();
