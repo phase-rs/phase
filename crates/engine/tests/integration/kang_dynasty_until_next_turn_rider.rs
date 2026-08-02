@@ -95,6 +95,7 @@ fn chapter_rider_parses_until_next_turn_expiry_and_parent_target() {
 ///   - Sig 2 (Jace, Architect of Thought / Tamiyo class): an inner "… until end
 ///     of turn" buff → the "until your next turn" still moves to the expiry, and
 ///     the residual `UntilEndOfTurn` surfaces on the creator ability.
+///
 /// In BOTH cases the load-bearing fix is identical and correct: the expiry is
 /// `UntilControllersNextTurn`, so the trigger fires on opponents' turns instead
 /// of being purged at the creating turn's cleanup (the pre-fix default-EndOfTurn
