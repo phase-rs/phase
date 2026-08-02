@@ -10514,12 +10514,13 @@ mod tests {
         /// before the layer-7c count applies, so a pre-layer probe would see a
         /// colorless entrant, keep the incremental arm, and leave pre-existing
         /// Bears at a stale 4/4 where the correct CR 613 board is 5/5.
-        /// `modification_population_key_write` classifies the color writers as
-        /// `PopulationKeyWrite::Color`, so the gate escalates and the two boards
+        /// `modification_characteristic_writes` classifies the color writers as
+        /// `CharacteristicKinds::COLOR` and the counted filter reads the same
+        /// kind, so the sets intersect, the gate escalates and the two boards
         /// agree.
         ///
         /// This is the discriminating fixture for that channel: revert the
-        /// `Color` arm of the classifier and the escalation assertion fails; keep
+        /// `COLOR` arm of the classifier and the escalation assertion fails; keep
         /// the arm but break the escalation plumbing and the identity assertion
         /// fails on the Bears' derived power/toughness.
         #[test]
@@ -10664,8 +10665,9 @@ mod tests {
         /// probe fires; but the type-writer makes the entrant a land in layer 4
         /// and the count crosses the anthem's threshold, changing PRE-EXISTING
         /// recipients. The blindness disjunct's condition channel
-        /// (`any_active_static_condition_reads_object_population`) MUST escalate
-        /// this entry, and the board must match a forced-Full pass (GateBear
+        /// (`static_condition_characteristic_reads`, unioned into `ReadKinds` by
+        /// `live_characteristic_reads`) MUST escalate this entry, and the board
+        /// must match a forced-Full pass (GateBear
         /// 4/4, not stale 2/2).
         #[test]
         fn condition_gated_anthem_entry_escalates_when_entrant_types_rewritten() {
@@ -10793,9 +10795,9 @@ mod tests {
         /// hands the entrant to the anthem's controller and the count goes
         /// 2 -> 3, which moves PRE-EXISTING recipients. CR 109.3 puts controller
         /// outside an object's characteristics, so this is not reachable by the
-        /// card-type disjunct — `modification_population_key_write` has to
-        /// classify `ChangeController` as a population-key write in its own
-        /// right for this entry to escalate.
+        /// card-type disjunct — `modification_characteristic_writes` has to
+        /// classify `ChangeController` as a `CharacteristicKinds::CONTROLLER`
+        /// write in its own right for this entry to escalate.
         #[test]
         fn controller_change_entry_escalates_when_population_is_controller_keyed() {
             let (normal, escalated, forced) = flush_entry_and_forced(
@@ -11303,6 +11305,739 @@ mod tests {
                 crate::game::layers::incremental_flush_must_escalate(&state, &entered_ids),
                 "absent gate-truth key must fail closed and escalate (invariant 1)"
             );
+        }
+
+        // ------------------------------------------------------------------
+        // Read/write-kind relation fixtures (CR 613.1).
+        //
+        // Each board mirrors the color-wash fixture's shape: one enchantment
+        // carrying TWO Continuous static definitions, a vanilla entrant (so
+        // `entered_object_blocks_incremental` stays quiet), and a divergence
+        // that surfaces in power/toughness (all `assert_pt_identical` compares).
+        //
+        // Non-vacuity invariants, checked per fixture: the entrant must NOT
+        // satisfy the population-sensitive read PRE-layer (otherwise Axis 2a
+        // escalates and the kind relation goes untested), it must satisfy it
+        // POST-layer, and the writer's layer must run strictly before the
+        // reading layer.
+        // ------------------------------------------------------------------
+
+        /// Install a battlefield enchantment carrying `defs` as both its base
+        /// and its live static definitions, matching how the pre-existing
+        /// escalation boards install anthems.
+        fn install_static_enchantment(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            defs: Vec<crate::types::ability::StaticDefinition>,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.base_static_definitions = Arc::new(defs.clone());
+            o.static_definitions = defs.into();
+            o.base_card_types.core_types = vec![CoreType::Enchantment];
+            o.card_types.core_types = vec![CoreType::Enchantment];
+            id
+        }
+
+        /// Create a vanilla 2/2 creature with an explicit name and color set.
+        fn add_relation_bear(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            colors: Vec<ManaColor>,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.base_power = Some(2);
+            o.base_toughness = Some(2);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.base_card_types.core_types = vec![CoreType::Creature];
+            o.card_types.core_types = vec![CoreType::Creature];
+            o.base_color.clone_from(&colors);
+            o.color = colors;
+            id
+        }
+
+        /// Sorted `(power, toughness)` of every battlefield object whose name
+        /// starts with `prefix`.
+        fn pts_named(state: &GameState, prefix: &str) -> Vec<(Option<i32>, Option<i32>)> {
+            let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|o| o.name.starts_with(prefix))
+                .map(|o| (o.power, o.toughness))
+                .collect();
+            pts.sort();
+            pts
+        }
+
+        /// A `Continuous` static definition over `affected` applying `mods`.
+        fn continuous_static(
+            affected: TargetFilter,
+            mods: Vec<crate::types::ability::ContinuousModification>,
+        ) -> crate::types::ability::StaticDefinition {
+            let mut def = crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            );
+            def.affected = Some(affected);
+            def.modifications = mods;
+            def
+        }
+
+        /// `AddDynamicPower` + `AddDynamicToughness` off one `ObjectCount`.
+        fn dynamic_pt_count(
+            counted: TargetFilter,
+        ) -> Vec<crate::types::ability::ContinuousModification> {
+            use crate::types::ability::ContinuousModification;
+            let count = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: counted },
+            };
+            vec![
+                ContinuousModification::AddDynamicPower {
+                    value: count.clone(),
+                },
+                ContinuousModification::AddDynamicToughness { value: count },
+            ]
+        }
+
+        /// (2.1) KEYWORD channel (CR 613.1f). A layer-6 `AddKeyword` reaches the
+        /// entrant while the anthem's magnitude counts creatures WITH that
+        /// keyword. Pre-layer the entrant has no flying, so every membership
+        /// probe reports "no perturbation"; post-layer it does, so the count
+        /// moves 2 → 3 and the pre-existing FlyBears go 4/4 → 5/5.
+        ///
+        /// Discriminating for BOTH halves of the relation: revert the
+        /// `AddKeyword` family to EMPTY on the write side, or the `WithKeyword`
+        /// family to EMPTY on the read side, and the escalation assertion fails.
+        fn flying_count_anthem_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::Keyword;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 600 + i, &format!("FlyBear{i}"), vec![]);
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let flying_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(flying_creatures),
+            );
+            install_static_enchantment(&mut state, 610, "Flying Count Anthem", vec![grant, count]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_escalates_when_population_is_keyword_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(flying_count_anthem_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 611)
+                });
+            assert!(
+                escalated,
+                "a layer-6 keyword grant reaching the entrant moves a keyword-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            assert_eq!(
+                pts_named(&forced, "FlyBear"),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the entrant once it has flying — correct CR 613 board"
+            );
+            assert_eq!(
+                pts_named(&normal, "FlyBear"),
+                pts_named(&forced, "FlyBear"),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "keyword-keyed escalation");
+        }
+
+        /// (2.2) POWER/TOUGHNESS channel (CR 613.1g + CR 613.4b/c). A layer-7b
+        /// `SetToughness` reaches the entrant while the anthem's magnitude counts
+        /// creatures with toughness ≥ 4 at layer 7c.
+        ///
+        /// Because power/toughness is ONE kind, a P/T-keyed count anthem is
+        /// itself a P/T writer and would satisfy the relation on its own reach.
+        /// The count anthem's affected set is therefore "creatures you control"
+        /// while the entrant enters under the OPPONENT (mirroring
+        /// `controller_theft_count_anthem_board`), which makes `SetToughness`
+        /// the only entrant-reaching writer and gives the revert-check SetPT-arm
+        /// granularity rather than whole-kind granularity.
+        fn tough_count_anthem_with_set_toughness_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 620 + i, &format!("ToughBear{i}"), vec![]);
+            }
+            // Layer 7b, controller-agnostic: reaches the opponent's entrant too.
+            let setter = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetToughness { value: 4 }],
+            );
+            let tough_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }],
+                ..Default::default()
+            });
+            // Layer 7c, "creatures you control": deliberately EXCLUDES the
+            // opponent-controlled entrant.
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tough_creatures,
+                        },
+                    },
+                }],
+            );
+            install_static_enchantment(
+                &mut state,
+                630,
+                "Toughness Count Anthem",
+                vec![setter, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn pt_change_entry_escalates_when_population_is_pt_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(tough_count_anthem_with_set_toughness_board, |s| {
+                    add_colorless_creature_entry_under(s, 631, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "a layer-7b toughness set reaching the entrant moves a P/T-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            assert_eq!(
+                pts_named(&forced, "ToughBear"),
+                vec![(Some(5), Some(4)); 2],
+                "full pass counts the entrant once its toughness is set to 4"
+            );
+            assert_eq!(
+                pts_named(&normal, "ToughBear"),
+                pts_named(&forced, "ToughBear"),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "P/T-keyed escalation");
+        }
+
+        /// (2.3) NAME channel (CR 613.1c + CR 612.8). A layer-3 `SetTextName`
+        /// reaches the entrant while the anthem's magnitude counts creatures by
+        /// name. Pre-layer the entrant is "Insect" and matches nothing;
+        /// post-layer it is a third "Doppelganger" and the pre-existing pair
+        /// goes 4/4 → 5/5.
+        fn named_count_anthem_with_name_rewrite_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 640 + i, "Doppelganger", vec![]);
+            }
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetTextName {
+                    name: "Doppelganger".to_string(),
+                }],
+            );
+            let doppelgangers = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::Named {
+                    name: "Doppelganger".to_string(),
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(doppelgangers),
+            );
+            install_static_enchantment(
+                &mut state,
+                650,
+                "Doppelganger Count Anthem",
+                vec![rename, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn name_change_entry_escalates_when_population_is_name_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(named_count_anthem_with_name_rewrite_board, |s| {
+                    add_colorless_creature_entry(s, 651)
+                });
+            assert!(
+                escalated,
+                "a layer-3 name rewrite reaching the entrant moves a name-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            // The two pre-existing Doppelgangers are the only 2/2 printed bodies;
+            // the entrant is a 1/1, so it cannot be confused with them.
+            let bears = |s: &GameState| {
+                let mut pts: Vec<(Option<i32>, Option<i32>)> = s
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .filter(|o| o.base_power == Some(2) && o.base_toughness == Some(2))
+                    .map(|o| (o.power, o.toughness))
+                    .collect();
+                pts.sort();
+                pts
+            };
+            assert_eq!(
+                bears(&forced),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the renamed entrant — correct CR 613 board"
+            );
+            assert_eq!(
+                bears(&normal),
+                bears(&forced),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "name-keyed escalation");
+        }
+
+        /// (2.4) NARROWING NEGATIVE. A layer-6 keyword grant reaches the entrant,
+        /// but nothing live READS abilities: the only population read is an
+        /// artifact count (CR 613.1d) and both affected filters are plain
+        /// typelines. `{Abilities, PowerToughness} ∩ {CardTypes} = ∅`, so the
+        /// entry must stay on the incremental fast path — a board the previous
+        /// one-sided gate had no way to keep there, since it escalated on any
+        /// recognized writer plus any population read.
+        ///
+        /// Revert direction: make `AddKeyword` write `ALL` and the assertion
+        /// flips, which is what proves the narrowing is the classifier's doing.
+        fn artifact_count_anthem_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::Keyword;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 660 + i, &format!("DisjointBear{i}"), vec![]);
+            }
+            // One pre-existing artifact so the counted population is non-empty.
+            let relic = create_object(
+                &mut state,
+                CardId(662),
+                PlayerId(0),
+                "Relic".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&relic).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Artifact];
+                o.card_types.core_types = vec![CoreType::Artifact];
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let artifacts = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(artifacts),
+            );
+            install_static_enchantment(
+                &mut state,
+                670,
+                "Artifact Count With Grant",
+                vec![grant, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_stays_incremental_when_population_reads_are_disjoint() {
+            use crate::types::Keyword;
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 671)
+                });
+            assert!(
+                !escalated,
+                "a keyword grant cannot move an artifact-keyed count — \
+                 {{Abilities}} ∩ {{CardTypes}} = ∅, so the entry must stay incremental"
+            );
+            // Non-vacuity: the grant really does reach the entrant, so the
+            // narrowing is the kind relation's doing and not a missed match.
+            let entrant = normal
+                .battlefield
+                .iter()
+                .filter_map(|id| normal.objects.get(id))
+                .find(|o| o.name == "Insect")
+                .expect("entrant on battlefield");
+            assert!(
+                entrant.keywords.contains(&Keyword::Flying),
+                "the entrant must actually be a recipient of the layer-6 grant"
+            );
+            assert_pt_identical(&normal, &forced, "disjoint-kind non-escalation");
+        }
+
+        /// (2.5) AFFECTED-FILTER READ CHANNEL. This board has NO dynamic
+        /// magnitude and NO static condition — the ONLY name read on it lives in
+        /// another modification's AFFECTED FILTER. A layer-3 `SetTextName`
+        /// renames the entering artifact to "Doppelganger", which adds that name
+        /// to the reference set of the buff's `DifferentNameFrom` filter and
+        /// therefore REMOVES the pre-existing Doppelganger creature from the
+        /// buff's affected set (5/5 → 2/2).
+        ///
+        /// Pre-layer the entering Treasure does not match the reference filter
+        /// (which is keyed on the name it does not yet have), so Axis 2a's
+        /// per-entrant narrowing reports "no perturbation" and only the kind
+        /// relation can catch this. Revert direction: drop the affected-filter
+        /// channel from `live_characteristic_reads` and `ReadKinds` becomes
+        /// empty, so the gate exits at stage 2 and the board goes stale.
+        fn name_rewrite_with_affected_filter_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            add_relation_bear(&mut state, 680, "Doppelganger", vec![]);
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::SetTextName {
+                    name: "Doppelganger".to_string(),
+                }],
+            );
+            // "each artifact you control named Doppelganger" — the entrant only
+            // joins this set AFTER layer 3 renames it.
+            let named_artifacts = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                properties: vec![FilterProp::Named {
+                    name: "Doppelganger".to_string(),
+                }],
+                ..Default::default()
+            });
+            let buff = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::DifferentNameFrom {
+                        filter: Box::new(named_artifacts),
+                    }],
+                    ..Default::default()
+                }),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            install_static_enchantment(&mut state, 690, "Different Name Buff", vec![rename, buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_affected_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(name_rewrite_with_affected_filter_read_board, |s| {
+                    add_artifact_entry(s, 691)
+                });
+            assert!(
+                escalated,
+                "a layer-3 rename feeding another static's AFFECTED FILTER must \
+                 escalate — the affected-filter read channel is unconditional"
+            );
+            let bear = |s: &GameState| {
+                s.battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .find(|o| o.base_power == Some(2))
+                    .map(|o| (o.power, o.toughness))
+                    .expect("pre-existing Doppelganger on battlefield")
+            };
+            assert_eq!(
+                bear(&forced),
+                (Some(2), Some(2)),
+                "full pass drops the pre-existing Doppelganger out of the buff \
+                 once the renamed artifact joins the reference set"
+            );
+            assert_eq!(
+                bear(&normal),
+                bear(&forced),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "affected-filter read channel");
+        }
+
+        /// (2.6) CONDITION READ CHANNEL through the walker's NET-NEW recursion.
+        /// The buff is gated by `RecipientMatchesFilter` over a keyword filter —
+        /// a condition whose MEMBERSHIP twin
+        /// (`static_condition_uses_object_population`) answers `false`, so Axis
+        /// 2b never looks at it. Only `static_condition_characteristic_reads`
+        /// recursing into that filter puts `Abilities` into `ReadKinds`, which is
+        /// what makes the layer-6 grant reaching the entrant intersect.
+        ///
+        /// The DISCRIMINATING assertion here is the escalation bit: revert the
+        /// `SourceMatchesFilter` / `RecipientMatchesFilter` arms to EMPTY and it
+        /// flips. The identity assertion is the usual under-escalation tripwire,
+        /// not an independent proof of divergence.
+        fn condition_keyed_buff_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::{Keyword, StaticCondition};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 700 + i, &format!("CondBear{i}"), vec![]);
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let mut buff = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            buff.condition = Some(StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    }],
+                    ..Default::default()
+                }),
+            });
+            install_static_enchantment(&mut state, 710, "Flying-Gated Buff", vec![grant, buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_escalates_through_condition_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(condition_keyed_buff_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 711)
+                });
+            assert!(
+                escalated,
+                "a live condition reading keywords through its own filter must put \
+                 Abilities in ReadKinds, so the layer-6 grant intersects and escalates"
+            );
+            assert_eq!(
+                pts_named(&forced, "CondBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the granted flying satisfies the recipient condition on the full pass"
+            );
+            assert_pt_identical(&normal, &forced, "condition-filter read channel");
+        }
+
+        /// (2.7) CONDITION-ADJACENT NARROWING NEGATIVE. `ChangeController` is the
+        /// writer the PREVIOUS gate recognized (it was one of its three
+        /// population keys), and it genuinely reaches the entrant here. Every
+        /// live read on this board is keyed purely on power/toughness — the
+        /// counted filter and both affected filters use a bare `PtComparison`
+        /// with no type constraint and no controller scope — so
+        /// `{Controller} ∩ {PowerToughness} = ∅` and the control theft cannot
+        /// move anything. The old gate escalated this board; the relation keeps
+        /// it incremental.
+        fn pt_keyed_count_anthem_with_control_theft_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 720 + i, &format!("ScopeBear{i}"), vec![]);
+            }
+            // Layer 2: steals every object with power ≤ 1, i.e. the 1/1 entrant.
+            let thief = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::ChangeController],
+            );
+            let tough_objects = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 2 },
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                tough_objects.clone(),
+                vec![ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tough_objects,
+                        },
+                    },
+                }],
+            );
+            install_static_enchantment(
+                &mut state,
+                730,
+                "Toughness Count With Theft",
+                vec![thief, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn control_change_entry_stays_incremental_when_reads_are_pt_only() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(pt_keyed_count_anthem_with_control_theft_board, |s| {
+                    add_colorless_creature_entry_under(s, 731, PlayerId(1))
+                });
+            assert!(
+                !escalated,
+                "control theft cannot move a purely P/T-keyed population — \
+                 {{Controller}} ∩ {{PowerToughness}} = ∅, so the entry stays incremental"
+            );
+            // Non-vacuity: the layer-2 writer really does reach the entrant, so
+            // the old one-sided gate would have escalated this exact board.
+            let entrant = normal
+                .battlefield
+                .iter()
+                .filter_map(|id| normal.objects.get(id))
+                .find(|o| o.name == "Insect")
+                .expect("entrant on battlefield");
+            assert_eq!(
+                entrant.controller,
+                PlayerId(0),
+                "the entrant must actually be a recipient of the layer-2 control change"
+            );
+            assert_pt_identical(&normal, &forced, "controller-vs-P/T non-escalation");
+        }
+
+        /// (2.8) CR 613.6 SELF-EXCLUSION CARVE-OUT. One Continuous definition
+        /// whose modifications WRITE exactly the kind its OWN affected filter
+        /// READS, and nothing else on the board reads anything: the buff is
+        /// `AddPower`/`AddToughness` (writes `{PowerToughness}`) over "creatures
+        /// with power ≤ 1" (reads `{CardTypes, PowerToughness}`). There is no
+        /// dynamic magnitude and no static condition, so the affected filter is
+        /// the whole read union.
+        ///
+        /// CR 613.6 locks the effect's affected-object set the first time the
+        /// effect applies and retains it for the rest of the pass, so the buff
+        /// cannot push the entrant back out of the set it was just admitted to.
+        /// Its own write is therefore not a read it can move, and the entry must
+        /// stay incremental.
+        ///
+        /// Revert direction: drop the per-modification exclusion and test stage 4
+        /// against the whole `ReadKinds` union again — `{PowerToughness}` then
+        /// intersects its own affected filter's reads and the escalation
+        /// assertion flips.
+        fn self_reading_pt_buff_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 740 + i, &format!("SelfBear{i}"), vec![]);
+            }
+            // Layer 7c. Pre-existing 2/2 bears are out of the set (power 2 > 1);
+            // the 1/1 entrant is in it, and stays in it after the +3/+3 that
+            // would otherwise disqualify it.
+            let buff = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    ..Default::default()
+                }),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            install_static_enchantment(&mut state, 742, "Self-Reading Buff", vec![buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn pt_writer_entry_stays_incremental_when_only_its_own_affected_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(self_reading_pt_buff_board, |s| {
+                    add_colorless_creature_entry(s, 743)
+                });
+            assert!(
+                !escalated,
+                "CR 613.6 retains the effect's own affected set, so a modification \
+                 cannot move the filter that admitted it — the entry stays incremental"
+            );
+            let entrant = |s: &GameState| {
+                s.battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .find(|o| o.name == "Insect")
+                    .map(|o| (o.power, o.toughness))
+                    .expect("entrant on battlefield")
+            };
+            // Non-vacuity: the P/T writer genuinely reaches the entrant, and the
+            // retained set keeps `AddToughness` applying even though `AddPower`
+            // already pushed current power past the filter's threshold.
+            assert_eq!(
+                entrant(&forced),
+                (Some(4), Some(4)),
+                "the entrant must actually be a recipient of the layer-7c buff"
+            );
+            assert_eq!(
+                pts_named(&forced, "SelfBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-existing 2/2 bears never satisfy the power ≤ 1 filter"
+            );
+            assert_eq!(
+                entrant(&normal),
+                entrant(&forced),
+                "the incremental entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "CR 613.6 self-exclusion carve-out");
         }
 
         /// Assert every battlefield object's computed power/toughness/loyalty and

@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use crate::game::combat;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::{
-    counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
+    counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
+    resolve_quantity_with_targets,
 };
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope,
@@ -30,6 +31,104 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+/// CR 613.1: The set of layer-writable characteristic kinds that a filter,
+/// quantity expression or static condition READS — one bit per CR 613 sublayer
+/// that can rewrite that kind, plus the copy-only mana cost.
+///
+/// This is the shared currency of the entry-incremental flush gate's
+/// read/write-kind relation (see `game::layers`): a live modification whose
+/// write kinds are disjoint from every live read kind cannot flip any live
+/// verdict, so the entry fast path stays sound. Both surfaces classify into
+/// this one lattice, which is what makes the intersection meaningful.
+///
+/// Granularity is exactly one CR 613 sublayer per kind, so the parameterization
+/// axis stays inside CR 613's own taxonomy (no cross-section unification):
+/// - [`Self::CONTROLLER`] — CR 613.1b (layer 2). CR 109.3 does not list
+///   controller among an object's characteristics, but a control change moves
+///   an object between controller-keyed populations, so the relation must track
+///   it alongside the true characteristics.
+/// - [`Self::NAME_TEXT`] — CR 613.1c (layer 3) + CR 612.8 (an effect that sets
+///   an object's name is a text-changing effect).
+/// - [`Self::CARD_TYPES`] — CR 613.1d (layer 4), which is card type, subtype
+///   AND supertype; all three fold into one kind because CR 613.1d is one
+///   sublayer.
+/// - [`Self::COLOR`] — CR 613.1e (layer 5).
+/// - [`Self::ABILITIES`] — CR 613.1f (layer 6).
+/// - [`Self::POWER_TOUGHNESS`] — CR 613.1g (layer 7), sublayers CR 613.4a-d.
+/// - [`Self::MANA_COST`] — no layer of its own; only copy effects rewrite it
+///   (CR 707.9b). It is tracked because devotion (CR 700.5) and mana-value
+///   populations key on it, so All-writers (copies) must intersect those reads.
+///
+/// CRITICAL — this is NOT the question that
+/// [`filter_prop_uses_object_population`] answers. That classifier answers
+/// MEMBERSHIP-perturbation ("can another object entering the battlefield change
+/// this verdict or this count"). This one answers CHARACTERISTIC-dependence
+/// ("which layer-writable kinds does this verdict read"). They are siblings,
+/// not duplicates: "the number of tapped permanents" USES the object population
+/// but reads NO layer-writable kind, and this relation correctly ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CharacteristicKinds(u8);
+
+impl CharacteristicKinds {
+    /// Reads (or writes) nothing that a continuous effect can rewrite.
+    pub(crate) const EMPTY: Self = Self(0);
+    /// CR 613.1b: layer 2, control-changing effects.
+    pub(crate) const CONTROLLER: Self = Self(1 << 0);
+    /// CR 613.1c + CR 612.8: layer 3, text-changing effects (names).
+    pub(crate) const NAME_TEXT: Self = Self(1 << 1);
+    /// CR 613.1d: layer 4, card type / subtype / supertype.
+    pub(crate) const CARD_TYPES: Self = Self(1 << 2);
+    /// CR 613.1e: layer 5, color-changing effects.
+    pub(crate) const COLOR: Self = Self(1 << 3);
+    /// CR 613.1f: layer 6, ability-adding and ability-removing effects.
+    pub(crate) const ABILITIES: Self = Self(1 << 4);
+    /// CR 613.1g + CR 613.4a-d: layer 7, power and/or toughness.
+    pub(crate) const POWER_TOUGHNESS: Self = Self(1 << 5);
+    /// CR 707.9b: copy-writable only; no layer of its own.
+    pub(crate) const MANA_COST: Self = Self(1 << 6);
+    /// Every kind — the conservative answer for any form whose reads or writes
+    /// cannot be determined structurally. Over-approximating here can only
+    /// over-escalate (a full re-evaluation is slower, never wrong).
+    pub(crate) const ALL: Self = Self(0b0111_1111);
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub(crate) const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// The kinds in `self` that are not in `other`.
+    pub(crate) const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    pub(crate) const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) const fn is_all(self) -> bool {
+        self.contains(Self::ALL)
+    }
+}
+
+/// Recursion budget for the characteristic-read walkers.
+///
+/// Filters, quantity expressions and conditions form a finite OWNED tree (no
+/// cycles are representable), so the walk always terminates; this cap only
+/// bounds stack depth on pathologically nested hand-authored data. Overflow
+/// yields [`CharacteristicKinds::ALL`], the conservative answer.
+pub(crate) const CHARACTERISTIC_READ_DEPTH: u32 = 8;
 
 /// True when the filter's matched SET depends on the population of objects on
 /// the battlefield — i.e. another object entering or leaving the battlefield can
@@ -255,6 +354,399 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // another object entering or leaving cannot change the commander's types.
         | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => false,
+    }
+}
+
+/// CR 613.1: Which layer-writable characteristic kinds does this filter's
+/// verdict read?
+///
+/// EXHAUSTIVE and wildcard-free over `TargetFilter`, deliberately living beside
+/// [`affected_filter_uses_object_population`] so that adding a variant forces
+/// BOTH the membership decision and the characteristic decision at one seam.
+/// See [`CharacteristicKinds`] for why these are two questions, not one.
+pub(crate) fn target_filter_characteristic_reads(filter: &TargetFilter) -> CharacteristicKinds {
+    target_filter_characteristic_reads_at(filter, CHARACTERISTIC_READ_DEPTH)
+}
+
+pub(crate) fn target_filter_characteristic_reads_at(
+    filter: &TargetFilter,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match filter {
+        TargetFilter::Not { filter: inner } => target_filter_characteristic_reads_at(inner, depth),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().fold(CharacteristicKinds::EMPTY, |acc, f| {
+                acc.union(target_filter_characteristic_reads_at(f, depth))
+            })
+        }
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) => {
+            let mut kinds = CharacteristicKinds::EMPTY;
+            // CR 613.1d: every type constraint reads the layer-4 typeline.
+            for tf in type_filters {
+                kinds = kinds.union(type_filter_characteristic_reads(tf));
+            }
+            // CR 613.1b: a controller-scoped filter gains and loses members when
+            // layer 2 rewrites control.
+            if controller.is_some() {
+                kinds = kinds.union(CharacteristicKinds::CONTROLLER);
+            }
+            for prop in properties {
+                if kinds.is_all() {
+                    break;
+                }
+                kinds = kinds.union(filter_prop_characteristic_reads_at(prop, depth));
+            }
+            kinds
+        }
+        // Payload-bearing object references: recurse into the embedded filter.
+        TargetFilter::TrackedSetFiltered { filter: inner, .. } => {
+            target_filter_characteristic_reads_at(inner, depth)
+        }
+        TargetFilter::ChosenDamageSource { filter: inner, .. } => {
+            inner.as_ref().map_or(CharacteristicKinds::EMPTY, |f| {
+                target_filter_characteristic_reads_at(f, depth)
+            })
+        }
+        // CR 613.1b: stack-ability reference scoped by controller.
+        TargetFilter::StackAbility { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 613.1b + CR 613.1d: parse-layer sugar for "that player and the
+        // permanents of this type they control"; lowered before object matching,
+        // but classified truthfully.
+        TargetFilter::ControllerAndControlledPermanents { .. } => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 201.2: compares the live `name` field, which layer 3 writes.
+        TargetFilter::Named { .. } => CharacteristicKinds::NAME_TEXT,
+        // Fixed object / player references, zone anchors and ledger lookups: the
+        // referent is picked by identity, not by any layer-written
+        // characteristic. Enumerated explicitly (no wildcard) so a future variant
+        // is forced through this classification. CR 108.3: `Owner` is fixed at
+        // game start and is not layer-writable.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Owner
+        | TargetFilter::GrantingObject
+        | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
+    }
+}
+
+/// CR 613.1d + CR 613.1f: a type constraint reads the layer-4 typeline; a
+/// SUBTYPE constraint additionally reads layer-6 abilities, because Changeling
+/// (CR 702.73a) makes an object every creature type and the live check reads the
+/// keyword set (`subtype_matches_with_changeling`).
+fn type_filter_characteristic_reads(tf: &TypeFilter) -> CharacteristicKinds {
+    match tf {
+        TypeFilter::Subtype(_) => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        TypeFilter::Non(inner) => type_filter_characteristic_reads(inner),
+        TypeFilter::AnyOf(inners) => inners.iter().fold(CharacteristicKinds::EMPTY, |acc, t| {
+            acc.union(type_filter_characteristic_reads(t))
+        }),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any => CharacteristicKinds::CARD_TYPES,
+    }
+}
+
+/// CR 603.4: Which characteristic a "shares a quality with" comparison reads.
+/// Shared by the `FilterProp::SharesQuality` arm and by
+/// `QuantityRef::ObjectCountBySharedQuality` / `ObjectCountDistinct`, which
+/// group objects on the same quality vocabulary.
+pub(crate) fn shared_quality_characteristic_reads(quality: &SharedQuality) -> CharacteristicKinds {
+    match quality {
+        // CR 201.2: name comparison.
+        SharedQuality::Name => CharacteristicKinds::NAME_TEXT,
+        // CR 202.3: mana value is derived from the mana cost.
+        SharedQuality::ManaValue => CharacteristicKinds::MANA_COST,
+        // CR 208.1 / CR 209.1.
+        SharedQuality::Power | SharedQuality::Toughness | SharedQuality::TotalPowerToughness => {
+            CharacteristicKinds::POWER_TOUGHNESS
+        }
+        // CR 105.1.
+        SharedQuality::Color => CharacteristicKinds::COLOR,
+        // CR 205.3m + CR 702.73a: creature types see through Changeling, which
+        // is a layer-6 ability.
+        SharedQuality::CreatureType => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 205.2 / CR 205.3.
+        SharedQuality::CardType | SharedQuality::LandType | SharedQuality::PermanentType => {
+            CharacteristicKinds::CARD_TYPES
+        }
+    }
+}
+
+/// CR 613.1: EXHAUSTIVE, wildcard-free leaf classifier for
+/// [`target_filter_characteristic_reads`] — the characteristic-dependence twin
+/// of [`filter_prop_uses_object_population`]. Adding a `FilterProp` variant
+/// forces a decision here.
+///
+/// A prop that carries a nested `TargetFilter` or `QuantityExpr` unions the
+/// payload's kinds ON TOP of its own intrinsic reads; a prop that carries a
+/// `ControllerRef` unions [`CharacteristicKinds::CONTROLLER`], because layer 2
+/// can move objects across the scope the prop is asking about.
+fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match prop {
+        // ---- CR 613.1f (layer 6): keyword and ability reads. ----
+        FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        // CR 605.1 + CR 113.1: both read the live ability set.
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        // CR 602.1: activation costs live on the object's abilities.
+        | FilterProp::HasXInActivationCost => CharacteristicKinds::ABILITIES,
+        // CR 303.4 + CR 702.5: "could enchant" reads the source's own Enchant
+        // ability (layer 6) and the referenced object through the inner filter.
+        FilterProp::CanEnchant { target } => CharacteristicKinds::ABILITIES
+            .union(target_filter_characteristic_reads_at(target, depth)),
+        // CR 302.6 + CR 702.10: haste is a keyword read; the creature check is a
+        // typeline read.
+        FilterProp::HasHasteOrControlledSinceTurnBegan => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+
+        // ---- CR 613.1d (layer 4): typeline reads. ----
+        FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::IsChosenCardType
+        // CR 303.4 + CR 301.5: both read the attachment's subtype (Aura /
+        // Equipment) to decide the relationship.
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy => CharacteristicKinds::CARD_TYPES,
+        // CR 205.3m + CR 702.73a: creature-type reads see through Changeling, so
+        // they read layer 6 as well as layer 4.
+        FilterProp::IsChosenCreatureType | FilterProp::SharesCreatureTypeWithCommander => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 205.3m + CR 701.23a: whole-zone creature-type tally, scoped to a
+        // player (CR 613.1b).
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
+        // CR 310 + CR 613.1b: the Battle's protector is read by type and by
+        // controller scope.
+        FilterProp::ProtectorMatches { .. }
+        // CR 303.4 + CR 301.5: attachment subtype plus the attachment's
+        // controller scope.
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        // CR 700.9: "modified" reads counters, Equipment and Auras controlled by
+        // the permanent's controller.
+        | FilterProp::Modified => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+
+        // ---- CR 613.1e (layer 5): color reads. ----
+        FilterProp::HasColor { .. }
+        | FilterProp::NotColor { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::ColorCount { .. } => CharacteristicKinds::COLOR,
+        // CR 205.2 + CR 608.2c: the transient card predicate is matched on both
+        // the card types and the color of the candidate.
+        FilterProp::MatchesLastChosenCardPredicate => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::COLOR)
+        }
+
+        // ---- CR 613.1c (layer 3): name reads. ----
+        FilterProp::SameName | FilterProp::SameNameAsParentTarget => CharacteristicKinds::NAME_TEXT,
+        // CR 201.2 + CR 613.1f: `Named` also matches through the live
+        // `StaticMode::CountsAsNamed` aliases, which are layer-6 statics.
+        FilterProp::Named { .. } => {
+            CharacteristicKinds::NAME_TEXT.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 201.2a: whole-board name tally, optionally scoped by controller.
+        FilterProp::NameMatchesAnyPermanent { .. } => {
+            CharacteristicKinds::NAME_TEXT.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 201.2: names of the permanents the evaluating controller controls
+        // that match the inner filter — name, controller scope, and the inner
+        // filter's own kinds.
+        FilterProp::DifferentNameFrom { filter } => CharacteristicKinds::NAME_TEXT
+            .union(CharacteristicKinds::CONTROLLER)
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+
+        // ---- CR 613.1g (layer 7): power/toughness reads. ----
+        // CR 208 + CR 613.4b: `Base` scope reads base P/T, which layers 7a/7b
+        // still write, so both scopes read this kind.
+        FilterProp::PtComparison { value, .. } => CharacteristicKinds::POWER_TOUGHNESS
+            .union(quantity_expr_characteristic_reads_at(value, depth)),
+        FilterProp::PowerGTSource
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase => CharacteristicKinds::POWER_TOUGHNESS,
+
+        // ---- CR 707.9b: mana-cost reads (copy-writable only). ----
+        FilterProp::Cmc { value, .. } => CharacteristicKinds::MANA_COST
+            .union(quantity_expr_characteristic_reads_at(value, depth)),
+        FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::HasXInManaCost => CharacteristicKinds::MANA_COST,
+
+        // ---- Structural recursion. ----
+        // CR 122.1: the counter count itself is not layer-written; only the
+        // threshold expression can read characteristics.
+        FilterProp::Counters { count, .. } => quantity_expr_characteristic_reads_at(count, depth),
+        FilterProp::AnyOf { props } => props.iter().fold(CharacteristicKinds::EMPTY, |acc, p| {
+            if acc.is_all() {
+                acc
+            } else {
+                acc.union(filter_prop_characteristic_reads_at(p, depth))
+            }
+        }),
+        // CR 608.2c: negation does not change WHICH state the inner prop reads.
+        FilterProp::Not { prop } => filter_prop_characteristic_reads_at(prop, depth),
+        // CR 115.9b/c: the stack entry's targets are matched by the inner filter.
+        FilterProp::TargetsOnly { filter } | FilterProp::Targets { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 603.4: the shared quality names exactly which characteristic is
+        // compared; the reference set contributes its own filter's kinds.
+        FilterProp::SharesQuality {
+            quality, reference, ..
+        } => {
+            let quality_kinds = shared_quality_characteristic_reads(quality);
+            reference.as_ref().map_or(quality_kinds, |r| {
+                quality_kinds.union(target_filter_characteristic_reads_at(r, depth))
+            })
+        }
+
+        // ---- CR 613.1b (layer 2): controller-scoped predicates. ----
+        // Each reads the matched object's live controller, or scopes a ledger
+        // lookup by a `ControllerRef` that layer 2 can move objects across.
+        FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::CountersPutOnThisTurn { .. } => CharacteristicKinds::CONTROLLER,
+
+        // ---- Undeterminable: conservatively every kind. ----
+        // CR 109.4: an arbitrary player predicate over the object's controller
+        // can read anything about the boards those players control.
+        FilterProp::ControllerMatches { .. }
+        // CR 115.1 + CR 707.10: evaluates the triggering spell's OWN target
+        // filter, which is not reachable from this AST node.
+        | FilterProp::CouldBeTargetedByTriggeringSpell => CharacteristicKinds::ALL,
+        // CR 109.1: identity exclusion. Against the ability's own parent target
+        // this is pure object identity and reads nothing; against any other
+        // reference the excluded set is filter-derived and could be anything.
+        FilterProp::DistinctFrom { reference } => match reference.as_ref() {
+            TargetFilter::ParentTarget => CharacteristicKinds::EMPTY,
+            _ => CharacteristicKinds::ALL,
+        },
+
+        // ---- Reads no layer-writable characteristic. ----
+        // Token identity, zone, ownership (CR 108.3), combat state, per-object
+        // designations, per-turn ledgers, stack shape, and the fail-closed
+        // unparsed leaf. Enumerated explicitly (no wildcard).
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::WasKicked
+        | FilterProp::InZone { .. }
+        // CR 108.3: owner is fixed at game start; no layer writes it.
+        | FilterProp::Owned { .. }
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        // CR 903.3: commander designation is set at deck construction.
+        | FilterProp::IsCommander
+        // Unparsed leaf: evaluates fail-closed `false` for every object, so its
+        // verdict can never be flipped by any layer.
+        | FilterProp::Other { .. } => CharacteristicKinds::EMPTY,
     }
 }
 
