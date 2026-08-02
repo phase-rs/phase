@@ -12211,6 +12211,90 @@ mod tests {
             assert_pt_identical(&normal, &forced, "transient condition read channel");
         }
 
+        /// (3.2) TRANSIENT SOURCE-LEVEL GATE. Same frozen-set/live-gate
+        /// asymmetry, but the gate is a plain SOURCE-LEVEL presence check
+        /// (CR 611.3a) instead of a recipient-context count, and NOTHING on the
+        /// board writes the kinds it reads. That makes the entry-perturbation
+        /// probe the only disjunct that can catch it: an opponent's creature
+        /// entering flips `IsPresent{creature an opponent controls}` from OFF
+        /// to ON, and every recipient frozen into the effect's set (CR 611.2c)
+        /// goes 2/2 → 5/5.
+        ///
+        /// DISCRIMINATING: drop the transient walk from
+        /// `any_active_static_condition_perturbed_by_entry` and the
+        /// printed-static walk sees no condition at all, the kind relation
+        /// exits at stage 3 (`{PowerToughness} ∩ {CardTypes, Controller} = ∅`),
+        /// and the recipients stay stale at 2/2.
+        fn transient_source_level_gate_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    770 + i,
+                    &format!("GatedBear{i}"),
+                    vec![],
+                ));
+            }
+            let source =
+                install_static_enchantment(&mut state, 772, "Opponent-Gated Grant", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+                // CR 109.5: a resolved effect RETAINS its controller, so "an
+                // opponent" is read against P0. OFF on this board.
+                StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::Opponent),
+                        ..Default::default()
+                    })),
+                },
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn opponent_entry_escalates_through_transient_source_level_gate() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_source_level_gate_board, |s| {
+                    add_colorless_creature_entry_under(s, 773, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "CR 611.2c freezes a resolved effect's affected SET, not its gate — \
+                 an entry that flips a transient's source-level presence gate must \
+                 escalate or every frozen recipient keeps a stale board"
+            );
+            // Non-vacuity: the gate is genuinely OFF before the entry.
+            let mut pre = transient_source_level_gate_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "GatedBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry no opponent controls a creature, so the gate is OFF"
+            );
+            assert_eq!(
+                pts_named(&forced, "GatedBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the opponent's entrant turns the gate ON for every frozen recipient"
+            );
+            assert_eq!(
+                pts_named(&normal, "GatedBear"),
+                pts_named(&forced, "GatedBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient source-level gate");
+        }
+
         /// Assert every battlefield object's computed power/toughness/loyalty and
         /// keyword set are identical across two states.
         fn assert_pt_identical(a: &GameState, b: &GameState, label: &str) {

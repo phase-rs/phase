@@ -4195,12 +4195,21 @@ fn active_effects_force_incremental_escalation(
     })
 }
 
-/// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
-/// whose enabling `condition` is board-population-dependent AND that one of the
-/// `entered_ids` actually perturbs. Walks the same source set as
-/// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
-/// and reads the source definition's `condition` field.
-/// O(active-source-count × entered-count); short-circuits on the first match.
+/// Scan every live continuous-effect generator for an enabling `condition` that
+/// is board-population-dependent AND that one of the `entered_ids` actually
+/// perturbs. Two generator channels are walked, matching the two
+/// `ActiveContinuousEffect` sources that carry a condition:
+///
+///  * PRINTED (and granted-inner) CONTINUOUS `StaticDefinition`s, over the same
+///    source set as `collect_shared_active_continuous_effects`
+///    (`for_each_static_effect_source`), reading each definition's `condition`.
+///  * RESOLUTION-CREATED `TransientContinuousEffect`s, reading `tce.condition`.
+///    CR 611.2c locks in a resolved effect's affected SET, not its gate, so a
+///    transient's condition stays live and flips on entry exactly like a printed
+///    one — see the transient walk below for why it has no truth-delta stage.
+///
+/// O((active-source-count + transient-count) × entered-count); short-circuits on
+/// the first match.
 ///
 /// Three-stage test:
 ///  1. The committed exhaustive classifier
@@ -4285,7 +4294,38 @@ fn any_active_static_condition_perturbed_by_entry(
             found = true;
         }
     });
-    found
+    if found {
+        return true;
+    }
+    // CR 611.2c + CR 611.3a: the walk above sees only PRINTED (and granted-inner)
+    // static definitions. A continuous effect created by the resolution of a
+    // spell or ability keeps its enabling condition LIVE — CR 611.2c locks in the
+    // affected SET, and nothing else — so a source-level population gate riding
+    // on a transient flips on entry exactly like a printed one, and every
+    // recipient frozen into that effect's set goes stale with it.
+    //
+    // No truth-delta stage here: `static_gate_truth` is keyed by
+    // `(source, def_index)` over printed definitions, and a transient has no
+    // `def_index` in that key space (several transients can share one
+    // `source_id`). Escalating on perturbation alone is the direction the whole
+    // gate is built on — over-escalation costs a full pass, under-escalation
+    // ships a wrong board — and it matches the recipient-context arm above,
+    // which also escalates on perturbation with no cache consult.
+    state.transient_continuous_effects.iter().any(|tce| {
+        let Some(condition) = tce.condition.as_ref() else {
+            return false;
+        };
+        if !static_condition_uses_object_population(condition) {
+            return false;
+        }
+        // CR 109.5: a resolved spell or ability RETAINS its controller, so "you"
+        // in the retained gate names `tce.controller` — not whoever controls the
+        // source object now (that reading is only correct for static abilities).
+        let ctx = FilterContext::from_source_with_controller(tce.source_id, tce.controller);
+        entered_ids
+            .iter()
+            .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
+    })
 }
 
 /// CR 611.3a + CR 611.3b: rewrite the source-level enabling-condition truth
