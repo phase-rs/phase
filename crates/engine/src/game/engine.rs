@@ -277,7 +277,7 @@ enum PriorityAnnouncement {
     CastSpellAsWebSlinging(casting::PriorityWebSlingingAnnouncement),
     CastSpellForFree(casting::PriorityCastFreeAnnouncement),
     PlayFaceDown(morph::PriorityPlayFaceDownAnnouncement),
-    TurnFaceUp { object_id: ObjectId },
+    TurnFaceUp(morph::PriorityTurnFaceUpAnnouncement),
     CompanionToHand(companion::PriorityCompanionAnnouncement),
     EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
     CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
@@ -305,7 +305,7 @@ impl PriorityAnnouncement {
             Self::CastSpellAsWebSlinging(_) => PriorityReducerFamily::CastSpellAsWebSlinging,
             Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
             Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
-            Self::TurnFaceUp { .. } => PriorityReducerFamily::TurnFaceUp,
+            Self::TurnFaceUp(_) => PriorityReducerFamily::TurnFaceUp,
             Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
             Self::EndContinuousEffect(_) => PriorityReducerFamily::EndContinuousEffect,
             Self::CastPreparedCopy(_) => PriorityReducerFamily::CastPreparedCopy,
@@ -399,9 +399,10 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             object_id: announcement.object_id(&_access),
             card_id: announcement.card_id(&_access),
         },
-        PriorityAnnouncement::TurnFaceUp { object_id } => {
-            GameAction::TurnFaceUp { object_id, x: 0 }
-        }
+        PriorityAnnouncement::TurnFaceUp(announcement) => GameAction::TurnFaceUp {
+            object_id: announcement.object_id(&_access),
+            x: 0,
+        },
         PriorityAnnouncement::CompanionToHand(_) => GameAction::CompanionToHand,
         PriorityAnnouncement::EndContinuousEffect(announcement) => {
             GameAction::EndContinuousEffect {
@@ -618,21 +619,23 @@ fn priority_preflight_candidates(
         );
     }
 
-    for &object_id in &state.battlefield {
-        let Ok(cost) = super::morph::turn_face_up_prepare(state, object_id, semantic_holder) else {
-            continue;
-        };
-        if casting_costs::cost_has_x(&cost) {
-            candidates.push(PriorityPreflightCandidate::Indeterminate {
-                family: PriorityReducerFamily::TurnFaceUp,
-                block: PriorityPreflightBlock::RequiresChosenX,
-            });
-        } else {
-            candidates.push(PriorityPreflightCandidate::Announcement(
-                PriorityAnnouncement::TurnFaceUp { object_id },
-            ));
-        }
-    }
+    candidates.extend(
+        morph::priority_turn_face_up_candidates(state, principal)
+            .into_iter()
+            .map(|candidate| match candidate {
+                morph::PriorityTurnFaceUpCandidate::Ready(announcement) => {
+                    PriorityPreflightCandidate::Announcement(PriorityAnnouncement::TurnFaceUp(
+                        announcement,
+                    ))
+                }
+                morph::PriorityTurnFaceUpCandidate::RequiresChosenX => {
+                    PriorityPreflightCandidate::Indeterminate {
+                        family: PriorityReducerFamily::TurnFaceUp,
+                        block: PriorityPreflightBlock::RequiresChosenX,
+                    }
+                }
+            }),
+    );
 
     if let Some(announcement) = companion::priority_companion_announcement(state, principal) {
         candidates.push(PriorityPreflightCandidate::Announcement(

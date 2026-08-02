@@ -14,6 +14,57 @@ use std::sync::Arc;
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
 
+/// An engine-authored turn-face-up announcement for the Priority preflight.
+/// The permanent identity remains owned by the face-down authority until the
+/// Priority facade reconstructs the special-action primer.
+pub(in crate::game) struct PriorityTurnFaceUpAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTurnFaceUpAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// One finite Priority outcome from the turn-face-up special-action authority.
+/// `RequiresChosenX` deliberately has no action payload: mandatory progress
+/// must not guess a value for a player-chosen X cost.
+pub(in crate::game) enum PriorityTurnFaceUpCandidate {
+    Ready(PriorityTurnFaceUpAnnouncement),
+    RequiresChosenX,
+}
+
+/// Enumerates the current holder's face-up special-action outcomes in
+/// battlefield order. `turn_face_up_prepare` remains the single legality and
+/// cost authority; the ordinary special-action reducer revalidates it when the
+/// ready announcement is replayed.
+pub(in crate::game) fn priority_turn_face_up_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTurnFaceUpCandidate> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter_map(|object_id| {
+            let cost = turn_face_up_prepare(state, object_id, principal.semantic_holder()).ok()?;
+            Some(if super::casting_costs::cost_has_x(&cost) {
+                PriorityTurnFaceUpCandidate::RequiresChosenX
+            } else {
+                PriorityTurnFaceUpCandidate::Ready(PriorityTurnFaceUpAnnouncement::new(object_id))
+            })
+        })
+        .collect()
+}
+
 /// An engine-authored face-down play announcement for Priority preflight. The
 /// hand object and card identity remain private to the face-down authority
 /// until the Priority facade reconstructs the ordinary reducer primer.
