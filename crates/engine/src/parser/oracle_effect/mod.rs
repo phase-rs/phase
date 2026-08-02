@@ -157,7 +157,9 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-pub(crate) use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
+pub(crate) use crate::parser::oracle_ir::context::{
+    ParseContext, TokenPtFollowup, TriggerConditionScope,
+};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
     ClauseIrBuilder, DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
@@ -1044,11 +1046,11 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_text = after.original;
 
     // Parse the condition as a trigger using the trigger parser.
-    // CR 603.7c: this is a DELAYED trigger condition — `in_delayed_trigger` enables
+    // CR 603.7c: this is a DELAYED trigger condition — the `Delayed` scope enables
     // anaphoric subject resolution ("he"/"she" → SelfRef, "those creatures" →
     // ParentTarget) that is valid only as a back-reference to the creating ability.
     let mut inner_ctx = ParseContext {
-        in_delayed_trigger: true,
+        trigger_condition_scope: TriggerConditionScope::Delayed,
         ..ParseContext::default()
     };
     let mut trigger_def = parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)

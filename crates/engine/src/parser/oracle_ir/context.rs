@@ -16,6 +16,25 @@ pub(crate) enum TokenPtFollowup {
     PowerToughness { power: PtValue, toughness: PtValue },
 }
 
+/// CR 603.7c + CR 201.5: Whether the trigger CONDITION currently being parsed is
+/// a printed (card-text) trigger or a DELAYED trigger created from a resolving
+/// effect chain. Anaphoric subjects that only bind as delayed back-references to
+/// the creating ability — the gendered pronoun "he"/"she" (→ `SelfRef`) and the
+/// plural set "those creatures"/"any of those creatures" (→ `ParentTarget`) — are
+/// recognized ONLY under `Delayed`, so a standalone printed trigger that happens
+/// to contain those words stays coverage-honest (`Unknown`) instead of binding
+/// its source to `Any`. A typed scope rather than a bare bool per the codebase's
+/// "typed enum over bool" convention.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TriggerConditionScope {
+    /// A trigger printed on the card. Delayed-only anaphoric subjects stay `Unknown`.
+    #[default]
+    Printed,
+    /// A delayed trigger condition created from a resolving effect chain
+    /// (set by `try_parse_whenever_this_turn`).
+    Delayed,
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
@@ -44,15 +63,10 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
-    /// CR 603.7c + CR 201.5: Whether we are parsing the CONDITION of a DELAYED
-    /// triggered ability created from an effect chain (set by
-    /// `try_parse_whenever_this_turn`). Anaphoric trigger subjects that only bind
-    /// as delayed back-references to the creating ability — the gendered pronoun
-    /// "he"/"she" (→ `SelfRef`) and the plural set "those creatures"/"any of those
-    /// creatures" (→ `ParentTarget`) — are recognized ONLY when this is set, so a
-    /// standalone printed trigger that happens to contain those words stays
-    /// coverage-honest (`Unknown`) instead of binding its source to `Any`.
-    pub in_delayed_trigger: bool,
+    /// CR 603.7c + CR 201.5: Whether the trigger CONDITION being parsed is printed
+    /// card text or a DELAYED trigger created from a resolving effect chain. Gates
+    /// delayed-only anaphoric subject resolution; see [`TriggerConditionScope`].
+    pub trigger_condition_scope: TriggerConditionScope,
     /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
     /// current trigger body ("it", "them") should bind to. Spell-cast triggers
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."

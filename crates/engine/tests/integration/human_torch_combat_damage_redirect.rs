@@ -144,12 +144,35 @@ fn possessive_gendered_subject_does_not_become_selfref() {
         );
     };
 
-    // The delayed subject arm evaluated "his commander" and must NOT have bound
-    // it to the source permanent — possessive case is excluded from the gendered
-    // SelfRef arm. This assertion flips (fails) if "his <noun>" ever binds SelfRef.
+    // Positive shape pin (replaces a prior vacuous negative): the delayed subject
+    // arm evaluated "his commander" and DECLINED — possessive case is excluded from
+    // the gendered SelfRef arm, and "his commander" is not otherwise a recognized
+    // subject. The inner combat-damage trigger therefore stays coverage-honest:
+    // `mode` is `Unknown` carrying the original clause, and NO filter slot binds.
+    // This is the discriminating positive assertion — a SelfRef regression would
+    // instead RECOGNIZE the trigger (a concrete `DamageDone`/`CombatOnly` mode with
+    // `valid_source == Some(SelfRef)`), so pinning `Unknown` rejects both the
+    // SelfRef bug and a spurious recognized-but-wrong parse; it cannot be satisfied
+    // by an upstream `None` masquerading as success.
+    assert!(
+        matches!(&trigger.mode, TriggerMode::Unknown(text) if text == oracle_condition_clause()),
+        "possessive 'his <noun>' must stay coverage-honest (Unknown), got mode={:?}",
+        trigger.mode
+    );
+    assert_eq!(
+        trigger.valid_source, None,
+        "an unrecognized possessive subject must bind no source (not SelfRef, not Any)"
+    );
     assert_ne!(
         trigger.valid_source,
         Some(TargetFilter::SelfRef),
         "possessive 'his <noun>' must not bind SelfRef"
     );
+}
+
+/// The exact combat-damage condition clause the delayed trigger carries for the
+/// probe oracle — pinned so the `Unknown` assertion above proves the *specific*
+/// clause reached classification and was left honestly unclassified.
+fn oracle_condition_clause() -> &'static str {
+    "his commander deals combat damage to a player"
 }

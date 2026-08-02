@@ -8278,9 +8278,21 @@ fn collect_matching_delayed_triggers(
     let mut pending: Vec<PendingTriggerContext> = to_fire
         .into_iter()
         .map(|(trigger, event_index, trigger_event)| {
+            // CR 603.2c + CR 510.2: The consumed IDENTITY is the raw originating
+            // buffer event at `event_index`. For an expanded multi-fire combat
+            // trigger that is the aggregate `CombatDamageDealtToPlayer` — NOT the
+            // synthetic per-source `DamageDealt` in `trigger_event`, which exists
+            // only as per-firing context. `trigger_event_occurrence` counts
+            // occurrences of `events[event_index]`, so the recorded event MUST key
+            // off the same raw event; otherwise `filter_consumed_trigger_events_from`
+            // (which compares both event equality and occurrence) never matches the
+            // aggregate, leaving it in the buffer for a later priority scan to
+            // re-expand and fire the delayed trigger a second time. For every
+            // non-expanded case `trigger_event == events[event_index]`, so this is a
+            // no-op there.
             consumed_events.push(ConsumedTriggerEventOccurrence {
                 occurrence: trigger_event_occurrence(events, event_index),
-                event: trigger_event.clone(),
+                event: events[event_index].clone(),
             });
             delayed_trigger_to_context(state, trigger, trigger_event)
         })
@@ -17468,6 +17480,129 @@ pub mod tests {
             filtered,
             vec![events[2].clone()],
             "the suffix-local first upkeep is globally the second occurrence"
+        );
+    }
+
+    /// CR 603.2c + CR 510.2 (PR #6884 blocker 1): a MULTI-FIRE combat-damage
+    /// `WheneverEvent` that expands one aggregate `CombatDamageDealtToPlayer` into
+    /// per-source synthetic `DamageDealt` firings must record the RAW AGGREGATE as
+    /// its consumed identity — never the synthetic per-source event.
+    /// `trigger_event_occurrence` keys the occurrence off the aggregate's buffer
+    /// slot, so a synthetic-keyed consumed entry could never be matched by
+    /// `filter_consumed_trigger_events`, leaving the aggregate in the buffer for a
+    /// later priority scan to re-expand and fire the trigger a SECOND time. This
+    /// proves both halves of the fix: (1) the consumed identity is the aggregate,
+    /// and (2) filtering the buffer by the consumed set actually removes the
+    /// aggregate, so a re-scan finds no combat event to re-fire on (one firing per
+    /// source, no double-fire).
+    #[test]
+    fn multi_fire_combat_damage_consumes_raw_aggregate_not_synthetic() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let defender = PlayerId(1);
+
+        let rider_source = create_object(
+            &mut state,
+            CardId(0x6884_0001),
+            controller,
+            "Combat Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(0x6884_0002),
+            controller,
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(0x6884_0003),
+            controller,
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        for attacker in [attacker_a, attacker_b] {
+            state
+                .objects
+                .get_mut(&attacker)
+                .expect("attacker exists")
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // A Love-on-the-Battlefield-shaped rider: "whenever a creature you control
+        // deals combat damage to a player, ..." — a source-filtered (non-SelfRef)
+        // listener that binds on the AGGREGATE combat-damage event and expands
+        // per damaging source.
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_target = Some(TargetFilter::Player);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            rider_source,
+            controller,
+        );
+        // The expansion path requires the delayed ability to carry its
+        // creation-time trigger source; without it, collection returns the event
+        // unexpanded (see `expand_multi_fire_damage_occurrences`).
+        let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&rider_source]);
+        ability.set_trigger_source_recursive(rider_ctx);
+
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: rider_source,
+            one_shot: false,
+            provenance: None,
+        });
+
+        // One combat-damage step: two creatures deal combat damage to one player.
+        let events = vec![GameEvent::CombatDamageDealtToPlayer {
+            player_id: defender,
+            source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
+            total_damage: 5,
+        }];
+
+        let (pending, consumed) =
+            collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
+
+        // CR 603.2c: one firing per damaging source — two creatures → two firings.
+        assert_eq!(pending.len(), 2, "one firing per damaging source");
+
+        // The consumed identity is the RAW aggregate, not the synthetic per-source
+        // `DamageDealt`. Before the fix this recorded the synthetic event.
+        assert!(
+            consumed
+                .iter()
+                .all(|c| matches!(c.event, GameEvent::CombatDamageDealtToPlayer { .. })),
+            "consumed identity must be the raw aggregate CombatDamageDealtToPlayer, got {:?}",
+            consumed.iter().map(|c| &c.event).collect::<Vec<_>>()
+        );
+
+        // Decisive anti-double-fire guard: filtering the buffer by the consumed set
+        // must REMOVE the aggregate, so a subsequent priority scan sees no combat
+        // event to re-expand. With a synthetic-keyed consumed entry the aggregate
+        // would survive here and the trigger could re-fire.
+        let remaining = filter_consumed_trigger_events(&events, &consumed);
+        assert!(
+            !remaining
+                .iter()
+                .any(|e| matches!(e, GameEvent::CombatDamageDealtToPlayer { .. })),
+            "the aggregate must be consumed so a re-scan cannot fire the trigger twice"
         );
     }
 

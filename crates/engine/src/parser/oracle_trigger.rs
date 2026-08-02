@@ -14,7 +14,7 @@ use super::oracle_effect::{
     try_parse_reanimator_aura_grant_etb_effect_ir,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
@@ -9015,11 +9015,11 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
     // CR 109.4 + CR 603.7c + CR 608.2c: Anaphoric subjects that only bind inside a
     // DELAYED triggered ability created by a parent ability. These pronouns have
     // no antecedent in a standalone printed trigger, so they are recognized ONLY
-    // when parsing a delayed-trigger condition (`ctx.in_delayed_trigger`, set by
-    // `try_parse_whenever_this_turn`). This keeps a standalone printed trigger that
-    // happens to contain the same words honestly coverage-red rather than binding
-    // its source to `Any`.
-    if ctx.in_delayed_trigger {
+    // when parsing a delayed-trigger condition (`ctx.trigger_condition_scope ==
+    // Delayed`, set by `try_parse_whenever_this_turn`). This keeps a standalone
+    // printed trigger that happens to contain the same words honestly coverage-red
+    // rather than binding its source to `Any`.
+    if ctx.trigger_condition_scope == TriggerConditionScope::Delayed {
         // CR 201.5: text referring to the object it's on (here the trigger
         // source, via a gendered pronoun) means just that object → `SelfRef`.
         // Nominative-only

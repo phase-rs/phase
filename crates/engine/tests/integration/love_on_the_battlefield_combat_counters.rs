@@ -265,8 +265,20 @@ fn three_attackers_do_not_satisfy_exactly_two() {
     let mut runner = scenario.build();
 
     let hand_before = hand_count(&runner, P0);
+    let life_before = runner.life(P1);
     run_combat(&mut runner, vec![a, b, c], vec![]);
     runner.advance_until_stack_empty();
+
+    // CR 120.2a (positive reach-guard): the three 2/2s actually attacked and dealt
+    // combat damage to P1 (6 total). This proves the attack RESOLVED and the
+    // `Comparator::EQ`/`count: 2` constraint was genuinely exercised on a real
+    // combat — the no-draw/no-counter/no-first-strike assertions below are the
+    // constraint declining, not a combat that never happened.
+    assert_eq!(
+        runner.life(P1),
+        life_before - 6,
+        "all three attackers hit P1 for 2 (attack resolved)"
+    );
 
     assert_eq!(
         hand_count(&runner, P0),
