@@ -8504,6 +8504,174 @@ fn canonicalize_delayed_install_identity(trigger: &mut serde_json::Value) -> Res
     Ok(())
 }
 
+/// Upgrade `Effect::Mana.target` snapshots written before `ManaTargetRole`
+/// made the target's grammatical role explicit. The old bare `TargetFilter`
+/// cannot tell whether it named the mana recipient or the count source, so the
+/// owning card's parsed Oracle clause is the migration authority.
+///
+/// The lookup is intentionally name-based rather than shape-based: Carpet of
+/// Flowers and Spectral Searchlight both serialize ordinary player filters but
+/// assign opposite roles. Unknown cards fail restoration rather than silently
+/// changing which player receives mana or supplies its amount.
+pub(crate) fn migrate_legacy_mana_target_roles(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let object_names = value
+        .as_object()
+        .and_then(|state| state.get("objects"))
+        .and_then(serde_json::Value::as_object)
+        .map(|objects| {
+            objects
+                .iter()
+                .filter_map(|(key, object)| {
+                    let object = object.as_object()?;
+                    let id = object
+                        .get("id")
+                        .and_then(json_object_id)
+                        .or_else(|| key.parse().ok())?;
+                    let name = object.get("name")?.as_str()?;
+                    (!name.is_empty()).then(|| (id, name.to_string()))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    migrate_legacy_mana_target_roles_in_value(value, &object_names, None)
+}
+
+fn json_object_id(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())
+}
+
+fn legacy_mana_target_role(card_name: &str) -> Option<(&'static str, &'static str)> {
+    match card_name {
+        // The named player receives the produced mana. This catalog is the
+        // complete pre-`ManaTargetRole` card-data surface; add future entries
+        // only after verifying their parsed Oracle role.
+        "A Display of My Dark Power"
+        | "Barbflare Gremlin"
+        | "Belbe, Corrupted Observer"
+        | "Bigger on the Inside"
+        | "Blighted Burgeoning"
+        | "Blinkmoth Urn"
+        | "Bubbling Muck"
+        | "Buried in the Garden"
+        | "Cheering Crowd"
+        | "Color Pie"
+        | "Dawn's Reflection"
+        | "Dictate of Karametra"
+        | "Eladamri, Lord of Leaves Avatar"
+        | "Eladamri's Vineyard"
+        | "Eloren Wilds"
+        | "Elvish Guidance"
+        | "Extraplanar Lens"
+        | "Fertile Ground"
+        | "Gauntlet of Might"
+        | "Gauntlet of Power"
+        | "Glittering Frost"
+        | "Heartbeat of Spring"
+        | "High Tide"
+        | "Jetfire, Ingenious Scientist"
+        | "Keeper of Progenitus"
+        | "Lavaleaper"
+        | "Mad Science Fair Project"
+        | "Magus of the Vineyard"
+        | "Mana Flare"
+        | "Market Festival"
+        | "Organ Harvest"
+        | "Overabundance"
+        | "Overgrowth"
+        | "Priest of Forgotten Gods"
+        | "Radiant Lotus"
+        | "Red Death, Shipwrecker"
+        | "Shimmerwilds Growth"
+        | "Shizuko, Caller of Autumn"
+        | "Snowfall"
+        | "Spectral Searchlight"
+        | "Stadium Vendors"
+        | "Tangleroot"
+        | "The Fertile Lands of Saulvinia"
+        | "The Warring Triad"
+        | "Trace of Abundance"
+        | "Utopia Sprawl"
+        | "Valleymaker"
+        | "Verdant Haven"
+        | "Vernal Bloom"
+        | "Wild Growth"
+        | "Winter's Night"
+        | "Wolfwillow Haven"
+        | "Zhur-Taa Ancient" => Some(("Recipient", "recipient")),
+        // The named player supplies the production count while the ability's
+        // controller receives the mana. Jeska's Will is the affected live-save
+        // case; Rousing Refrain has the same Oracle sentence.
+        "Carpet of Flowers" | "Jeska's Will" | "Orcish Squatters Avatar" | "Rousing Refrain" => {
+            Some(("CountSource", "count_source"))
+        }
+        _ => None,
+    }
+}
+
+fn migrate_legacy_mana_target_roles_in_value(
+    value: &mut serde_json::Value,
+    object_names: &HashMap<u64, String>,
+    inherited_owner: Option<String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_mana_target_roles_in_value(
+                    value,
+                    object_names,
+                    inherited_owner.clone(),
+                )?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let source_owner = object
+                .get("source_id")
+                .and_then(json_object_id)
+                .and_then(|source_id| object_names.get(&source_id))
+                .cloned();
+            let owner = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .or(source_owner)
+                .or(inherited_owner);
+
+            let legacy_target = object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|effect_type| effect_type == "Mana")
+                .then(|| object.get("target"))
+                .flatten()
+                .filter(|target| !target.is_null() && target.get("role").is_none())
+                .cloned();
+            if let Some(target) = legacy_target {
+                let owner = owner.as_deref().ok_or_else(|| {
+                    "legacy mana target has no source card name for role migration".to_string()
+                })?;
+                let (role, field) = legacy_mana_target_role(owner).ok_or_else(|| {
+                    format!("legacy mana target on {owner:?} has no verified role migration")
+                })?;
+                object.insert(
+                    "target".to_string(),
+                    serde_json::json!({ "role": role, field: target }),
+                );
+            }
+
+            for value in object.values_mut() {
+                migrate_legacy_mana_target_roles_in_value(value, object_names, owner.clone())?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -14744,7 +14912,8 @@ impl GameStateDecode {
         migrate_legacy_trigger_firing_carriers(
             value,
             matches!(mode, GameStateDecodeMode::ResolutionWireV1),
-        )
+        )?;
+        migrate_legacy_mana_target_roles(value)
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {

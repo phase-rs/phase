@@ -18,7 +18,7 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
-  PlayerId,
+  SerializedPlayerIdKey,
   TargetFilter,
   WaitingFor,
   Zone,
@@ -209,8 +209,7 @@ export function CardChoiceModal() {
       if (!canActForWaitingState) return null;
       return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
-      if (!canActForWaitingState) return null;
-      return <ChooseUntapSubsetModal data={waitingFor.data} />;
+      return null;
     case "PayCost":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -476,8 +475,22 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const lookedAt = useGameStore(
+    (s) =>
+      s.gameState?.active_library_searches?.[
+        data.player.toString() as SerializedPlayerIdKey
+      ]?.looked_at,
+  );
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  // The engine records every card the searching player looked at. `cards`
+  // remains the legal-selection subset; rendering the full engine-provided
+  // look set lets a library-search modal show the remaining library while
+  // keeping non-matching cards unselectable.
+  const displayedCards = lookedAt
+    ? Array.from(new Set([...lookedAt.map(([, , identity]) => identity.object_id), ...data.cards]))
+    : data.cards;
+  const selectableCards = new Set(data.cards);
   const countValid = searchChoiceAllowsPartialFind(data)
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
@@ -520,23 +533,27 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
+        {displayedCards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selectedSet.has(id);
+          const isSelectable = selectableCards.has(id);
           return (
             <motion.button
               key={id}
+              disabled={!isSelectable}
               className={`relative shrink-0 rounded-lg transition ${
                 isSelected
                   ? "z-10 ring-2 ring-emerald-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                  : isSelectable
+                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                    : "cursor-not-allowed opacity-40"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              animate={{ opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4, y: 0, scale: 1 }}
               transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
+              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+              onClick={() => isSelectable && toggleSelect(id)}
               {...hoverProps(id)}
             >
               <CardImage
@@ -1305,100 +1322,6 @@ function SacrificeModal({ data }: { data: PayCost["data"] }) {
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
       badgeClassName="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white"
     />
-  );
-}
-
-// CR 502.3: a MaxUntapPerType cap (Smoke / Stoic Angel / Damping Field / Winter
-// Orb class) left more than `max` eligible tapped permanents, so the active
-// player directly chooses the bounded subset (up to `max`) that untaps. The
-// complement stays tapped. Answered with `SelectCards { cards }`.
-function ChooseUntapSubsetModal({
-  data,
-}: {
-  data: { player: PlayerId; group: ObjectId[]; max: number };
-}) {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) {
-          next.delete(id);
-        } else if (next.size < data.max) {
-          next.add(id);
-        }
-        return next;
-      });
-    },
-    [data.max],
-  );
-
-  const handleConfirm = useCallback(() => {
-    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  return (
-    <ChoiceOverlay
-      title={t("cardChoice.untapSubset.title")}
-      subtitle={t("cardChoice.untapSubset.subtitle", { count: data.max })}
-      footer={
-        // CR 502.3: a max-untap cap ("can't untap more than one <type>") bounds
-        // the untap count from above only — choosing zero is legal (the whole
-        // group simply stays tapped). Never force an at-least-one selection here.
-        <ConfirmButton
-          onClick={handleConfirm}
-          label={t("cardChoice.buttons.labelCount", {
-            label: t("gamePage.untap.untap"),
-            selected: selected.size,
-            count: data.max,
-          })}
-        />
-      }
-    >
-      <ScrollableCardStrip>
-        {data.group.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? "z-10 ring-2 ring-emerald-400/80"
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    {t("gamePage.untap.untap")}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
   );
 }
 

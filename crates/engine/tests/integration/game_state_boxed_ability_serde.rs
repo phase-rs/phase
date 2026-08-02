@@ -42,6 +42,7 @@
 
 use engine::game::scenario::{P0, P1};
 use engine::game::triggers::PendingTrigger;
+use engine::game::zones::create_object;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::game_state::{
     GameState, PendingCast, PendingDiscardForCostResume, PersistedGameState, StackEntry,
@@ -49,6 +50,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
+use engine::types::zones::Zone;
 
 const SOURCE: ObjectId = ObjectId(700);
 
@@ -330,5 +332,75 @@ fn persisted_round_trip_preserves_the_boxed_resolving_stack_entry() {
         persisted_ability.get("effect").is_some(),
         "resolving_stack_entry's boxed ability must serialize as a bare \
          ResolvedAbility object on the persisted wire, got {persisted_ability}"
+    );
+}
+
+#[test]
+fn persisted_restore_migrates_legacy_jeskas_will_mana_target_role() {
+    let mut state = state_with_resolving_stack_entry();
+    let source = create_object(
+        &mut state,
+        CardId(2),
+        P0,
+        "Jeska's Will".to_string(),
+        Zone::Hand,
+    );
+    let entry = state
+        .resolving_stack_entry
+        .as_mut()
+        .expect("reach-guard: resolving stack entry is populated");
+    entry.source_id = source;
+    let ability = entry
+        .ability_mut()
+        .expect("reach-guard: resolving spell has an ability");
+    ability.source_id = source;
+
+    let mut persisted = serde_json::to_value(PersistedGameState::capture(state))
+        .expect("a current persisted snapshot serializes");
+    let effect =
+        &mut persisted["state"]["resolving_stack_entry"]["kind"]["data"]["ability"]["effect"];
+    *effect = serde_json::json!({
+        "type": "Mana",
+        "produced": {
+            "type": "AnyOneColor",
+            "count": {
+                "type": "Ref",
+                "qty": { "type": "TargetZoneCardCount", "zone": "Hand" }
+            },
+            "color_options": ["Red"]
+        },
+        "target": {
+            "type": "Typed",
+            "type_filters": [],
+            "controller": "Opponent",
+            "properties": []
+        }
+    });
+
+    let target =
+        &persisted["state"]["resolving_stack_entry"]["kind"]["data"]["ability"]["effect"]["target"];
+    assert!(
+        target.get("role").is_none(),
+        "reach-guard: the fixture must carry the pre-ManaTargetRole target encoding"
+    );
+
+    let restored = serde_json::from_value::<PersistedGameState>(persisted)
+        .expect("legacy Jeska's Will snapshot restores through the persisted codec")
+        .into_game_state();
+    let reserialized = serde_json::to_value(PersistedGameState::capture(restored))
+        .expect("the migrated state reserializes");
+    assert_eq!(
+        reserialized["state"]["resolving_stack_entry"]["kind"]["data"]["ability"]["effect"]
+            ["target"],
+        serde_json::json!({
+            "role": "CountSource",
+            "count_source": {
+                "type": "Typed",
+                "type_filters": [],
+                "controller": "Opponent",
+                "properties": []
+            }
+        }),
+        "Jeska's Will target must restore as its Oracle-defined count source"
     );
 }
