@@ -1783,20 +1783,16 @@ pub(in crate::game) fn priority_web_slinging_announcements(
             tapped_creatures
                 .iter()
                 .copied()
-                .filter_map(move |creature_to_return| {
+                .filter(move |&creature_to_return| {
                     can_cast_spell_as_web_slinging_now(
                         state,
                         player,
                         hand_object,
                         creature_to_return,
                     )
-                    .then(|| {
-                        PriorityWebSlingingAnnouncement::new(
-                            hand_object,
-                            card_id,
-                            creature_to_return,
-                        )
-                    })
+                })
+                .map(move |creature_to_return| {
+                    PriorityWebSlingingAnnouncement::new(hand_object, card_id, creature_to_return)
                 })
         })
         .collect()
