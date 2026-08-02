@@ -7900,8 +7900,9 @@ fn validate_trigger_dispatch_origin(
 /// classifier can only establish ordinary versus delayed-without-provenance.
 pub(crate) fn migrate_legacy_trigger_firing_carriers(
     value: &mut serde_json::Value,
+    allow_unlabeled_v1_carriers: bool,
 ) -> Result<(), String> {
-    migrate_legacy_continuation_firing(value)?;
+    migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
     let state = value
         .as_object_mut()
         .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
@@ -7981,14 +7982,20 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                         legacy_firing_to_canonical(&legacy)?,
                     );
                 }
-                // Unlike a deferred/order context, an active pending trigger
-                // no longer retains its delayed scheduler origin. Historical
-                // omission is therefore ambiguous and must not be guessed as
-                // ordinary (CR 603.7).
+                // CR 603.7: an unlabelled v1 active trigger may have been
+                // delayed, so preserve it as a non-receipt-eligible legacy
+                // firing rather than inventing ordinary or receipt identity.
                 (None, None) => {
-                    return Err(
-                        "active legacy pending trigger has no firing discriminator".to_string()
-                    );
+                    if allow_unlabeled_v1_carriers {
+                        state.insert(
+                            "pending_trigger_firing".to_string(),
+                            serde_json::Value::String("LegacyDelayed".to_string()),
+                        );
+                    } else {
+                        return Err(
+                            "active legacy pending trigger has no firing discriminator".to_string()
+                        );
+                    }
                 }
             }
         }
@@ -8034,6 +8041,29 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                 "stack_trigger_firings".to_string(),
                 serde_json::Value::Object(migrated),
             );
+        } else if allow_unlabeled_v1_carriers {
+            let entries = state
+                .get("stack")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "persisted game state has no stack array".to_string())?;
+            let mut migrated = serde_json::Map::new();
+            for entry in entries {
+                if !serialized_stack_entry_is_triggered(entry) {
+                    continue;
+                }
+                let entry_id = entry
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "persisted triggered stack entry has no id".to_string())?;
+                migrated.insert(
+                    entry_id.to_string(),
+                    serde_json::Value::String("LegacyDelayed".to_string()),
+                );
+            }
+            state.insert(
+                "stack_trigger_firings".to_string(),
+                serde_json::Value::Object(migrated),
+            );
         }
     } else if old_stack.is_some() {
         return Err("legacy and canonical stack firing maps both present".to_string());
@@ -8045,11 +8075,28 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                 "resolving_trigger_firing".to_string(),
                 serde_json::json!({ "ReceiptEligible": provenance }),
             );
+        } else if allow_unlabeled_v1_carriers
+            && state
+                .get("resolving_stack_entry")
+                .is_some_and(serialized_stack_entry_is_triggered)
+        {
+            state.insert(
+                "resolving_trigger_firing".to_string(),
+                serde_json::Value::String("LegacyDelayed".to_string()),
+            );
         }
     } else if old_resolving.is_some() {
         return Err("legacy and canonical resolving firing carriers both present".to_string());
     }
     Ok(())
+}
+
+fn serialized_stack_entry_is_triggered(entry: &serde_json::Value) -> bool {
+    entry
+        .get("kind")
+        .and_then(|kind| kind.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("TriggeredAbility")
 }
 
 fn legacy_firing_to_canonical(value: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -8099,11 +8146,14 @@ fn legacy_firing_class_matches(canonical: &serde_json::Value, legacy: &serde_jso
 /// Upgrade the firing carrier inside every serialized ability-continuation
 /// frame. Resolution-frame envelopes have evolved, but a continuation always
 /// owns both `chain` and `trigger_context`.
-fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(), String> {
+fn migrate_legacy_continuation_firing(
+    value: &mut serde_json::Value,
+    allow_unlabeled_v1_carriers: bool,
+) -> Result<(), String> {
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
-                migrate_legacy_continuation_firing(value)?;
+                migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
             }
         }
         serde_json::Value::Object(object) => {
@@ -8134,6 +8184,17 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
                     (Some(canonical), None) => {
                         object.insert("trigger_firing".to_string(), canonical);
                     }
+                    (None, None)
+                        if allow_unlabeled_v1_carriers
+                            && object
+                                .get("trigger_context")
+                                .is_some_and(|context| !context.is_null()) =>
+                    {
+                        object.insert(
+                            "trigger_firing".to_string(),
+                            serde_json::Value::String("LegacyDelayed".to_string()),
+                        );
+                    }
                     (None, None) => {}
                     (None, Some(legacy)) => {
                         object.insert(
@@ -8144,7 +8205,7 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
                 }
             }
             for value in object.values_mut() {
-                migrate_legacy_continuation_firing(value)?;
+                migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
             }
         }
         _ => {}
@@ -14639,7 +14700,13 @@ impl GameStateDecode {
         reject_legacy_raw_prompt_authority(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
-            migrate_legacy_trigger_firing_carriers(&mut value)?;
+            migrate_legacy_trigger_firing_carriers(
+                &mut value,
+                matches!(
+                    mode,
+                    GameStateDecodeMode::PersistedRaw | GameStateDecodeMode::ResolutionWireV1
+                ),
+            )?;
         }
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
@@ -14659,7 +14726,10 @@ impl GameStateDecode {
         ));
         reject_legacy_raw_prompt_authority(value)?;
         migrate_legacy_delayed_trigger_provenance(value)?;
-        migrate_legacy_trigger_firing_carriers(value)
+        migrate_legacy_trigger_firing_carriers(
+            value,
+            matches!(mode, GameStateDecodeMode::ResolutionWireV1),
+        )
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
@@ -21459,6 +21529,36 @@ mod tests {
                 "expected fail-closed stack-trigger migration, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn v1_unlabeled_trigger_carriers_migrate_to_legacy_delayed() {
+        let mut state = normal_trigger_firing_fixture();
+        state.resolving_stack_entry = state.stack.back().cloned();
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
+        v1["resolution_state_version"] = serde_json::Value::from(1);
+        let v1_state = v1.as_object_mut().expect("v1 fixture is a state object");
+        v1_state.remove("pending_trigger_firing");
+        v1_state.remove("stack_trigger_firings");
+        v1_state.remove("resolving_trigger_firing");
+
+        let restored = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("v1 fixture conservatively restores unlabelled trigger carriers")
+            .into_game_state();
+
+        assert_eq!(
+            restored.pending_trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored.stack_trigger_firings.get(&ObjectId(9_003)),
+            Some(&TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored.resolving_trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
     }
 
     #[test]

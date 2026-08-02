@@ -2829,8 +2829,14 @@ mod tests {
         .expect("serialize filtered client state");
 
         for client_state in [&client["state"], &filtered_client["state"]] {
-            serde_json::from_value::<GameState>(client_state.clone())
-                .expect("redacted client state must still deserialize");
+            let error = serde_json::from_value::<GameState>(client_state.clone())
+                .expect_err("redacted client state must not restore as trusted authority");
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending trigger has no firing carrier"),
+                "client redaction must fail only because it removes private trigger authority: {error}"
+            );
             for private_field in [
                 "next_delayed_trigger_token",
                 "next_delayed_trigger_instance",
