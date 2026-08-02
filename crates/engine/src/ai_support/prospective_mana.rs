@@ -213,8 +213,16 @@ pub fn certify_pact_plan(state: &GameState, root: &CandidateAction) -> Option<Ce
     if draws_are_opaque(&projected, &outcome.action.events) {
         return None;
     }
+    let mut budget = ProspectiveBudget::default();
     let receipt = receipt_installed_by(&projected, object_id, frozen.semantic_owner, &outcome)
-        .or_else(|| advance_pact_to_install(&mut projected, frozen.semantic_owner, object_id))?;
+        .or_else(|| {
+            advance_pact_to_install(
+                &mut projected,
+                frozen.semantic_owner,
+                object_id,
+                &mut budget,
+            )
+        })?;
     pact_payment_survives(&mut projected, frozen.semantic_owner, receipt).then(|| {
         CertifiedPactPlan {
             root: frozen,
@@ -448,9 +456,9 @@ fn advance_pact_to_install(
     state: &mut GameState,
     owner: PlayerId,
     source_id: ObjectId,
+    budget: &mut ProspectiveBudget,
 ) -> Option<PactReceipt> {
     let mut priority_beats = 0;
-    let mut forced_transitions = 0;
     while priority_beats < PROSPECTIVE_MAX_PRIORITY_BEATS {
         match &state.waiting_for {
             WaitingFor::Priority { player } => {
@@ -464,10 +472,6 @@ fn advance_pact_to_install(
                 priority_beats += 1;
             }
             waiting if waiting.acting_player() == Some(owner) => {
-                if forced_transitions == PROSPECTIVE_MAX_FORCED_TRANSITIONS {
-                    return None;
-                }
-                forced_transitions += 1;
                 let mut continuations =
                     frozen_candidates(state, owner)
                         .into_iter()
@@ -482,7 +486,8 @@ fn advance_pact_to_install(
                     return None;
                 }
                 let continuation = FrozenCandidate::capture(state, &continuation)?;
-                let outcome = continuation.apply_with_lifecycle(state).ok()?;
+                let permit = budget.issue_forced_progress(continuation)?;
+                let outcome = permit.apply(state).ok()?;
                 if draws_are_opaque(state, &outcome.action.events) {
                     return None;
                 }
@@ -595,9 +600,7 @@ const PROSPECTIVE_MAX_PRIORITY_BEATS: usize = 2;
 const PROSPECTIVE_MAX_PACT_TRANSITIONS: usize = 96;
 const PROSPECTIVE_MAX_PAYMENT_APPLICATIONS: usize = 64;
 const PROSPECTIVE_MAX_SEARCH_BRANCHES: usize = 12;
-// Kept private because forced actionless progress is not yet part of the
-// fetch grammar.  A future route may consume it only through the engine-owned
-// one-unit transition seam, never by invoking `auto_advance` directly.
+// Only a fully bound, deterministic continuation can consume this allowance.
 const PROSPECTIVE_MAX_FORCED_TRANSITIONS: usize = 16;
 
 impl Default for ProspectiveManaDecision {
@@ -614,8 +617,15 @@ struct ProspectiveBudget {
     strategic_actions_remaining: usize,
     priority_beats_remaining: usize,
     payment_applications_remaining: usize,
-    #[allow(dead_code)]
     forced_transitions_remaining: usize,
+}
+
+/// A move-only grant to apply one already captured deterministic continuation.
+/// It is issued only after candidate selection has proved that no player choice
+/// remains; the grant owns that exact capability and burns its budget on issue.
+#[derive(Debug)]
+struct ForcedProgressPermit {
+    continuation: FrozenCandidate,
 }
 
 impl Default for ProspectiveBudget {
@@ -626,6 +636,25 @@ impl Default for ProspectiveBudget {
             payment_applications_remaining: PROSPECTIVE_MAX_PAYMENT_APPLICATIONS,
             forced_transitions_remaining: PROSPECTIVE_MAX_FORCED_TRANSITIONS,
         }
+    }
+}
+
+impl ProspectiveBudget {
+    fn issue_forced_progress(
+        &mut self,
+        continuation: FrozenCandidate,
+    ) -> Option<ForcedProgressPermit> {
+        if self.forced_transitions_remaining == 0 {
+            return None;
+        }
+        self.forced_transitions_remaining -= 1;
+        Some(ForcedProgressPermit { continuation })
+    }
+}
+
+impl ForcedProgressPermit {
+    fn apply(self, state: &mut GameState) -> Result<ProspectiveSimulationOutcome, ()> {
+        self.continuation.apply_with_lifecycle(state)
     }
 }
 
@@ -1202,10 +1231,13 @@ fn draws_are_opaque(state: &GameState, events: &[GameEvent]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_priority_for_route, ProspectiveManaDecision, PROSPECTIVE_MAX_SEARCH_BRANCHES,
+        advance_priority_for_route, FrozenCandidate, ProspectiveBudget, ProspectiveManaDecision,
+        StateCapabilityBinding, PROSPECTIVE_MAX_SEARCH_BRANCHES,
     };
+    use crate::ai_support::TacticalClass;
     use crate::game::engine::apply_actionless_priority_pass_for_prospective;
     use crate::game::zones;
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, WaitingFor};
     use crate::types::identifiers::CardId;
@@ -1234,6 +1266,37 @@ mod tests {
             assert!(decision.terminal_branch_budget().is_some());
         }
         assert!(decision.terminal_branch_budget().is_none());
+    }
+
+    #[test]
+    fn forced_progress_permit_burns_its_budget_before_a_stale_apply_fails() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let candidate = |state: &GameState| FrozenCandidate {
+            action: GameAction::PassPriority,
+            semantic_owner: player,
+            authenticated_actor: player,
+            tactical_class: TacticalClass::Selection,
+            capability: StateCapabilityBinding::capture(state, player)
+                .expect("a complete state yields a capability binding"),
+        };
+        let mut budget = ProspectiveBudget::default();
+        budget.forced_transitions_remaining = 1;
+
+        let permit = budget
+            .issue_forced_progress(candidate(&state))
+            .expect("the final allowance issues one bound permit");
+        assert_eq!(budget.forced_transitions_remaining, 0);
+        state.state_revision += 1;
+
+        assert!(
+            permit.apply(&mut state).is_err(),
+            "a capability change blocks the already-issued continuation"
+        );
+        assert!(
+            budget.issue_forced_progress(candidate(&state)).is_none(),
+            "a failed post-issue apply still burns the one forced-transition allowance"
+        );
     }
 
     #[test]
