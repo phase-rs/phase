@@ -3023,6 +3023,35 @@ mod tests {
     }
 
     #[test]
+    fn production_phase_handoffs_do_not_reenter_the_looping_advance_helper() {
+        for (name, source, test_marker) in [
+            (
+                "turns",
+                include_str!("turns.rs"),
+                "\n#[cfg(test)]\nmod tests {",
+            ),
+            (
+                "priority",
+                include_str!("priority.rs"),
+                "\n#[cfg(test)]\nmod tests {",
+            ),
+            (
+                "engine_resolution_choices",
+                include_str!("engine_resolution_choices.rs"),
+                "\n#[cfg(test)]\nmod tests {",
+            ),
+        ] {
+            let production_end = source
+                .find(test_marker)
+                .expect("production source precedes its tests");
+            assert!(
+                !source[..production_end].contains("advance_phase(state, events)"),
+                "{name} must use advance_phase_once before auto_advance; the outer interpreter owns repetition"
+            );
+        }
+    }
+
+    #[test]
     fn one_auto_advance_unit_matches_the_production_loop_at_an_untap_boundary() {
         let mut production = setup();
         production.phase = Phase::Untap;
