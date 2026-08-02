@@ -110,6 +110,26 @@ pub(in crate::game) struct PriorityManaAnnouncements {
     nonland_activations: Vec<PriorityNonlandManaAnnouncement>,
 }
 
+/// An engine-authored undo announcement for a land tapped for mana in the
+/// current Priority window. The tracked object identity stays provider-owned
+/// until the Priority facade reconstructs the reducer primer.
+pub(in crate::game) struct PriorityUntapLandAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityUntapLandAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
 impl PriorityManaAnnouncements {
     pub(in crate::game) fn into_partitioned(
         self,
@@ -159,6 +179,23 @@ pub(in crate::game) fn priority_mana_announcements(
         land_taps,
         nonland_activations,
     }
+}
+
+/// Enumerates the current holder's existing mana-undo eligibility. The normal
+/// reducer remains authoritative for tracked membership and current object
+/// validity when the announcement is replayed on a clone.
+pub(in crate::game) fn priority_untap_land_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityUntapLandAnnouncement> {
+    state
+        .lands_tapped_for_mana
+        .get(&principal.semantic_holder())
+        .into_iter()
+        .flatten()
+        .copied()
+        .map(PriorityUntapLandAnnouncement::new)
+        .collect()
 }
 
 impl ManaSourcePenalty {

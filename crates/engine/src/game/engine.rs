@@ -256,9 +256,7 @@ enum PriorityAnnouncement {
     },
     TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
     ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
-    UntapLandForMana {
-        object_id: ObjectId,
-    },
+    UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
     CastSpell {
         object_id: ObjectId,
         card_id: CardId,
@@ -372,9 +370,9 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::ActivateManaSource(announcement) => GameAction::ActivateManaSource {
             selection: announcement.selection(&_access).clone(),
         },
-        PriorityAnnouncement::UntapLandForMana { object_id } => {
-            GameAction::UntapLandForMana { object_id }
-        }
+        PriorityAnnouncement::UntapLandForMana(announcement) => GameAction::UntapLandForMana {
+            object_id: announcement.object_id(&_access),
+        },
         PriorityAnnouncement::CastSpell { object_id, card_id } => GameAction::CastSpell {
             object_id,
             card_id,
@@ -632,13 +630,12 @@ fn priority_preflight_candidates(
             .map(PriorityAnnouncement::ActivateManaSource)
             .map(PriorityPreflightCandidate::Announcement),
     );
-    if let Some(lands) = state.lands_tapped_for_mana.get(&semantic_holder) {
-        for &object_id in lands {
-            candidates.push(PriorityPreflightCandidate::Announcement(
-                PriorityAnnouncement::UntapLandForMana { object_id },
-            ));
-        }
-    }
+    candidates.extend(
+        mana_sources::priority_untap_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::UntapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
 
     if !split_second_active {
         for object_id in casting::spell_objects_available_to_cast(state, semantic_holder) {
