@@ -34,6 +34,7 @@ use super::ability_utils::{
 };
 use super::casting;
 use super::casting_costs;
+use super::companion;
 use super::effects;
 use super::end_continuous_effect;
 use super::engine_casting;
@@ -316,7 +317,7 @@ enum PriorityAnnouncement {
     TurnFaceUp {
         object_id: ObjectId,
     },
-    CompanionToHand,
+    CompanionToHand(companion::PriorityCompanionAnnouncement),
     EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
     CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
 }
@@ -344,9 +345,9 @@ impl PriorityAnnouncement {
             Self::CastSpellForFree { .. } => PriorityReducerFamily::CastSpellForFree,
             Self::PlayFaceDown { .. } => PriorityReducerFamily::PlayFaceDown,
             Self::TurnFaceUp { .. } => PriorityReducerFamily::TurnFaceUp,
-            Self::CompanionToHand => PriorityReducerFamily::CompanionToHand,
-            Self::EndContinuousEffect { .. } => PriorityReducerFamily::EndContinuousEffect,
-            Self::CastPreparedCopy { .. } => PriorityReducerFamily::CastPreparedCopy,
+            Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
+            Self::EndContinuousEffect(_) => PriorityReducerFamily::EndContinuousEffect,
+            Self::CastPreparedCopy(_) => PriorityReducerFamily::CastPreparedCopy,
         }
     }
 }
@@ -450,7 +451,7 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
         PriorityAnnouncement::TurnFaceUp { object_id } => {
             GameAction::TurnFaceUp { object_id, x: 0 }
         }
-        PriorityAnnouncement::CompanionToHand => GameAction::CompanionToHand,
+        PriorityAnnouncement::CompanionToHand(_) => GameAction::CompanionToHand,
         PriorityAnnouncement::EndContinuousEffect(announcement) => {
             GameAction::EndContinuousEffect {
                 group: announcement.group(&_access),
@@ -992,9 +993,9 @@ fn priority_preflight_candidates(
         }
     }
 
-    if super::companion::can_activate_companion(state, semantic_holder) {
+    if let Some(announcement) = companion::priority_companion_announcement(state, principal) {
         candidates.push(PriorityPreflightCandidate::Announcement(
-            PriorityAnnouncement::CompanionToHand,
+            PriorityAnnouncement::CompanionToHand(announcement),
         ));
     }
     candidates.extend(
