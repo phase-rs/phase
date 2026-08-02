@@ -4816,6 +4816,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // predicate (Layer 6 / duration `ForAsLongAs`); no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
+        // CR 102.3 + CR 805.4a: the team-aware opponent-turn predicate has
+        // no `AbilityCondition` counterpart yet. Return `None` rather than
+        // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::None => None,
     }
 }

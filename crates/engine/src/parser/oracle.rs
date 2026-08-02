@@ -7644,9 +7644,16 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// decline rather than mis-classify.
 /// The single-gate `during`-role / speed sub-combinator, factored out so it can
 /// be the first half of a compound "X and only Y" / "X, Y" activation-timing
-/// gate. Each arm emits an EXISTING enforced `ActivationRestriction` value —
-/// the opponent-turn arm reuses `opponents_turn_activation_restriction()`
-/// (= `RequiresCondition{Not(IsYourTurn)}`), NOT a new variant.
+/// gate. Every arm emits an EXISTING `ActivationRestriction` variant — the
+/// opponent-scoped arms express their scope as a `ParsedCondition` under the
+/// existing `RequiresCondition`, so no `DuringOpponents*` restriction sibling
+/// is introduced.
+///
+/// The `during ...` half is nested prefix dispatch rather than a flat list of
+/// whole-clause tags: the shared `"during "` prefix is matched once, then the
+/// turn-role and turn-window axes are consumed by their own sub-combinators, so
+/// the four role×window gates come from four small tags instead of eight
+/// enumerated phrases (and a new spelling on either axis is a one-tag change).
 fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     alt((
         value(
@@ -7654,21 +7661,7 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
             tag::<_, _, OracleError<'_>>("as a sorcery"),
         ),
         value(ActivationRestriction::AsInstant, tag("as an instant")),
-        value(
-            opponents_turn_activation_restriction(),
-            alt((
-                tag("during an opponent's turn"),
-                tag("during an opponents turn"),
-            )),
-        ),
-        value(
-            ActivationRestriction::DuringYourTurn,
-            alt((tag("during your turn"), tag("during their turn"))),
-        ),
-        value(
-            ActivationRestriction::DuringYourUpkeep,
-            alt((tag("during your upkeep"), tag("during their upkeep"))),
-        ),
+        parse_activation_during_gate,
     ))
     .parse(i)
 }
@@ -7717,8 +7710,9 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         // CR 602.5b + CR 102.1 + CR 509.1: compound
         // "during <turn-role> [and only | , ] before combat/attackers"
         // activation-timing gate — turn-role half reuses
-        // RequiresCondition{Not(IsYourTurn)} / DuringYourTurn, combat-window half
-        // reuses BeforeAttackersDeclared. Composed with a trailing
+        // RequiresCondition{IsOpponentsTurn} / DuringYourTurn (CR 102.3 +
+        // CR 805.4a), combat-window half reuses BeforeAttackersDeclared.
+        // Composed with a trailing
         // `opt(pair(separator, before-window))`, no permutation enumeration and no
         // `contains`/`split_once` dispatch. Preserves the single-gate behavior
         // above (a bare "during an opponent's turn" still returns one restriction).
@@ -7869,17 +7863,123 @@ fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
     Some(format!("{prefix} {timing_text}."))
 }
 
+/// CR 102.1 + CR 102.3: whose turn an activation-timing gate scopes to. The two
+/// roles are NOT complements — under shared team turns (CR 805.4) "your turn"
+/// is a seat question and "an opponent's turn" is a team question — so each
+/// lowers to its own predicate rather than one negated flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationTurnRole {
+    /// "your " / "their " — the activating player's own turn.
+    Yours,
+    /// "an opponent's " / "an opponents " — a turn of a player on another team.
+    Opponents,
+}
+
+/// CR 500.1 + CR 503.1: which window of the scoped turn the gate admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationTurnWindow {
+    /// "turn" — the whole turn, any step or phase.
+    WholeTurn,
+    /// "upkeep" — the upkeep step only.
+    Upkeep,
+}
+
+/// The turn-role axis of a `during ...` activation gate. Both possessive
+/// spellings of the opponent role are accepted (Oracle text and the misparse
+/// corpus both occur with and without the apostrophe).
+fn parse_activation_turn_role(i: &str) -> OracleResult<'_, ActivationTurnRole> {
+    alt((
+        value(
+            ActivationTurnRole::Opponents,
+            alt((
+                tag::<_, _, OracleError<'_>>("an opponent's "),
+                tag("an opponents "),
+            )),
+        ),
+        value(
+            ActivationTurnRole::Yours,
+            // "their" is the activating player's possessive — equivalent to
+            // "your" once an activator is fixed.
+            alt((tag("your "), tag("their "))),
+        ),
+    ))
+    .parse(i)
+}
+
+/// The turn-window axis of a `during ...` activation gate.
+fn parse_activation_turn_window(i: &str) -> OracleResult<'_, ActivationTurnWindow> {
+    alt((
+        value(
+            ActivationTurnWindow::Upkeep,
+            tag::<_, _, OracleError<'_>>("upkeep"),
+        ),
+        value(ActivationTurnWindow::WholeTurn, tag("turn")),
+    ))
+    .parse(i)
+}
+
+/// CR 602.5b: the composed `during <role> <window>` activation gate — the
+/// shared prefix is consumed once, then each axis by its own sub-combinator.
+fn parse_activation_during_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    let (rest, (role, window)) = preceded(
+        tag::<_, _, OracleError<'_>>("during "),
+        (parse_activation_turn_role, parse_activation_turn_window),
+    )
+    .parse(i)?;
+    Ok((rest, activation_turn_gate(role, window)))
+}
+
+/// CR 602.5b: map a (role, window) pair onto an EXISTING enforced
+/// `ActivationRestriction`. No arm introduces a new variant — the opponent
+/// arms compose `ParsedCondition` leaves under `RequiresCondition`.
+fn activation_turn_gate(
+    role: ActivationTurnRole,
+    window: ActivationTurnWindow,
+) -> ActivationRestriction {
+    match (role, window) {
+        (ActivationTurnRole::Yours, ActivationTurnWindow::WholeTurn) => {
+            ActivationRestriction::DuringYourTurn
+        }
+        (ActivationTurnRole::Yours, ActivationTurnWindow::Upkeep) => {
+            ActivationRestriction::DuringYourUpkeep
+        }
+        (ActivationTurnRole::Opponents, ActivationTurnWindow::WholeTurn) => {
+            opponents_turn_activation_restriction()
+        }
+        (ActivationTurnRole::Opponents, ActivationTurnWindow::Upkeep) => {
+            opponents_upkeep_activation_restriction()
+        }
+    }
+}
+
 fn opponents_turn_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(opponents_turn_activation_condition()),
     }
 }
 
-/// CR 602.5b + CR 102.1 + CR 109.5: "Activate only during an opponent's turn"
-/// gates activation to turns where the activator is not the active player.
+/// CR 602.5b + CR 102.3 + CR 805.4a: "Activate only during an opponent's turn"
+/// gates activation to turns belonging to an opposing TEAM. Not
+/// `Not(IsYourTurn)`: under shared team turns that also admits a turn where a
+/// teammate holds `active_player`, which is the activator's own team's turn.
 fn opponents_turn_activation_condition() -> ParsedCondition {
-    ParsedCondition::Not {
-        condition: Box::new(ParsedCondition::IsYourTurn),
+    ParsedCondition::IsOpponentsTurn
+}
+
+/// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
+/// gates activation to the upkeep step of an opponent's turn (Trade Caravan).
+/// Composed from the same team-aware opponent-turn leaf as
+/// `opponents_turn_activation_condition` plus the `IsDuringUpkeep` step
+/// predicate, so the opponent scope reuses the existing composition idiom
+/// instead of a dedicated `DuringOpponents*` restriction sibling per step.
+fn opponents_upkeep_activation_restriction() -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                opponents_turn_activation_condition(),
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
     }
 }
 

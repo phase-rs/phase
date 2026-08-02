@@ -835,6 +835,14 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         }
 
         // CR 111.10: Predefined token abilities for known subtypes (Treasure, Food, etc.).
+        //
+        // PAIRED WITH THE REPLAY ARM at `token::apply_resolved_token_creation`'s
+        // `ResolvedTokenBody::Copy` match arm, which must call the same
+        // predefined-only injector. Unlike the liminal path — where one
+        // `copy_resume.is_some()` predicate drives both the live and journaled
+        // matches, so a divergence fails to compile — this branch is coupled to
+        // replay by convention only. Switching it to the catalog-wide
+        // `inject_resolved_token_abilities` would silently desync replay from live.
         super::token::inject_predefined_token_abilities(state, token_id);
         // Battlefield entry of a copy token: request an incremental re-derive
         // for just this token. `flush_layers` escalates to a full pass when

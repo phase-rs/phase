@@ -1719,10 +1719,15 @@ pub struct BattlefieldEntryRecord {
     /// with flying entered this turn") evaluate via the CR 603.10 last-known-state
     /// against entry-time characteristics (like the existing core_types/colors
     /// snapshots). KNOWN LIMITATION: this captures the object's keywords at record
-    /// time, which is BEFORE the layer system re-evaluates (layers are only marked
-    /// dirty, not recomputed, at zone-change). Printed flyers and keyword-counter /
-    /// intrinsic flyers are counted; a creature granted flying ONLY by a Layer-6
-    /// continuous effect (e.g. an anthem) at the moment it enters is NOT counted.
+    /// time, which for most entries is BEFORE the layer system re-evaluates (layers
+    /// are only marked dirty, not recomputed, at zone-change). Printed flyers and
+    /// keyword-counter / intrinsic flyers are counted; a creature granted flying ONLY
+    /// by a Layer-6 continuous effect (e.g. an anthem) at the moment it enters is NOT
+    /// counted. EXCEPTION — a token created attached to a host (Role/Aura tokens):
+    /// `effects::attach::attach_to` runs `mark_layers_full` + `flush_layers`, and the
+    /// token path records its entry AFTER the attach, so that sub-path's snapshot IS
+    /// post-flush and does see Layer-6 grants. Not a defect: the paired
+    /// `ZoneChangeRecord` has always been taken post-attach, so the two ledgers agree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
@@ -3512,6 +3517,64 @@ pub enum PersistentAxisMaterialization {
         sequence: Vec<LoopActionContext>,
         collapsed_axes: Vec<ResourceAxis>,
     },
+}
+
+/// CR 732.2a: the `unbounded_resources` axis a counter of `ct` on `obj_id` backs — mirrors
+/// `ResourceVector::snapshot`'s `(CounterClass, ObjectClass)` keying. SINGLE mapping from a
+/// counter target to its axis, shared by `scheduled_collapse_axes`,
+/// `clear_collapsed_materializations`' surviving-target guard, and the ∞ counter-pill
+/// projection in `game::derived_views`.
+///
+/// LIVE RE-DERIVATION — DELIBERATE DISPLAY-ONLY TOLERANCE. The class is read from the
+/// object as it stands NOW, not snapshotted at accept. `state.objects` retains an object
+/// across an ordinary zone change, so the `Other` fallback is reached only when the bearer
+/// truly stopped existing, or when its printed types changed under CR 400.7. In that window
+/// the derived axis becomes `Counter(_, Other)`, which is not the axis `unbounded_resources`
+/// holds ⇒ the pill/badge is NOT hidden and the `∞` renders for a collapse that is still
+/// scheduled.
+///
+/// CENSUS (`grep -rn 'objects.remove' crates/`, `#[cfg(test)]` bodies excluded) — FOUR
+/// production removes, not one. Cease-to-exist (`zones::…replay_resolved_object_cease`,
+/// e.g. a token dying to CR 704.5d) is the only one that can erase a counter BEARER; the
+/// other three cannot plausibly hold an `unbounded_counter_targets` entry, so the conclusion
+/// above survives unchanged:
+///   • `game::engine_debug` `DebugAction::Remove` — a debug-only forced deletion, not a
+///     CR 400.1 zone event, and not reachable in a real game;
+///   • `game::effects::prepare::cleanup_failed_prepared_copy_cast` — an ephemeral synthetic
+///     STACK copy discarded after a failed cast, never a battlefield permanent;
+///   • `game::casting::handle_cancel_cast` — the same synthetic prepare-copy, rolled back on
+///     cancel.
+/// Two further removes operate on DISCARDED COMPARISON CLONES, never live state
+/// (`game::engine::normalize_recast_frame`, `analysis::resource`'s frame projection).
+///
+/// REACHABILITY BY CONSUMER (the fallback is not uniformly live):
+///   • the ∞ counter-PILL projection in `game::derived_views` — UNREACHABLE. That loop
+///     `continue`s on `!state.battlefield.contains(id)` before calling this, and every
+///     production remove above deletes from the zone set before `objects` (or never touches
+///     a battlefield permanent at all), so a battlefield id is present in `state.objects`.
+///   • `scheduled_collapse_axes` (both its `derived_views` hide-set caller and its
+///     `clear_collapsed_materializations` caller) and that function's surviving-target guard
+///     — LIVE, and byte-identical to the pre-extraction nested `counter_axis` helper they
+///     already used. The hide-set case is exactly the fail-open described above.
+///
+/// That fail-open polarity is the SAME one this phase mandates everywhere else (an axis
+/// with no registration renders ∞): it can only ever show an extra ∞ for at most the
+/// accept→CR-500.5-boundary window, never hide a real one. A snapshot would have to add a
+/// serde field to `CounterGrowth` — a saved-game surface change across every construction
+/// site — to buy a strictly-display improvement, so it is not taken. Removing a non-present
+/// axis stays a harmless no-op, and `clear_collapsed_materializations`' surviving-target
+/// guard re-preserves any axis still backed.
+pub(crate) fn collapsed_counter_axis(
+    state: &GameState,
+    obj_id: ObjectId,
+    ct: &CounterType,
+) -> ResourceAxis {
+    let oc = state
+        .objects
+        .get(&obj_id)
+        .map(|o| object_class(o.card_types.core_types.as_slice()))
+        .unwrap_or(ObjectClass::Other);
+    ResourceAxis::Counter(CounterClass::from_counter_type(ct), oc)
 }
 
 /// CR 122.1: one object's per-cycle beneficial counter growth captured at accept, for
@@ -13193,6 +13256,25 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_unbounded_materialization: BTreeMap<PlayerId, Vec<PersistentAxisMaterialization>>,
 
+    /// CR 732.2c: the finite iteration count each controller's accepted `Fixed(N)` loop
+    /// shortcut named. Once the last player has accepted, the shortcut IS taken at that
+    /// N — the boundary collapse prompt (`PayableResource::LoopCollapse`) may therefore
+    /// only let the controller collapse to at most N, because re-asking for a larger
+    /// count would be a new game choice the accepted proposal never contained. Written
+    /// by `materialize_fixed_shortcut` (the ONLY path that can register a deferred
+    /// materialization — `UntilLethal` never reaches it); read by
+    /// `turns::drain_pending_phase_transition_progress` as the prompt's `max`; cleared in
+    /// lockstep with `pending_unbounded_materialization` by `take_pending_materialization`,
+    /// `clear_collapsed_materializations` and `clear_unbounded_loop`.
+    ///
+    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same unbounded family as `pending_unbounded_materialization`):
+    /// shortcut annotation, not rules state for equality — a populated live state must
+    /// still compare equal to the empty ring snapshots or CR 104.4b loop detection yields
+    /// false negatives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_materialization_count: BTreeMap<PlayerId, u32>,
+
     /// Oracle ids (fallback: object names) of cards whose abilities hit
     /// `Effect::Unimplemented` at resolution this game. Diagnostics only —
     /// records *runtime resolution hits*, is game-scoped, and survives zone
@@ -17961,6 +18043,7 @@ impl GameState {
             unbounded_loop_pile: BTreeMap::new(),
             unbounded_counter_targets: BTreeMap::new(),
             pending_unbounded_materialization: BTreeMap::new(),
+            pending_materialization_count: BTreeMap::new(),
             unimplemented_oracle_ids: BTreeSet::new(),
             pending_trigger_abandons: Vec::new(),
             loop_detection: LoopDetectionMode::Off,
@@ -18941,7 +19024,58 @@ impl GameState {
         &mut self,
         controller: PlayerId,
     ) -> Option<Vec<PersistentAxisMaterialization>> {
+        // CR 732.2c: the accepted count is spent with the stash it bounded.
+        self.pending_materialization_count.remove(&controller);
         self.pending_unbounded_materialization.remove(&controller)
+    }
+
+    /// CR 732.2a: the exact `ResourceAxis` set a deferred materialization stash will
+    /// collapse at the next CR 500.5 boundary. SINGLE AUTHORITY, with exactly two callers:
+    /// - `clear_collapsed_materializations` REMOVES these axes once the growth was applied;
+    /// - `game::derived_views::derive_views` HIDES their `∞` HUD rows while the collapse is
+    ///   merely SCHEDULED. CR 732.2c fixes the finite N at accept, so the axis is already
+    ///   bounded — rendering `∞ Life` beside a finite, growing life total is a lie.
+    ///
+    /// Returns the axes UNFILTERED, including any `Mana(_)` a `DriveSequence` names, because the
+    /// `clear_collapsed_materializations` caller MUST remove that axis at the boundary. The
+    /// `derive_views` caller drops `Mana(_)` from its hide-set on the way out: mana is already
+    /// materialized in the pool (`mana_payment::refill_infinite_mana` re-tops it off this very
+    /// store until CR 500.5 empties it), so it is the one axis that must keep rendering `∞`
+    /// while a collapse is merely scheduled. See the class rule at that call site.
+    ///
+    /// Hiding in the PROJECTION rather than removing from the store is load-bearing:
+    /// the store keeps `unbounded_resources` and `unbounded_loop_enablers` in CR 104.4b /
+    /// CR 110.1 lockstep, which is what `zones::apply_zone_exit_cleanup` reads to defuse a
+    /// capability whose enabler leaves between accept and boundary.
+    ///
+    /// FAIL-CLOSED: only an axis some REGISTERED item actually collapses is returned, so an
+    /// ∞ axis with no registration (a mana engine registers nothing) keeps its badge.
+    /// EXHAUSTIVE over `PersistentAxisMaterialization` (no wildcard) — a future variant
+    /// build-breaks here instead of silently leaking a stale `∞`.
+    pub fn scheduled_collapse_axes(
+        &self,
+        items: &[PersistentAxisMaterialization],
+    ) -> BTreeSet<ResourceAxis> {
+        let mut axes: BTreeSet<ResourceAxis> = BTreeSet::new();
+        for item in items {
+            match item {
+                PersistentAxisMaterialization::Tokens(_) => {
+                    axes.insert(ResourceAxis::TokensCreated);
+                }
+                PersistentAxisMaterialization::Counters(growths) => {
+                    for g in growths {
+                        axes.insert(collapsed_counter_axis(self, g.object, &g.counter));
+                    }
+                }
+                PersistentAxisMaterialization::Life { player, .. } => {
+                    axes.insert(ResourceAxis::Life(*player));
+                }
+                PersistentAxisMaterialization::DriveSequence { collapsed_axes, .. } => {
+                    axes.extend(collapsed_axes.iter().copied());
+                }
+            }
+        }
+        axes
     }
 
     /// CR 732.2a: clear every unbounded-resource axis recorded for `controller`.
@@ -18954,6 +19088,7 @@ impl GameState {
         self.unbounded_loop_pile.remove(&controller);
         self.unbounded_counter_targets.remove(&controller); // display-only counter analog of the pile
         self.pending_unbounded_materialization.remove(&controller);
+        self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
     }
 
     /// CR 732.2a: end the ACTUALLY-collapsed persistent axes for `controller` after
@@ -18970,8 +19105,11 @@ impl GameState {
     ///   display targets those axes back (the driven loop collapses whole).
     ///
     /// PRESERVES any coexisting NON-collapsed axis (a debug `SetInfiniteMana` `Mana(_)`
-    /// axis, or a second uncollapsed loop): the collapsed set never contains a `Mana(_)`
-    /// axis, so mana is preserved by construction. Drops `unbounded_resources[controller]`
+    /// axis, or a second uncollapsed loop). The batched `Tokens` / `Counters` / `Life` items
+    /// never name a `Mana(_)` axis, so a batched collapse preserves mana by construction; a
+    /// `DriveSequence` CAN name one (its `collapsed_axes` is the loop's whole `proposal.unbounded`
+    /// set) and then removing it here is correct — that loop's mana really did end with it.
+    /// Drops `unbounded_resources[controller]`
     /// (and its `unbounded_loop_enablers` entry in CR 104.4b/CR 110.1 lockstep, mirroring
     /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
     /// the whole `pending_unbounded_materialization` list (owned by `take_` at the submit
@@ -18981,49 +19119,30 @@ impl GameState {
         controller: PlayerId,
         collapsed: &[PersistentAxisMaterialization],
     ) {
-        // The `unbounded_resources` axis a counter of `ct` on `obj_id` backs — mirrors
-        // `ResourceVector::snapshot`'s `(CounterClass, ObjectClass)` keying. A vanished
-        // token bearer (CR 400.7) has unknowable class ⇒ `Other` (removing a non-present
-        // axis is a harmless no-op; the surviving-target guard below re-preserves any that
-        // is still backed).
-        fn counter_axis(state: &GameState, obj_id: ObjectId, ct: &CounterType) -> ResourceAxis {
-            let oc = state
-                .objects
-                .get(&obj_id)
-                .map(|o| object_class(o.card_types.core_types.as_slice()))
-                .unwrap_or(ObjectClass::Other);
-            ResourceAxis::Counter(CounterClass::from_counter_type(ct), oc)
-        }
-
         // --- Phase 1 (reads): what to remove ---
-        let mut axes_to_remove: BTreeSet<ResourceAxis> = BTreeSet::new();
+        // The axis set comes from the SHARED authority the ∞-row projection also reads, so
+        // "hidden while scheduled" and "removed once applied" can never disagree.
+        let mut axes_to_remove = self.scheduled_collapse_axes(collapsed);
+        // The token pile drops exactly when the token axis collapses — true for a batched
+        // `Tokens` item and for a `DriveSequence` that names `TokensCreated`.
+        let drop_token_pile = axes_to_remove.contains(&ResourceAxis::TokensCreated);
+        // Counter DISPLAY-TARGET bookkeeping — a different question from "which axes
+        // collapse", so it stays local rather than widening the shared authority.
+        // Exhaustive (no wildcard) for the same build-break guarantee.
         let mut collapsed_pairs: BTreeSet<(ObjectId, CounterType)> = BTreeSet::new();
         let mut driven_axes: BTreeSet<ResourceAxis> = BTreeSet::new();
-        let mut drop_token_pile = false;
         for item in collapsed {
             match item {
-                PersistentAxisMaterialization::Tokens(_) => {
-                    axes_to_remove.insert(ResourceAxis::TokensCreated);
-                    drop_token_pile = true;
-                }
                 PersistentAxisMaterialization::Counters(growths) => {
                     for g in growths {
-                        axes_to_remove.insert(counter_axis(self, g.object, &g.counter));
                         collapsed_pairs.insert((g.object, g.counter.clone()));
                     }
                 }
-                PersistentAxisMaterialization::Life { player, .. } => {
-                    axes_to_remove.insert(ResourceAxis::Life(*player));
-                }
                 PersistentAxisMaterialization::DriveSequence { collapsed_axes, .. } => {
-                    for ax in collapsed_axes {
-                        axes_to_remove.insert(*ax);
-                        driven_axes.insert(*ax);
-                        if matches!(ax, ResourceAxis::TokensCreated) {
-                            drop_token_pile = true;
-                        }
-                    }
+                    driven_axes.extend(collapsed_axes.iter().copied());
                 }
+                PersistentAxisMaterialization::Tokens(_)
+                | PersistentAxisMaterialization::Life { .. } => {}
             }
         }
 
@@ -19037,7 +19156,7 @@ impl GameState {
                 ts.iter()
                     .filter(|(obj, ct)| {
                         !collapsed_pairs.contains(&(*obj, ct.clone()))
-                            && !driven_axes.contains(&counter_axis(self, *obj, ct))
+                            && !driven_axes.contains(&collapsed_counter_axis(self, *obj, ct))
                     })
                     .cloned()
                     .collect()
@@ -19045,7 +19164,7 @@ impl GameState {
             .unwrap_or_default();
         let backed: BTreeSet<ResourceAxis> = surviving_targets
             .iter()
-            .map(|(obj, ct)| counter_axis(self, *obj, ct))
+            .map(|(obj, ct)| collapsed_counter_axis(self, *obj, ct))
             .collect();
         axes_to_remove.retain(|ax| !backed.contains(ax));
 
@@ -19067,6 +19186,7 @@ impl GameState {
             }
         }
         self.pending_unbounded_materialization.remove(&controller);
+        self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
     }
 
     /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
@@ -19310,6 +19430,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         unbounded_loop_pile: _,
         unbounded_counter_targets: _,
         pending_unbounded_materialization: _,
+        pending_materialization_count: _,
         unimplemented_oracle_ids: _,
         pending_trigger_abandons: _,
         loop_detection: _,
@@ -22222,6 +22343,73 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "the PR-0/PR-2 modulo path must exclude pending_unbounded_materialization"
+        );
+    }
+
+    /// R6a (CR 732.2c collapse bound): sibling of
+    /// `pending_unbounded_materialization_excluded_from_loop_equality` — the accepted-count
+    /// bound follows the identical exclusion-by-omission discipline, and for the same
+    /// reason: it is written at accept, so including it would make a live post-accept state
+    /// unequal to the pre-accept ring snapshots and yield CR 104.4b false negatives.
+    ///
+    /// It also pins the CR 732.2c LOCKSTEP: every seam that drops the stash drops the bound
+    /// with it, so a stale bound can never outlive the collapse it bounded.
+    ///
+    /// REVERT-PROBE: add `&& self.pending_materialization_count ==
+    /// other.pending_materialization_count` to the manual `impl PartialEq for GameState` →
+    /// the three equality assertions fail. Drop any one `remove` → the matching lockstep
+    /// assertion fails.
+    #[test]
+    fn pending_materialization_count_excluded_from_loop_equality_and_cleared_in_lockstep() {
+        use crate::analysis::resource::loop_states_equal_modulo_resources;
+
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.pending_materialization_count.insert(PlayerId(0), 7);
+        assert_ne!(
+            a.pending_materialization_count, b.pending_materialization_count,
+            "fixture must actually differ in pending_materialization_count"
+        );
+        assert!(
+            a == b,
+            "manual PartialEq must exclude pending_materialization_count (annotation, not rules state)"
+        );
+        assert!(
+            loop_states_equal(&a, &b),
+            "loop_states_equal (CR 104.4b/732.2a) must exclude pending_materialization_count"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&a, &b),
+            "the PR-0/PR-2 modulo path must exclude pending_materialization_count"
+        );
+
+        // CR 732.2c lockstep — each of the three stash-dropping seams drops the bound too.
+        let mut s = a.clone();
+        s.pending_materialization_count.insert(PlayerId(0), 7);
+        s.take_pending_materialization(PlayerId(0));
+        assert!(
+            s.pending_materialization_count.is_empty(),
+            "take_pending_materialization must drop the CR 732.2c bound"
+        );
+        let mut s = a.clone();
+        s.pending_materialization_count.insert(PlayerId(0), 7);
+        s.clear_unbounded_loop(PlayerId(0));
+        assert!(
+            s.pending_materialization_count.is_empty(),
+            "clear_unbounded_loop must drop the CR 732.2c bound"
+        );
+        let mut s = a.clone();
+        s.pending_materialization_count.insert(PlayerId(0), 7);
+        s.clear_collapsed_materializations(
+            PlayerId(0),
+            &[PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 1,
+            }],
+        );
+        assert!(
+            s.pending_materialization_count.is_empty(),
+            "clear_collapsed_materializations must drop the CR 732.2c bound"
         );
     }
 

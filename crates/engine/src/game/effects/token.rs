@@ -950,7 +950,8 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // continuous effect / carries counters / etc., or if any active effect
         // reads board population.
         crate::game::layers::mark_layers_entered(state, obj_id);
-        crate::game::restrictions::record_battlefield_entry(state, obj_id);
+        // CR 403.3 battlefield-entry bookkeeping is done by `record_zone_change` inside
+        // `push_committed_token_entry_events` below — recording it here too double-counts.
         crate::game::restrictions::record_token_created(state, obj_id);
 
         // CR 303.4 + CR 303.7: A Role/Aura token created "attached to" a host
@@ -980,25 +981,16 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // Battlefield }` so every ETB trigger matcher (Elvish Vanguard, Soul
         // Warden, Panharmonicon) fires for tokens through the same code path
         // used for normal battlefield entry. The accompanying `TokenCreated`
-        // event is preserved below for token-specific consumers (animation,
-        // logging, `LastCreated` target filters).
-        let zone_change_record = state
-            .objects
-            .get(&obj_id)
-            .expect("token just created")
-            .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-        events.push(GameEvent::ZoneChanged {
-            object_id: obj_id,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(zone_change_record),
-        });
-
-        events.push(GameEvent::TokenCreated {
-            object_id: obj_id,
-            name: spec.characteristics.display_name.clone(),
-            source_id: spec.source_id,
-        });
+        // event is emitted for token-specific consumers (animation, logging,
+        // `LastCreated` target filters). Single authority for both, and for the
+        // CR 400.7 zone-change index the batched replay guard keys on.
+        push_committed_token_entry_events(
+            state,
+            obj_id,
+            spec.characteristics.display_name.clone(),
+            spec.source_id,
+            events,
+        );
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
         // Used by Mobilize and similar keywords that create temporary attacking tokens.
@@ -1122,6 +1114,60 @@ pub fn apply_resolved_token_creation(
     state.objects.insert(object_id, object);
     // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
     zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
+    // and the predefined/catalog tables, NOT from the body the command carries,
+    // so the body alone materializes a Treasure with no "{T}, Sacrifice this
+    // token: Add one mana of any color." Both live paths inject after
+    // materializing and before their entry snapshot (Spec: this file, above the
+    // `push_committed_token_entry_events` call; Copy: `token_copy.rs`'s
+    // `finalize_copied_token` + `inject_predefined_token_abilities`), so replay
+    // does the same here, per body variant. The dispatch mirrors
+    // `finalize_committed_liminal_token_entry_from_action`'s
+    // `LiminalTokenAbilityInjection` match arm-for-arm — a blanket
+    // `inject_resolved_token_abilities` would be wrong for the Copy body, whose
+    // live authority uses the predefined-only injector after
+    // `finalize_copied_token`'s CR 707.2 cast-only strip.
+    match &command.body {
+        ResolvedTokenBody::Copy { copy, .. } => {
+            super::token_copy::finalize_copied_token(state, copy.source_id, object_id);
+            inject_predefined_token_abilities(state, object_id);
+        }
+        ResolvedTokenBody::Spec { .. } => inject_resolved_token_abilities(state, object_id),
+    }
+    // CR 400.7 + CR 403.3: the resolve path records the birth through
+    // `restrictions::record_zone_change` (`push_committed_token_entry_events`),
+    // which appends to this turn's zone-change ledger and assigns the entry's
+    // index. Replay must record the same entry: the ledger length IS the index
+    // allocator, so a birth that records nothing leaves every later replayed
+    // zone change one short of its recorded `turn_zone_change_index` and
+    // `apply_resolved_zone_change` fails closed on `TurnRecordIndexMismatch`.
+    // The record is reconstructed from the materialized object rather than
+    // carried on the command: it is a projection of state this applier has
+    // already installed.
+    //
+    // KNOWN CEILING — two record-visible classes the reconstruction cannot
+    // reproduce, both because the LIVE journal point (`record_token_creation`,
+    // in the resolve path above) runs BEFORE the live mutations and before the
+    // live snapshot, so no call site inside THIS applier can close them; they
+    // would need the live journal-record point moved:
+    //   (i)  `spec.enter_with_counters` — the live snapshot's
+    //        `trigger_source_context.lki.counters` (and P/T, if the counter's
+    //        layer bump landed first) carry the entry counters. Counters replay
+    //        through their own `ObjectCounter` command, journaled AFTER this
+    //        birth, so the reconstructed record here has none.
+    //   (ii) `spec.attach_to` (Role/Aura tokens) — `record.attached_to`. Same
+    //        reason: attachment replays through the Attachment family.
+    // A third class, predefined/catalog ability injection contributing
+    // `record.trigger_definitions`, IS closed — by the injection dispatch
+    // directly above, which runs before this snapshot exactly as the live paths
+    // do. Storing the live record on the command would not close (i) or (ii)
+    // either, for the same ordering reason, so it was not done.
+    let entry_record = state
+        .objects
+        .get(&object_id)
+        .expect("the token was materialized above")
+        .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+    crate::game::restrictions::record_zone_change(state, entry_record);
     // CR 111.1: replay must not hand the same id out again to a later allocation.
     state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
     // CR 613.7d: the birth drew an entry timestamp alongside the object id, and
@@ -1475,15 +1521,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     )
 }
 
-pub(crate) fn commit_liminal_token_entry_with_event_emission(
-    state: &mut GameState,
-    event: ProposedEvent,
-    events: &mut Vec<GameEvent>,
-    entry_events: TokenEntryEventEmission,
-) -> bool {
-    commit_liminal_token_entry_with_post_actions(state, event, events, entry_events, Vec::new())
-}
-
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1662,7 +1699,8 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         }
     }
     crate::game::layers::mark_layers_entered(state, object_id);
-    crate::game::restrictions::record_battlefield_entry(state, object_id);
+    // CR 403.3 battlefield-entry bookkeeping is done by `record_zone_change` inside
+    // `push_committed_token_entry_events` below — recording it here too double-counts.
     crate::game::restrictions::record_token_created(state, object_id);
 
     if enters_attacking {
@@ -1710,15 +1748,33 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     true
 }
 
+/// CR 603.6a + CR 400.7: emit a token's battlefield-entry events, recording the entry through
+/// [`crate::game::restrictions::record_zone_change`] — the single authority that assigns this
+/// turn's zone-change index and performs the CR 403.3 battlefield-entry bookkeeping.
+///
+/// The index matters: `GameObject::snapshot_for_zone_change` leaves
+/// `turn_zone_change_index` at its `0` placeholder for the recorder to overwrite, and the
+/// CR 603.2c batched zone-change replay guard (`triggers.rs`) dedups on
+/// `(definition_ref, turn_zone_change_index)`. A token entry that never reached the recorder
+/// therefore shipped index `0` on the wire, so a SECOND same-turn token batch collided with the
+/// first and its batched trigger fire was swallowed.
+///
+/// Callers must NOT also call `record_battlefield_entry` — `record_zone_change` does it, and a
+/// second call double-counts `battlefield_entries_this_turn`.
 pub(crate) fn push_committed_token_entry_events(
-    state: &GameState,
+    state: &mut GameState,
     object_id: ObjectId,
     name: String,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) {
-    if let Some(token) = state.objects.get(&object_id) {
-        let zone_change_record = token.snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+    let entry = state
+        .objects
+        .get(&object_id)
+        .map(|token| token.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+    if let Some(mut zone_change_record) = entry {
+        zone_change_record.turn_zone_change_index =
+            crate::game::restrictions::record_zone_change(state, zone_change_record.clone());
         events.push(GameEvent::ZoneChanged {
             object_id,
             from: None,

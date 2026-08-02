@@ -7270,7 +7270,7 @@ fn evaluate_cost_mod_static_condition(
     use crate::types::ability::StaticCondition;
 
     match condition {
-        StaticCondition::DuringYourTurn => {
+        StaticCondition::DuringYourTurn | StaticCondition::DuringOpponentsTurn => {
             super::layers::evaluate_condition(state, condition, source_controller, source_id)
         }
         StaticCondition::And { conditions } => conditions.iter().all(|c| {

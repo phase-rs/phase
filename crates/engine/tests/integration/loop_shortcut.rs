@@ -6288,3 +6288,536 @@ fn phase_reachable_ledger_observer_whose_filter_matches_the_class_still_suppress
         runner.state().waiting_for
     );
 }
+
+// ===========================================================================
+// R6a — the ∞ badge is a lie once the collapse is SCHEDULED, and CR 732.2c
+// bounds the boundary prompt by the count the table accepted.
+// ===========================================================================
+
+/// Sprout Swarm in P0's hand in the `witherbloom_sprout_lumaret_simple_4p` capture.
+const R6A_SPROUT: ObjectId = ObjectId(405);
+/// The one untapped P0 Saproling in that capture — the {G} convoke fodder.
+const R6A_FODDER: ObjectId = ObjectId(1412);
+
+/// Load the simple 4p Witherbloom/Sprout capture and drive one real buyback+convoke
+/// recast through the cast pipeline, returning the state AT the CR 732.2a offer.
+fn r6a_offer_state() -> GameState {
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/witherbloom_sprout_lumaret_simple_4p.json.gz"
+    )));
+    state.loop_detection = LoopDetectionMode::On;
+    let outcome = GameRunner::from_state(state)
+        .cast(R6A_SPROUT)
+        .accept_optional()
+        .convoke_with(&[R6A_FODDER])
+        .commit()
+        .resolve();
+    outcome.state().clone()
+}
+
+/// Proposer declares `Fixed(n)`; every living opponent accepts (APNAP).
+fn r6a_declare_and_accept_all(state: &mut GameState, proposer: PlayerId, n: u32) {
+    apply(
+        state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: None,
+        },
+    )
+    .expect("the proposer declares the object-growth shortcut");
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("each living opponent accepts");
+    }
+}
+
+/// Pass priority through the real production path until the CR 500.5 step/phase
+/// boundary surfaces a non-`Priority` prompt (the `LoopCollapse` pay-amount) or the
+/// phase advances with no prompt. Bounded so a wedge fails loudly.
+fn r6a_drive_to_boundary(state: &mut GameState) {
+    let start_phase = state.phase;
+    for _ in 0..64 {
+        let WaitingFor::Priority { player } = state.waiting_for.clone() else {
+            return;
+        };
+        apply(state, player, GameAction::PassPriority)
+            .expect("pass priority toward the next phase boundary");
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.phase != start_phase {
+            return;
+        }
+    }
+    panic!("r6a_drive_to_boundary: no phase boundary within 64 passes");
+}
+
+/// R6a-1 (PRIMARY). MEASURED DEFECT: accepting the Witherbloom/Sprout loop writes
+/// `unbounded_resources = {P0: [Life(0), TokensCreated]}` and that mark survives to the
+/// CR 500.5 boundary, so the HUD renders an "∞ Life" badge beside P0's *finite*, growing
+/// life total. CR 732.2c: once the last player accepted, the shortcut IS taken at the
+/// named `Fixed(N)` — the growth is bounded, so no `∞` row may render for a scheduled axis.
+///
+/// FILTER THE PROJECTION, NEVER THE STORE. The store must still carry the mark (it is what
+/// CR 104.4b / CR 110.1 lockstep and `zones::apply_zone_exit_cleanup`'s defuse read until
+/// the boundary applies the growth), so this row asserts BOTH halves.
+///
+/// §15 NON-VACUITY: the emptiness assertion is paired with the store's NON-emptiness and a
+/// non-empty `unbounded_loop_pile` — the same `state` the projection reads is measurably
+/// populated, so the instrument demonstrably CAN report a row. Emptiness is asserted on the
+/// WIRE (`derive_views`), never on `state`.
+///
+/// REVERT-PROBES (both RUN, both observed to fail):
+/// ⓐ delete the `if scheduled.contains(&axis) { continue; }` filter in `derive_views`
+///    ⇒ the `Life(0)` and `TokensCreated` rows render ⇒ assertion (3) FAILS.
+/// ⓑ make `GameState::scheduled_collapse_axes` return an empty set ⇒ (3) FAILS the same
+///    way AND `clear_collapsed_materializations` stops removing at the boundary — which is
+///    what proves the projection and the collapse share ONE authority rather than two
+///    copies of the same match.
+#[test]
+fn scheduled_collapse_renders_no_unbounded_badge() {
+    let mut state = r6a_offer_state();
+
+    // (0) reach-guard: the real cast reached the CR 732.2a offer.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the buyback+convoke recast must surface P0's offer, got {:?}",
+        state.waiting_for
+    );
+
+    r6a_declare_and_accept_all(&mut state, P0, 200);
+
+    // (1) POSITIVE CONTROL — the accept really marked the ∞ axes in the STORE. Without
+    // this the emptiness in (3) would be vacuous.
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("accept must mark P0's ∞ axes in the store")
+        .clone();
+    assert!(
+        marked.contains(&ResourceAxis::Life(P0)),
+        "MEASURED defect axis: the accept marks Life(P0) ∞, got {marked:?}"
+    );
+    assert!(
+        marked.contains(&ResourceAxis::TokensCreated),
+        "the accept marks TokensCreated ∞, got {marked:?}"
+    );
+    assert!(
+        !state.unbounded_loop_pile.is_empty(),
+        "the object-growth accept writes a non-empty ∞ pile (store still populated)"
+    );
+    assert_eq!(
+        state.pending_unbounded_materialization.len(),
+        1,
+        "exactly one controller has a scheduled collapse"
+    );
+    // The growth really is finite: P0's life is a concrete number, not ∞.
+    let life = state.players.iter().find(|p| p.id == P0).unwrap().life;
+    assert!(
+        life > 0,
+        "the axis the badge lies about is a finite life total, got {life}"
+    );
+
+    // (2) FAIL-CLOSED CONTROL, in the SAME state: every ∞ axis the accept scheduled is
+    // covered by the shared authority. An axis it does not name keeps its badge (R6a-2/-3).
+    let scheduled = state.scheduled_collapse_axes(
+        state
+            .pending_unbounded_materialization
+            .get(&P0)
+            .expect("stash present"),
+    );
+    assert!(
+        marked.iter().all(|a| scheduled.contains(a)),
+        "every marked axis on this board is scheduled; marked={marked:?} scheduled={scheduled:?}"
+    );
+
+    // (3) DISCRIMINATOR — on the WIRE, for EVERY viewer (and the spectator view), no ∞ row.
+    // ALL THREE ∞ surfaces share the one authority, so the HUD can never hide a resource badge
+    // while a card group still renders ∞. The PER-SURFACE positive rows live on their own real
+    // fixtures — `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile` (pile)
+    // and `kilo_live_offer_from_real_dump::kilo_accept_marks_pentad_charge_as_unbounded_display_
+    // target` (counter pills) — so a regression on ONE surface stays visible even though this
+    // row flips on all of them at once.
+    for viewer in [None, Some(P0), Some(P1), Some(P2), Some(PlayerId(3))] {
+        let views = engine::game::derived_views::derive_views(&state, viewer);
+        assert!(
+            views.unbounded_resources.is_empty(),
+            "CR 732.2c: a scheduled finite collapse must render NO ∞ row (viewer {viewer:?}), \
+             got {:?}",
+            views.unbounded_resources
+        );
+        assert!(
+            views.unbounded_pile.is_empty(),
+            "CR 732.2c: ...and no ∞ card group beside it (viewer {viewer:?}), got {:?}",
+            views.unbounded_pile
+        );
+    }
+
+    // (3b) A TRIPWIRE, NOT A SECOND PRODUCER. Multiplayer broadcasts (`phase-server`) and the
+    // WASM `wrap_filtered` getter go through `derive_filtered_views`, which CALLS
+    // `derive_views(filtered_state, viewer)` and then overrides only
+    // `unique_authorized_submitter` and `blocker_assignment_pairs`. It WRAPS; it does not
+    // bypass. So gating in `derive_views` alone could not have leaked ∞ to the broadcast
+    // path — there is no other producer of these three fields, and this row costs zero
+    // production code.
+    //
+    // What it DOES guard is the INPUT: `filter_state_for_viewer` is a clone-and-redact with
+    // ZERO `unbounded` references today, so it passes `pending_unbounded_materialization`
+    // through unredacted and the gate sees the same stash the hot-seat viewer does. If a
+    // future redaction ever drops that stash from the filtered clone, the gate goes silently
+    // INERT on the broadcast path only — filtered viewers get the ∞ rows back while the local
+    // viewer does not. That is the regression this row catches.
+    for viewer in [P0, P1, P2, PlayerId(3)] {
+        let filtered = engine::game::visibility::filter_state_for_viewer(&state, viewer);
+        let views =
+            engine::game::derived_views::derive_filtered_views(&state, &filtered, Some(viewer));
+        assert!(
+            views.unbounded_resources.is_empty() && views.unbounded_pile.is_empty(),
+            "CR 732.2c: the viewer-FILTERED broadcast path hides the same rows (viewer \
+             {viewer:?}), got {:?} / {:?}",
+            views.unbounded_resources,
+            views.unbounded_pile
+        );
+    }
+
+    // (4) THE STORE IS UNTOUCHED — the projection filtered, it did not mutate.
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        Some(&marked),
+        "the ∞ store must survive the projection (CR 104.4b / CR 110.1 lockstep + the \
+         zone-exit defuse still need it until the boundary)"
+    );
+    assert!(
+        !state.unbounded_loop_pile.is_empty(),
+        "the ∞ pile must survive the projection too"
+    );
+}
+
+/// R6a-3 (FAIL-CLOSED). An ∞ axis the accept marked but NO registered materialization
+/// collapses must keep rendering its badge — the filter is keyed on what is actually
+/// scheduled, never on what is merely *labellable*.
+///
+/// This is the row that kills the lazy-but-unsound filter: `LoopCollapseAxis`
+/// `from_resource_axis` maps `TokensCreated` / `Counter(..)` / `Life(..)` to a label, so
+/// building the hide-set from "does this axis have a collapse label" is a one-liner that
+/// passes R6a-1 and silently hides an axis nothing will ever collapse.
+///
+/// REVERT-PROBE (RUN): build the projection filter from
+/// `LoopCollapseAxis::from_resource_axis(axis).is_some()` instead of from
+/// `scheduled_collapse_axes` ⇒ this row's `TokensCreated` badge vanishes ⇒ FAILS, while
+/// R6a-1 still passes.
+#[test]
+fn unregistered_axis_still_renders_its_infinity_badge() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 200);
+
+    // Keep the marks, DROP the registrations: the exact shape of an axis that is
+    // collapsible-LABELLED but has nothing scheduled to collapse it.
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("accept marked the ∞ axes")
+        .clone();
+    assert!(
+        marked.contains(&ResourceAxis::TokensCreated) && marked.contains(&ResourceAxis::Life(P0)),
+        "reach-guard: both labellable axes are marked, got {marked:?}"
+    );
+    // Positive control on the SAME state, BEFORE the drop: with the stash present the rows
+    // are hidden, so the flip below is attributable to the missing registration alone.
+    assert!(
+        engine::game::derived_views::derive_views(&state, None)
+            .unbounded_resources
+            .is_empty(),
+        "control: with the stash present the scheduled rows are hidden"
+    );
+    state.pending_unbounded_materialization.clear();
+
+    let rows = engine::game::derived_views::derive_views(&state, None).unbounded_resources;
+    let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
+    assert!(
+        axes.contains(&ResourceAxis::TokensCreated),
+        "FAIL-CLOSED: a collapsible-LABELLED axis with NO registered materialization is \
+         still unbounded and must keep its ∞ badge, got {axes:?}"
+    );
+    assert!(
+        axes.contains(&ResourceAxis::Life(P0)),
+        "FAIL-CLOSED: same for the life axis, got {axes:?}"
+    );
+}
+
+/// R4-C4b (CR 732.2c). "Once the last player has either accepted or shortened the shortcut
+/// proposal, the shortcut is taken" — its ending point is fixed at the accepted N, so the
+/// CR 500.5 boundary collapse prompt may not offer a WIDER range than the table agreed to.
+/// BASE re-asked with `max = MAX_SHORTCUT_CYCLES` (1000), letting a controller who proposed
+/// 7 cycles walk away with 1000.
+///
+/// REVERT-PROBE (RUN): restore `max: crate::game::engine::MAX_SHORTCUT_CYCLES` ⇒ `max`
+/// reads 1000 ⇒ FAILS. `min: 0` is asserted unchanged (a collapse-to-nothing stays legal).
+#[test]
+fn accepted_fixed_count_bounds_the_boundary_collapse_prompt() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 7);
+    assert!(
+        state.pending_unbounded_materialization.contains_key(&P0),
+        "reach-guard: the accept scheduled a collapse, so the boundary WILL prompt"
+    );
+
+    r6a_drive_to_boundary(&mut state);
+
+    match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+            min,
+            max,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the loop controller is prompted");
+            assert_eq!(
+                *max, 7,
+                "CR 732.2c: the accepted Fixed(7) bounds the collapse prompt (BASE: 1000)"
+            );
+            assert_eq!(*min, 0, "a collapse-to-nothing stays legal");
+        }
+        other => {
+            panic!("the CR 500.5 boundary must prompt P0 for the collapse count, got {other:?}")
+        }
+    }
+
+    // REJECTION DISCRIMINATOR — the bound is ENFORCED by the reducer, not merely advertised
+    // in the prompt. This is the control a widened-`max` BASE cannot pass: with
+    // `max = MAX_SHORTCUT_CYCLES` a submit of 8 is ACCEPTED, so this assertion is what makes
+    // the range assertion above load-bearing rather than cosmetic.
+    let over = apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 8 });
+    assert!(
+        matches!(&over, Err(EngineError::InvalidAction(msg)) if msg.contains("[0, 7]")),
+        "CR 732.2c: collapsing PAST the accepted count must be rejected, got {over:?}"
+    );
+
+    // The bound is honored end-to-end: submitting exactly N is still accepted.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 7 })
+        .expect("collapsing at exactly the accepted count is legal");
+}
+
+/// R6a FIX-2 (CR 732.2c). MEASURED DEFECT in the first cut of the collapse bound: the stash
+/// `register_pending_materialization` APPENDS ("two accepts by the same controller, coexist"),
+/// but the bound was written with a bare `insert`, i.e. it OVERWROTE. A controller who accepts
+/// `Fixed(1)` and then, in the SAME phase, accepts `Fixed(1000)` therefore ends up with a
+/// two-item stash bounded at 1000 — and since the boundary applies ONE submitted amount to
+/// EVERY item, the first accept's loop would materialize 1000 times though the table agreed to
+/// exactly one.
+///
+/// SHIPPED SEMANTICS, PINNED HERE EXPLICITLY: the bound is the MINIMUM of the accepted counts.
+/// The second accept's agreed 1000 is UNDER-delivered down to 1. That is still a divergence
+/// from what the table agreed to — but it is the safe polarity: no accept in the stash can ever
+/// be over-materialized, which is the CR 732.2c violation ("the shortcut is taken" at the count
+/// the last player accepted, not at some later, larger one). The exact per-accept bound needs
+/// the flat stash to become accept-grouped and is deliberately NOT smuggled in here; the
+/// boundary's pause-safety `sort_by_key` reorders that flat list, so a positional parallel
+/// bound vector is not a valid shortcut to it.
+///
+/// REVERT-PROBE (RUN): restore `pending_materialization_count.insert(proposal.proposer, n)` in
+/// `materialize_fixed_shortcut` ⇒ the bound reads 1000, the prompt offers `max == 1000`, and the
+/// out-of-range submit is ACCEPTED ⇒ assertions (4), (5) and (6) FAIL.
+#[test]
+fn two_accepts_in_one_phase_bound_the_collapse_to_the_smallest_accepted_count() {
+    let mut state = r6a_offer_state();
+
+    // (1) reach-guard: the first real cast reached the CR 732.2a offer.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the first buyback+convoke recast must surface P0's offer, got {:?}",
+        state.waiting_for
+    );
+    let phase_at_first_accept = state.phase;
+    r6a_declare_and_accept_all(&mut state, P0, 1);
+    assert_eq!(
+        state.pending_materialization_count.get(&P0).copied(),
+        Some(1),
+        "the first accept records its own Fixed(1) bound"
+    );
+
+    // (2) The buyback returned Sprout Swarm to hand and priority came back, so a SECOND real
+    // cast is available in the SAME phase — this is what makes the append reachable at all.
+    let fodder = *state
+        .battlefield
+        .iter()
+        .find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && !o.tapped && o.name.contains("Saproling"))
+        })
+        .expect("an untapped P0 Saproling remains to convoke the second cast");
+    let mut state = GameRunner::from_state(state)
+        .cast(R6A_SPROUT)
+        .accept_optional()
+        .convoke_with(&[fodder])
+        .commit()
+        .resolve()
+        .state()
+        .clone();
+
+    // (3) reach-guard: the second cast really produced a second offer, in the same phase.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the second recast must surface a second offer, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.phase, phase_at_first_accept,
+        "both accepts land in ONE phase, so they share ONE stash and ONE boundary prompt"
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 1000);
+
+    // (4) THE PREMISE + THE FIX. The stash APPENDED (two items, one boundary amount for both),
+    // and the bound is the MINIMUM — not the latest write.
+    assert_eq!(
+        state
+            .pending_unbounded_materialization
+            .get(&P0)
+            .map(Vec::len),
+        Some(2),
+        "premise: the two accepts coexist in ONE stash, so ONE amount will scale BOTH"
+    );
+    assert_eq!(
+        state.pending_materialization_count.get(&P0).copied(),
+        Some(1),
+        "CR 732.2c: min(1, 1000) — the later Fixed(1000) may NOT re-scale the Fixed(1) accept \
+         (BASE overwrite: 1000)"
+    );
+
+    let p0_permanents = |s: &GameState| {
+        s.battlefield
+            .iter()
+            .filter(|id| s.objects.get(id).is_some_and(|o| o.controller == P0))
+            .count()
+    };
+    let permanents_before = p0_permanents(&state);
+    let life_before = state.players.iter().find(|p| p.id == P0).unwrap().life;
+
+    r6a_drive_to_boundary(&mut state);
+
+    // (5) The prompt advertises the minimum.
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+        max,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the CR 500.5 boundary must prompt P0 for the collapse count, got {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(*player, P0, "the loop controller is prompted");
+    assert_eq!(
+        *max, 1,
+        "CR 732.2c: the prompt is bounded by the SMALLEST accepted count (BASE: 1000)"
+    );
+
+    // (6) And the reducer ENFORCES it — the second accept's agreed 1000 is unreachable.
+    let over = apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 1000 });
+    assert!(
+        matches!(&over, Err(EngineError::InvalidAction(msg)) if msg.contains("[0, 1]")),
+        "CR 732.2c: the later accept's 1000 cannot be collapsed at, got {over:?}"
+    );
+
+    // (7) WHAT B'S 1000 ACTUALLY BECOMES: exactly 1. Each of the two stashed sequences replays
+    // ONCE — one new token and one life per sequence — so the first accept keeps precisely the
+    // single cycle the table agreed to, and the second is capped down to the same.
+    //
+    // NOT the BASE discriminator, and deliberately not claimed as one: this submits
+    // `amount: 1`, which the BASE overwrite ALSO materializes as Δ2. A bare-`insert` revert
+    // probe was RUN and fails only at assertion (5) (`left: Some(1000)`). What BASE gets
+    // wrong is that it ADVERTISES `max: 1000` and PERMITS a 1000× submit — assertions (4),
+    // (5) and (6) are the rows that catch that. This row exists to pin the post-collapse
+    // board, i.e. that the enforced bound is also the delivered one.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 1 })
+        .expect("collapsing at the minimum accepted count is legal");
+    assert_eq!(
+        p0_permanents(&state) - permanents_before,
+        2,
+        "one materialized cycle per stashed accept, never 1000"
+    );
+    assert_eq!(
+        state.players.iter().find(|p| p.id == P0).unwrap().life - life_before,
+        2,
+        "same for the life axis: one cycle per stashed accept"
+    );
+}
+
+/// R6a FIX-4 (CR 732.2c). The AI's `LoopCollapse` candidate was a hardcoded `amount: 1`, from
+/// when the prompt's `max` was the fixed engine-wide `MAX_SHORTCUT_CYCLES`. Binding `max` to
+/// the accepted count makes `max == 0` reachable — a shortcut everyone accepted at `Fixed(0)`
+/// — and the reducer rejects `amount > max`, so the generator's SOLE candidate would be
+/// illegal and an AI-seated controller would have no legal action at this prompt.
+///
+/// Driven end-to-end: a real cast → a real `Fixed(0)` declaration → real APNAP accepts → the
+/// real CR 500.5 boundary prompt → the production `ai_support::legal_actions` generator → the
+/// production `apply()` reducer.
+///
+/// REVERT-PROBE (RUN, MEASURED): restore `GameAction::SubmitPayAmount { amount: 1 }` in
+/// `ai_support::candidates` ⇒ `legal_actions` returns `[]`. `legal_actions` validates its
+/// candidates against the reducer, so the illegal `amount: 1` is not merely rejected on
+/// submit — it is dropped, leaving the AI with NO legal action at this prompt. Assertion (3)
+/// FAILS (`left: []`).
+#[test]
+fn ai_collapse_candidate_is_clamped_to_the_accepted_bound() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 0);
+    r6a_drive_to_boundary(&mut state);
+
+    // (1) reach-guard: a `Fixed(0)` accept really does register a stash and really does prompt.
+    // (2) ...with the zero-width range the clamp exists for.
+    let WaitingFor::PayAmountChoice {
+        resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+        min,
+        max,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "reach-guard: a Fixed(0) accept must still reach the boundary prompt, got {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(
+        (*min, *max),
+        (0, 0),
+        "CR 732.2c: Fixed(0) bounds the prompt to exactly 0"
+    );
+
+    // (3) The production candidate generator offers the clamped amount (BASE: a hardcoded 1).
+    let candidates = engine::ai_support::legal_actions(&state);
+    assert_eq!(
+        candidates,
+        vec![GameAction::SubmitPayAmount { amount: 0 }],
+        "the AI's sole collapse candidate is clamped to the accepted bound"
+    );
+
+    // (4) ...and it is actually LEGAL — the assertion that makes (3) load-bearing rather than
+    // a restatement of the generator.
+    apply(&mut state, P0, candidates[0].clone())
+        .expect("the AI's generated candidate must be accepted by the reducer");
+}

@@ -937,6 +937,11 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        // CR 503.1: reads only `state.phase`, apply()-constant global state.
+        | ParsedCondition::IsDuringUpkeep
+        // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,
+        // both apply()-constant like `IsYourTurn`.
+        | ParsedCondition::IsOpponentsTurn
         | ParsedCondition::IsYourTurn => true,
     }
 }

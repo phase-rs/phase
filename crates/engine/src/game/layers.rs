@@ -1095,6 +1095,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -1231,6 +1232,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -1439,6 +1441,16 @@ fn evaluate_condition_with_context(
                 .map(|obj| obj.controller)
                 .unwrap_or(controller);
             state.active_player == source_controller
+        }
+        // CR 102.3 + CR 805.4a: team-aware opponent relation. A teammate
+        // holding `active_player` does not make this an opponent's turn.
+        StaticCondition::DuringOpponentsTurn => {
+            let source_controller = state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(controller);
+            super::players::is_opponent(state, source_controller, state.active_player)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -3266,6 +3278,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage

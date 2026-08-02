@@ -8681,7 +8681,14 @@ fn check_trigger_constraint_with_ref(
             definition_ref.is_none_or(|key| !state.triggers_fired_this_game.contains(key))
         }
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
-        TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != controller,
+        // CR 102.3 / CR 805.4a: team-aware — under shared team turns a turn
+        // where a teammate holds `active_player` still belongs to the
+        // controller's own team, so the weaker `active_player != controller`
+        // test would over-fire. Same authority as
+        // `ParsedCondition::IsOpponentsTurn`.
+        TriggerConstraint::OnlyDuringOpponentsTurn => {
+            super::players::is_opponent(state, controller, state.active_player)
+        }
         TriggerConstraint::OncePerOpponentPerTurn => {
             // CR 603.2: The trigger event only matches the first life-loss event
             // during that opponent's own turn.
@@ -9568,9 +9575,12 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::DuringPlayersTurn { player } => match player {
             // CR 102.1: "your turn" — controller is active.
             PlayerFilter::Controller => state.active_player == controller,
-            // CR 102.1 + CR 102.2: "an opponent's turn" — active player is any
-            // non-controller (set-valued match: true whenever it isn't your turn).
-            PlayerFilter::Opponent => state.active_player != controller,
+            // CR 102.3 + CR 805.4a: "an opponent's turn" is team-aware. Under
+            // shared team turns, a teammate holding `active_player` remains on
+            // the controller's active team and is not an opponent.
+            PlayerFilter::Opponent => {
+                super::players::is_opponent(state, controller, state.active_player)
+            }
             // CR 603.4 + CR 102.1: "that player's turn" — the player named by
             // the trigger event (drawer / tapper / damaged player / etc.) is
             // currently the active player.
@@ -12129,6 +12139,40 @@ pub mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// CR 102.3 + CR 805.4a: an opponent-turn trigger constraint must read the
+    /// active player's team relation, not merely whether that player is the
+    /// trigger controller. This drives the production constraint gate used by
+    /// trigger collection rather than the relation helper directly.
+    #[test]
+    fn opponents_turn_trigger_constraint_excludes_teammate_in_two_headed_giant() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let mut trigger = make_trigger(TriggerMode::Drawn);
+        trigger.constraint = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+        let event = GameEvent::CardDrawn {
+            player_id: PlayerId(2),
+            object_id: ObjectId(99),
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+
+        // Seats 0/1 share a team: teammate 1 is not an opponent of controller 0.
+        state.active_player = PlayerId(1);
+        assert!(
+            !check_trigger_constraint(&state, &trigger, ObjectId(1), 0, PlayerId(0), &event),
+            "a teammate's turn must not satisfy OnlyDuringOpponentsTurn"
+        );
+
+        state.active_player = PlayerId(2);
+        assert!(
+            check_trigger_constraint(&state, &trigger, ObjectId(1), 0, PlayerId(0), &event),
+            "an opposing team's turn must satisfy OnlyDuringOpponentsTurn"
+        );
     }
 
     /// Regression (issue #770 cluster — Sheoldred/Replicating Ring/Skyline
@@ -27422,12 +27466,16 @@ pub mod tests {
         ));
     }
 
-    /// CR 603.4 + CR 102.1 + CR 102.2 — `DuringPlayersTurn { Opponent }`
-    /// preserves the pre-refactor semantics of the retired `DuringOpponentsTurn`
-    /// variant: true iff the active player is NOT the trigger controller.
+    /// CR 603.4 + CR 102.3 + CR 805.4a — `DuringPlayersTurn { Opponent }`
+    /// is true only while the active player is on an opposing team, not merely
+    /// while a non-controller seat is active.
     #[test]
-    fn during_players_turn_opponent_tracks_active_not_controller() {
-        let mut state = setup();
+    fn during_players_turn_opponent_tracks_team_aware_active_relation() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
         let controller = PlayerId(0);
         let condition = TriggerCondition::DuringPlayersTurn {
             player: PlayerFilter::Opponent,
@@ -27438,7 +27486,14 @@ pub mod tests {
             &state, &condition, controller, None, None
         ));
 
+        // Seats 0/1 are teammates, so a teammate's shared-team turn is not an
+        // opponent's turn.
         state.active_player = PlayerId(1);
+        assert!(!check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
+
+        state.active_player = PlayerId(2);
         assert!(check_trigger_condition(
             &state, &condition, controller, None, None
         ));

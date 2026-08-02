@@ -39,7 +39,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 16 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 13 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
 
@@ -515,7 +515,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Olog-hai Crusher
 - Omega, Heartless Evolution
 - On Wings of Gold
-- Onakke Oathkeeper
 - Only the Best
 - Oracle of Tragedy
 - Orcish Veteran
@@ -5057,7 +5056,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (14 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (13 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -5076,7 +5075,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
 - Tomb Tyrant
-- Trade Caravan
 - Uthros Research Craft
 - Uthros, Titanic Godcore
 

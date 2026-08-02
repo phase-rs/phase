@@ -598,19 +598,23 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
     );
 }
 
-fn has_not_your_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
+/// CR 102.3 + CR 805.4a: the opponent-turn gate is the team-aware
+/// `IsOpponentsTurn` leaf, NOT `Not(IsYourTurn)` — the latter also admits a
+/// turn where a teammate holds `active_player`, which under shared team turns
+/// is the activator's own team's turn.
+fn has_opponents_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
     restrictions.iter().any(|restriction| {
         matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not { condition })
-            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+                condition: Some(ParsedCondition::IsOpponentsTurn)
+            }
         )
     })
 }
 
 #[test]
-fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+fn activated_ability_opponent_turn_restriction_uses_team_aware_condition() {
     let r = parse(
         "{T}: Add {C}{C}. Activate only during an opponent's turn.",
         "Lavinia, Foil to Conspiracy",
@@ -622,10 +626,100 @@ fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
     assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
     let restrictions = &r.abilities[0].activation_restrictions;
     assert!(
-        has_not_your_turn_activation_restriction(restrictions),
-        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        has_opponents_turn_activation_restriction(restrictions),
+        "expected team-aware IsOpponentsTurn activation restriction, got {:?}",
         restrictions
     );
+}
+
+/// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
+/// (Trade Caravan) composes the team-aware opponent-turn scope
+/// (`IsOpponentsTurn`) with the upkeep-step predicate (`IsDuringUpkeep`) in a
+/// single `RequiresCondition`, reusing the same composition idiom as the bare
+/// opponent-turn gate above rather than a dedicated `DuringOpponents*`
+/// restriction sibling. Before the fix the tail dropped to
+/// `Effect::Unimplemented` and the ability was activatable at any time.
+#[test]
+fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
+    let r = parse(
+        "Remove two currency counters from ~: Untap target basic land. \
+         Activate only during an opponent's upkeep.",
+        "Trade Caravan",
+        &[],
+        &["Creature"],
+        &["Human", "Nomad"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert!(
+        !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+            && ability
+                .sub_ability
+                .as_ref()
+                .is_none_or(|sub| !matches!(sub.effect.as_ref(), Effect::Unimplemented { .. })),
+        "expected no unimplemented fallback, got {:#?}",
+        ability
+    );
+
+    let expected = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                ParsedCondition::IsOpponentsTurn,
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
+    };
+    assert!(
+        ability.activation_restrictions.contains(&expected),
+        "expected composed opponent's-upkeep restriction, got {:?}",
+        ability.activation_restrictions
+    );
+}
+
+/// CR 602.5b: the `during <role> <window>` activation gate is composed from a
+/// turn-role axis and a turn-window axis, so every role×window pairing resolves
+/// without a whole-clause tag per phrase. Both opponent possessive spellings and
+/// the "their" possessive of the own-turn role are covered on each axis.
+#[test]
+fn activation_during_gate_composes_turn_role_and_window_axes() {
+    let opponents_turn = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::IsOpponentsTurn),
+    };
+    let opponents_upkeep = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                ParsedCondition::IsOpponentsTurn,
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
+    };
+
+    for (phrase, expected) in [
+        ("during your turn", ActivationRestriction::DuringYourTurn),
+        ("during their turn", ActivationRestriction::DuringYourTurn),
+        (
+            "during your upkeep",
+            ActivationRestriction::DuringYourUpkeep,
+        ),
+        (
+            "during their upkeep",
+            ActivationRestriction::DuringYourUpkeep,
+        ),
+        ("during an opponent's turn", opponents_turn.clone()),
+        ("during an opponents turn", opponents_turn.clone()),
+        ("during an opponent's upkeep", opponents_upkeep.clone()),
+        ("during an opponents upkeep", opponents_upkeep.clone()),
+    ] {
+        let line = format!("{{T}}: Add {{C}}. Activate only {phrase}.");
+        let r = parse(&line, "Axis Probe", &[], &["Creature"], &["Human"]);
+        assert_eq!(r.abilities.len(), 1, "{phrase}: got {:#?}", r.abilities);
+        assert!(
+            r.abilities[0].activation_restrictions.contains(&expected),
+            "{phrase}: expected {expected:?}, got {:?}",
+            r.abilities[0].activation_restrictions
+        );
+    }
 }
 
 /// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
@@ -8680,8 +8774,8 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
     let restrictions = &activation.activation_restrictions;
     assert!(
-        has_not_your_turn_activation_restriction(restrictions),
-        "expected Not(IsYourTurn), got {:?}",
+        has_opponents_turn_activation_restriction(restrictions),
+        "expected IsOpponentsTurn, got {:?}",
         restrictions
     );
 
@@ -8757,8 +8851,8 @@ fn opponents_may_activate_but_only_records_timing_restriction() {
     );
     assert_eq!(opponent_turn.activator_filter, Some(PlayerFilter::Opponent));
     assert!(
-        has_not_your_turn_activation_restriction(&opponent_turn.activation_restrictions),
-        "expected Not(IsYourTurn), got {:?}",
+        has_opponents_turn_activation_restriction(&opponent_turn.activation_restrictions),
+        "expected IsOpponentsTurn, got {:?}",
         opponent_turn.activation_restrictions
     );
 }

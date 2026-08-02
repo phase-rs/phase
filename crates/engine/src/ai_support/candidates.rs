@@ -3027,16 +3027,31 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 732.2a: an accepted object-growth loop collapses into a finite count
-        // the controller names. `max` is the engine's 1000-wide loop bound; the AI
-        // never wants a huge pile, so offer only the default N=1 — this bounds
-        // search regardless of the display cap. Must precede the general arm below.
+        // CR 732.2a: an accepted object-growth loop collapses into a finite count the
+        // controller names. Offer only N=1 rather than the whole `min..=max` range: the AI
+        // never wants a huge pile, and one candidate bounds search regardless of how wide
+        // the prompt is. Must precede the general arm below.
+        //
+        // CR 732.2c: `max` is NOT a fixed 1000 — it is the count the table accepted
+        // (`pending_materialization_count`), so it can legitimately be 0 (a shortcut
+        // accepted at `Fixed(0)`). Clamp, or the generator's sole candidate is rejected by
+        // the reducer's `amount > max` guard and the AI has no legal action at this prompt.
+        //
+        // Unreachable for the AI *today* and deliberately kept correct anyway: the AI's own
+        // `WaitingFor::LoopShortcut` arm below only ever proposes `IterationCount::
+        // UntilLethal`, which routes to `apply_until_lethal_shortcut` and never reaches
+        // `materialize_fixed_shortcut` — the only path that registers a stash. So no
+        // AI-declared shortcut currently produces this prompt; a human-declared one in a
+        // mixed game, or a future bounded AI offer, does.
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
+            max,
             ..
         } => vec![candidate(
-            GameAction::SubmitPayAmount { amount: 1 },
+            GameAction::SubmitPayAmount {
+                amount: (*max).min(1),
+            },
             TacticalClass::Selection,
             Some(*player),
         )],

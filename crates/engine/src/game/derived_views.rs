@@ -793,6 +793,54 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
 
+    // CR 732.2c: once every player accepted the shortcut it IS taken, at the finite N the
+    // proposal named — so an axis with a scheduled collapse is already BOUNDED and must not
+    // render `∞` anywhere beside the finite totals it is growing. ONE authority
+    // (`GameState::scheduled_collapse_axes`), THREE consumers below: the per-axis resource
+    // badge rows, the ∞ object pile, and the ∞ counter pills. The gate is computed here,
+    // once per controller, precisely so no surface can re-derive it and drift — a HUD that
+    // hides the resource badge while a card group still shows ∞ is internally inconsistent.
+    //
+    // Filter the PROJECTION, never the store: `unbounded_resources` +
+    // `unbounded_loop_enablers` stay in CR 104.4b / CR 110.1 lockstep until the CR 500.5
+    // boundary applies the growth, which is what keeps `zones::apply_zone_exit_cleanup`'s
+    // defuse armed in the meantime.
+    //
+    // FAIL-CLOSED: only axes a registered materialization really collapses are hidden, so an
+    // unregistered ∞ axis (a mana engine registers none) still renders.
+    //
+    // CLASS RULE for the hide-set: hide only axes whose growth is still DEFERRED; never hide an
+    // axis that is ALREADY MATERIALIZED and spendable right now. `Tokens` / `Counters` / `Life`
+    // are deferred by construction — the growth is not on the board until the boundary applies
+    // it — so an `∞` for them is exactly the lie this gate kills. A `DriveSequence` is the one
+    // item that does NOT name a deferral: its `collapsed_axes` is `proposal.unbounded`, i.e.
+    // EVERY axis of the whole loop, and a `Mana(_)` among them is live *now* —
+    // `mana_payment::refill_infinite_mana` tops that controller's pool back to
+    // `INFINITE_MANA_PER_TYPE` off the STORE (which this projection deliberately never touches)
+    // after every action. Hiding it would show no `∞` beside a pool that keeps refilling: the
+    // same internally-inconsistent HUD as an `∞ Life` badge on a finite life total, inverted.
+    // CR 500.5: `turns::drain_pending_phase_transition_progress` clears the mana axis when the
+    // step/phase ends, and THAT is what legitimately ends the badge — not this projection.
+    //
+    // `Mana(_)` is today's only already-materialized axis: census of production readers of
+    // `GameState::unbounded_resources` (`refill_infinite_mana`, the CR 500.5 clear in `turns`,
+    // and this projection) shows it is the only axis any reader turns back into a spendable
+    // resource. Widen this `retain` only for an axis that gains the same property.
+    let scheduled_collapse: BTreeMap<PlayerId, BTreeSet<ResourceAxis>> = state
+        .pending_unbounded_materialization
+        .iter()
+        .map(|(&controller, items)| {
+            let mut axes = state.scheduled_collapse_axes(items);
+            axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)));
+            (controller, axes)
+        })
+        .collect();
+    let collapse_scheduled = |controller: PlayerId, axis: &ResourceAxis| -> bool {
+        scheduled_collapse
+            .get(&controller)
+            .is_some_and(|axes| axes.contains(axis))
+    };
+
     // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
     // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
     // short-circuit below) and stays empty (field omitted) when no loop is
@@ -800,6 +848,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (`attribution_player`); the frontend only formats each axis to a family.
     for (&controller, axes) in &state.unbounded_resources {
         for &axis in axes {
+            if collapse_scheduled(controller, &axis) {
+                continue;
+            }
             views.unbounded_resources.push(UnboundedResourceView {
                 player: attribution_player(axis, controller),
                 axis,
@@ -811,7 +862,15 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // winning controller's tapped fodder-class members — dropping any that have since
     // left the battlefield (stale member). Public board state (no viewer filtering);
     // the frontend renders `∞` on any group whose members are all pile members.
-    for ids in state.unbounded_loop_pile.values() {
+    //
+    // CR 732.2c: same gate, same authority as the badge rows above. The pile IS the
+    // `TokensCreated` axis — `clear_collapsed_materializations` drops it on exactly that
+    // axis collapsing — so once that axis has a scheduled finite mint the group must stop
+    // rendering ∞ in lockstep with its resource badge.
+    for (&controller, ids) in &state.unbounded_loop_pile {
+        if collapse_scheduled(controller, &ResourceAxis::TokensCreated) {
+            continue;
+        }
         for id in ids {
             if state.battlefield.contains(id) {
                 views.unbounded_pile.push(*id);
@@ -825,15 +884,28 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // the battlefield (stale member). Display-only per-object channel mirroring
     // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
     // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
-    for targets in state.unbounded_counter_targets.values() {
+    //
+    // CR 732.2c: same gate, same authority. A pill's axis is derived by the SHARED
+    // `(object, counter) -> ResourceAxis` mapping the collapse itself uses
+    // (`collapsed_counter_axis`), so a pill can never disagree with the badge it mirrors.
+    // The class lookup is LIVE by design here: this loop only emits pills for bearers still
+    // on the battlefield, so the object is present and its class is current.
+    for (&controller, targets) in &state.unbounded_counter_targets {
         for (id, ct) in targets {
-            if state.battlefield.contains(id) {
-                views
-                    .unbounded_counters
-                    .entry(*id)
-                    .or_default()
-                    .push(ct.clone());
+            if !state.battlefield.contains(id) {
+                continue;
             }
+            if collapse_scheduled(
+                controller,
+                &crate::types::game_state::collapsed_counter_axis(state, *id, ct),
+            ) {
+                continue;
+            }
+            views
+                .unbounded_counters
+                .entry(*id)
+                .or_default()
+                .push(ct.clone());
         }
     }
 

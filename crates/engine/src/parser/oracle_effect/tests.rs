@@ -31734,6 +31734,23 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
         }
     ));
     assert!(connector.duration.is_none());
+
+    let planeswalker_only = parse_effect_chain(
+        "that player can't attack planeswalkers you control during their next turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        planeswalker_only.effect.as_ref(),
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                activity: ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Planeswalker,
+                    protected_player: None,
+                },
+                ..
+            },
+        }
+    ));
 }
 
 #[test]
@@ -31743,6 +31760,10 @@ fn scoped_cant_attack_prohibition_supports_both_verbs_and_all_defended_scopes() 
     for verb in ["can't", "cannot"] {
         for (scope, expected_defended) in [
             ("you", AttackTargetFilter::Player),
+            (
+                "planeswalkers you control",
+                AttackTargetFilter::Planeswalker,
+            ),
             (
                 "you or planeswalkers you control",
                 AttackTargetFilter::PlayerOrPlaneswalker,

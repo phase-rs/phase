@@ -7466,7 +7466,13 @@ pub enum StaticCondition {
     Unrecognized {
         text: String,
     },
+    /// CR 102.1: The active player is the controller of this static ability.
     DuringYourTurn,
+    /// CR 102.3 + CR 805.4a: The active player is an opponent of this static
+    /// ability's controller. This is deliberately distinct from
+    /// `Not(DuringYourTurn)`: in team games, a teammate may be the active
+    /// player while the controller's team still has the turn.
+    DuringOpponentsTurn,
     /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with
     /// the most common color among all permanents on the battlefield (including
     /// any color tied for most common). Used by Heroic Defiance's "gets +3/+3
@@ -7871,6 +7877,34 @@ pub enum ParsedCondition {
     /// ability-resolution layer), the same way `ParsedCondition::And` mirrors
     /// `AbilityCondition::And`.
     IsYourTurn,
+    /// CR 102.3 + CR 805.4a: True when the active player belongs to a team the
+    /// scoped player is not on — "a player's opponents are all players not on
+    /// their team", so the turn genuinely belongs to an opponent.
+    ///
+    /// Deliberately NOT `Not(IsYourTurn)`. `IsYourTurn` compares the scoped
+    /// player against the single `active_player` SEAT, but under the shared
+    /// team turns option (CR 805.4: "Each team takes turns rather than each
+    /// player" — always on in Two-Headed Giant, CR 810.2) a turn belongs to a
+    /// TEAM. When a teammate holds `active_player` the active team is still the
+    /// scoped player's own team, yet `Not(IsYourTurn)` reports it as an
+    /// opponent's turn and wrongly opens an opponent-turn window.
+    ///
+    /// For the same reason this is not a `PlayerRelation` parameterization of
+    /// `IsYourTurn`: the two predicates are asked at different granularities
+    /// (seat vs team), so they are independent leaves rather than two values of
+    /// one scope axis.
+    ///
+    /// Team membership is never re-derived here — evaluation delegates to the
+    /// single authority `crate::game::players::is_opponent`.
+    IsOpponentsTurn,
+    /// CR 503.1: True when the game is currently in the upkeep step. A
+    /// turn-structure predicate with NO player scope — it asks only "is it an
+    /// upkeep step", not whose. Player scope composes at the restriction layer:
+    /// "during an opponent's upkeep" is `And([IsOpponentsTurn, IsDuringUpkeep])`
+    /// (CR 102.1 fixes the active player from the turn), reusing the
+    /// turn-scope leaf rather than adding a `DuringOpponents*` restriction
+    /// sibling per step.
+    IsDuringUpkeep,
     /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
     /// least one object that matches `filter`. Gates a target-dependent casting
     /// permission (Timely Ward — "you may cast this spell as though it had flash if

@@ -274,6 +274,9 @@ fn static_condition_to_restriction_condition(
         // The `Not` recursion arm above yields `Not(IsYourTurn)` for
         // "it's not your turn".
         StaticCondition::DuringYourTurn => Some(ParsedCondition::IsYourTurn),
+        // CR 102.3 + CR 805.4a: keep the opponent relation distinct from
+        // `Not(IsYourTurn)`, which would incorrectly include a teammate's turn.
+        StaticCondition::DuringOpponentsTurn => Some(ParsedCondition::IsOpponentsTurn),
         // CR 903.3d: "If an effect refers to controlling a commander, it refers to a
         // permanent on the battlefield that is a commander" — regardless of who OWNS it.
         // That is exactly an `ObjectCount` over the `IsCommander` filter scoped to your

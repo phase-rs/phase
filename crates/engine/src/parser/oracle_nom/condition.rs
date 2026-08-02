@@ -1187,9 +1187,9 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         map(tag("it's not your turn"), |_| StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         }),
-        // CR 102.1 + CR 102.2: there is always exactly one active player, so
-        // "it's an opponent's turn" is exactly "it's not your turn" — the active
-        // player is any non-controller. Maps to the same Not(DuringYourTurn).
+        // CR 102.3 + CR 805.4a: "it's an opponent's turn" names an opponent
+        // relation, not merely a non-controller active seat. In team games a
+        // teammate can be active while the controller's team still has the turn.
         // Both apostrophe forms are accepted at each position (U+0027 straight
         // and U+2019 curly — Scryfall English oracle text uses the curly form).
         // The surface permutations are composed from two small `alt`s rather than
@@ -1201,9 +1201,7 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
                 alt((tag("'s"), tag("\u{2019}s"))),
                 tag(" turn"),
             ),
-            |_| StaticCondition::Not {
-                condition: Box::new(StaticCondition::DuringYourTurn),
-            },
+            |_| StaticCondition::DuringOpponentsTurn,
         ),
         parse_day_night_condition,
     ))
@@ -9814,15 +9812,11 @@ mod tests {
 
     #[test]
     fn test_parse_condition_opponents_turn() {
-        // CR 102.1 + CR 102.2: there is always exactly one active player, so
-        // "it's an opponent's turn" is exactly "it's not your turn" — the active
-        // player is any non-controller. Represented as `Not(DuringYourTurn)`,
-        // mirroring the existing "it's not your turn" arm. Both apostrophe forms
-        // (U+0027 straight, U+2019 curly — Scryfall uses the curly form) parse at
-        // each position, so the contraction/possessive permutations all hold.
-        let expected = StaticCondition::Not {
-            condition: Box::new(StaticCondition::DuringYourTurn),
-        };
+        // CR 102.3 + CR 805.4a: an opponent's turn excludes the active
+        // controller's teammate in a team game. Both apostrophe forms (U+0027
+        // straight, U+2019 curly — Scryfall uses the curly form) parse at each
+        // position, so the contraction/possessive permutations all hold.
+        let expected = StaticCondition::DuringOpponentsTurn;
         for input in [
             "if it's an opponent's turn, do",
             "if it is an opponent's turn, do",

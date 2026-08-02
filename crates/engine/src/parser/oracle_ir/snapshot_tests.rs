@@ -2487,6 +2487,22 @@ fn liliana_the_repentant() {
     insta::assert_json_snapshot!("liliana_the_repentant_lowered", &lowered);
 }
 
+/// CR 508.1b-c + CR 508.1h + CR 602.2: Onakke's two printed lines exercise both the
+/// planeswalker-only combat-tax static and its graveyard activation. Snapshot
+/// both document IR and lowering so neither line can silently degrade while
+/// the other stays supported.
+#[test]
+fn onakke_oathkeeper() {
+    let (ir, lowered) = parse_two_layer(
+        "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.\n{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
+        "Onakke Oathkeeper",
+        &["Creature"],
+        &["Ogre", "Spirit"],
+    );
+    insta::assert_json_snapshot!("onakke_oathkeeper_ir", &ir);
+    insta::assert_json_snapshot!("onakke_oathkeeper_lowered", &lowered);
+}
+
 /// CR 702.142a Boast: pins the order of the two IMPLICIT restrictions.
 ///
 /// No Boast card in the pool states its activation instruction outside reminder

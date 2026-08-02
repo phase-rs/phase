@@ -3311,6 +3311,65 @@ fn fire_time_conditions_read_projected_resource_scoped(
     false
 }
 
+/// CR 113.6 (CR 113.6k): every trigger definition that FUNCTIONS in its source's current zone.
+/// The shared board walk for the axis firewalls — `board_has_event_observer` and
+/// [`board_has_functioning_etb_trigger`] both ask "which event does it react to?" of the same
+/// set, so the zone gate has one authority.
+fn functioning_board_trigger_defs(
+    state: &GameState,
+) -> impl Iterator<Item = &crate::types::ability::TriggerDefinition> {
+    state.objects.values().flat_map(move |obj| {
+        crate::game::functioning_abilities::active_trigger_definitions(state, obj)
+            .map(|active| active.definition)
+            .filter(move |def| {
+                crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone)
+            })
+    })
+}
+
+/// CR 603.6a: does ANY functioning board trigger fire on a battlefield entry?
+///
+/// The route firewall for a batched collapse that MINTS TOKENS: each minted token is a real
+/// CR 603.6a entry, so every board ETB trigger fires for real on top of whatever the batched
+/// arithmetic already applied. Measured on the Sprout Swarm 4p dump: the batched
+/// `[Tokens, Life { per_cycle_delta: 1 }]` pair took P0 from 546 to 596 at the collapse, and
+/// draining the 50 real token-ETB triggers paid the SAME life again, ending at 646. Routing to
+/// the concrete replay makes the real ETB triggers the ONLY source, which is what the board does.
+///
+/// SHAPE-AGNOSTIC by construction. An earlier form asked whether the trigger's effect chain was
+/// an `Effect::GainLife`, which is under-approximate: life reaches `apply_life_gain` from four
+/// resolvers (`effects/life.rs`, `effects/double.rs`, `effects/exchange_life.rs`, and
+/// `effects/deal_damage.rs`'s CR 702.15b lifelink leg), so a Terror-of-the-Peaks-shaped board —
+/// an ETB damage trigger on a permanent with lifelink — grows a genuinely ETB-sourced life axis
+/// that no `Effect`-shape test can see. Asking only "is there a functioning ETB trigger" cannot
+/// miss a life source.
+///
+/// This predicate and the effect-shape test it replaced are INCOMPARABLE, not nested — dropping the
+/// `Effect::GainLife` conjunct is strictly LOOSER on effect shape (any ETB trigger counts, not just
+/// a life-gaining one). What narrows the CALLER is a different axis: it pairs this with
+/// `token_profile.is_some()`, so only a collapse that MINTS the entries can route here and a
+/// token-less loop never does. Looser on shape, narrower on axis; neither side contains the other.
+///
+/// Distinct from [`life_growth_is_observed`], which asks whether a LUMP gain would miscount an
+/// observer. Here the batched arithmetic is right and the double-apply comes from the collapse
+/// itself. Deliberately NOT folded into `life_growth_is_observed`: that predicate also gates the
+/// offer firewall, where this shape is not an observation. Deliberately NOT a
+/// registration-cancelling suppressor either — the axis can be MIXED-cause (an ETB rider plus a
+/// drain), and the batched `Life` registration is per-player, so dropping it would under-apply
+/// the non-ETB half and silence the wrong beneficiary.
+///
+/// A sound OVER-approximation in the same idiom as its siblings: a true result routes to the
+/// discrete N-cycle driver, which is always correct (only slower).
+pub(crate) fn board_has_functioning_etb_trigger(state: &GameState) -> bool {
+    use crate::types::triggers::TriggerEventKey;
+    functioning_board_trigger_defs(state).any(|def| {
+        crate::game::trigger_index::keys_from_trigger_def(def)
+            .0
+            .iter()
+            .any(|key| matches!(key, TriggerEventKey::EnterBattlefield(_)))
+    })
+}
+
 /// CR 732.2a / CR 603.4 / CR 614.1: does any battlefield/command-FUNCTIONING trigger fire on
 /// `trig_key`, or any active battlefield/command replacement replace `repl_event`? The shared
 /// per-event observer scan for the axis-specific firewalls, classifying triggers via the same
@@ -3320,20 +3379,12 @@ fn board_has_event_observer(
     trig_key: crate::types::triggers::TriggerEventKey,
     repl_event: ReplacementEvent,
 ) -> bool {
-    for obj in state.objects.values() {
-        for active in crate::game::functioning_abilities::active_trigger_definitions(state, obj) {
-            let def = active.definition;
-            // CR 603.4 / CR 113.6: only a trigger that FUNCTIONS in its source's current zone.
-            if !crate::game::triggers::trigger_definition_functions_in_zone(def, obj.zone) {
-                continue;
-            }
-            if crate::game::trigger_index::keys_from_trigger_def(def)
-                .0
-                .contains(&trig_key)
-            {
-                return true;
-            }
-        }
+    if functioning_board_trigger_defs(state).any(|def| {
+        crate::game::trigger_index::keys_from_trigger_def(def)
+            .0
+            .contains(&trig_key)
+    }) {
+        return true;
     }
     for (_, obj, def) in crate::game::functioning_abilities::active_replacements(state) {
         // CR 614.1 / CR 113.6: `active_replacements` is all-zones; a life/counter-event

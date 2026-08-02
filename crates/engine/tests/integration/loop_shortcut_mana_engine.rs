@@ -804,3 +804,368 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
          no finite opp-fuel loop exists ⇒ the break-on-err is a defensive guard (PATH-2)"
     );
 }
+
+/// R6a-2 (FAIL-CLOSED DISCRIMINATOR for the CR 732.2c ∞-badge filter). A mana engine
+/// registers NO deferred materialization — `current_period_fodder` finds no fodder,
+/// `current_period_counter_growth` / `current_period_life_growth` are empty — so nothing
+/// will ever collapse its `Mana(_)` axis at the CR 500.5 boundary. It is therefore still
+/// genuinely unbounded within the phase (`refill_infinite_mana` holds the pool at
+/// `INFINITE_MANA_PER_TYPE`) and MUST keep rendering its `∞` row on the wire.
+///
+/// The 12 shipped rows in this file are the must-NOT-flip control set; THIS is the new
+/// discriminator. It is the fail-closed half of the R6a filter: R6a-1 proves a scheduled
+/// axis hides, this proves an UNscheduled one does not.
+///
+/// REVERT-PROBE (RUN): key the `derive_views` filter on the ACCEPTED COUNT
+/// (`state.pending_materialization_count.contains_key(&controller)`) instead of on the
+/// axis set `scheduled_collapse_axes` returns — the count-keyed filter is written at every
+/// `Fixed(n)` accept including this one, so the `Mana(_)` row vanishes ⇒ this row FAILS
+/// while R6a-1 and the 12/12 control set stay green.
+#[test]
+fn mana_engine_accept_still_renders_its_infinity_badge() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    let state = rig.runner.state();
+    // (1) reach-guard: the accept ran and marked a Mana axis in the store.
+    assert!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))),
+        "reach-guard: the mana-engine accept marks a Mana(_) ∞ axis"
+    );
+    // (2) reach-guard: it registered NOTHING — this is the unscheduled-axis shape.
+    assert!(
+        state.pending_unbounded_materialization.is_empty(),
+        "reach-guard: a mana engine registers no deferred materialization, got {:?}",
+        state.pending_unbounded_materialization
+    );
+
+    // (3) DISCRIMINATOR — on the WIRE, the Mana row still renders for every viewer.
+    for viewer in [None, Some(P0), Some(P1)] {
+        let rows = engine::game::derived_views::derive_views(state, viewer).unbounded_resources;
+        assert!(
+            rows.iter().any(|r| matches!(r.axis, ResourceAxis::Mana(_))),
+            "FAIL-CLOSED: nothing is scheduled to collapse the mana axis, so its ∞ row must \
+             still render (viewer {viewer:?}), got {rows:?}"
+        );
+    }
+}
+
+/// R6a FIX-ROUND-2 (CR 732.2c). MEASURED REGRESSION in the first cut of the collapse bound:
+/// `materialize_fixed_shortcut` wrote `pending_materialization_count` UNCONDITIONALLY, before
+/// either route ran. A mana engine reaches that function and registers NO deferred
+/// materialization (proved by
+/// [`mana_engine_accept_still_renders_its_infinity_badge`]'s reach-guard (2)) — so a
+/// `Fixed(1)` mana accept left a bound with NOTHING to bound.
+///
+/// That stray bound is UNCLEARABLE and PERSISTENT: all three clears
+/// (`take_pending_materialization`, `clear_collapsed_materializations`,
+/// `clear_unbounded_loop`) are keyed on the stash, `clear_unbounded_mana_loop` deliberately
+/// does not touch it, and the field is `#[serde(default)]`. It therefore survives the phase,
+/// the game and a save/load — and the NEXT accept that really does register a stash gets
+/// `min(1, N)` = 1. A table that unanimously agreed to `Fixed(500)` object growth would be
+/// offered `max: 1` at the CR 500.5 boundary and have `SubmitPayAmount { 500 }` REJECTED with
+/// `"[0, 1]"`. BASE offered `MAX_SHORTCUT_CYCLES` and honored the agreed 500, so this was a
+/// regression against BASE, not merely an incomplete fix.
+///
+/// REVERT-PROBE (RUN, MEASURED): hoist the write back out of the stash-gate in
+/// `materialize_fixed_shortcut` ⇒ assertion (3) FAILS with
+/// `pending_materialization_count = {PlayerId(0): 1}`. (3) short-circuits the run, so (5) is
+/// not reached in the same execution; a SECOND probe run with (3) temporarily downgraded to an
+/// `eprintln!` reached it and observed (5) FAIL with `left: Some(1) right: Some(1000)`.
+///
+/// HONEST SCOPE. Two real accepts — a stash-less one followed by a stash-bearing one — need a
+/// board carrying BOTH a mana engine and an object-growth loop; that is not this rig and is
+/// not reachable here without building a second combo. So the consequence at (4)/(5) is
+/// pinned on the REAL `turns.rs` `max` read instead: the stash is grafted through the same
+/// single-authority writer the accept path itself calls
+/// (`GameState::register_pending_materialization`), and the CR 500.5 boundary is then reached
+/// by passing priority through the real `apply()` reducer.
+#[test]
+fn mana_engine_accept_records_no_collapse_bound() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    // (1) REACH-GUARD: the accept really ran `materialize_fixed_shortcut` — it marked the
+    // Mana axis, which only the materialize path does. Without this the emptiness at (3)
+    // would be the vacuous "nothing happened" pass.
+    assert!(
+        rig.runner
+            .state()
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))),
+        "reach-guard: the mana-engine accept reaches materialize_fixed_shortcut and marks a \
+         Mana(_) ∞ axis"
+    );
+    // (2) REACH-GUARD: and it registered NOTHING — there is no stash for a bound to bound.
+    assert!(
+        rig.runner
+            .state()
+            .pending_unbounded_materialization
+            .is_empty(),
+        "reach-guard: a mana engine registers no deferred materialization, got {:?}",
+        rig.runner.state().pending_unbounded_materialization
+    );
+
+    // (3) DISCRIMINATOR: no bound is recorded either. Asserted on the SAME state the two
+    // reach-guards above measured as post-accept and stash-less.
+    assert!(
+        rig.runner.state().pending_materialization_count.is_empty(),
+        "CR 732.2c: a stash-less accept must record NO collapse bound (it would be \
+         unclearable and would cap the next accept), got {:?}",
+        rig.runner.state().pending_materialization_count
+    );
+
+    // (4) CONSEQUENCE, on the real `turns.rs` read. Graft a stash through the production
+    // single-authority writer (as if a later object-growth accept had registered one) and
+    // reach the CR 500.5 boundary through real priority passes.
+    rig.runner.state_mut().register_pending_materialization(
+        P0,
+        engine::types::game_state::PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 1,
+        },
+    );
+    let mut prompt_max = None;
+    for _ in 0..64 {
+        if let WaitingFor::PayAmountChoice {
+            resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+            max,
+            ..
+        } = rig.runner.state().waiting_for
+        {
+            prompt_max = Some(max);
+            break;
+        }
+        if rig.runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    // (5) The grafted stash carries NO accepted bound, so the prompt falls back to the
+    // engine-wide safety bound. Under the unconditional write the stray `Fixed(1)` mana
+    // bound is still sitting in the map and caps this prompt at 1.
+    // 1_000 is `game::engine::MAX_SHORTCUT_CYCLES`, spelled literally because the const is
+    // `pub(crate)` and this is an integration test.
+    assert_eq!(
+        prompt_max,
+        Some(1_000),
+        "CR 732.2c: a stash-less mana accept must not bound a LATER stash's collapse prompt"
+    );
+}
+
+/// R6a FIX-ROUND-3 (CR 732.2c + CR 500.5). MEASURED DEFECT in the ∞-badge hide-set: the
+/// `PersistentAxisMaterialization::DriveSequence` arm of `scheduled_collapse_axes` extends the
+/// hide-set with the loop's WHOLE axis set (`collapsed_axes` == `proposal.unbounded`), so a
+/// scheduled drive covering a `Mana(_)` axis suppressed that axis' `∞` row on the wire.
+///
+/// That is the wrong side of the class rule. `Tokens` / `Counters` / `Life` each name a
+/// DEFERRED materialization — the growth is not on the board until the boundary applies it, so
+/// rendering `∞` for them is the lie R6a exists to kill. Mana is ALREADY MATERIALIZED at accept:
+/// `mana_payment::refill_infinite_mana` re-tops the flagged pool to `INFINITE_MANA_PER_TYPE` off
+/// `unbounded_resources` (the STORE, which the projection deliberately never filters) after every
+/// action, so throughout the accept→boundary window the player can really spend an unbounded
+/// pool while the HUD showed no `∞` — an internally inconsistent HUD, the inverse of an "∞ Life"
+/// badge beside a finite life total. CR 500.5 is what legitimately ends the badge: the step/phase
+/// end drains the pool and `turns::drain_pending_phase_transition_progress` clears the axis
+/// (covered by `combo_infinite_pile`'s E4 mana axis-clear row, not re-proved here).
+///
+/// HONEST SCOPE. Everything except one write is real: real cards through the real parser, a real
+/// two-beat Basalt+Power period, a real `DeclareShortcut`/`RespondToShortcut` accept that marks
+/// `Mana(Colorless)` and holds the pool at the cap. What is NOT reachable on this rig — and the
+/// R6a reviewer could not reach it on any production board either — is a single loop spanning
+/// BOTH a `Mana(_)` axis and an OBSERVED counter/life axis, which is what routes an accept into
+/// the `DriveSequence` arm (`game::engine::materialize_object_growth_shortcut`). So the stash is
+/// grafted through the same single-authority writers the accept path itself calls
+/// (`GameState::mark_unbounded_loop` for the second axis, `register_pending_materialization` for
+/// the item), with `collapsed_axes` set to exactly the store's mark set — byte-for-byte the
+/// `proposal.unbounded.clone()` that production writes. Same graft technique as
+/// `combo_infinite_pile::real_4p_observed_drive_sequence_replays_captured_period_n_times`.
+///
+/// REVERT-PROBE (RUN): delete the `axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)))` in
+/// `derive_views`' hide-set ⇒ (5) FAILS — the `Mana(Colorless)` row vanishes from the wire while
+/// the pool is still being refilled. (6) is the paired positive control that keeps the probe
+/// honest: the genuinely deferred `Life(P0)` axis in the SAME stash MUST stay hidden, so a
+/// blanket "disable the filter" is not a passing alternative.
+#[test]
+fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
+    use engine::types::game_state::PersistentAxisMaterialization;
+
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = setup(true, LoopDetectionMode::Interactive, db);
+    let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    let untap_idx = untap_ability_index(rig.runner.state(), rig.basalt).unwrap();
+    drive_one_period(&mut rig, mana_idx, untap_idx);
+    assert!(
+        matches!(
+            rig.runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "precondition: the mana-engine offer must fire before acceptance"
+    );
+    // The real captured two-beat period, read AT THE OFFER — `materialize_fixed_shortcut`
+    // clears `last_loop_action_sequence` on its way out, and production reads it at the same
+    // pre-clear point (`game::engine`'s capture-before-clear).
+    let sequence = rig.runner.state().last_loop_action_sequence.clone();
+    assert!(
+        sequence.len() == 2,
+        "reach-guard: the offer carries the real two-beat Basalt+Power period the DriveSequence \
+         would replay, got {} beats",
+        sequence.len()
+    );
+    rig.runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1),
+            template: None,
+        })
+        .expect("declare shortcut");
+    rig.runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("opponent accepts");
+
+    // (1) REACH-GUARD: the real accept marked the Mana axis in the STORE. Capture the exact
+    // axes — the graft below reuses them as `collapsed_axes`, mirroring production.
+    let mana_axes: Vec<ResourceAxis> = rig
+        .runner
+        .state()
+        .unbounded_resources
+        .get(&P0)
+        .expect("reach-guard: the mana-engine accept marks P0's ∞ axes")
+        .iter()
+        .copied()
+        .filter(|a| matches!(a, ResourceAxis::Mana(_)))
+        .collect();
+    assert!(
+        mana_axes.contains(&ResourceAxis::Mana(ManaType::Colorless)),
+        "reach-guard: Basalt+Power nets colorless, so the accept marks Mana(Colorless), got \
+         {mana_axes:?}"
+    );
+
+    // (2) REACH-GUARD: that axis is ALREADY SPENDABLE — the pipeline refill holds the pool at
+    // the infinite-mana cap right now. This is what makes hiding the badge a lie rather than a
+    // harmless early cleanup. (`INFINITE_MANA_PER_TYPE` is `pub(crate)`; 100 spelled literally,
+    // matching `real_4p_basalt_power_artifact_refills_colorless_only`.)
+    let pool = colorless(rig.runner.state(), P0);
+    assert!(
+        pool >= 90,
+        "reach-guard: refill_infinite_mana holds P0's colorless pool at the cap (~100) during \
+         the accept→CR-500.5 window, got {pool}"
+    );
+
+    // (3) GRAFT (see HONEST SCOPE): a second, genuinely DEFERRED axis plus the one
+    // `DriveSequence` an observed-growth accept would register over the real captured period.
+    // Both writes go through the production single-authority writers.
+    rig.runner
+        .state_mut()
+        .mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)]);
+    let collapsed_axes: Vec<ResourceAxis> = rig
+        .runner
+        .state()
+        .unbounded_resources
+        .get(&P0)
+        .expect("both axes marked")
+        .iter()
+        .copied()
+        .collect();
+    rig.runner.state_mut().register_pending_materialization(
+        P0,
+        PersistentAxisMaterialization::DriveSequence {
+            sequence,
+            collapsed_axes: collapsed_axes.clone(),
+        },
+    );
+
+    // (4) REACH-GUARD ON THE SEAM: the shared authority really does name the Mana axis, so the
+    // unfiltered hide-set WOULD have suppressed it. Without this, (5) could pass because the
+    // stash never reached the `DriveSequence` arm at all.
+    let state = rig.runner.state();
+    let scheduled = state.scheduled_collapse_axes(
+        state
+            .pending_unbounded_materialization
+            .get(&P0)
+            .expect("the grafted stash is present"),
+    );
+    assert!(
+        scheduled.contains(&ResourceAxis::Mana(ManaType::Colorless))
+            && scheduled.contains(&ResourceAxis::Life(P0)),
+        "reach-guard: scheduled_collapse_axes returns BOTH axes unfiltered (the boundary must \
+         still clear the mana one), got {scheduled:?}"
+    );
+
+    for viewer in [None, Some(P0), Some(P1)] {
+        let rows = engine::game::derived_views::derive_views(state, viewer).unbounded_resources;
+        let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
+        // (5) DISCRIMINATOR — the already-materialized mana axis keeps its ∞ row on the WIRE.
+        assert!(
+            axes.contains(&ResourceAxis::Mana(ManaType::Colorless)),
+            "CR 732.2c/CR 500.5: mana is already in the pool and still being refilled, so a \
+             merely-scheduled drive must NOT hide its ∞ row (viewer {viewer:?}), got {axes:?}"
+        );
+        // (6) POSITIVE CONTROL, SAME STATE — the genuinely deferred axis in the SAME
+        // `DriveSequence` is still hidden. Proves (5) is a targeted carve-out, not a disabled
+        // filter.
+        assert!(
+            !axes.contains(&ResourceAxis::Life(P0)),
+            "CR 732.2c: the deferred Life axis of the same scheduled drive stays hidden (viewer \
+             {viewer:?}), got {axes:?}"
+        );
+    }
+
+    // (7) THE STORE IS UNTOUCHED — the projection filtered, it did not mutate. The boundary
+    // clear still reads both axes from here.
+    assert_eq!(
+        state
+            .unbounded_resources
+            .get(&P0)
+            .map(|a| a.iter().copied().collect::<Vec<_>>()),
+        Some(collapsed_axes),
+        "the ∞ store survives the projection (CR 104.4b / CR 110.1 lockstep)"
+    );
+}
