@@ -285,7 +285,9 @@ if (stateMode) {
     target !== null && typeof target === "object" && typeof target.role === "string";
   const raw = readFileSync(fixturePath);
   const text = zlib.gunzipSync(raw).toString("utf8");
-  const doc = JSON.parse(text);
+  // Bigint-lossless like fixture mode: GameState dumps carry u64 object-id
+  // sentinels that a naive JSON round-trip would mangle into `expected u64`.
+  const doc = parseLossless(text);
 
   const migrated = [];
   const alreadyRole = [];
@@ -329,7 +331,7 @@ if (stateMode) {
   );
   migrated.forEach((l) => console.log(`  ${l}`));
   if (!checkOnly && migrated.length > 0) {
-    writeFileSync(fixturePath, zlib.gzipSync(JSON.stringify(doc)));
+    writeFileSync(fixturePath, zlib.gzipSync(stringifyLossless(doc)));
     console.log(`rewrote ${fixturePath} (gzipped, minified)`);
   }
   process.exit(0);
