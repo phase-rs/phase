@@ -223,7 +223,7 @@ pub fn certify_pact_plan(state: &GameState, root: &CandidateAction) -> Option<Ce
                 &mut budget,
             )
         })?;
-    pact_payment_survives(&mut projected, frozen.semantic_owner, receipt).then(|| {
+    pact_payment_survives(&mut projected, frozen.semantic_owner, receipt, &mut budget).then(|| {
         CertifiedPactPlan {
             root: frozen,
             receipt,
@@ -304,7 +304,12 @@ fn delayed_trigger_is_mandatory_mana_payment_or_loss_definition(
 /// is installed. The engine owns Pact's resolution-time mana payment: it
 /// auto-taps legal sources and either completes the mandatory payment or takes
 /// the loss branch without exposing a `ManaPayment` interaction to the AI.
-fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactReceipt) -> bool {
+fn pact_payment_survives(
+    state: &mut GameState,
+    owner: PlayerId,
+    receipt: PactReceipt,
+    budget: &mut ProspectiveBudget,
+) -> bool {
     for _ in 0..PROSPECTIVE_MAX_PACT_TRANSITIONS {
         if let WaitingFor::GameOver { winner } = &state.waiting_for {
             // CR 104.2: a completed game is a successful prospective terminal
@@ -352,11 +357,13 @@ fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactRe
                 if order_candidates.len() != 1 {
                     return false;
                 }
-                let action = FrozenCandidate::capture(state, &order_candidates[0]);
-                let Some(action) = action else {
+                let Some(action) = FrozenCandidate::capture(state, &order_candidates[0]) else {
                     return false;
                 };
-                let Ok(outcome) = action.apply_with_lifecycle(state) else {
+                let Some(permit) = budget.issue_forced_progress(action) else {
+                    return false;
+                };
+                let Ok(outcome) = permit.apply(state) else {
                     return false;
                 };
                 if outcome.receipt_finished_normally(receipt.provenance)
