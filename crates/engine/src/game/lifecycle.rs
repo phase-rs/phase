@@ -194,10 +194,6 @@ pub(super) fn record_delayed_terminal(
 fn append(fact: ReducerLifecycleFact) {
     FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
-        debug_assert!(
-            !frames.is_empty(),
-            "delayed lifecycle facts require an active action frame"
-        );
         if let Some(frame) = frames.last_mut() {
             frame.facts.push(fact);
         }
@@ -306,16 +302,22 @@ mod tests {
         assert!(facts.receipt_terminalized(origin));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "delayed lifecycle facts require an active action frame")]
-    fn recording_without_an_action_frame_is_a_debug_invariant_failure() {
+    fn recording_without_an_action_frame_is_lifecycle_silent() {
+        let origin = origin();
         record_delayed_installed(
-            origin(),
+            origin,
             ImmutableBinding {
                 source_id: ObjectId(3),
                 controller: PlayerId(4),
             },
+        );
+        let facts = enter_action_frame()
+            .take_outer_facts()
+            .expect("the outer frame always returns its own fact collection");
+        assert!(
+            facts.delayed_installations().next().is_none(),
+            "an observation made outside an action boundary cannot leak into a later one"
         );
     }
 }

@@ -7578,6 +7578,50 @@ fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameSta
     GameStateDecode::decode_persisted_resolution_state(value, GameStateDecodeMode::PersistedRaw)
 }
 
+fn delayed_install_origins(state: &GameState) -> impl Iterator<Item = DelayedTriggerOrigin> + '_ {
+    state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::DelayedTriggerInstall(command) => {
+                command.trigger.provenance.origin()
+            }
+            _ => None,
+        })
+        .chain(
+            state
+                .delayed_triggers
+                .iter()
+                .filter_map(|trigger| trigger.provenance.origin()),
+        )
+}
+
+fn normalize_delayed_trigger_allocators(state: &mut GameState) -> Result<(), String> {
+    let max_token = delayed_install_origins(state)
+        .map(|origin| origin.token.0)
+        .max()
+        .unwrap_or(0);
+    let max_instance = delayed_install_origins(state)
+        .map(|origin| origin.instance.0)
+        .max()
+        .unwrap_or(0);
+    let next_token = max_token
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger token allocator overflow".to_string())?;
+    let next_instance = max_instance
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger instance allocator overflow".to_string())?;
+
+    state.next_delayed_trigger_token = state.next_delayed_trigger_token.max(next_token).max(1);
+    state.next_delayed_trigger_instance = state
+        .next_delayed_trigger_instance
+        .max(next_instance)
+        .max(1);
+    Ok(())
+}
+
 /// Validates the private CR 603.7 identity transport after raw-state migration.
 ///
 /// A delayed-install command is the durable installation root. A still-live
@@ -8237,6 +8281,18 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
             used_instances.insert(instance);
         }
     }
+    let next_token = used_tokens
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger token allocator overflow".to_string())?;
+    let next_instance = used_instances
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger instance allocator overflow".to_string())?;
     state.insert(
         "next_delayed_trigger_token".to_string(),
         serde_json::Value::from(
@@ -8244,7 +8300,7 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 .get("next_delayed_trigger_token")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1)
-                .max(used_tokens.last().copied().unwrap_or(0).saturating_add(1)),
+                .max(next_token),
         ),
     );
     state.insert(
@@ -8254,13 +8310,7 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 .get("next_delayed_trigger_instance")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1)
-                .max(
-                    used_instances
-                        .last()
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(1),
-                ),
+                .max(next_instance),
         ),
     );
     canonicalize_delayed_install_identities(state)?;
@@ -14572,9 +14622,10 @@ impl GameStateDecode {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
         }
-        let state = serde_json::from_value::<ResolutionStateWire>(value)
+        let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
+        normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
@@ -14590,7 +14641,8 @@ impl GameStateDecode {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(&mut value)?;
         }
-        let state = Self::materialize_prepared(value)?;
+        let mut state = Self::materialize_prepared(value)?;
+        normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
@@ -21050,6 +21102,20 @@ mod tests {
             .record_delayed_trigger_install(command)
             .expect("fixture install has a journal cause");
         (state, source)
+    }
+
+    #[test]
+    fn direct_current_raw_decode_repairs_stale_delayed_trigger_allocators() {
+        let (state, _) = delayed_install_fixture();
+        let mut serialized = serde_json::to_value(state).expect("fixture serializes");
+        serialized["next_delayed_trigger_token"] = serde_json::Value::from(1);
+        serialized["next_delayed_trigger_instance"] = serde_json::Value::from(1);
+
+        let restored: GameState =
+            serde_json::from_value(serialized).expect("stale allocators repair after decode");
+
+        assert_eq!(restored.next_delayed_trigger_token, 2);
+        assert_eq!(restored.next_delayed_trigger_instance, 2);
     }
 
     fn erase_delayed_install_provenance(value: &mut serde_json::Value) {
