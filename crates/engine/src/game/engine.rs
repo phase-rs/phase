@@ -35,6 +35,7 @@ use super::ability_utils::{
 use super::casting;
 use super::casting_costs;
 use super::companion;
+use super::crew_payment;
 use super::effects;
 use super::end_continuous_effect;
 use super::engine_casting;
@@ -267,9 +268,9 @@ enum PriorityAnnouncement {
     UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
     RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
     Equip { equipment_id: ObjectId },
-    CrewVehicle { vehicle_id: ObjectId },
-    ActivateStation { spacecraft_id: ObjectId },
-    SaddleMount { mount_id: ObjectId },
+    CrewVehicle(crew_payment::PriorityCrewAnnouncement),
+    ActivateStation(crew_payment::PriorityStationAnnouncement),
+    SaddleMount(crew_payment::PrioritySaddleAnnouncement),
     Transform(transform::PriorityTransformAnnouncement),
     ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
     CastSpellAsSneak(casting::PrioritySneakAnnouncement),
@@ -295,9 +296,9 @@ impl PriorityAnnouncement {
             Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
             Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
             Self::Equip { .. } => PriorityReducerFamily::Equip,
-            Self::CrewVehicle { .. } => PriorityReducerFamily::CrewVehicle,
-            Self::ActivateStation { .. } => PriorityReducerFamily::ActivateStation,
-            Self::SaddleMount { .. } => PriorityReducerFamily::SaddleMount,
+            Self::CrewVehicle(_) => PriorityReducerFamily::CrewVehicle,
+            Self::ActivateStation(_) => PriorityReducerFamily::ActivateStation,
+            Self::SaddleMount(_) => PriorityReducerFamily::SaddleMount,
             Self::Transform(_) => PriorityReducerFamily::Transform,
             Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
             Self::CastSpellAsSneak(_) => PriorityReducerFamily::CastSpellAsSneak,
@@ -355,16 +356,16 @@ fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAc
             // target-selection flow when the choice is not forced.
             target_id: equipment_id,
         },
-        PriorityAnnouncement::CrewVehicle { vehicle_id } => GameAction::CrewVehicle {
-            vehicle_id,
+        PriorityAnnouncement::CrewVehicle(announcement) => GameAction::CrewVehicle {
+            vehicle_id: announcement.vehicle_id(&_access),
             creature_ids: Vec::new(),
         },
-        PriorityAnnouncement::ActivateStation { spacecraft_id } => GameAction::ActivateStation {
-            spacecraft_id,
+        PriorityAnnouncement::ActivateStation(announcement) => GameAction::ActivateStation {
+            spacecraft_id: announcement.spacecraft_id(&_access),
             creature_id: None,
         },
-        PriorityAnnouncement::SaddleMount { mount_id } => GameAction::SaddleMount {
-            mount_id,
+        PriorityAnnouncement::SaddleMount(announcement) => GameAction::SaddleMount {
+            mount_id: announcement.mount_id(&_access),
             creature_ids: Vec::new(),
         },
         PriorityAnnouncement::Transform(announcement) => GameAction::Transform {
@@ -552,67 +553,26 @@ fn priority_preflight_candidates(
                 .map(PriorityPreflightCandidate::Announcement),
         );
 
-        let can_tap_creature = |object_id: ObjectId| {
-            state.objects.get(&object_id).is_some_and(|object| {
-                object.controller == semantic_holder
-                    && !object.tapped
-                    && object
-                        .card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Creature)
-                    && !super::restrictions::object_cant_tap(state, object_id)
-            })
-        };
-        for &object_id in &state.battlefield {
-            let Some(object) = state.objects.get(&object_id) else {
-                continue;
-            };
-            if object.controller != semantic_holder {
-                continue;
-            }
-            let has_other_tappable =
-                state.battlefield.iter().copied().any(|candidate_id| {
-                    candidate_id != object_id && can_tap_creature(candidate_id)
-                });
-            if object
-                .keywords
-                .iter()
-                .any(|keyword| matches!(keyword, crate::types::keywords::Keyword::Crew { .. }))
-                && has_other_tappable
-            {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::CrewVehicle {
-                        vehicle_id: object_id,
-                    },
-                ));
-            }
-            if super::restrictions::is_sorcery_speed_window(state, semantic_holder)
-                && object
-                    .keywords
-                    .iter()
-                    .any(|keyword| matches!(keyword, crate::types::keywords::Keyword::Station))
-                && has_other_tappable
-            {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::ActivateStation {
-                        spacecraft_id: object_id,
-                    },
-                ));
-            }
-            if super::restrictions::is_sorcery_speed_window(state, semantic_holder)
-                && object
-                    .keywords
-                    .iter()
-                    .any(|keyword| matches!(keyword, crate::types::keywords::Keyword::Saddle(_)))
-                && has_other_tappable
-            {
-                candidates.push(PriorityPreflightCandidate::Announcement(
-                    PriorityAnnouncement::SaddleMount {
-                        mount_id: object_id,
-                    },
-                ));
-            }
-        }
+        let (crew_announcements, station_announcements, saddle_announcements) =
+            crew_payment::priority_tap_payment_announcements(state, principal).into_partitioned();
+        candidates.extend(
+            crew_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::CrewVehicle)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            station_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateStation)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            saddle_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::SaddleMount)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
 
         candidates.extend(
             room::priority_unlock_room_door_announcements(state, principal)
