@@ -18,7 +18,6 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
-  PlayerId,
   SerializedPlayerIdKey,
   TargetFilter,
   WaitingFor,
