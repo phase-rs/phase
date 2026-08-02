@@ -36801,6 +36801,47 @@ fn intensify_parser_maps_source_and_owned_scopes() {
     ));
 }
 
+/// The controller-specific "if you discard a card this way" continuation shares
+/// the generic reflexive connector with the player-anaphor forms used by Chains.
+/// Great Desert Hellion must retain its conditioned intensify rider.
+#[test]
+fn great_desert_hellion_unless_discard_keeps_conditioned_intensify() {
+    let parsed = parse_oracle_text(
+        "Starting intensity 1\nMenace\nAt the beginning of your upkeep, sacrifice Great Desert Hellion unless you discard a card. If you discard a card this way, Great Desert Hellion intensifies by 1.",
+        "Great Desert Hellion",
+        &[],
+        &["Creature".to_string()],
+        &["Hellion".to_string()],
+    );
+    let upkeep = parsed
+        .triggers
+        .iter()
+        .find(|trigger| matches!(trigger.phase, Some(Phase::Upkeep)))
+        .expect("expected Great Desert Hellion's upkeep trigger");
+    let intensify = upkeep
+        .execute
+        .as_deref()
+        .and_then(|ability| ability.sub_ability.as_deref())
+        .expect("expected an intensify rider after the unless-discard action");
+    assert!(
+        matches!(
+            intensify.effect.as_ref(),
+            Effect::Intensify {
+                scope: IntensityScope::Source,
+                amount: QuantityExpr::Fixed { value: 1 },
+            }
+        ),
+        "upkeep rider must remain source intensify, got {:?}",
+        intensify.effect
+    );
+    assert_eq!(
+        intensify.condition,
+        Some(AbilityCondition::effect_performed()),
+        "intensify must be gated on the optional discard succeeding, got {:?}",
+        intensify.condition
+    );
+}
+
 #[test]
 fn intensify_parser_preserves_variable_x_amount() {
     let e = parse_effect("This Equipment intensifies by X, where X is that creature's power.");

@@ -9427,17 +9427,23 @@ pub(crate) fn parse_affirmative_reflexive_connector(
     .parse(input)
 }
 
-/// CR 603.12 + CR 701.9a: the echoed-verb affirmative form — "if [subject]
+/// CR 608.2c + CR 701.9a: the echoed-verb affirmative form — "if [subject]
 /// discard(s) a card this way, " (Chains of Mephistopheles / Magus of the
 /// Chains: "If the player discards a card this way, they draw a card."). This
 /// is the untyped-object sibling of `parse_you_discard_this_way_clause` (which
 /// requires a typed filter and lowers to `ZoneChangedThisWay`): an unqualified
 /// "a card" carries no type information to check, so the condition collapses
 /// to the same "did the preceding discard occur" gate as the bare "if you
-/// do, " connector. Mirrors the same subject set already covered by the bare
-/// affirmative connector above.
+/// do, " connector. The controller-specific "if you discard ..." form shares
+/// that gate: its preceding optional discard publishes `OptionalEffectPerformed`,
+/// so the follow-up stays attached to the discard outcome rather than executing
+/// after the sacrifice alternative.
 fn parse_discard_this_way_affirmative_connector(input: &str) -> OracleResult<'_, AbilityCondition> {
     alt((
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if you discard a card this way, "),
+        ),
         value(
             AbilityCondition::effect_performed(),
             tag("if a player discards a card this way, "),
@@ -9453,10 +9459,6 @@ fn parse_discard_this_way_affirmative_connector(input: &str) -> OracleResult<'_,
         value(
             AbilityCondition::effect_performed(),
             tag("if the player discards a card this way, "),
-        ),
-        value(
-            AbilityCondition::effect_performed(),
-            tag("if you discard a card this way, "),
         ),
     ))
     .parse(input)
@@ -9493,7 +9495,7 @@ fn parse_negated_reflexive_connector(input: &str) -> OracleResult<'_, AbilityCon
     .parse(input)
 }
 
-/// CR 603.12 + CR 701.9a: the echoed-verb negated form — "if [subject]
+/// CR 608.2c + CR 701.9a: the echoed-verb negated form — "if [subject]
 /// doesn't/don't discard a card this way, " (Chains of Mephistopheles / Magus
 /// of the Chains: "If the player doesn't discard a card this way, they mill a
 /// card."). Untyped-object sibling of the affirmative echoed connector above;

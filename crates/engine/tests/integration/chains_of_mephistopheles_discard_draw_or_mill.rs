@@ -39,9 +39,7 @@ fn card_names(
 /// either/or behavior leaves "Sol Ring" untouched in the library.
 #[test]
 fn chains_nonempty_hand_discards_then_draws_no_mill() {
-    let Some(db) = load_db() else {
-        return;
-    };
+    let db = load_db().expect("shared card database must be available for this integration test");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -111,9 +109,7 @@ fn chains_nonempty_hand_discards_then_draws_no_mill() {
 /// hand empty and "Sol Ring" untouched in the library.
 #[test]
 fn chains_empty_hand_fails_discard_then_mills_no_draw() {
-    let Some(db) = load_db() else {
-        return;
-    };
+    let db = load_db().expect("shared card database must be available for this integration test");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
