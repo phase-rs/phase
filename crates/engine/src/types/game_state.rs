@@ -8088,6 +8088,21 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
     } else if old_resolving.is_some() {
         return Err("legacy and canonical resolving firing carriers both present".to_string());
     }
+    // A v1 `pending_continuation` is the paused child of the active resolution,
+    // but may have no trigger-event context of its own. Once its triggered parent
+    // has been classified above, transfer that exact firing to the child as well.
+    if allow_unlabeled_v1_carriers {
+        if let (Some(firing), Some(continuation)) = (
+            state.get("resolving_trigger_firing").cloned(),
+            state
+                .get_mut("pending_continuation")
+                .and_then(serde_json::Value::as_object_mut),
+        ) {
+            if continuation.contains_key("chain") && !continuation.contains_key("trigger_firing") {
+                continuation.insert("trigger_firing".to_string(), firing);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -21533,15 +21548,24 @@ mod tests {
 
     #[test]
     fn v1_unlabeled_trigger_carriers_migrate_to_legacy_delayed() {
-        let mut state = normal_trigger_firing_fixture();
-        state.resolving_stack_entry = state.stack.back().cloned();
-        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        let mut state = trigger_continuation_fixture();
+        let continuation = state
+            .active_ability_continuation()
+            .expect("fixture parks a trigger continuation")
+            .clone();
+        state.resolution_stack = ResolutionStack::default();
         let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
         v1["resolution_state_version"] = serde_json::Value::from(1);
+        v1["pending_continuation"] =
+            serde_json::to_value(continuation).expect("legacy continuation serializes");
         let v1_state = v1.as_object_mut().expect("v1 fixture is a state object");
         v1_state.remove("pending_trigger_firing");
         v1_state.remove("stack_trigger_firings");
         v1_state.remove("resolving_trigger_firing");
+        v1_state["pending_continuation"]
+            .as_object_mut()
+            .expect("legacy continuation is an object")
+            .remove("trigger_firing");
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("v1 fixture conservatively restores unlabelled trigger carriers")
@@ -21557,6 +21581,13 @@ mod tests {
         );
         assert_eq!(
             restored.resolving_trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored
+                .active_ability_continuation()
+                .expect("v1 continuation restores")
+                .trigger_firing,
             Some(TriggerFiring::LegacyDelayed)
         );
     }
