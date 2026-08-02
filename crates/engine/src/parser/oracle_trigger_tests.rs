@@ -9233,6 +9233,27 @@ fn trigger_intervening_if_creature_subtype_still_creature() {
     );
 }
 
+/// CR 603.4: A TRAILING subtype conditional ("<effect> ... if it's a <subtype>
+/// card" — Oathkeeper, Takeno's Daisho: "return that card ... if it's a Samurai
+/// card") is a resolution-time effect gate, NOT an intervening-if. The subtype
+/// recognizer must only fire at the leading position; a trailing clause must be
+/// left in the effect text (returned unchanged) with no trigger condition
+/// extracted, so the ability still triggers and goes on the stack unconditionally.
+#[test]
+fn trigger_trailing_subtype_conditional_is_not_intervening_if() {
+    let effect = "return that card to the battlefield under your control if it's a samurai card";
+    let (without_if, condition) = extract_if_condition(effect);
+    assert!(
+        condition.is_none(),
+        "trailing '... if it's a Samurai card' must not be lifted to a trigger \
+         condition, got {condition:?}",
+    );
+    assert_eq!(
+        without_if, effect,
+        "trailing conditional must remain in the effect text for the resolution-time gate",
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players
