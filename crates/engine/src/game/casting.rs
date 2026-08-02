@@ -10473,12 +10473,10 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 707.10: `resolving_stack_entry` may intentionally persist after a
-    // resolution for deferred self-copy choices, but a fresh normal cast starts
-    // a new stack-object announcement outside that old resolution context.
-    super::stack::clear_resolving_stack_entry(state);
-    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-    state.resolution_source_relatch = None;
+    // CR 608.2g: An effect may instruct a player to cast a spell while its
+    // parent stack object remains parked in the active resolution carrier.
+    // The parent, not casting, owns that carrier and settles it only after the
+    // instructed cast window and every continuation have completed.
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -18147,8 +18145,12 @@ pub fn handle_cancel_cast(
             .iter()
             .rposition(|entry| entry.id == pending.object_id)
         {
-            super::stack::remove_stack_entry_at(state, pos)
-                .expect("rposition yielded a live stack index");
+            super::stack::remove_nonresolving_stack_entry_at(
+                state,
+                pos,
+                super::lifecycle::DelayedTerminalDisposition::Removed,
+            )
+            .expect("rposition yielded a live stack index");
         }
     }
 

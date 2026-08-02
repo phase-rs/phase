@@ -218,8 +218,12 @@ fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     // authority rather than expressed as a `retain`, which would leave both
     // per-entry side tables stranded and the removal unjournaled.
     if let Some(idx) = state.stack.iter().position(|entry| entry.id == copy_id) {
-        crate::game::stack::remove_stack_entry_at(state, idx)
-            .expect("position yielded a live stack index");
+        crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("position yielded a live stack index");
     }
     state.objects.remove(&copy_id);
 }

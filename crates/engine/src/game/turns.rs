@@ -69,8 +69,63 @@ pub(crate) fn last_step_of_phase(phase: Phase) -> Phase {
     }
 }
 
-/// CR 500.5: Advance to the next phase/step, clearing mana pools.
+/// CR 500.5: Advance through phase/step successors until one phase entry has
+/// been committed. A skipped successor is still a distinct one-hop transition:
+/// the loop, rather than recursive re-entry, advances past it.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    loop {
+        match advance_phase_once(state, events) {
+            AdvancePhaseOnce::Entry(entry) => match *entry {
+                PhaseEntryOutcome::Entered { successor } => {
+                    debug_assert_eq!(state.phase, successor);
+                    return;
+                }
+                PhaseEntryOutcome::Paused {
+                    successor,
+                    waiting_for,
+                    progress,
+                } => {
+                    debug_assert_eq!(state.phase, successor);
+                    debug_assert_eq!(state.waiting_for, *waiting_for);
+                    debug_assert_eq!(
+                        state.pending_phase_transition_progress.as_ref(),
+                        Some(progress.as_ref())
+                    );
+                    return;
+                }
+            },
+            AdvancePhaseOnce::Skipped => {}
+        }
+    }
+}
+
+/// The committed result of entering one phase. A paused entry has already
+/// mutated production state; its typed cursor and prompt are the authority
+/// that resumes the phase-transition drain.
+pub(in crate::game) enum PhaseEntryOutcome {
+    Entered {
+        successor: Phase,
+    },
+    Paused {
+        successor: Phase,
+        waiting_for: Box<WaitingFor>,
+        progress: Box<crate::types::game_state::PhaseTransitionProgress>,
+    },
+}
+
+/// One production phase-transition hop. This remains private until the
+/// mandatory-transition adapter can request exactly one committed unit; normal
+/// callers retain the existing "advance through skipped steps" behavior via
+/// [`advance_phase`].
+pub(in crate::game) enum AdvancePhaseOnce {
+    Entry(Box<PhaseEntryOutcome>),
+    Skipped,
+}
+
+pub(in crate::game) fn advance_phase_once(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> AdvancePhaseOnce {
     // CR 500.8: Extra phases are inserted *directly after* their anchor phase
     // (e.g., Aurelia's "after this phase" extra combat is inserted after the
     // current combat phase ends — anchor = `EndCombat`). Consume only when
@@ -142,10 +197,10 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
         ) {
             // CR 500.11: "To skip a step, phase, or turn is to proceed past it
             // as though it didn't exist." Advance `state.phase` past the skipped
-            // phase so the recursive call computes the phase AFTER it, then
-            // recurse to enter that phase.
+            // phase so the next loop iteration computes the phase AFTER it, then
+            // let the outer advance loop compute the phase AFTER it.
             state.phase = next;
-            return advance_phase(state, events);
+            return AdvancePhaseOnce::Skipped;
         }
     }
 
@@ -167,7 +222,7 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .and_then(|ep| ep.attacker_restriction_source);
     }
 
-    enter_phase(state, next, events);
+    AdvancePhaseOnce::Entry(Box::new(enter_phase(state, next, events)))
 }
 
 /// CR 724.1d: End the current turn by skipping straight to the cleanup step.
@@ -229,6 +284,32 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     enter_phase(state, Phase::PostCombatMain, events);
 }
 
+/// CR 508.8: Mark the end-of-combat step after no attackers remain, so the
+/// caller can skip the blockers and combat-damage steps through the ordinary
+/// phase interpreter.
+pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    state.phase = Phase::EndCombat;
+    events.push(GameEvent::PhaseChanged {
+        phase: Phase::EndCombat,
+    });
+}
+
+/// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
+/// It preserves the established ordering that has already processed
+/// declaration triggers and advances past the synthetic marker without
+/// running EndCombat step triggers.
+pub(super) fn advance_after_empty_attackers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    mark_empty_attackers_end_combat(state, events);
+    state.combat = None;
+    super::layers::prune_end_of_combat_effects(state);
+    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
+    advance_phase(state, events);
+    auto_advance(state, events)
+}
+
 /// Enter a phase directly: set phase, run the CR 703.4q step-end empty
 /// unspent mana event for each player in APNAP order through the replacement
 /// pipeline, then (when the queue empties) reset priority (CR 117.3a),
@@ -244,7 +325,11 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
 /// drain stores progress in `state.pending_phase_transition_progress` and
 /// sets `state.waiting_for`; resume happens via the `EmptyManaPool` arm of
 /// `handle_replacement_choice`, which re-calls `drain_pending_phase_transition_progress`.
-fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
+fn enter_phase(
+    state: &mut GameState,
+    next: Phase,
+    events: &mut Vec<GameEvent>,
+) -> PhaseEntryOutcome {
     use std::collections::VecDeque;
 
     state.phase = next;
@@ -281,6 +366,14 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
             drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
         });
     drain_pending_phase_transition_progress(state, events);
+    match state.pending_phase_transition_progress.clone() {
+        Some(progress) => PhaseEntryOutcome::Paused {
+            successor: next,
+            waiting_for: Box::new(state.waiting_for.clone()),
+            progress: Box::new(progress),
+        },
+        None => PhaseEntryOutcome::Entered { successor: next },
+    }
 }
 
 /// CR 732.2a: the APNAP-first player (turn order) who still holds a non-empty deferred
@@ -2126,10 +2219,12 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is likewise NOT
     // a "this turn" trigger: the end step "doesn't back up", so it legitimately
     // persists to the next turn's end step — it must survive this retain.
-    state.delayed_triggers.retain(|dt| {
-        dt.one_shot
+    let mut survivors = Vec::new();
+    let mut expired = Vec::new();
+    for trigger in std::mem::take(&mut state.delayed_triggers) {
+        let retain = trigger.one_shot
             && !matches!(
-                dt.condition,
+                trigger.condition,
                 crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
                     // CR 603.7b + CR 603.12: both a stated-"this turn" one-shot and
                     // any reflexive that (defensively) escaped its creation-batch
@@ -2138,8 +2233,20 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                         | crate::types::ability::DelayedTriggerLifetime::Reflexive,
                     ..
                 }
-            )
-    });
+            );
+        if retain {
+            survivors.push(trigger);
+        } else {
+            expired.push(trigger);
+        }
+    }
+    state.delayed_triggers = survivors;
+    for trigger in expired {
+        super::lifecycle::record_delayed_terminal(
+            trigger.provenance.firing(),
+            super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
+        );
+    }
 
     // CR 502.2 / CR 731.2: Check the prior active player's day/night transition
     // before advancing the active player.
@@ -2467,6 +2574,14 @@ fn process_phase_triggers(
     (outcome.fired, outcome.prompt)
 }
 
+/// CR 800.4: Skip an eliminated active player's remaining turn through the
+/// normal Cleanup-to-next-turn transition. This intentionally shares the
+/// phase-entry pipeline rather than fabricating a replacement priority prompt.
+fn skip_eliminated_active_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    state.phase = Phase::Cleanup;
+    advance_phase(state, events);
+}
+
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     loop {
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -2484,8 +2599,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         // CR 800.4: If the active player has been eliminated, skip their
         // remaining phases and proceed to the next player's turn.
         if !super::players::is_alive(state, state.active_player) {
-            state.phase = Phase::Cleanup;
-            advance_phase(state, events);
+            skip_eliminated_active_turn(state, events);
             continue;
         }
 
@@ -2725,10 +2839,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     };
                 } else {
                     // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
-                    state.phase = Phase::EndCombat;
-                    events.push(GameEvent::PhaseChanged {
-                        phase: Phase::EndCombat,
-                    });
+                    mark_empty_attackers_end_combat(state, events);
                     // Continue loop to process EndCombat
                 }
             }
@@ -2846,6 +2957,40 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 1;
         state
+    }
+
+    /// R14 B7: direct phase assignment is an authority boundary. Freeze the
+    /// current production-only census so any additional bypass is reviewed
+    /// alongside migration to the one-hop transition seam.
+    #[test]
+    fn production_phase_assignment_census_is_frozen() {
+        let source = include_str!("turns.rs");
+        let production_end = source
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("turns production source precedes its tests");
+        let production = &source[..production_end];
+
+        assert_eq!(
+            production
+                .lines()
+                .filter(|line| line.trim_start().starts_with("state.phase ="))
+                .count(),
+            4,
+            "a new direct phase assignment needs a B7 transition-authority row"
+        );
+
+        let combat_source = include_str!("engine_combat.rs");
+        let combat_production_end = combat_source
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("combat production source precedes its tests");
+        assert_eq!(
+            combat_source[..combat_production_end]
+                .lines()
+                .filter(|line| line.trim_start().starts_with("state.phase ="))
+                .count(),
+            0,
+            "empty-attacker continuations must use the canonical turns authority"
+        );
     }
 
     #[test]
@@ -3665,7 +3810,23 @@ mod tests {
         ));
 
         let mut events = Vec::new();
-        advance_phase(&mut state, &mut events);
+        let AdvancePhaseOnce::Entry(entry) = advance_phase_once(&mut state, &mut events) else {
+            panic!("the replacement choice must commit a paused phase entry");
+        };
+        let PhaseEntryOutcome::Paused {
+            successor,
+            waiting_for,
+            progress,
+        } = *entry
+        else {
+            panic!("the replacement choice must commit a paused phase entry");
+        };
+        assert_eq!(successor, Phase::BeginCombat);
+        assert_eq!(*waiting_for, state.waiting_for);
+        assert_eq!(
+            state.pending_phase_transition_progress.as_ref(),
+            Some(progress.as_ref())
+        );
 
         // CR 616.1: pipeline paused on a multi-handler choice for player 0.
         assert!(
@@ -8650,7 +8811,7 @@ mod tests {
     #[test]
     fn phase_pipeline_prevented_skips_that_phase() {
         // CR 614.1b + CR 500.11: An unconditional BeginPhase replacement causes
-        // advance_phase to recurse and land on the phase AFTER the skipped one.
+        // advance_phase to loop and land on the phase AFTER the skipped one.
         // We tightly scope the skip to a single phase by mutating the
         // replacement definition's matcher indirectly: we install the skip,
         // advance past the first phase, then remove the skip so the test
@@ -8699,6 +8860,52 @@ mod tests {
             "at least one BeginPhase skip must have fired, got {}",
             begin_phase_applied_count
         );
+    }
+
+    #[test]
+    fn phase_pipeline_skip_is_one_transition_hop() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::ReplacementDefinition;
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Untap;
+
+        let mut obj = GameObject::new(
+            ObjectId(200),
+            CardId(99),
+            PlayerId(1),
+            "SkipPhase".to_string(),
+            Zone::Battlefield,
+        );
+        obj.replacement_definitions = vec![ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::BeginPhase,
+        )]
+        .into();
+        state.objects.insert(ObjectId(200), obj);
+        state.battlefield.push_back(ObjectId(200));
+
+        let mut events = Vec::new();
+        assert!(matches!(
+            advance_phase_once(&mut state, &mut events),
+            AdvancePhaseOnce::Skipped
+        ));
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::PhaseChanged { .. })),
+            "a skipped hop must not enter its prevented phase"
+        );
+
+        state.objects.remove(&ObjectId(200));
+        state.battlefield.clear();
+        assert!(matches!(
+            advance_phase_once(&mut state, &mut events),
+            AdvancePhaseOnce::Entry(entry)
+                if matches!(*entry, PhaseEntryOutcome::Entered { successor: Phase::Draw })
+        ));
     }
 
     /// CR 122.1d + CR 101.2: Fear of Sleep Paralysis — stun counters can't be
