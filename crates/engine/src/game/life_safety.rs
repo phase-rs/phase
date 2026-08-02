@@ -514,7 +514,18 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                             }
                         }
                 }
-                OptionalAdditionalCostPath::Flow { repeatability: _ } => true,
+                OptionalAdditionalCostPath::Flow { repeatability } => {
+                    let matches_flow = |pending: &PendingCast| {
+                        matches!(
+                            &pending.additional_cost_flow,
+                            Some(AdditionalCost::Optional {
+                                cost,
+                                repeatability: flow_repeatability,
+                            }) if flow_repeatability == repeatability && cost == materialized_cost
+                        )
+                    };
+                    matches_flow(pending_before) && matches_flow(pending_after)
+                }
                 OptionalAdditionalCostPath::Direct => {
                     pending_before.additional_cost_queue.is_empty()
                         && pending_before.additional_cost_flow.is_none()
