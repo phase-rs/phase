@@ -18,7 +18,7 @@ use crate::types::format::FormatConfig;
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
@@ -219,6 +219,10 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
     });
     state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
+    state
+        .stack_trigger_firings
+        .insert(entry_id, TriggerFiring::Ordinary);
+    state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
     let stack_len_before = state.stack.len();
 
     let result = begin_pending_trigger_target_selection(&mut state);

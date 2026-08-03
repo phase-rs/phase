@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use rand_chacha::ChaCha20Rng;
+
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
@@ -18,12 +20,12 @@ use crate::types::game_state::{
     AutoMayChoice, DamageRecord, DelayedTrigger, DistributionUnit, GameState,
     LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
     LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-    StackEntryKind, TargetSelectionConstraint, TriggerObservationTime, TriggerSourceContext,
-    WaitingFor,
+    StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime,
+    TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{
-    DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken, ObjectId,
-    ObjectIncarnationRef, TriggerFiring,
+    DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+    ObjectId, ObjectIncarnationRef, TriggerFiring,
 };
 use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
@@ -346,13 +348,13 @@ impl PendingTriggerContext {
         }
     }
 
-    fn delayed(pending: PendingTrigger, provenance: Option<DelayedTriggerProvenance>) -> Self {
+    fn delayed(pending: PendingTrigger, identity: DelayedInstallIdentity) -> Self {
         let trigger_events = pending.trigger_event.iter().cloned().collect();
         Self {
             pending,
             trigger_events,
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
-            firing: TriggerFiring::Delayed(provenance),
+            firing: identity.firing(),
         }
     }
 
@@ -361,11 +363,8 @@ impl PendingTriggerContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn delayed_for_test(
-        pending: PendingTrigger,
-        provenance: DelayedTriggerProvenance,
-    ) -> Self {
-        Self::delayed(pending, Some(provenance))
+    pub(crate) fn delayed_for_test(pending: PendingTrigger, origin: DelayedTriggerOrigin) -> Self {
+        Self::delayed(pending, DelayedInstallIdentity::ReceiptEligible(origin))
     }
 }
 
@@ -822,12 +821,16 @@ impl PendingActivationTriggerCollection {
 /// ability as it resolved), its source, and its `ResolvedAbility` with targets
 /// chosen. This function reads only the live install position, so it cannot
 /// fail — the precondition it records is the one it just observed.
-pub fn install_delayed_trigger(state: &mut GameState, mut trigger: DelayedTrigger) {
+pub fn install_delayed_trigger(
+    state: &mut GameState,
+    mut trigger: DelayedTrigger,
+    _events: &mut Vec<GameEvent>,
+) {
     let token = DelayedTriggerToken(state.next_delayed_trigger_token);
     state.next_delayed_trigger_token = state.next_delayed_trigger_token.saturating_add(1);
     let instance = DelayedTriggerInstanceId(state.next_delayed_trigger_instance);
     state.next_delayed_trigger_instance = state.next_delayed_trigger_instance.saturating_add(1);
-    trigger.provenance = Some(DelayedTriggerProvenance {
+    trigger.provenance = DelayedInstallIdentity::ReceiptEligible(DelayedTriggerOrigin {
         token,
         instance,
         source_id: trigger.source_id,
@@ -838,12 +841,22 @@ pub fn install_delayed_trigger(state: &mut GameState, mut trigger: DelayedTrigge
         expected_installed_count: state.delayed_triggers.len(),
         cause: state.current_or_begin_rules_execution_node(),
     };
+    let origin = command
+        .trigger
+        .provenance
+        .origin()
+        .expect("a live delayed-trigger install mints a receipt root");
+    let binding = super::lifecycle::ImmutableBinding {
+        source_id: command.trigger.source_id,
+        controller: command.trigger.controller,
+    };
     apply_resolved_delayed_trigger(state, &command)
         .expect("the freshly read install position must satisfy its own precondition");
     state
         .resolved_rules_journal
         .record_delayed_trigger_install(command)
         .expect("resolved delayed-trigger install must have a live journal cause");
+    super::lifecycle::record_delayed_installed(origin, binding);
 }
 
 /// Installs one already-resolved CR 603.7 delayed triggered ability verbatim.
@@ -866,11 +879,17 @@ pub fn apply_resolved_delayed_trigger(
             },
         );
     }
-    let provenance = command.trigger.provenance.ok_or(
-        ResolvedDelayedTriggerReplayInvariantError::MissingProvenance {
-            token: command.token,
-        },
-    )?;
+    let Some(provenance) = command.trigger.provenance.origin() else {
+        if command.token.0 != 0 {
+            return Err(
+                ResolvedDelayedTriggerReplayInvariantError::MissingProvenance {
+                    token: command.token,
+                },
+            );
+        }
+        state.delayed_triggers.push(command.trigger.clone());
+        return Ok(());
+    };
     if provenance.token != command.token {
         return Err(
             ResolvedDelayedTriggerReplayInvariantError::ProvenanceTokenMismatch {
@@ -901,14 +920,14 @@ pub fn apply_resolved_delayed_trigger(
         .filter_map(|command| match command {
             crate::types::resolved_commands::ResolvedRulesCommand::DelayedTriggerInstall(
                 command,
-            ) => command.trigger.provenance,
+            ) => command.trigger.provenance.origin(),
             _ => None,
         })
         .chain(
             state
                 .delayed_triggers
                 .iter()
-                .filter_map(|trigger| trigger.provenance),
+                .filter_map(|trigger| trigger.provenance.origin()),
         );
     for installed in installed_provenances {
         if installed.token == provenance.token {
@@ -6838,7 +6857,20 @@ pub(crate) fn abandon_ceased_pending_trigger(
         // per-entry tables when an entry leaves the stack.
         state.stack_paid_facts.remove(&entry_id);
         state.stack_trigger_event_batches.remove(&entry_id);
-        state.stack_trigger_firings.remove(&entry_id);
+        let pending_firing = state.pending_trigger_firing;
+        let stack_firing = state.stack_trigger_firings.remove(&entry_id);
+        if let (Some(pending_firing), Some(stack_firing)) = (pending_firing, stack_firing) {
+            debug_assert_eq!(
+                pending_firing, stack_firing,
+                "ceased pending trigger carriers must agree"
+            );
+            if pending_firing == stack_firing {
+                super::lifecycle::record_delayed_terminal(
+                    pending_firing,
+                    super::lifecycle::DelayedTerminalDisposition::Removed,
+                );
+            }
+        }
     }
     state.pending_trigger = None;
     state.pending_trigger_firing = None;
@@ -6890,7 +6922,22 @@ pub(crate) fn finalize_pending_trigger_entry(
         .pending_trigger_entry
         .expect("finalize_pending_trigger_entry: pending_trigger_entry must be set under the push-first contract");
     if assign_pending_trigger_entry_ability(state, entry_id, source_ability) {
-        // Construction complete — release the cursor so the resolver may fire.
+        // Construction complete — transfer the exact canonical firing from the
+        // pending carrier to its already-live stack entry before releasing the
+        // cursor. This is not terminal ownership.
+        let pending_firing = state
+            .pending_trigger_firing
+            .take()
+            .expect("pending trigger construction must retain its firing carrier");
+        let stack_firing = state
+            .stack_trigger_firings
+            .get(&entry_id)
+            .copied()
+            .expect("pending trigger construction must retain its stack firing carrier");
+        assert_eq!(
+            pending_firing, stack_firing,
+            "pending trigger transfer must preserve its exact firing"
+        );
         state.pending_trigger_entry = None;
         true
     } else {
@@ -7004,6 +7051,131 @@ impl TriggerDispatchDisposition {
     }
 }
 
+/// A target-preparation result that has not changed the live trigger dispatch
+/// state. Successful automatic paths carry every value that may change while
+/// target selection is prepared, so dispatch can commit them as one boundary.
+enum PreparedTriggerTargets {
+    NoTargets {
+        trigger: PendingTrigger,
+        rng: ChaCha20Rng,
+        events: Vec<GameEvent>,
+    },
+    AutoAssigned {
+        trigger: PendingTrigger,
+        rng: ChaCha20Rng,
+        events: Vec<GameEvent>,
+    },
+    NeedsPlayerChoice {
+        target_slots: Vec<TargetSelectionSlot>,
+    },
+    NoLegalRequiredTarget,
+    NeedsFallbackPush,
+}
+
+fn prepare_trigger_targets(state: &GameState, trigger: &PendingTrigger) -> PreparedTriggerTargets {
+    let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
+        Ok(target_slots) => target_slots,
+        Err(_) => {
+            return if matches!(
+                super::ability_utils::simple_legal_target_assignment_exists_for_ability(
+                    state,
+                    &trigger.ability,
+                    &trigger.target_constraints,
+                ),
+                Some(false)
+            ) {
+                PreparedTriggerTargets::NoLegalRequiredTarget
+            } else {
+                PreparedTriggerTargets::NeedsFallbackPush
+            };
+        }
+    };
+
+    let mut prepared_state = state.clone();
+    let mut prepared_trigger = trigger.clone();
+    if target_slots.is_empty() {
+        if prepared_trigger.distribute.is_some() {
+            prepared_trigger.ability.distribution = Some(Vec::new());
+        }
+        return PreparedTriggerTargets::NoTargets {
+            trigger: prepared_trigger,
+            rng: prepared_state.rng,
+            events: Vec::new(),
+        };
+    }
+
+    // CR 115.1 + CR 701.9b: Random target selection uses the staged RNG;
+    // controller-choice degenerate auto-selection uses the same transaction.
+    let auto_targets = if matches!(
+        prepared_trigger.ability.target_selection_mode,
+        crate::types::ability::TargetSelectionMode::Random
+    ) {
+        super::ability_utils::random_select_targets_for_ability(
+            &mut prepared_state,
+            &target_slots,
+            &prepared_trigger.target_constraints,
+        )
+        .map(Some)
+    } else {
+        super::ability_utils::auto_select_targets_for_ability(
+            &prepared_state,
+            &prepared_trigger.ability,
+            &target_slots,
+            &prepared_trigger.target_constraints,
+        )
+    };
+
+    match auto_targets {
+        Ok(Some(targets)) => {
+            if super::ability_utils::assign_targets_in_chain(
+                &prepared_state,
+                &mut prepared_trigger.ability,
+                &targets,
+            )
+            .is_err()
+            {
+                return PreparedTriggerTargets::NeedsFallbackPush;
+            }
+            let mut events = Vec::new();
+            super::casting::emit_targeting_events(
+                &prepared_state,
+                &super::ability_utils::flatten_targets_in_chain(&prepared_trigger.ability),
+                prepared_trigger.source_id,
+                prepared_trigger.controller,
+                &mut events,
+            );
+            PreparedTriggerTargets::AutoAssigned {
+                trigger: prepared_trigger,
+                rng: prepared_state.rng,
+                events,
+            }
+        }
+        Ok(None) => PreparedTriggerTargets::NeedsPlayerChoice { target_slots },
+        Err(_) => {
+            if super::ability_utils::has_legal_target_assignment_for_ability(
+                &prepared_state,
+                &prepared_trigger.ability,
+                &target_slots,
+                &prepared_trigger.target_constraints,
+            ) {
+                PreparedTriggerTargets::NeedsFallbackPush
+            } else {
+                PreparedTriggerTargets::NoLegalRequiredTarget
+            }
+        }
+    }
+}
+
+fn commit_prepared_trigger_targets(
+    state: &mut GameState,
+    rng: ChaCha20Rng,
+    events: Vec<GameEvent>,
+    events_out: &mut Vec<GameEvent>,
+) {
+    state.rng = rng;
+    events_out.extend(events);
+}
+
 /// CR 603.2 + CR 603.3b + CR 309.4c: Dispatch a synthetic
 /// single trigger (game-rule trigger queued mid-resolution, e.g. dungeon
 /// room ability from `effects::venture::queue_room_trigger`). Delegates
@@ -7079,7 +7251,7 @@ fn dispatch_pending_trigger_context(
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerDispatchDisposition {
     let PendingTriggerContext {
-        pending: mut trigger,
+        pending: trigger,
         trigger_events,
         firing,
         ..
@@ -7218,109 +7390,49 @@ fn dispatch_pending_trigger_context(
         subject_match_count,
     );
 
-    let target_slots = match super::ability_utils::build_target_slots(state, &trigger.ability) {
-        Ok(target_slots) => target_slots,
-        Err(_) => {
-            let no_legal_required_target = matches!(
-                super::ability_utils::simple_legal_target_assignment_exists_for_ability(
-                    state,
-                    &trigger.ability,
-                    &trigger.target_constraints,
-                ),
-                Some(false)
-            );
-            restore_trigger_event_context(state, context_snapshot);
-            return if no_legal_required_target {
-                TriggerDispatchDisposition::DroppedNoLegalRequiredTarget
-            } else {
-                TriggerDispatchDisposition::DroppedTargetUnresolved
-            };
-        }
-    };
-
-    if target_slots.is_empty() {
-        if trigger.distribute.is_some() {
-            trigger.ability.distribution = Some(Vec::new());
-        }
-        // CR 605.1b: Triggered mana abilities don't use the stack — they resolve
-        // immediately at the moment the trigger event occurs. Classify via the
-        // single-authority `is_triggered_mana_ability` (ResolvedAbility form),
-        // which enforces all three CR 605.1b criteria.
-        if super::mana_abilities::is_triggered_mana_ability(
-            &trigger.ability,
-            trigger.trigger_event.as_ref(),
-        ) {
-            super::mana_abilities::resolve_triggered_mana_ability_inline(
-                state,
+    match prepare_trigger_targets(state, &trigger) {
+        PreparedTriggerTargets::NoTargets {
+            trigger,
+            rng,
+            events,
+        } => {
+            // CR 603.3 + CR 605.1b: Once preparation succeeds, commit the
+            // staged RNG, targeting events, and trigger exactly once before
+            // the terminal inline-or-stack branch.
+            commit_prepared_trigger_targets(state, rng, events, events_out);
+            if super::mana_abilities::is_triggered_mana_ability(
                 &trigger.ability,
                 trigger.trigger_event.as_ref(),
+            ) {
+                super::mana_abilities::resolve_triggered_mana_ability_inline(
+                    state,
+                    &trigger.ability,
+                    trigger.trigger_event.as_ref(),
+                    events_out,
+                    None,
+                );
+                restore_trigger_event_context(state, context_snapshot);
+                return TriggerDispatchDisposition::ResolvedInline;
+            }
+            push_pending_trigger_to_stack_with_firing(
+                state,
+                trigger,
+                trigger_events,
                 events_out,
-                None,
+                firing,
             );
             restore_trigger_event_context(state, context_snapshot);
-            return TriggerDispatchDisposition::ResolvedInline;
+            TriggerDispatchDisposition::Pushed
         }
-        push_pending_trigger_to_stack_with_firing(
-            state,
-            trigger,
-            trigger_events,
-            events_out,
-            firing,
-        );
-        restore_trigger_event_context(state, context_snapshot);
-        return TriggerDispatchDisposition::Pushed;
-    }
-
-    // CR 115.1 + CR 701.9b: Random-target triggered abilities short-circuit
-    // to RNG-driven selection. Falls back to controller-choice degenerate
-    // auto-select otherwise.
-    // Prepare automatic target selection as a transaction. Random target
-    // selection advances the engine RNG and target assignment emits events, so
-    // neither may escape if assignment or distribution preparation fails.
-    let mut prepared_state = state.clone();
-    let mut prepared_trigger = trigger.clone();
-    let auto_targets = if matches!(
-        prepared_trigger.ability.target_selection_mode,
-        crate::types::ability::TargetSelectionMode::Random
-    ) {
-        super::ability_utils::random_select_targets_for_ability(
-            &mut prepared_state,
-            &target_slots,
-            &prepared_trigger.target_constraints,
-        )
-        .map(Some)
-    } else {
-        super::ability_utils::auto_select_targets_for_ability(
-            &prepared_state,
-            &prepared_trigger.ability,
-            &target_slots,
-            &prepared_trigger.target_constraints,
-        )
-    };
-
-    match auto_targets {
-        Ok(Some(targets)) => {
-            if super::ability_utils::assign_targets_in_chain(
-                &prepared_state,
-                &mut prepared_trigger.ability,
-                &targets,
-            )
-            .is_err()
-            {
-                restore_trigger_event_context(state, context_snapshot);
-                return TriggerDispatchDisposition::DroppedTargetUnresolved;
-            }
-            let mut prepared_events = Vec::new();
-            super::casting::emit_targeting_events(
-                &prepared_state,
-                &super::ability_utils::flatten_targets_in_chain(&prepared_trigger.ability),
-                prepared_trigger.source_id,
-                prepared_trigger.controller,
-                &mut prepared_events,
-            );
+        PreparedTriggerTargets::AutoAssigned {
+            trigger: mut prepared_trigger,
+            rng,
+            events,
+        } => {
+            commit_prepared_trigger_targets(state, rng, events, events_out);
             if let Some(unit) = prepared_trigger.distribute.clone() {
                 if let Some(total) = super::casting_targets::extract_distribution_total(
-                    &prepared_state,
+                    state,
                     &prepared_trigger.ability,
                     &prepared_trigger.ability.effect,
                 ) {
@@ -7345,8 +7457,6 @@ fn dispatch_pending_trigger_context(
                             // when the division choice completes.
                             let player = prepared_trigger.controller;
                             let pending_for_state = prepared_trigger.clone();
-                            state.rng = prepared_state.rng;
-                            events_out.extend(prepared_events);
                             let entry_id = push_pending_trigger_to_stack_with_firing(
                                 state,
                                 prepared_trigger,
@@ -7371,8 +7481,6 @@ fn dispatch_pending_trigger_context(
                     }
                 }
             }
-            state.rng = prepared_state.rng;
-            events_out.extend(prepared_events);
             push_pending_trigger_to_stack_with_firing(
                 state,
                 prepared_trigger,
@@ -7383,7 +7491,7 @@ fn dispatch_pending_trigger_context(
             restore_trigger_event_context(state, context_snapshot);
             TriggerDispatchDisposition::Pushed
         }
-        Ok(None) => {
+        PreparedTriggerTargets::NeedsPlayerChoice { target_slots } => {
             // CR 601.2c + CR 603.3d: Manual target selection pending. Push the
             // entry to the stack FIRST (ability has empty `targets`), then
             // prompt for target. `engine_stack::finalize_trigger_target_selection`
@@ -7402,22 +7510,16 @@ fn dispatch_pending_trigger_context(
             state.pending_trigger_firing = Some(firing);
             state.pending_trigger_entry = Some(entry_id);
             restore_trigger_event_context(state, context_snapshot);
+            debug_assert!(!target_slots.is_empty());
             TriggerDispatchDisposition::Paused
         }
-        Err(_) => {
-            let has_legal_assignment =
-                super::ability_utils::has_legal_target_assignment_for_ability(
-                    &prepared_state,
-                    &prepared_trigger.ability,
-                    &target_slots,
-                    &prepared_trigger.target_constraints,
-                );
+        PreparedTriggerTargets::NoLegalRequiredTarget => {
             restore_trigger_event_context(state, context_snapshot);
-            if has_legal_assignment {
-                TriggerDispatchDisposition::DroppedTargetUnresolved
-            } else {
-                TriggerDispatchDisposition::DroppedNoLegalRequiredTarget
-            }
+            TriggerDispatchDisposition::DroppedNoLegalRequiredTarget
+        }
+        PreparedTriggerTargets::NeedsFallbackPush => {
+            restore_trigger_event_context(state, context_snapshot);
+            TriggerDispatchDisposition::DroppedTargetUnresolved
         }
     }
 }
@@ -7435,6 +7537,16 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
         return false;
     }
     if !state.resolution_stack.is_empty() {
+        return false;
+    }
+    // CR 608.2c: Several resolution-owned prompts (notably Ripple's
+    // `CastOffer`) do not require a typed resolution-stack frame. They still
+    // suspend the parent object, so its carrier and deferred observers must
+    // remain live until the shared choice dispatcher has completed them.
+    if state.resolving_stack_entry.is_some()
+        && (super::engine_resolution_choices::handles(&state.waiting_for)
+            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }))
+    {
         return false;
     }
     if state.pending_replacement.is_some() {
@@ -7524,7 +7636,13 @@ pub(crate) fn drain_deferred_triggers_after_trigger_construction(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
-    if state.resolving_stack_entry.is_some() {
+    // A resolving-entry carrier preserves terminal ownership across a prompt,
+    // but it does not by itself prove that resolution is still active. A cast
+    // can finish its announcement while an outer carrier remains parked; once
+    // the trigger that paused construction has reached the stack, its cast
+    // observers must use the normal post-announcement boundary even though the
+    // spell is still on the stack (CR 603.3b; issue #2872).
+    if state.active_ability_continuation().is_some() || state.active_spell_resolution().is_some() {
         drain_deferred_trigger_queue(state, events_out)
     } else {
         drain_deferred_triggers_after_stack_object_announcement(state, events_out)
@@ -8055,7 +8173,6 @@ fn delayed_trigger_to_context(
     trigger: DelayedTrigger,
     trigger_event: GameEvent,
 ) -> PendingTriggerContext {
-    let provenance = trigger.provenance;
     PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -8073,7 +8190,7 @@ fn delayed_trigger_to_context(
             subject_match_count: None,
             die_result: None,
         },
-        provenance,
+        trigger.provenance,
     )
 }
 
@@ -8091,7 +8208,7 @@ fn collect_matching_delayed_triggers(
 
     // Separate "abilities to fire" from "indices to remove".
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
-    let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent)> = Vec::new();
+    let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool)> = Vec::new();
     let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
 
     // CR 603.12: A reflexive delayed trigger ("when you [do X] this way, ...",
@@ -8120,7 +8237,7 @@ fn collect_matching_delayed_triggers(
             if delayed.one_shot {
                 to_remove.push((idx, event_index, trigger_event));
             } else {
-                to_fire.push((delayed.clone(), event_index, trigger_event));
+                to_fire.push((delayed.clone(), event_index, trigger_event, false));
             }
         } else if match scope {
             DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
@@ -8152,7 +8269,7 @@ fn collect_matching_delayed_triggers(
             synth.ability.trigger_source.as_ref(),
         ) {
             if scope.accepts(&trigger_event) {
-                to_fire.push((synth, event_index, trigger_event));
+                to_fire.push((synth, event_index, trigger_event, false));
             }
         }
     }
@@ -8176,19 +8293,35 @@ fn collect_matching_delayed_triggers(
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
         if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
-            to_fire.push((trigger, event_index, trigger_event));
+            to_fire.push((trigger, event_index, trigger_event, true));
+        } else {
+            super::lifecycle::record_delayed_terminal(
+                trigger.provenance.firing(),
+                super::lifecycle::DelayedTerminalDisposition::ReflexiveUnmatched,
+            );
         }
     }
 
     let mut consumed_events = Vec::new();
     let mut pending: Vec<PendingTriggerContext> = to_fire
         .into_iter()
-        .map(|(trigger, event_index, trigger_event)| {
+        .map(|(trigger, event_index, trigger_event, removed_one_shot)| {
             consumed_events.push(ConsumedTriggerEventOccurrence {
                 occurrence: trigger_event_occurrence(events, event_index),
                 event: trigger_event.clone(),
             });
-            delayed_trigger_to_context(state, trigger, trigger_event)
+            let origin = trigger.provenance.origin();
+            let binding = super::lifecycle::ImmutableBinding {
+                source_id: trigger.source_id,
+                controller: trigger.controller,
+            };
+            let context = delayed_trigger_to_context(state, trigger, trigger_event);
+            if removed_one_shot {
+                if let Some(origin) = origin {
+                    super::lifecycle::record_delayed_due(origin, binding);
+                }
+            }
+            context
         })
         .collect();
 
@@ -11235,8 +11368,8 @@ pub mod tests {
         TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
-        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken, ObjectId,
-        TrackedSetId,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
+        TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -11247,6 +11380,55 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn abandon_ceased_pending_trigger_recovers_when_its_stack_firing_was_pruned() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vanished trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(1),
+            instance: DelayedTriggerInstanceId(1),
+            source_id: source,
+        };
+        let source_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let vanished_entry = ObjectId(99);
+        state.pending_trigger_entry = Some(vanished_entry);
+        state.pending_trigger_firing = Some(TriggerFiring::ReceiptEligible(origin));
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        abandon_ceased_pending_trigger(&mut state, &source_ability);
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        assert!(state.pending_trigger_firing.is_none());
+        assert!(state.pending_trigger_event_batch.is_empty());
+        assert!(!state.stack_trigger_firings.contains_key(&vanished_entry));
+        assert_eq!(
+            state.pending_trigger_abandons,
+            vec!["Vanished trigger source (stack entry 99)"],
+        );
+        assert!(
+            !facts.receipt_terminalized(origin),
+            "a firing already pruned with its vanished stack entry must not be terminalized twice"
+        );
     }
 
     #[test]
@@ -11281,7 +11463,7 @@ pub mod tests {
             &mut state,
             PendingTriggerContext::delayed(
                 pending,
-                Some(DelayedTriggerProvenance {
+                DelayedInstallIdentity::ReceiptEligible(DelayedTriggerOrigin {
                     token: DelayedTriggerToken(1),
                     instance: DelayedTriggerInstanceId(1),
                     source_id: ObjectId(99),
@@ -11350,7 +11532,10 @@ pub mod tests {
             subject_match_count: None,
             die_result: None,
         };
-        let mut pending = vec![PendingTriggerContext::delayed(pending, None)];
+        let mut pending = vec![PendingTriggerContext::delayed(
+            pending,
+            DelayedInstallIdentity::LegacyDelayed,
+        )];
 
         apply_trigger_doubling(&state, &mut pending);
 
@@ -15388,7 +15573,7 @@ pub mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
         let other_event = zone_changed_event(
@@ -17125,7 +17310,7 @@ pub mod tests {
             controller,
             source_id: source_draw,
             one_shot: true,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         });
         // DT2: "when [a creature] dies, gain 1 life" (GainLife) — distinct effect.
         state.delayed_triggers.push(DelayedTrigger {
@@ -17144,7 +17329,7 @@ pub mod tests {
             controller,
             source_id: source_gain,
             one_shot: true,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
         let death = zone_changed_event(
@@ -17265,7 +17450,7 @@ pub mod tests {
             controller,
             source_id: delayed_source,
             one_shot: true,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         });
 
         let events = vec![GameEvent::PhaseChanged {
@@ -17733,6 +17918,48 @@ pub mod tests {
             safety_bound -= 1;
         }
         assert!(state.stack.is_empty(), "targetless trigger must not hang");
+    }
+
+    #[test]
+    fn zero_slot_distribution_is_staged_without_targeting_events() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+        let trigger_events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        let pending = collect_pending_triggers(&mut state, &trigger_events);
+        let [context] = pending.as_slice() else {
+            panic!("expected exactly one divided ETB trigger");
+        };
+        assert_eq!(
+            context.pending.ability.distribution, None,
+            "the live pending trigger has not yet been prepared"
+        );
+
+        let PreparedTriggerTargets::NoTargets {
+            trigger, events, ..
+        } = prepare_trigger_targets(&state, &context.pending)
+        else {
+            panic!("a divided trigger with no legal targets must prepare without a prompt");
+        };
+        assert_eq!(trigger.ability.distribution, Some(Vec::new()));
+        assert!(
+            events.is_empty(),
+            "an empty distribution does not announce a target"
+        );
+        assert_eq!(
+            context.pending.ability.distribution, None,
+            "preparation must leave the live pending trigger untouched"
+        );
     }
 
     #[test]

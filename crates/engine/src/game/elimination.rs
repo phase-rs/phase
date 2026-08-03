@@ -138,11 +138,29 @@ pub fn eliminate_players_simultaneously(
     if let Some(winner) = game_over_winner {
         // Terminal: drop trigger scaffolding the client would otherwise show as
         // a stuck stack / ordering prompt.
-        state.pending_trigger_order = None;
-        state.deferred_triggers.clear();
+        let mut terminal_firings = state
+            .pending_trigger_order
+            .take()
+            .into_iter()
+            .flat_map(|order| order.groups)
+            .flat_map(|group| group.triggers)
+            .map(|context| context.firing())
+            .collect::<Vec<_>>();
+        terminal_firings.extend(
+            std::mem::take(&mut state.deferred_triggers)
+                .into_iter()
+                .map(|context| context.firing()),
+        );
+        terminal_firings.extend(state.pending_trigger_firing.take());
         state.pending_trigger = None;
-        state.pending_trigger_firing = None;
         state.pending_trigger_entry = None;
+        state.pending_trigger_event_batch.clear();
+        for firing in terminal_firings {
+            crate::game::lifecycle::record_delayed_terminal(
+                firing,
+                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+            );
+        }
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 603.3b: If prune collapsed an ordering pass into
@@ -302,6 +320,8 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         return;
     };
 
+    let mut terminal_firings = Vec::new();
+
     // Drop triggers controlled by eliminated players and auto-resolve
     // eliminated controllers' groups with identity order.
     for group in order.groups.iter_mut() {
@@ -313,9 +333,14 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         // triggers whose own controller is now eliminated (delayed-trigger
         // re-attribution corner case — pre-elimination snapshot may have
         // triggers whose `pending.controller` belongs to a now-dead player).
-        group
-            .triggers
-            .retain(|ctx| living_players.contains(&ctx.pending.controller));
+        let triggers = std::mem::take(&mut group.triggers);
+        for context in triggers {
+            if living_players.contains(&context.pending.controller) {
+                group.triggers.push(context);
+            } else {
+                terminal_firings.push(context.firing());
+            }
+        }
         if group.triggers.len() <= 1 {
             group.ordered = true;
         }
@@ -333,26 +358,45 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         // The waiting_for caller below (`acting_player()` is_alive check) will
         // re-point to a living player's Priority since OrderTriggers no longer
         // matches.
-        return;
+    } else {
+        // Some groups still need a choice — refresh the OrderTriggers prompt so
+        // it points at the next-most-AP unordered group (possibly the same one
+        // if its controller is alive).
+        if let Some(wf) = super::triggers::build_next_order_triggers_prompt_public(state) {
+            state.waiting_for = wf;
+        }
     }
 
-    // Some groups still need a choice — refresh the OrderTriggers prompt so
-    // it points at the next-most-AP unordered group (possibly the same one
-    // if its controller is alive).
-    if let Some(wf) = super::triggers::build_next_order_triggers_prompt_public(state) {
-        state.waiting_for = wf;
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
     }
 }
 
 /// CR 800.4a: Remove deferred triggers controlled by eliminated players.
 fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
-    state.deferred_triggers.retain(|ctx| {
-        state
+    let deferred = std::mem::take(&mut state.deferred_triggers);
+    let mut terminal_firings = Vec::new();
+    for context in deferred {
+        if state
             .players
             .iter()
-            .find(|player| player.id == ctx.pending.controller)
+            .find(|player| player.id == context.pending.controller)
             .is_some_and(|player| !player.is_eliminated)
-    });
+        {
+            state.deferred_triggers.push(context);
+        } else {
+            terminal_firings.push(context.firing());
+        }
+    }
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
 }
 
 /// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
@@ -617,8 +661,12 @@ fn do_eliminate(
         .iter()
         .position(|entry| entry.controller == player)
     {
-        super::stack::remove_stack_entry_at(state, idx)
-            .expect("position yielded a live stack index");
+        super::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            super::lifecycle::DelayedTerminalDisposition::Eliminated,
+        )
+        .expect("position yielded a live stack index");
     }
 
     // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
@@ -761,9 +809,14 @@ fn do_eliminate(
         .pending_trigger_entry
         .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
     {
+        if let Some(firing) = state.pending_trigger_firing.take() {
+            crate::game::lifecycle::record_delayed_terminal(
+                firing,
+                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+            );
+        }
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
-        state.pending_trigger_firing = None;
         state.pending_trigger_event_batch.clear();
     }
 
@@ -1067,7 +1120,10 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    crate::game::stack::clear_resolving_stack_entry(state);
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
     // The prompt and its ability continuation are abandoned, so no realization point will ever be
@@ -1105,7 +1161,10 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    crate::game::stack::clear_resolving_stack_entry(state);
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
     // Same reasoning as `abandon_source_bound_resolution_prompt`: the owning resolution is gone,

@@ -1576,8 +1576,7 @@ mod tests {
         StackPaidSnapshot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
-        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken,
-        TriggerFiring,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -2720,7 +2719,7 @@ mod tests {
             "Delayed source".into(),
             Zone::Battlefield,
         );
-        let provenance = DelayedTriggerProvenance {
+        let provenance = DelayedTriggerOrigin {
             token: DelayedTriggerToken(17),
             instance: DelayedTriggerInstanceId(23),
             source_id: source,
@@ -2743,12 +2742,14 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
-            provenance: Some(provenance),
+            provenance: crate::types::identifiers::DelayedInstallIdentity::ReceiptEligible(
+                provenance,
+            ),
         });
         state
             .stack_trigger_firings
-            .insert(ObjectId(999), TriggerFiring::Delayed(Some(provenance)));
-        state.resolving_trigger_firing = Some(TriggerFiring::Delayed(Some(provenance)));
+            .insert(ObjectId(999), TriggerFiring::ReceiptEligible(provenance));
+        state.resolving_trigger_firing = Some(TriggerFiring::ReceiptEligible(provenance));
         let delayed_pending_context = || {
             PendingTriggerContext::delayed_for_test(
                 PendingTrigger {
@@ -2779,7 +2780,7 @@ mod tests {
             )
         };
         state.pending_trigger = Some(Box::new(delayed_pending_context().pending));
-        state.pending_trigger_firing = Some(TriggerFiring::Delayed(Some(provenance)));
+        state.pending_trigger_firing = Some(TriggerFiring::ReceiptEligible(provenance));
         state.deferred_triggers.push(delayed_pending_context());
         state.pending_trigger_order = Some(crate::types::game_state::PendingTriggerOrder {
             groups: vec![TriggerOrderGroup {
@@ -2793,23 +2794,26 @@ mod tests {
         let persisted = serde_json::to_value(&state).expect("serialize trusted state");
         assert_eq!(persisted["next_delayed_trigger_token"], 18);
         assert_eq!(persisted["next_delayed_trigger_instance"], 24);
-        assert_eq!(persisted["delayed_triggers"][0]["provenance"]["token"], 17);
+        assert_eq!(
+            persisted["delayed_triggers"][0]["provenance"]["ReceiptEligible"]["token"],
+            17
+        );
         assert!(persisted["stack_trigger_firings"].is_object());
         assert_eq!(
-            persisted["resolving_trigger_firing"]["Delayed"]["instance"],
+            persisted["resolving_trigger_firing"]["ReceiptEligible"]["instance"],
             23,
         );
         assert_eq!(
-            persisted["pending_trigger_firing"]["Delayed"]["token"], 17,
+            persisted["pending_trigger_firing"]["ReceiptEligible"]["token"], 17,
             "test precondition: trusted persistence retains active delayed authority"
         );
         assert_eq!(
-            persisted["deferred_triggers"][0]["firing"]["Delayed"]["token"], 17,
+            persisted["deferred_triggers"][0]["firing"]["ReceiptEligible"]["token"], 17,
             "test precondition: trusted persistence retains delayed queue authority"
         );
         assert_eq!(
-            persisted["pending_trigger_order"]["groups"][0]["triggers"][0]["firing"]["Delayed"]
-                ["instance"],
+            persisted["pending_trigger_order"]["groups"][0]["triggers"][0]["firing"]
+                ["ReceiptEligible"]["instance"],
             23,
             "test precondition: trusted ordering queue retains delayed authority"
         );
@@ -2825,8 +2829,14 @@ mod tests {
         .expect("serialize filtered client state");
 
         for client_state in [&client["state"], &filtered_client["state"]] {
-            serde_json::from_value::<GameState>(client_state.clone())
-                .expect("redacted client state must still deserialize");
+            let error = serde_json::from_value::<GameState>(client_state.clone())
+                .expect_err("redacted client state must not restore as trusted authority");
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending trigger has no firing carrier"),
+                "client redaction must fail only because it removes private trigger authority: {error}"
+            );
             for private_field in [
                 "next_delayed_trigger_token",
                 "next_delayed_trigger_instance",

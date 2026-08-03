@@ -20,6 +20,39 @@ use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
+use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+
+/// An engine-authored Ninjutsu-family activation announcement for Priority
+/// preflight. The hand/command source and return creature stay private to the
+/// keyword authority until facade conversion.
+pub(in crate::game) struct PriorityNinjutsuAnnouncement {
+    ninjutsu_object_id: ObjectId,
+    creature_to_return: ObjectId,
+}
+
+impl PriorityNinjutsuAnnouncement {
+    fn new(ninjutsu_object_id: ObjectId, creature_to_return: ObjectId) -> Self {
+        Self {
+            ninjutsu_object_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn ninjutsu_object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.ninjutsu_object_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
+
 /// Check if a game object has a specific keyword, using discriminant-based matching
 /// for simple keywords (ignoring associated data for parameterized variants).
 ///
@@ -1091,6 +1124,36 @@ pub fn ninjutsu_family_activatable_sources(
     hand_sources.chain(command_sources).collect()
 }
 
+/// Enumerates the Priority holder's finite Ninjutsu-family primers through the
+/// existing source, timing, cost, and return-creature authorities.
+pub(in crate::game) fn priority_ninjutsu_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityNinjutsuAnnouncement> {
+    let player = principal.semantic_holder();
+    ninjutsu_family_activatable_sources(state, player)
+        .into_iter()
+        .filter_map(|(ninjutsu_object_id, _, variant, cost)| {
+            (ninjutsu_timing_ok(&state.phase, &variant)
+                && crate::game::casting::can_pay_ability_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    ninjutsu_object_id,
+                    None,
+                    &cost,
+                ))
+            .then_some((ninjutsu_object_id, variant))
+        })
+        .flat_map(|(ninjutsu_object_id, variant)| {
+            returnable_creatures_for_variant(state, player, &variant)
+                .into_iter()
+                .map(move |creature_to_return| {
+                    PriorityNinjutsuAnnouncement::new(ninjutsu_object_id, creature_to_return)
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1987,6 +2050,25 @@ mod tests {
         }
 
         (state, attacker_id, ninja_id)
+    }
+
+    #[test]
+    fn priority_offers_ninjutsu_to_an_active_teams_non_active_member() {
+        let (mut state, _, _) = setup_ninjutsu_scenario();
+        state.format_config = crate::types::format::FormatConfig::two_headed_giant();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("an active-team priority holder has a principal");
+
+        assert_eq!(
+            priority_ninjutsu_announcements(&state, &principal).len(),
+            1,
+            "a teammate of the active player may take ninjutsu during the team's priority"
+        );
     }
 
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose

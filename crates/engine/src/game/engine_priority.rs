@@ -400,7 +400,10 @@ fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
     // resolution. Now its terminal instruction has completed, so clear the
     // resolution-only LKI before the explicit post-announcement drain.
     state.pending_resolution_completion = None;
-    super::stack::clear_resolving_stack_entry(state);
+    super::stack::finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
     state.resolution_source_relatch = None;
     true
 }

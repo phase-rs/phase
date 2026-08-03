@@ -263,6 +263,29 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
+  it("keeps all-target retarget dialogs interactive", () => {
+    // CR 115.7: a single target is selected on the battlefield, but an `All`
+    // retarget uses RetargetChoiceModal. The host must not make that modal's
+    // target cards and Confirm button inherit `pointer-events: none`.
+    setWaitingFor({
+      type: "RetargetChoice",
+      data: {
+        player: 0,
+        stack_entry_index: 0,
+        scope: { type: "All" },
+        current_targets: [{ Object: 71 }],
+        legal_new_targets: [{ Object: 27 }, { Object: 43 }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="retarget-modal" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
     setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(

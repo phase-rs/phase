@@ -1,18 +1,18 @@
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, PersistedGameState};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
 #[derive(Deserialize)]
 struct Saved {
     #[serde(rename = "gameState")]
-    game_state: GameState,
+    game_state: PersistedGameState,
 }
 
 pub fn load_saved_game_state(raw: &str) -> Result<GameState, serde_json::Error> {
     let mut value = serde_json::from_str(raw)?;
     migrate_saved_state(&mut value);
     serde_json::from_value::<Saved>(value).map(|saved| {
-        let mut state = saved.game_state;
+        let mut state = saved.game_state.into_game_state();
         // A deserialized state carries `layers_dirty = Full` and a conservative
         // all-present `static_mode_presence`. `choose_action` takes `&GameState`
         // and cannot flush, so flush here — otherwise every presence-gated scan
