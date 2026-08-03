@@ -2183,6 +2183,9 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::VotedFor { .. }
+        // Per-resolution chain ledger read, like `ZoneChangedThisWay` and the
+        // `TrackedSetSize` quantity refs — not one of the retained legacy refs.
+        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
 }
@@ -6497,6 +6500,21 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         // like `ControllerRef::EnchantedPlayer`) and reads this-combat attack
         // declarations against it ⇒ member-bound (refuse batch-T1).
         PlayerFilter::OpponentAttackingEnchantedPlayer => member_bound_read(),
+        // CR 603.10a + CR 608.2h: reads the per-resolution tracked object set and
+        // its cause stamps — a look-back referent keyed on specific members (and
+        // their LKI) ⇒ member-bound, refuse batch-T1. The inner filter is
+        // additionally evaluated against board set membership for members still
+        // on the battlefield, exactly like `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor {
+            filter,
+            relation: _,
+            possession: _,
+            caused_by: _,
+        } => {
+            let mut p = board_membership_read(filter);
+            p.merge(member_bound_read());
+            p
+        }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer

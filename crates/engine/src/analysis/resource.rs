@@ -2423,10 +2423,12 @@ fn fire_time_conditions_read_growing_class_scoped(
                     // does not imply unreachability.
                     //
                     // Fail closed on ANY `Some(..)`, never on an enumeration of the two
-                    // widening variants. `PlayerFilter` (`types/ability.rs`) has 25
-                    // variants; enumerating would make THIS site assert that the other 23
-                    // leave a foreign ability unreachable — a claim nothing forces anyone
-                    // to re-verify when variant 26 lands. `is_none()` asserts nothing about
+                    // widening variants. `PlayerFilter` (`types/ability.rs`) carries
+                    // dozens of variants and keeps growing; enumerating would make THIS
+                    // site assert that every OTHER variant leaves a foreign ability
+                    // unreachable — a claim nothing forces anyone to re-verify when the
+                    // next variant lands. (Deliberately no count here: a hardcoded
+                    // number goes stale silently.) `is_none()` asserts nothing about
                     // any variant: it keys on CR 602.2's own predicate, whether the object
                     // says otherwise AT ALL. Note `player_may_begin_activating`'s
                     // `Some(_) => player == source_controller` catch-all (`casting.rs`)

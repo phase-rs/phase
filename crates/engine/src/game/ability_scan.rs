@@ -3960,6 +3960,26 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             sibling: false,
             projected: false,
         },
+        // CR 603.3b + CR 608.2c: the membership set is published by a PRECEDING
+        // SIBLING effect in the same chain, and the per-member filter reads live
+        // board state for members still on the battlefield — both are
+        // sibling-mutable. Per ADD-1 a newly-added filter site is classified
+        // `LiveBoardCensus` (fail-closed), matching `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor {
+            filter,
+            relation: _,
+            possession: _,
+            caused_by: _,
+        } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_target_filter(
+            filter,
+            FilterReadContext::LiveBoardCensus,
+            mode,
+        )),
     }
 }
 

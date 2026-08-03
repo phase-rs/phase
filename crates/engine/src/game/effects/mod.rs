@@ -532,6 +532,28 @@ pub(crate) fn matches_player_scope(
                             && candidate_player_scalar_with_state(state, p, controller, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
+                    // CR 608.2c + CR 608.2h + CR 109.4: "each player who
+                    // controlled/owned a <filter> this way" — the candidate must
+                    // satisfy both `relation` and possession of a member of the
+                    // most recent tracked object set. Delegates to the single
+                    // authority shared with `quantity::resolve_player_count`.
+                    PlayerFilter::TrackedSetPossessor {
+                        relation,
+                        possession,
+                        filter,
+                        caused_by,
+                    } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && crate::game::quantity::possessed_tracked_set_member(
+                                state,
+                                p.id,
+                                *possession,
+                                filter,
+                                *caused_by,
+                                controller,
+                                source_id,
+                            )
+                    }
                 }
         })
 }
@@ -4648,21 +4670,26 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => {
-            matches!(
-                qty,
-                QuantityRef::TrackedSetSize
-                    | QuantityRef::FilteredTrackedSetSize { .. }
-                    | QuantityRef::TrackedSetAggregate { .. }
-                    | QuantityRef::DistinctCardTypes {
-                        source: CardTypeSetSource::TrackedSet { .. }
-                    }
-                    | QuantityRef::DistinctSubtypes {
-                        source: CardTypeSetSource::TrackedSet { .. },
-                        ..
-                    }
-            )
-        }
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::TrackedSetAggregate { .. }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+            }
+            | QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+                ..
+            } => true,
+            // CR 608.2c: a player-count whose filter is keyed on the chain's
+            // tracked object set is a CONSUMER of that set — the preceding
+            // producer must publish it, or the count resolves to 0. This is the
+            // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
+            // reference is nested inside the PLAYER filter, not the quantity.
+            // Not every `PlayerCount` qualifies, so it must be asked per filter.
+            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            _ => false,
+        },
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -4676,6 +4703,57 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             quantity_expr_references_tracked_set(left)
                 || quantity_expr_references_tracked_set(right)
         }
+    }
+}
+
+/// CR 608.2c: Does this player filter read the chain's tracked object set?
+///
+/// EXHAUSTIVE BY DESIGN — no `_` arm, and it must stay that way. Its sibling
+/// predicates (`quantity_expr_references_tracked_set`,
+/// `filter_references_tracked_set`) are `matches!`/wildcard allowlists that a
+/// new variant joins silently and WRONGLY: a non-listed consumer compiles
+/// clean, its producer never publishes, and the quantity resolves to 0 instead
+/// of its real value. This one makes the compiler demand an answer. Grouped `|`
+/// arms keep it readable; adding a variant to the `false` group is a decision,
+/// not an accident.
+fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
+    match filter {
+        // Reads `tracked_object_sets` + `tracked_set_member_causes`, which are
+        // published only when `next_sub_needs_tracked_set` reports a consumer.
+        PlayerFilter::TrackedSetPossessor { .. } => true,
+        // Reads `last_zone_changed_ids` — a DIFFERENT ledger, unconditionally
+        // recomputed after every effect and needing no publication gate.
+        PlayerFilter::ZoneChangedThisWay
+        // Reads the CR 701.x `player_actions_this_way` ledger.
+        | PlayerFilter::PerformedActionThisWay { .. }
+        // Plain relations, turn/combat ledgers, event-context anchors, vote
+        // ballots, linked-exile piles and per-candidate board/scalar
+        // comparisons — none consults `tracked_object_sets`.
+        | PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => false,
+        // The negation wrapper inherits its inner filter's consumption: an
+        // "all except <tracked-set possessor>" scope still needs the set.
+        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
     }
 }
 
@@ -11764,6 +11842,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
     }
 }
@@ -12879,6 +12958,65 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 608.2c — issue #6943 (Faerie Slumber Party). The Seasoned Pyromancer
+    /// shape ONE LAYER UP: the tracked-set reference is nested inside the PLAYER
+    /// filter of a `PlayerCount`, not in the quantity itself.
+    ///
+    /// This is the cheapest layer at which the de-registration regression is
+    /// detectable, and its signature here is unique. `PlayerCount` is not
+    /// intrinsically a tracked-set consumer, so the enclosing predicate must ask
+    /// `player_filter_references_tracked_set` per filter. If it does not, the
+    /// producing `BounceAll` never publishes, the set selection returns `None`,
+    /// every player is rejected, and the count silently resolves to 0 — the card
+    /// creates ZERO tokens instead of six, with nothing failing to compile.
+    ///
+    /// Revert discriminator: dropping the `QuantityRef::PlayerCount` arm from
+    /// `quantity_expr_references_tracked_set` (i.e. restoring the `matches!`
+    /// allowlist) makes the first assertion fail.
+    #[test]
+    fn repeat_for_player_count_over_tracked_set_possessors_references_tracked_set() {
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+
+        // Faerie Slumber Party's repeat_for: "for each opponent who controlled a
+        // creature returned this way".
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    caused_by: None,
+                },
+            },
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: PlayerCount over TrackedSetPossessor is a tracked-set CONSUMER — \
+             without this the producer never publishes and the count resolves to 0"
+        );
+
+        // Paired negative: the arm must be FILTER-discriminating, not a blanket
+        // `PlayerCount => true` that would make every existing player-count card
+        // force a spurious tracked-set publication.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        });
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "a plain PlayerCount{{Opponent}} reads no tracked set and must NOT force publication"
         );
     }
 
