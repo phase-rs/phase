@@ -3575,6 +3575,19 @@ impl GameSubmission {
     /// The `Err` is boxed because `ServerMessage` is ~13 KiB (it carries a
     /// `GameState`), matching how this file already passes the type around
     /// (`game_started_msg: Box<ServerMessage>`).
+    /// Stable `kind` label for the diagnostics this handler emits.
+    ///
+    /// Both submission variants share one handler, so an unlabelled event is
+    /// unattributable: an operator triaging an interaction report greps for
+    /// "interaction" and matches nothing. Deriving the label here keeps the two
+    /// call sites from restating the variant set.
+    fn kind(&self) -> &'static str {
+        match self {
+            GameSubmission::Action(_) => "action",
+            GameSubmission::Interaction(_) => "interaction",
+        }
+    }
+
     fn payload_rejection(&self) -> Result<(), Box<ServerMessage>> {
         match self {
             GameSubmission::Action(action) => guard_game_action_payload(action)
@@ -3610,10 +3623,11 @@ async fn handle_full_game_submission(
     // `handle_client_message` need `&mut`. Do not "fix" this to `&mut`.
     identity: &SocketIdentity,
 ) {
+    let kind = submission.kind();
     let game_code = match &identity.game_code {
         Some(c) => c.clone(),
         None => {
-            warn!("Action received but not in a game");
+            warn!(kind, "game submission received but not in a game");
             let msg = ServerMessage::error("Not in a game".to_string());
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
@@ -3690,9 +3704,10 @@ async fn handle_full_game_submission(
                 let lock_ms = lock_start.elapsed().as_millis();
                 info!(
                     game = %game_code,
+                    kind,
                     lock_ms,
                     ai_actions = ai_results.len(),
-                    "action processed (lock held)"
+                    "game submission processed (lock held)"
                 );
 
                 terminal.map(|terminal| {
