@@ -778,7 +778,7 @@ fn from_among_them_cast_retains_the_instant_or_sorcery_gate() {
 }
 
 /// Sibling guard: an *untyped* "cast a spell from among them" clause (Svella,
-/// Aetherworks Marvel, Apex of Power, ... — the 25-card majority of this
+/// Aetherworks Marvel, Apex of Power, ... — the untyped majority of this
 /// anaphor family) must keep its bare `ExiledBySource` binding. A type gate
 /// synthesized where the Oracle text names no type would silently narrow every
 /// one of those cards.
