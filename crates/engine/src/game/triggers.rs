@@ -17752,7 +17752,9 @@ pub mod tests {
             controller,
             source_id: rider_source,
             one_shot: false,
-            provenance: None,
+            // CR 603.7c: a normal (legacy) delayed trigger — no command receipt.
+            // (#6933 canonicalized `provenance` from Option to DelayedInstallIdentity.)
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         });
 
         // One combat-damage step: two creatures deal combat damage to one player.
