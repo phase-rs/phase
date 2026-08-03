@@ -10772,8 +10772,9 @@ mod cycling_synthesis_tests {
     /// not a hand-only wipe plus an orphaned `Unimplemented { "graveyard" }` (the
     /// pre-PR parse), and never the mis-parse that injected `InZone(Battlefield)`
     /// and dropped the noncreature/nonland restriction. The asserted shape:
-    ///   - `RevealHand` targeting the Opponent (the target that "that player"
-    ///     anaphorically binds to, CR 601.2c),
+    ///   - `RevealHand` targeting the Opponent (the parse-chain antecedent that
+    ///     the exile's "that player" anaphor resolves to — template/anaphora
+    ///     resolution, not a numbered rule),
     ///   - a single `ChangeZoneAll` to Exile with `origin: None` (the zone union
     ///     rides on the filter) whose `Typed` filter carries the
     ///     `Non(Creature)`/`Non(Land)` restriction (CR 205.2a), the
@@ -10823,8 +10824,8 @@ mod cycling_synthesis_tests {
 
         let face = build_oracle_face(&mtgjson, None);
 
-        // The reveal establishes the owner binding: the exile is scoped to the
-        // targeted OPPONENT's hand (CR 601.2c target opponent).
+        // The reveal names the target opponent; the exile's "that player" anaphor
+        // resolves to that same antecedent (parser-chain behavior, not a CR rule).
         let reveal = face
             .abilities
             .iter()
