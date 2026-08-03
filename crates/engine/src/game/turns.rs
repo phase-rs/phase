@@ -716,7 +716,7 @@ fn scan_step_end_mana_handlers(
     state: &GameState,
     player_id: PlayerId,
 ) -> Vec<crate::types::game_state::StepEndManaScanEntry> {
-    use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+    use crate::types::ability::{ContinuousModification, TargetFilter};
     use crate::types::game_state::StepEndManaScanEntry;
 
     let context = super::static_abilities::StaticCheckContext {
@@ -763,15 +763,13 @@ fn scan_step_end_mana_handlers(
         if affected_id != player_id {
             continue;
         }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !super::layers::transient_gate_conditions(tce).all(|condition| {
+            super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+        }) {
+            continue;
         }
         for modification in &tce.modifications {
             if let ContinuousModification::AddStaticMode {
