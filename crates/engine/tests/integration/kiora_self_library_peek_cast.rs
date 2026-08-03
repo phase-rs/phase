@@ -40,6 +40,8 @@ const PRIMEVAL_SPAWN: &str = "Vigilance, trample, lifelink\nWhen Primeval Spawn 
 const CAPSTONE: &str = "Exile cards from the top of your library until you exile cards with total mana value 4 or greater. You may cast any number of spells from among them without paying their mana costs.";
 const FOUNDING: &str = "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may cast an instant or sorcery spell with mana value 1 or 2 from your hand without paying its mana cost.\nII — Target player mills four cards.\nIII — Exile target instant or sorcery card from your graveyard. Copy it. You may cast the copy.";
 
+const MEETING_OF_THE_FIVE: &str = "Exile the top ten cards of your library. You may cast spells with exactly three colors from among them this turn. Add {W}{W}{U}{U}{B}{B}{R}{R}{G}{G}. Spend this mana only to cast spells with exactly three colors.";
+
 fn parse(oracle: &str, name: &str, types: &[&str]) -> engine::parser::oracle::ParsedAbilities {
     parse_oracle_text(
         oracle,
@@ -780,12 +782,25 @@ fn from_among_them_cast_retains_the_instant_or_sorcery_gate() {
 /// anaphor family) must keep its bare `ExiledBySource` binding. A type gate
 /// synthesized where the Oracle text names no type would silently narrow every
 /// one of those cards.
+///
+/// The last three rows are the hostile cases, and they are the point of this
+/// test: Oracle text that carries a restrictive qualifier immediately next to
+/// "spell"/"spells" which is NOT a card type. CR 601.3 does restrict those
+/// casts, but along the color and mana-value axes — which this filter does not
+/// model, and which `parse_cast_type_gate` must therefore never mistake for a
+/// card type. Meeting of the Five ("spells with exactly three colors") probes
+/// the color axis; Perception Bobblehead and Kiora ("a spell with mana value
+/// N or less") probe the property axis that rides on
+/// `CastPermissionConstraint` instead.
 #[test]
 fn untyped_from_among_them_cast_stays_a_bare_exile_anaphor() {
     for (name, oracle, types) in [
         ("Svella, Ice Shaper", SVELLA, &["Creature"][..]),
         ("Aetherworks Marvel", AETHERWORKS_MARVEL, &["Artifact"][..]),
         ("Apex of Power", APEX, &["Sorcery"][..]),
+        ("Meeting of the Five", MEETING_OF_THE_FIVE, &["Sorcery"][..]),
+        ("Perception Bobblehead", BOBBLEHEAD, &["Artifact"][..]),
+        ("Kiora, Sovereign of the Deep", KIORA, &["Creature"][..]),
     ] {
         assert_eq!(
             cast_target_of(oracle, name, types),
