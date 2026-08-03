@@ -1,4 +1,5 @@
 use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds};
+use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
@@ -6,6 +7,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility,
     TargetFilter, TargetRef, TypedFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -14,6 +16,61 @@ use crate::types::resolved_commands::{
     ResolvedAttachmentCommand, ResolvedAttachmentReplayInvariantError,
 };
 use crate::types::zones::Zone;
+
+/// An engine-authored Equip announcement for the Priority preflight. The
+/// Equipment identity remains provider-owned until the Priority facade rebuilds
+/// the ordinary reducer primer.
+pub(in crate::game) struct PriorityEquipAnnouncement {
+    equipment_id: ObjectId,
+}
+
+impl PriorityEquipAnnouncement {
+    fn new(equipment_id: ObjectId) -> Self {
+        Self { equipment_id }
+    }
+
+    pub(in crate::game) fn equipment_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.equipment_id
+    }
+}
+
+/// Enumerates the attachment authority's finite Equip primers for the current
+/// Priority holder. The ordinary reducer remains responsible for sorcery-speed
+/// timing and target selection when the announcement is replayed.
+pub(in crate::game) fn priority_equip_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityEquipAnnouncement> {
+    let controller = principal.semantic_holder();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&equipment_id| {
+            state.objects.get(&equipment_id).is_some_and(|equipment| {
+                equipment.controller == controller
+                    && equipment
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Equipment")
+                    && state.battlefield.iter().copied().any(|candidate_id| {
+                        state.objects.get(&candidate_id).is_some_and(|candidate| {
+                            candidate.controller == controller
+                                && candidate
+                                    .card_types
+                                    .core_types
+                                    .contains(&CoreType::Creature)
+                        })
+                    })
+            })
+        })
+        .map(PriorityEquipAnnouncement::new)
+        .collect()
+}
 
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(

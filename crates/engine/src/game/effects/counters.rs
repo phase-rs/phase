@@ -586,8 +586,9 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
+                    provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
                 };
-                crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
+                crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
             }
             state.last_created_token_ids.push(object_id);
             true
@@ -712,14 +713,25 @@ fn apply_pending_counter_post_action(
             remaining_count,
             events,
         ),
-        PendingCounterPostAction::EmitCommittedCopyTokenEntry {
-            object_id,
-            name,
-            source_id,
-        } => {
-            super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
-            );
+        PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id } => {
+            // CR 400.7 + CR 616.1: the ETB-counter ordering choice is answered and `BecomeCopy`
+            // has run (or, on the pre-`BecomeCopy` commit pause, the copy chain was abandoned and
+            // this is as realized as that route gets), so realize the entry inside the drain —
+            // before the rest of this action, whether or not that action settles.
+            //
+            // MEASURED redundancy, stated rather than implied: when the drain's action DOES settle
+            // to `Priority` (the Faithful Watchdog fixture in
+            // `tests/integration/token_zone_change_index.rs`, and every route the current card pool
+            // reaches), `token::realize_settled_token_battlefield_entry` realizes it anyway — from
+            // inside `apply_action` ahead of that action's CR 603.2 scan, and, for handlers that
+            // never reach that pipeline, from `apply_action_boundary_core`, which now runs
+            // `run_post_action_pipeline_from` over the slice it appended. Deleting this call AND the
+            // in-`apply_action` one flips no test. It is kept for a drain that does NOT settle in
+            // its own action, where this is the only in-action realization point, and because the
+            // in-`apply_action` call orders the CR 400.7 row ahead of that action's CR 704.3 SBA
+            // pass (CR 704.5f). `false` means an earlier convergence point already realized it
+            // (structurally idempotent, `Option::take_if`), which is not an error.
+            let _ = super::token::flush_pending_token_battlefield_entry(state, object_id, events);
             if !state.last_created_token_ids.contains(&object_id) {
                 state.last_created_token_ids.push(object_id);
             }

@@ -1719,10 +1719,11 @@ pub(super) fn handle_copy_target_choice(
         else {
             unreachable!("meld resume returned above")
         };
-        let entry_events = state
-            .liminal_entries
-            .get(&source_id)
-            .map(|entry| (entry.name.clone(), entry.source_id));
+        // The entry's `name` / `source_id` now ride the parked
+        // `GameState::pending_token_battlefield_entry` that the `Suppress` commit installs, so
+        // only the liminal entry's PRESENCE matters here: it is what says this commit will park
+        // an entry that later needs realizing.
+        let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
@@ -1774,11 +1775,36 @@ pub(super) fn handle_copy_target_choice(
                 }));
             }
         }
-        if !super::effects::token::commit_liminal_token_entry_with_event_emission(
+        // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
+        // PAUSE on a CR 616.1 ordering choice between two AddCounter replacements. On that pause
+        // the only stashed post-action is the entry finalization, and its `Suppress` emission mode
+        // PARKS the whole entry (record + events) on `GameState` instead of realizing it. Hand the
+        // realization down as a post-finalize action so the paused path performs the same CR 400.7
+        // record and CR 603.6a emit the unpaused one performs below.
+        //
+        // Realizing it INSIDE the counter drain (rather than leaving it to the action-boundary
+        // convergence) keeps the emitted pair ahead of this action's `run_post_action_pipeline`
+        // trigger scan AND ahead of its CR 704.3 SBA pass. The boundary now converges the trigger
+        // half for handlers that never reach that pipeline, so this hand-down is retained for the
+        // SBA ordering and for a drain that does not settle in its own action.
+        //
+        // On a pause this function returns at the `commit_liminal_token_entry_*` call below, so
+        // the unpaused tail's CR 614.12a `BecomeCopy` chain, `finish_copy_target_choice_entry`,
+        // and the copy continuation do not run on that route. THAT abandonment — of the copy
+        // chain and continuation, not of the entry lifecycle — is pre-existing and is not what
+        // this hand-down addresses. Dropped unused when the commit does not pause.
+        let paused_entry_emit: Vec<PendingCounterPostAction> = has_liminal_entry
+            .then_some(PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+                object_id: source_id,
+            })
+            .into_iter()
+            .collect();
+        if !super::effects::token::commit_liminal_token_entry_with_post_actions(
             state,
             resume_event,
             events,
             TokenEntryEventEmission::Suppress,
+            paused_entry_emit,
         ) {
             return Ok(state.waiting_for.clone());
         }
@@ -1788,12 +1814,10 @@ pub(super) fn handle_copy_target_choice(
         // exceptions (CR 707.9b).
         let _ = effects::resolve_ability_chain(state, &ability, events, 0);
         let mut counter_pause_post_actions = Vec::new();
-        if let Some((name, event_source_id)) = entry_events.clone() {
+        if has_liminal_entry {
             counter_pause_post_actions.push(
                 PendingCounterPostAction::EmitCommittedCopyTokenEntry {
                     object_id: source_id,
-                    name,
-                    source_id: event_source_id,
                 },
             );
         }
@@ -1816,15 +1840,6 @@ pub(super) fn handle_copy_target_choice(
             true,
         )? {
             return Ok(waiting_for);
-        }
-        if let Some((name, event_source_id)) = entry_events {
-            super::effects::token::push_committed_token_entry_events(
-                state,
-                source_id,
-                name,
-                event_source_id,
-                events,
-            );
         }
         if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation
@@ -1890,14 +1905,33 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    // CR 608.3c + CR 614.12a: a permanent spell that paused on its
+    // enter-as-copy choice keeps its spell-resolution frame until this answer
+    // has applied the copy. Complete the spell-specific epilogue before entry
+    // events replay, so those triggers see the same cast provenance as an
+    // unpaused permanent resolution. The post-replacement dispatch that
+    // surfaced this choice is its direct child, so retire that exact dispatch
+    // first; only then does the spell-resolution frame own the stack top.
+    state.finish_active_paused_post_replacement_dispatch();
+    if state
+        .active_spell_resolution()
+        .is_some_and(|ctx| ctx.object_id == source_id)
+    {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("matching spell-resolution frame was checked above");
+        apply_pending_spell_resolution(state, &ctx, events);
+    }
     if let Some(waiting_for) =
         finish_copy_target_choice_entry(state, source_id, events, Vec::new(), true)?
     {
         return Ok(waiting_for);
     }
-    Ok(WaitingFor::Priority {
+    state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
-    })
+    };
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 fn finish_copy_target_choice_entry(
@@ -1942,6 +1976,12 @@ fn finish_copy_target_choice_entry(
             return Ok(Some(waiting_for));
         }
     }
+    // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
+    // choice is answered — the first instant the token IS the thing that entered. Placed before
+    // the replay/batch-drain/aura blocks so their pause returns cannot strand a parked entry.
+    // `false` here means an earlier convergence point already realized it (structurally
+    // idempotent, `Option::take_if`), which is not an error.
+    let _ = super::effects::token::flush_pending_token_battlefield_entry(state, source_id, events);
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
@@ -1964,6 +2004,15 @@ fn finish_copy_target_choice_entry(
                 source_id,
                 &events[delivery_start..],
             );
+            // CR 603.3b + CR 608.2c: the entry has completed before its ETB
+            // trigger's target-selection prompt is exposed. Retire the parent
+            // carrier now; otherwise the selected trigger would later try to
+            // resolve while this completed spell or ability still owns it.
+            // The paused post-replacement drain is part of that parent
+            // completion. Retire its exact top dispatch before asking the
+            // carrier predicate whether the source resolution can settle.
+            state.finish_active_paused_post_replacement_dispatch();
+            super::engine::settle_resolving_stack_entry_before_trigger_selection(state);
             return Ok(Some(waiting_for));
         }
         state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
@@ -2583,7 +2632,7 @@ pub(crate) fn apply_pending_spell_resolution(
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
         });
         if has_warp {
-            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller);
+            super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller, events);
         }
     }
 

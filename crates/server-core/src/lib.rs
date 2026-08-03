@@ -12,6 +12,7 @@ pub mod game_reconnect_guard;
 pub mod game_state_snapshot_wire_guard;
 #[cfg(test)]
 mod harness;
+pub mod interaction_payload_guard;
 pub mod legacy_deck_guard;
 pub mod legacy_join_guard;
 pub mod lobby;
@@ -29,7 +30,7 @@ pub mod takeback;
 pub use ai_seats_wire_guard::guard_create_ai_seats;
 pub use client_hello_guard::guard_client_hello;
 pub use client_message_wire_guard::{
-    guard_broker_projection_inbound, guard_client_message_before_dispatch,
+    guard_broker_projection_inbound, guard_client_message_before_dispatch, wire_rejection_message,
 };
 pub use deck_resolve::resolve_deck;
 pub use draft_action_payload_guard::guard_draft_action_payload;

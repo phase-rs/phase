@@ -7,6 +7,7 @@ use crate::parser::oracle_ir::doc::{
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, CountScope, CounterAdjustment, DoorLockOp,
+    SpellStackToGraveyardReplacement,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 
@@ -535,6 +536,46 @@ fn spelunking_etb_put_cave_gains_life_conditionally() {
     );
 }
 
+/// CR 614.1c: the fully spelled external-entry untapped form must travel
+/// through document classification into a battlefield-entry replacement. This
+/// is intentionally a `parse_oracle_text` test rather than a direct suffix
+/// helper test: reverting the classifier route leaves Vigorous Farming as an
+/// unimplemented line and no replacement reaches the runtime card definition.
+#[test]
+fn vigorous_farming_long_untapped_entry_reaches_replacement_pipeline() {
+    let parsed = parse_oracle_text(
+        "Lands you control enter the battlefield untapped.",
+        "Vigorous Farming",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.abilities.is_empty(),
+        "the replacement line must not fall through as a spell ability: {:#?}",
+        parsed.abilities
+    );
+    let replacement = parsed
+        .replacements
+        .first()
+        .expect("long-form untapped entry must produce a replacement definition");
+    assert!(
+        matches!(
+            replacement
+                .execute
+                .as_deref()
+                .map(|definition| definition.effect.as_ref()),
+            Some(Effect::SetTapState {
+                state: TapStateChange::Untap,
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+            })
+        ),
+        "the replacement must install the normal entry-untap payload: {replacement:#?}"
+    );
+}
+
 /// CR 207.2c + CR 602.1: an activated ability may carry an italic ability-word
 /// label before its cost ("Mental Organism — Pay 3 life: ~ connives" —
 /// M.O.D.O.K.). The ability word has no rules meaning, so `find_activated_colon`
@@ -597,19 +638,23 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
     );
 }
 
-fn has_not_your_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
+/// CR 102.3 + CR 805.4a: the opponent-turn gate is the team-aware
+/// `IsOpponentsTurn` leaf, NOT `Not(IsYourTurn)` — the latter also admits a
+/// turn where a teammate holds `active_player`, which under shared team turns
+/// is the activator's own team's turn.
+fn has_opponents_turn_activation_restriction(restrictions: &[ActivationRestriction]) -> bool {
     restrictions.iter().any(|restriction| {
         matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not { condition })
-            } if matches!(condition.as_ref(), ParsedCondition::IsYourTurn)
+                condition: Some(ParsedCondition::IsOpponentsTurn)
+            }
         )
     })
 }
 
 #[test]
-fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
+fn activated_ability_opponent_turn_restriction_uses_team_aware_condition() {
     let r = parse(
         "{T}: Add {C}{C}. Activate only during an opponent's turn.",
         "Lavinia, Foil to Conspiracy",
@@ -621,10 +666,100 @@ fn activated_ability_opponent_turn_restriction_uses_not_your_turn_condition() {
     assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
     let restrictions = &r.abilities[0].activation_restrictions;
     assert!(
-        has_not_your_turn_activation_restriction(restrictions),
-        "expected Not(IsYourTurn) activation restriction, got {:?}",
+        has_opponents_turn_activation_restriction(restrictions),
+        "expected team-aware IsOpponentsTurn activation restriction, got {:?}",
         restrictions
     );
+}
+
+/// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
+/// (Trade Caravan) composes the team-aware opponent-turn scope
+/// (`IsOpponentsTurn`) with the upkeep-step predicate (`IsDuringUpkeep`) in a
+/// single `RequiresCondition`, reusing the same composition idiom as the bare
+/// opponent-turn gate above rather than a dedicated `DuringOpponents*`
+/// restriction sibling. Before the fix the tail dropped to
+/// `Effect::Unimplemented` and the ability was activatable at any time.
+#[test]
+fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
+    let r = parse(
+        "Remove two currency counters from ~: Untap target basic land. \
+         Activate only during an opponent's upkeep.",
+        "Trade Caravan",
+        &[],
+        &["Creature"],
+        &["Human", "Nomad"],
+    );
+
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert!(
+        !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+            && ability
+                .sub_ability
+                .as_ref()
+                .is_none_or(|sub| !matches!(sub.effect.as_ref(), Effect::Unimplemented { .. })),
+        "expected no unimplemented fallback, got {:#?}",
+        ability
+    );
+
+    let expected = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                ParsedCondition::IsOpponentsTurn,
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
+    };
+    assert!(
+        ability.activation_restrictions.contains(&expected),
+        "expected composed opponent's-upkeep restriction, got {:?}",
+        ability.activation_restrictions
+    );
+}
+
+/// CR 602.5b: the `during <role> <window>` activation gate is composed from a
+/// turn-role axis and a turn-window axis, so every role×window pairing resolves
+/// without a whole-clause tag per phrase. Both opponent possessive spellings and
+/// the "their" possessive of the own-turn role are covered on each axis.
+#[test]
+fn activation_during_gate_composes_turn_role_and_window_axes() {
+    let opponents_turn = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::IsOpponentsTurn),
+    };
+    let opponents_upkeep = ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                ParsedCondition::IsOpponentsTurn,
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
+    };
+
+    for (phrase, expected) in [
+        ("during your turn", ActivationRestriction::DuringYourTurn),
+        ("during their turn", ActivationRestriction::DuringYourTurn),
+        (
+            "during your upkeep",
+            ActivationRestriction::DuringYourUpkeep,
+        ),
+        (
+            "during their upkeep",
+            ActivationRestriction::DuringYourUpkeep,
+        ),
+        ("during an opponent's turn", opponents_turn.clone()),
+        ("during an opponents turn", opponents_turn.clone()),
+        ("during an opponent's upkeep", opponents_upkeep.clone()),
+        ("during an opponents upkeep", opponents_upkeep.clone()),
+    ] {
+        let line = format!("{{T}}: Add {{C}}. Activate only {phrase}.");
+        let r = parse(&line, "Axis Probe", &[], &["Creature"], &["Human"]);
+        assert_eq!(r.abilities.len(), 1, "{phrase}: got {:#?}", r.abilities);
+        assert!(
+            r.abilities[0].activation_restrictions.contains(&expected),
+            "{phrase}: expected {expected:?}, got {:?}",
+            r.abilities[0].activation_restrictions
+        );
+    }
 }
 
 /// CR 508.1: a STANDALONE combat-window activation gate — "Activate only before
@@ -3294,11 +3429,14 @@ fn free_cast_window_clause_chains_rider_and_self_exile() {
             max_total_mv,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
         } => {
             assert_eq!(*count, 2);
             assert_eq!(*max_total_mv, Some(6));
-            assert!(*exile_instead_of_graveyard);
+            assert_eq!(
+                graveyard_replacement.as_ref(),
+                Some(&SpellStackToGraveyardReplacement::Exile)
+            );
             assert_eq!(zones, &vec![Zone::Graveyard, Zone::Hand]);
             assert_eq!(
                 *filter,
@@ -3352,7 +3490,7 @@ fn free_cast_window_parses_single_zone_non_invoke_variant() {
         max_total_mv,
         filter,
         zones,
-        exile_instead_of_graveyard,
+        graveyard_replacement,
     } = &*result.abilities[0].effect
     else {
         panic!(
@@ -3368,7 +3506,7 @@ fn free_cast_window_parses_single_zone_non_invoke_variant() {
         TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))
     );
     assert_eq!(zones, &vec![Zone::Graveyard]);
-    assert!(!*exile_instead_of_graveyard);
+    assert!(graveyard_replacement.is_none());
 }
 
 /// Issue #2385 MED — `Effect::FreeCastFromZones` is a *free* cast. A
@@ -8149,6 +8287,159 @@ fn forest_reminder_text_only() {
     assert_eq!(r.abilities.len(), 0);
 }
 
+/// CR 106.4 + CR 106.6 + CR 115.1 + CR 701.28: Jetfire, Ingenious Scientist
+/// front-face activated ability composes end-to-end: a chosen-X counter-removal
+/// cost from among artifacts you control, a mana clause that adds that-much {C}
+/// to a TARGET player (the new "target player adds" recipient arm), the negative
+/// spend restriction folded onto the produced mana, and a trailing "Convert
+/// Jetfire" self-transform as the chained sub-ability.
+#[test]
+fn jetfire_front_face_activated_ability() {
+    use crate::types::ability::{
+        AbilityCost, Effect, ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
+        TargetFilter, REMOVE_COUNTER_COST_X,
+    };
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::mana::AbilityActivationScope;
+
+    let r = parse(
+        "Remove one or more +1/+1 counters from among artifacts you control: \
+         Target player adds that much {C}. This mana can't be spent to cast \
+         nonartifact spells. Convert Jetfire.",
+        "Jetfire, Ingenious Scientist",
+        &[],
+        &["Artifact", "Creature"],
+        &["Robot"],
+    );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Cost: remove the chosen-X count of +1/+1 counters from among a group.
+    match ability
+        .cost
+        .as_ref()
+        .expect("activated ability must have a cost")
+    {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *count, REMOVE_COUNTER_COST_X,
+                "'one or more' → chosen-X sentinel"
+            );
+            assert_eq!(*counter_type, CounterMatch::OfType(CounterType::Plus1Plus1));
+            assert!(
+                target.is_some(),
+                "counters come from among artifacts you control (a group filter)"
+            );
+        }
+        other => panic!("expected RemoveCounter cost, got {other:?}"),
+    }
+
+    // Head effect: add "that much" {C} to a TARGET player, with the negative
+    // spend restriction folded in from the following sentence.
+    let Effect::Mana {
+        produced,
+        target,
+        restrictions,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("head effect must be Effect::Mana, got {:?}", ability.effect);
+    };
+    assert!(
+        matches!(
+            produced,
+            ManaProduction::Colorless {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            }
+        ),
+        "must add 'that much' ({{C}} = counters removed), got {produced:?}"
+    );
+    assert_eq!(
+        *target,
+        Some(crate::types::ability::ManaTargetRole::Recipient {
+            recipient: TargetFilter::Player
+        }),
+        "recipient must be the chosen TARGET player role, not a count source"
+    );
+    assert_eq!(
+        restrictions,
+        &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            spell_type: "Artifact".to_string(),
+            ability: AbilityActivationScope::Any,
+        }],
+        "the following sentence must fold in the 'nonartifact' spend restriction"
+    );
+
+    // Sub-ability: "Convert Jetfire" → self-transform.
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("'Convert Jetfire' must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::Transform {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "sub-ability must be a self-transform, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 701.28 + CR 701.46a: Jetfire, Air Guardian back-face activated ability
+/// "{U}{U}{U}: Convert Jetfire, then adapt 3." composes a self-transform head
+/// with a chained `adapt 3` sub-ability (ordered).
+#[test]
+fn jetfire_back_face_convert_then_adapt() {
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+
+    let r = parse(
+        "{U}{U}{U}: Convert Jetfire, then adapt 3.",
+        "Jetfire, Air Guardian",
+        &[],
+        &["Artifact"],
+        &["Vehicle"],
+    );
+    assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Transform {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "head effect must be a self-transform, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_ref()
+        .expect("'then adapt 3' must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::Adapt {
+                count: QuantityExpr::Fixed { value: 3 }
+            }
+        ),
+        "sub-ability must be adapt 3, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 106.6 + CR 603.3: Lapis Orb of Dragonkind — the trailing "When you
 /// spend this mana to cast a Dragon creature spell, scry 2" clause folds into
 /// the mana effect's `grants` as a `TriggerOnSpend`, consuming the sub-ability
@@ -8676,8 +8967,8 @@ fn any_player_may_activate_but_only_records_timing_restriction() {
     assert_eq!(activation.activator_filter, Some(PlayerFilter::All));
     let restrictions = &activation.activation_restrictions;
     assert!(
-        has_not_your_turn_activation_restriction(restrictions),
-        "expected Not(IsYourTurn), got {:?}",
+        has_opponents_turn_activation_restriction(restrictions),
+        "expected IsOpponentsTurn, got {:?}",
         restrictions
     );
 
@@ -8753,8 +9044,8 @@ fn opponents_may_activate_but_only_records_timing_restriction() {
     );
     assert_eq!(opponent_turn.activator_filter, Some(PlayerFilter::Opponent));
     assert!(
-        has_not_your_turn_activation_restriction(&opponent_turn.activation_restrictions),
-        "expected Not(IsYourTurn), got {:?}",
+        has_opponents_turn_activation_restriction(&opponent_turn.activation_restrictions),
+        "expected IsOpponentsTurn, got {:?}",
         opponent_turn.activation_restrictions
     );
 }
@@ -10441,13 +10732,20 @@ fn spell_temporal_whenever_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::SpellCast);
     assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     assert!(trigger.valid_card.is_some());
+    // CR 514.2: "this turn" ends the WheneverEvent at the creating turn's cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
     assert!(r.parse_warnings.is_empty());
 }
 
@@ -10854,12 +11152,19 @@ fn spell_temporal_phase_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::Phase);
     assert_eq!(trigger.phase, Some(Phase::BeginCombat));
+    // CR 514.2: "this turn" ends the phase-based WheneverEvent at cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
 }
 
 #[test]
@@ -10879,13 +11184,20 @@ fn spell_temporal_enters_line_builds_delayed_trigger() {
     else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::ChangesZone);
     assert_eq!(trigger.destination, Some(Zone::Battlefield));
     assert!(trigger.valid_card.is_some());
+    // CR 514.2: "this turn" ends the zone-change WheneverEvent at cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
     assert!(effect.optional);
     assert!(r.parse_warnings.is_empty());
 }
@@ -23030,6 +23342,299 @@ fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
     ));
     assert_eq!(transform.condition, expected_ability_condition);
     assert!(transform.sub_ability.is_none());
+}
+
+/// Issue #6507 SHAPE: Gemstone Mine's sacrifice rider — "If there are no
+/// mining counters on this land, sacrifice it." — must bind the bare "it" to
+/// `SelfRef` (CR 608.2k: the rider's condition names the source, so the
+/// pronoun anaphors to the source permanent). Pre-fix the sub-ability carried
+/// `ParentTarget`, which a mana ability can never resolve (CR 605.1a — a mana
+/// ability requires no target), so the rider silently no-oped at runtime.
+#[test]
+fn depletion_land_rider_sacrifice_binds_self_ref() {
+    let text = "This land enters with three mining counters on it.\n{T}, Remove a mining \
+                counter from this land: Add one mana of any color. If there are no mining \
+                counters on this land, sacrifice it.";
+    let parsed = parse(text, "Gemstone Mine", &[], &["Land"], &[]);
+
+    // Reach-guards: the parse succeeded with zero swallowed clauses and zero
+    // Unimplemented markers, so the shape assertions below are not vacuous.
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero parse warnings, got {:#?}",
+        parsed.parse_warnings
+    );
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(has_unimpl)
+    }
+    assert!(
+        !parsed.abilities.iter().any(has_unimpl),
+        "no Unimplemented anywhere in the parse: {:#?}",
+        parsed.abilities
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+
+    let mana = &parsed.abilities[0];
+    assert!(
+        matches!(mana.effect.as_ref(), Effect::Mana { .. }),
+        "head effect must be the mana production, got {:?}",
+        mana.effect
+    );
+
+    let rider = mana.sub_ability.as_deref().expect("sacrifice sub-ability");
+    // CR 122.1: the gate reads the mining-counter total on the source.
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(crate::types::counter::parse_counter_type("mining")),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+    // CR 608.2k: "sacrifice it" = sacrifice the source land itself.
+    assert!(
+        matches!(
+            rider.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "the rider must sacrifice SelfRef, got {:?}",
+        rider.effect
+    );
+}
+
+/// Issue #6507 SHAPE (typed-subject trigger sibling): Last Light of Durin's
+/// Day's rider — "If it has six or more quest counters on it, sacrifice it."
+/// — must bind to `SelfRef`, not `TriggeringSource` (pre-fix the anaphor
+/// rewriter bound the gated sacrifice to the triggering Mountain). The head
+/// clause's explicit "on this enchantment" binding must be untouched (guards
+/// against over-rewrite).
+#[test]
+fn typed_trigger_source_counter_rider_binds_self_ref_not_triggering_source() {
+    let text = "Whenever a Mountain you control enters, put a quest counter on this \
+                enchantment. If it has six or more quest counters on it, sacrifice it. If you \
+                do, search your hand and/or library for a Dragon card and put it onto the \
+                battlefield. If you search your library this way, shuffle.";
+    let parsed = parse(
+        text,
+        "Last Light of Durin's Day",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    // Reach-guards: full trigger parse, zero warnings, zero Unimplemented.
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero parse warnings, got {:#?}",
+        parsed.parse_warnings
+    );
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(has_unimpl)
+    }
+    assert_eq!(parsed.triggers.len(), 1);
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must carry an execute chain");
+    assert!(
+        !has_unimpl(execute),
+        "no Unimplemented anywhere in the trigger chain: {execute:#?}"
+    );
+
+    // Head clause: the explicit "on this enchantment" subject stays SelfRef.
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the head counter placement must stay on the source, got {:?}",
+        execute.effect
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_deref()
+        .expect("sacrifice sub-ability");
+    // CR 122.1: source-scoped quest-counter threshold gate.
+    assert_eq!(
+        rider.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(crate::types::counter::parse_counter_type("quest")),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        })
+    );
+    // CR 608.2k: the gated "sacrifice it" anaphors to the source enchantment,
+    // NOT the triggering Mountain.
+    assert!(
+        matches!(
+            rider.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "the rider must sacrifice SelfRef (the source), got {:?}",
+        rider.effect
+    );
+}
+
+/// Issue #6559 review regression guard: the source-counter arm must NOT fire
+/// when an EARLIER clause already chose a typed target. Revelation of Power
+/// (Instant): "Target creature gets +2/+2 until end of turn. If it has a counter
+/// on it, it also gains flying and lifelink until end of turn." Both bare "it"
+/// pronouns anaphor to the TARGET creature, but the intervening-if condition
+/// must be recipient-scoped instead of source-scoped. Binding the gated grant
+/// to the source (SelfRef) would drop flying/lifelink onto the one-shot Instant
+/// — the card would lose its second sentence (an `engine_regress`).
+/// `chain_has_prior_typed_referent` sees the prior "Target creature gets +2/+2"
+/// clause and suppresses the source binding, so the grant stays on the parent
+/// (target) creature. CR 608.2k only licenses a source anaphor when the ability's
+/// COST or TRIGGER CONDITION names the source — never a mid-effect intervening-if
+/// over a previously chosen target. The depletion-land / counter riders have no
+/// prior typed target, so their SelfRef heals are unaffected (see the two tests
+/// above).
+#[test]
+fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
+    let text = "Target creature gets +2/+2 until end of turn. If it has a counter on it, \
+                it also gains flying and lifelink until end of turn.";
+    let parsed = parse(text, "Revelation of Power", &[], &["Instant"], &[]);
+
+    // Reach-guards: the parse succeeded with zero warnings and zero Unimplemented,
+    // so the shape assertions below are not vacuous.
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero parse warnings, got {:#?}",
+        parsed.parse_warnings
+    );
+    fn has_unimpl(def: &AbilityDefinition) -> bool {
+        matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+            || def.sub_ability.as_deref().is_some_and(has_unimpl)
+    }
+    assert!(
+        !parsed.abilities.iter().any(has_unimpl),
+        "no Unimplemented anywhere in the parse: {:#?}",
+        parsed.abilities
+    );
+
+    // The flying/lifelink grant is the sub-ability of the +2/+2 pump.
+    let pump = &parsed.abilities[0];
+    assert!(
+        matches!(pump.effect.as_ref(), Effect::Pump { .. }),
+        "head effect is the +2/+2 pump, got {:?}",
+        pump.effect
+    );
+    let grant = pump
+        .sub_ability
+        .as_deref()
+        .expect("flying/lifelink grant sub-ability");
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = grant.effect.as_ref()
+    else {
+        panic!(
+            "grant must be a continuous GenericEffect, got {:?}",
+            grant.effect
+        );
+    };
+    // CR 608.2k: "it" = the prior chosen target creature (ParentTarget), never
+    // the source Instant (SelfRef).
+    assert_eq!(
+        *target,
+        Some(TargetFilter::ParentTarget),
+        "the grant's target must be the parent (target) creature, not the source Instant"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(
+        static_abilities[0].affected,
+        Some(TargetFilter::ParentTarget),
+        "the flying/lifelink continuous grant must affect the target creature (ParentTarget), \
+         not the source Instant (SelfRef) — the #6559 regression this guard prevents"
+    );
+    assert!(
+        matches!(
+            &static_abilities[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Recipient,
+                        ..
+                    },
+                },
+                ..
+            })
+        ),
+        "the bare counter-condition pronoun must gate the recipient, got {:?}",
+        static_abilities[0].condition
+    );
+}
+
+/// CR 122.1 + CR 608.2c: A prior typed target does not rewrite an explicit
+/// source subject. This sibling keeps source-counter cards such as Gemstone
+/// Mine and Last Light of Durin's Day on their established Source scope.
+#[test]
+fn explicit_source_counter_gate_over_prior_target_stays_source_scoped() {
+    let parsed = parse(
+        "Target creature gets +2/+2 until end of turn. If this creature has a counter on it, \
+         it also gains flying until end of turn.",
+        "Explicit Source Counter Guard",
+        &[],
+        &["Creature"],
+        &[],
+    );
+
+    let rider = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("conditional flying rider");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!(
+            "explicit source-counter rider must be a GenericEffect, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert!(
+        matches!(
+            &static_abilities[0].condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        ..
+                    },
+                },
+                ..
+            })
+        ),
+        "explicit source text must retain CountersOn(Source), got {:?}",
+        static_abilities[0].condition
+    );
 }
 
 /// CR 104.2b + CR 104.3e + CR 114.1 + CR 611.3a + CR 205.3j: Gideon of the

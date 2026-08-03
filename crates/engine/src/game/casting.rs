@@ -47,7 +47,7 @@ use super::ability_utils::{
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
@@ -61,6 +61,222 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
+
+/// An engine-authored Foretell announcement for the Priority preflight. The
+/// hand object and card identity remain private to Casting until the Priority
+/// facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityForetellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+/// An engine-authored normal-spell announcement for the Priority preflight.
+/// The zone-aware casting authority captures the object and printed card
+/// identity; target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastSpellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+/// An engine-authored land-play announcement for the Priority preflight. The
+/// zone-specific land permissions remain owned by Casting until the Priority
+/// facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityPlayLandAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+/// An engine-authored once-per-turn free-cast announcement for the Priority
+/// preflight. The production permission authority retains the source provenance
+/// while target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastFreeAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+    source_id: ObjectId,
+}
+
+/// An engine-authored activated-ability announcement for Priority preflight.
+/// The source identity and resolved ability index remain private to Casting
+/// until the facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityActivateAbilityAnnouncement {
+    source_id: ObjectId,
+    ability_index: usize,
+}
+
+/// An engine-authored Sneak cast announcement for Priority preflight. The hand
+/// card and unblocked attacker remain private to Casting until facade conversion.
+pub(in crate::game) struct PrioritySneakAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+}
+
+/// An engine-authored Web Slinging cast announcement for Priority preflight.
+/// The hand card and tapped creature remain private to Casting until facade
+/// conversion reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityWebSlingingAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+}
+
+impl PriorityWebSlingingAnnouncement {
+    fn new(hand_object: ObjectId, card_id: CardId, creature_to_return: ObjectId) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
+
+impl PrioritySneakAnnouncement {
+    fn new(hand_object: ObjectId, card_id: CardId, creature_to_return: ObjectId) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+}
+
+impl PriorityActivateAbilityAnnouncement {
+    fn new(source_id: ObjectId, ability_index: usize) -> Self {
+        Self {
+            source_id,
+            ability_index,
+        }
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+
+    pub(in crate::game) fn ability_index(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> usize {
+        self.ability_index
+    }
+}
+
+impl PriorityCastFreeAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId, source_id: ObjectId) -> Self {
+        Self {
+            object_id,
+            card_id,
+            source_id,
+        }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+}
+
+impl PriorityPlayLandAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+impl PriorityCastSpellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+impl PriorityForetellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
 
 fn runtime_granted_cycling_abilities(
     state: &GameState,
@@ -801,6 +1017,17 @@ pub(crate) fn is_blocked_by_cant_play_lands(
     })
 }
 
+/// CR 305.1 + CR 116.2a: Per-object land-play restrictions apply regardless
+/// of the zone from which a permission lets the player play the land.
+pub(crate) fn land_play_is_permitted_by_restrictions(
+    state: &GameState,
+    player: PlayerId,
+    land_obj: &GameObject,
+) -> bool {
+    !is_blocked_by_cant_play_lands(state, player, land_obj)
+        && !is_blocked_by_prohibit_play_from_zone(state, land_obj, player)
+}
+
 /// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
 /// abilities, optionally exempting mana abilities via the single classifier.
 ///
@@ -1315,6 +1542,278 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
     can_pay_special_action_cost_after_auto_tap(state, player, &cost)
 }
 
+/// Enumerates the current holder's finite Foretell special-action primers from
+/// the existing legality and payment authority.
+pub(in crate::game) fn priority_foretell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityForetellAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            can_foretell_card(state, player, object_id)
+                .then(|| PriorityForetellAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
+
+/// Enumerates normal spell casts from every zone exposed by the existing
+/// casting-permission authority for the current Priority holder.
+pub(in crate::game) fn priority_cast_spell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastSpellAnnouncement> {
+    let player = principal.semantic_holder();
+    spell_objects_available_to_cast(state, player)
+        .into_iter()
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            can_cast_object_now(state, player, object_id)
+                .then(|| PriorityCastSpellAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
+
+/// Enumerates land plays from the current holder's hand and every existing
+/// permission-granted zone, retaining the normal play-land eligibility gates.
+pub(in crate::game) fn priority_play_land_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayLandAnnouncement> {
+    let semantic_holder = principal.semantic_holder();
+    let land_resource_owner = principal.land_resource_owner();
+    let is_main_phase = matches!(
+        state.phase,
+        crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
+    );
+    let land_limit =
+        state
+            .max_lands_per_turn
+            .saturating_add(super::static_abilities::additional_land_drops(
+                state,
+                land_resource_owner,
+            ));
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        state
+            .players
+            .iter()
+            .find(|player| player.id == land_resource_owner)
+            .map(|player| player.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if !is_main_phase
+        || !state.stack.is_empty()
+        || state.active_player != semantic_holder
+        || lands_played >= land_limit
+        || super::static_abilities::player_has_static_other(
+            state,
+            land_resource_owner,
+            "CantPlayLand",
+        )
+    {
+        return Vec::new();
+    }
+
+    let mut announcements = Vec::new();
+    if let Some(player) = state
+        .players
+        .iter()
+        .find(|player| player.id == land_resource_owner)
+    {
+        for &object_id in &player.hand {
+            let Some(object) = state.objects.get(&object_id) else {
+                continue;
+            };
+            let is_playable_land = object
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                || object.back_face.as_ref().is_some_and(|back_face| {
+                    back_face.layout_kind == Some(LayoutKind::Modal)
+                        && back_face
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                });
+            if is_playable_land
+                && land_play_is_permitted_by_restrictions(state, land_resource_owner, object)
+            {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    for (object_id, _) in graveyard_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    if let Some((object_id, _)) =
+        top_of_library_land_playable_by_permission(state, land_resource_owner)
+    {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    for (object_id, _) in exile_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    announcements
+}
+
+/// Enumerates only the production OncePerTurn free-cast permission tuples for
+/// the current Priority holder. Unlimited permissions remain normal casts.
+pub(in crate::game) fn priority_cast_free_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastFreeAnnouncement> {
+    hand_cast_free_candidates(state, principal.semantic_holder())
+        .into_iter()
+        .filter_map(|(object_id, source_id, _)| {
+            state.objects.get(&object_id).map(|object| {
+                PriorityCastFreeAnnouncement::new(object_id, object.card_id, source_id)
+            })
+        })
+        .collect()
+}
+
+/// Enumerates the current holder's finite activated-ability primers through the
+/// existing activation-definition and legality authorities.
+pub(in crate::game) fn priority_activate_ability_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityActivateAbilityAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .objects
+        .iter()
+        .flat_map(|(&source_id, _)| {
+            activated_ability_definitions(state, source_id)
+                .into_iter()
+                .filter_map(move |(ability_index, ability)| {
+                    (ability.kind == AbilityKind::Activated
+                        && can_activate_ability_now(state, player, source_id, ability_index))
+                    .then(|| PriorityActivateAbilityAnnouncement::new(source_id, ability_index))
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Sneak casts through the existing keyword-cost, affordability,
+/// and combat authorities for the active player in declare blockers.
+pub(in crate::game) fn priority_sneak_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PrioritySneakAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player || state.phase != crate::types::phase::Phase::DeclareBlockers {
+        return Vec::new();
+    }
+    let unblocked_attackers: Vec<_> = crate::game::combat::unblocked_attackers(state)
+        .into_iter()
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == player)
+        })
+        .collect();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            let cost = crate::game::keywords::effective_sneak_cost(state, hand_object)?;
+            if !can_pay_cost_after_auto_tap(state, player, hand_object, &cost) {
+                return None;
+            }
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id))
+        })
+        .flat_map(|(hand_object, card_id)| {
+            unblocked_attackers
+                .iter()
+                .copied()
+                .map(move |creature_to_return| {
+                    PrioritySneakAnnouncement::new(hand_object, card_id, creature_to_return)
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Web Slinging casts through the existing keyword and casting
+/// authorities, retaining its exact tapped-creature return domain.
+pub(in crate::game) fn priority_web_slinging_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityWebSlingingAnnouncement> {
+    let player = principal.semantic_holder();
+    let tapped_creatures: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.controller == player
+                    && object.tapped
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Creature)
+            })
+        })
+        .collect();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            crate::game::keywords::effective_web_slinging_cost(state, player, hand_object)?;
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id))
+        })
+        .flat_map(|(hand_object, card_id)| {
+            tapped_creatures
+                .iter()
+                .copied()
+                .filter(move |&creature_to_return| {
+                    can_cast_spell_as_web_slinging_now(
+                        state,
+                        player,
+                        hand_object,
+                        creature_to_return,
+                    )
+                })
+                .map(move |creature_to_return| {
+                    PriorityWebSlingingAnnouncement::new(hand_object, card_id, creature_to_return)
+                })
+        })
+        .collect()
+}
+
 /// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through
 /// the replacement-aware zone pipeline.
 pub fn handle_foretell(
@@ -1742,17 +2241,13 @@ fn transient_granted_spell_keywords_for(
         if id != caster {
             continue;
         }
-        // CR 603.4 + CR 608.2h: mirror `transient_grants_static_mode_to_player`'s
-        // dual-condition gating exactly.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !super::layers::transient_gate_conditions(tce).all(|condition| {
+            super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+        }) {
+            continue;
         }
         for modification in &tce.modifications {
             let ContinuousModification::GrantStaticAbility { definition } = modification else {
@@ -4671,6 +5166,7 @@ fn prepare_casting_variant(
     player: PlayerId,
     object_id: ObjectId,
     variant: CastingVariant,
+    mode: CastingMode,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let mut transformed_state = state.clone();
     match variant {
@@ -4747,11 +5243,14 @@ fn prepare_casting_variant(
         | CastingVariant::Fuse
         | CastingVariant::Surge => {}
     }
-    let prepared = prepare_spell_cast_with_variant_override(
+    let prepared = prepare_spell_cast_with_variant_override_inner(
         &transformed_state,
         player,
         object_id,
         Some(variant),
+        None,
+        None,
+        mode,
     )?;
     Ok(PreparedCastingVariant {
         transformed_state,
@@ -4771,7 +5270,9 @@ fn casting_variant_choice_set(
     let mut options = Vec::new();
 
     for variant in candidates {
-        let Ok(candidate) = prepare_casting_variant(state, player, object_id, variant) else {
+        let Ok(candidate) =
+            prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)
+        else {
             continue;
         };
         if !can_cast_prepared_now_with_probe(
@@ -4792,6 +5293,71 @@ fn casting_variant_choice_set(
         options,
         had_multiple_candidates,
     }
+}
+
+/// Return the current legal cast-variant options for an object.
+///
+/// This is the same freshly prepared option set that the cast-choice handler
+/// validates before it commits a selected variant (CR 601.2b). Read-only AI
+/// consumers use it to reject stale displayed prompts rather than recreating
+/// casting-variant legality.
+pub fn current_casting_variant_choice_options(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<CastingVariantChoiceOption> {
+    casting_variant_choice_set(state, player, object_id, None).options
+}
+
+/// Project an Evoke cast through the engine's cast-variant and zone-move
+/// authorities through its attempted battlefield entry.
+///
+/// This is a read-only preview for consumers that need ETB target legality.
+/// It deliberately uses the same `prepare_casting_variant` seam as the
+/// casting-variant prompt and the normal casting-to-stack / spell-resolution
+/// zone pipeline, rather than reconstructing a source object by hand.
+///
+/// CR 601.2a + CR 608.3: a permanent spell moves from its origin to the stack
+/// as part of casting and then enters the battlefield as it resolves. CR
+/// 702.74a: this projection applies the Evoke alternative cast variant.
+pub fn project_evoke_entry_state(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    let PreparedCastingVariant {
+        mut transformed_state,
+        prepared,
+    } = prepare_casting_variant(
+        state,
+        player,
+        object_id,
+        CastingVariant::Evoke,
+        CastingMode::Display,
+    )
+    .ok()?;
+    let mut events = Vec::new();
+
+    if !matches!(
+        zone_pipeline::move_object(
+            &mut transformed_state,
+            ZoneMoveRequest::casting_to_stack(object_id, prepared.object_id),
+            &mut events,
+        ),
+        ZoneMoveResult::Done
+    ) {
+        return None;
+    }
+    // A replacement effect may prevent the entry or park it for a choice. The
+    // resulting state is still the exact source context in which that
+    // replacement's own immediate effect chooses targets, so preserve it for
+    // the preview rather than treating the prompt as stale.
+    let _ = zone_pipeline::move_object(
+        &mut transformed_state,
+        ZoneMoveRequest::spell_resolution_default(object_id, Zone::Battlefield),
+        &mut events,
+    );
+    Some(transformed_state)
 }
 
 fn casting_variant_candidates(
@@ -7199,7 +7765,7 @@ fn evaluate_cost_mod_static_condition(
     use crate::types::ability::StaticCondition;
 
     match condition {
-        StaticCondition::DuringYourTurn => {
+        StaticCondition::DuringYourTurn | StaticCondition::DuringOpponentsTurn => {
             super::layers::evaluate_condition(state, condition, source_controller, source_id)
         }
         StaticCondition::And { conditions } => conditions.iter().all(|c| {
@@ -9333,7 +9899,10 @@ fn face_down_cast_profile(
 /// CR 702.37c / CR 702.37b (megamorph) / CR 702.168b: true when `object_id` carries
 /// an effective morph, megamorph, or disguise keyword (printed or granted, CR 604.1) —
 /// the class of cards castable face down for the {3} alternative cost.
-fn object_has_effective_face_down_keyword(state: &GameState, object_id: ObjectId) -> bool {
+pub(crate) fn object_has_effective_face_down_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
     [
         KeywordKind::Morph,
         KeywordKind::Megamorph,
@@ -9377,7 +9946,11 @@ fn can_afford_face_down_cast(
 /// object (same `face_down_cast_profile` + `apply_face_down_entry_profile` +
 /// `Some(CastingVariant::FaceDown)` prepare), so `.is_ok()` here predicts the real
 /// face-down cast's prepare step precisely.
-fn face_down_cast_is_permitted(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+pub(crate) fn face_down_cast_is_permitted(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
     let mut simulated = state.clone();
     let profile = face_down_cast_profile(state, object_id);
     super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
@@ -9441,7 +10014,8 @@ fn continue_cast_with_variant(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let candidate = prepare_casting_variant(state, player, object_id, variant)?;
+    let candidate =
+        prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)?;
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
@@ -9538,7 +10112,13 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
-    let candidate = prepare_casting_variant(state, player, object_id, option.variant)?;
+    let candidate = prepare_casting_variant(
+        state,
+        player,
+        object_id,
+        option.variant,
+        CastingMode::Actual,
+    )?;
     let fresh = CastingVariantChoiceOption {
         variant: candidate.prepared.casting_variant,
         mana_cost: candidate.prepared.mana_cost.clone(),
@@ -10243,6 +10823,81 @@ fn normal_cast_choice_cost_and_affordability(
     (normal_cost, normal_affordable)
 }
 
+/// The fully authenticated, payable two-way Evoke offer shown to a player.
+///
+/// This is the single read-only authority for the ordinary
+/// `AlternativeCastChoice(Evoke)` payload. It deliberately does not model the
+/// N-way casting-variant menu: callers that have such a menu must authenticate
+/// its complete option payload with `current_casting_variant_choice_options`.
+///
+/// CR 702.74a + CR 118.9: Evoke is an alternative cost. Both its mana and
+/// non-mana components must be payable, and the displayed costs include all
+/// applicable cost modifications (CR 601.2f-h).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvokeCastChoiceOffer {
+    pub normal_cost: ManaCost,
+    pub alternative_cost: Option<ManaCost>,
+    pub alternative_additional_cost: Option<AbilityCost>,
+}
+
+struct EvokeCastChoiceEligibility {
+    offer: EvokeCastChoiceOffer,
+    normal_affordable: bool,
+    evoke_affordable: bool,
+}
+
+pub fn current_evoke_cast_choice_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+) -> Option<EvokeCastChoiceOffer> {
+    let eligibility = evoke_cast_choice_eligibility(state, player, object_id, card_id)?;
+    (eligibility.normal_affordable && eligibility.evoke_affordable).then_some(eligibility.offer)
+}
+
+fn evoke_cast_choice_eligibility(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+) -> Option<EvokeCastChoiceEligibility> {
+    let object = state.objects.get(&object_id)?;
+    if object.card_id != card_id || object.owner != player || object.zone != Zone::Hand {
+        return None;
+    }
+
+    let evoke_cost = effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Evoke(cost) => Some(cost),
+            _ => None,
+        })?;
+    let (evoke_mana_part, evoke_non_mana_part) = split_evoke_cost_components(&evoke_cost);
+    let (normal_cost, normal_affordable) =
+        normal_cast_choice_cost_and_affordability(state, player, object_id, object);
+    let alternative_cost = evoke_mana_part.as_ref().map(|mana_cost| {
+        apply_cost_modifiers_to_base(state, player, object_id, mana_cost.clone())
+            .unwrap_or_else(|| mana_cost.clone())
+    });
+    let evoke_mana_affordable = alternative_cost
+        .as_ref()
+        .is_none_or(|mana_cost| can_pay_cost_after_auto_tap(state, player, object_id, mana_cost));
+    let evoke_non_mana_affordable = evoke_non_mana_part
+        .as_ref()
+        .is_none_or(|cost| cost.is_payable(state, player, object_id));
+
+    Some(EvokeCastChoiceEligibility {
+        offer: EvokeCastChoiceOffer {
+            normal_cost,
+            alternative_cost,
+            alternative_additional_cost: evoke_non_mana_part,
+        },
+        normal_affordable,
+        evoke_affordable: evoke_mana_affordable && evoke_non_mana_affordable,
+    })
+}
+
 pub fn handle_cast_spell_with_payment_mode(
     state: &mut GameState,
     player: PlayerId,
@@ -10320,12 +10975,10 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 707.10: `resolving_stack_entry` may intentionally persist after a
-    // resolution for deferred self-copy choices, but a fresh normal cast starts
-    // a new stack-object announcement outside that old resolution context.
-    state.resolving_stack_entry = None;
-    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-    state.resolution_source_relatch = None;
+    // CR 608.2g: An effect may instruct a player to cast a spell while its
+    // parent stack object remains parked in the active resolution carrier.
+    // The parent, not casting, owns that carrier and settles it only after the
+    // instructed cast window and every continuation have completed.
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -10484,68 +11137,30 @@ pub fn handle_cast_spell_with_payment_mode(
     // sub-cost (if any) flows through the normal mana-payment phase
     // (CR 601.2g) and the non-mana residual is paid via `pay_additional_cost`
     // (CR 601.2h). Affordability requires BOTH halves to be payable.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand {
-            // CR 702.74a + CR 604.1: effective keywords so granted evoke
-            // routes/affords.
-            if let Some(evoke_cost) = effective_spell_keywords(state, player, object_id)
-                .into_iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Evoke(cost) => Some(cost),
-                    _ => None,
-                })
-            {
-                let (evoke_mana_part, evoke_non_mana_part) =
-                    split_evoke_cost_components(&evoke_cost);
-                // CR 601.2f + CR 118.9d: affordability and the displayed costs
-                // must reflect active cost modifiers — applied to BOTH the printed
-                // cost and the evoke mana sub-cost (CR 118.9d).
-                let (normal_cost, normal_affordable) =
-                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
-                let evoke_mana_eff = evoke_mana_part.as_ref().map(|m| {
-                    apply_cost_modifiers_to_base(state, player, object_id, m.clone())
-                        .unwrap_or_else(|| m.clone())
-                });
-                let evoke_mana_affordable = match &evoke_mana_eff {
-                    Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
-                    // CR 118.3: a zero mana cost is always payable.
-                    None => true,
-                };
-                // CR 118.3 + CR 601.2h: non-mana sub-costs must be independently
-                // payable for the evoke option to surface. `AbilityCost::is_payable`
-                // walks the cost tree (Composite/Exile/Sacrifice/Discard/PayLife/...)
-                // and validates each leaf against current game state.
-                let evoke_non_mana_affordable = match &evoke_non_mana_part {
-                    Some(ab_cost) => ab_cost.is_payable(state, player, object_id),
-                    None => true,
-                };
-                let evoke_affordable = evoke_mana_affordable && evoke_non_mana_affordable;
-                if normal_affordable && evoke_affordable {
-                    return Ok(WaitingFor::AlternativeCastChoice {
-                        player,
-                        object_id,
-                        card_id,
-                        payment_mode,
-                        keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
-                        normal_cost,
-                        alternative_cost: evoke_mana_eff,
-                        alternative_additional_cost: evoke_non_mana_part,
-                    });
-                }
-                if !normal_affordable && evoke_affordable {
-                    // Only evoke is payable — proceed via the evoke path.
-                    return handle_evoke_cost_choice_with_payment_mode(
-                        state,
-                        player,
-                        object_id,
-                        card_id,
-                        crate::types::actions::AlternativeCastDecision::Alternative,
-                        payment_mode,
-                        events,
-                    );
-                }
-                // Otherwise (normal-only or neither): fall through to normal cast.
-            }
+    if let Some(eligibility) = evoke_cast_choice_eligibility(state, player, object_id, card_id) {
+        if eligibility.normal_affordable && eligibility.evoke_affordable {
+            let offer = eligibility.offer;
+            return Ok(WaitingFor::AlternativeCastChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+                keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
+                normal_cost: offer.normal_cost,
+                alternative_cost: offer.alternative_cost,
+                alternative_additional_cost: offer.alternative_additional_cost,
+            });
+        }
+        if !eligibility.normal_affordable && eligibility.evoke_affordable {
+            return handle_evoke_cost_choice_with_payment_mode(
+                state,
+                player,
+                object_id,
+                card_id,
+                crate::types::actions::AlternativeCastDecision::Alternative,
+                payment_mode,
+                events,
+            );
         }
     }
 
@@ -18032,8 +18647,12 @@ pub fn handle_cancel_cast(
             .iter()
             .rposition(|entry| entry.id == pending.object_id)
         {
-            super::stack::remove_stack_entry_at(state, pos)
-                .expect("rposition yielded a live stack index");
+            super::stack::remove_nonresolving_stack_entry_at(
+                state,
+                pos,
+                super::lifecycle::DelayedTerminalDisposition::Removed,
+            )
+            .expect("rposition yielded a live stack index");
         }
     }
 

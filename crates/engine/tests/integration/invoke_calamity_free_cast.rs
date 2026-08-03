@@ -20,7 +20,7 @@
 //! CR 614.1a: spells cast this way are exiled instead of going to the graveyard.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{SpellStackToGraveyardReplacement, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -115,14 +115,17 @@ fn invoke_calamity_opens_free_cast_window_and_exiles_cast_spells() {
                     candidates,
                     remaining_casts,
                     remaining_mv_budget,
-                    exile_instead_of_graveyard,
+                    graveyard_replacement,
                     ..
                 },
         } => {
             assert_eq!(player, P0);
             assert_eq!(remaining_casts, 2, "up to two casts");
             assert_eq!(remaining_mv_budget, Some(6));
-            assert!(exile_instead_of_graveyard);
+            assert_eq!(
+                graveyard_replacement,
+                Some(SpellStackToGraveyardReplacement::Exile)
+            );
             assert!(
                 candidates.contains(&gy_instant),
                 "the graveyard instant must be a free-cast candidate"

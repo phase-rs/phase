@@ -364,6 +364,29 @@ pub fn record_sacrifice(
     }
 }
 
+/// CR 608.2i: the entry-time snapshot record [`record_battlefield_entry`] pushes for
+/// `obj`. Extracted (behaviour-identical, field-for-field) so a READ-ONLY caller — the
+/// CR 732.2a loop firewall's class-exclusion test — can ask
+/// [`battlefield_entry_matches_filter`] about an object without `&mut GameState`.
+/// `record_battlefield_entry` is its other caller, so the field list has ONE authority.
+pub(crate) fn battlefield_entry_record_for(
+    obj: &GameObject,
+) -> crate::types::game_state::BattlefieldEntryRecord {
+    crate::types::game_state::BattlefieldEntryRecord {
+        object_id: obj.id,
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        colors: obj.color.clone(),
+        // CR 403.3: snapshot the object's keywords at entry time — whatever the layer
+        // state is at the caller's record point (pre-flush for most entries, post-flush
+        // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
+        keywords: obj.keywords.clone(),
+        controller: obj.controller,
+    }
+}
+
 /// CR 403.3: Record a battlefield entry snapshot for data-driven ETB condition queries.
 pub fn record_battlefield_entry(
     state: &mut crate::types::game_state::GameState,
@@ -376,19 +399,7 @@ pub fn record_battlefield_entry(
         return;
     }
 
-    let record = crate::types::game_state::BattlefieldEntryRecord {
-        object_id,
-        name: obj.name.clone(),
-        core_types: obj.card_types.core_types.clone(),
-        subtypes: obj.card_types.subtypes.clone(),
-        supertypes: obj.card_types.supertypes.clone(),
-        colors: obj.color.clone(),
-        // CR 403.3: snapshot the object's keywords at entry time. This is the
-        // printed/base + counter-granted keyword set (pre-layer; see the field doc
-        // on BattlefieldEntryRecord.keywords for the documented Layer-6 limitation).
-        keywords: obj.keywords.clone(),
-        controller: obj.controller,
-    };
+    let record = battlefield_entry_record_for(obj);
     state.battlefield_entries_this_turn.push(record);
 }
 
@@ -538,16 +549,19 @@ pub(crate) fn battlefield_entry_matches_filter(
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types/game_state.rs:1586-1606`). Every other
+/// supertypes / colors / keywords / controller` (`types/game_state.rs:1650-1670`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at `:517` and the whole tally reads a silent constant 0. Measured: 98
+/// matcher fails closed at its `FilterProp` arm (`:515`) and its outer `TargetFilter` arm
+/// (`:544`), and the whole tally reads a silent constant 0 — but see the `Or` exception
+/// documented at `:519-526`: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
+/// instead. Measured: 98
 /// `FilterProp` variants exist (`types/ability.rs:3609-4251`); the matcher answers 4.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
 /// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
 /// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list must name exactly the props the matcher answers at `:504-516`; the binder is
+/// The list must name exactly the props the matcher answers at `:502-514`; the binder is
 /// `ledger_guard_agrees_with_matcher` (test, below).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
@@ -561,7 +575,7 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` (`:408-418`) answers only these two.
+            // CR 109.5: `entry_controller_matches` (`fn` at `:406`) answers only these two.
             typed
                 .controller
                 .as_ref()
@@ -576,12 +590,12 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                     )
                 })
         }
-        // CR 608.2i: mirrors the matcher's monotone connectives (`:540-545`); every leaf must be
+        // CR 608.2i: mirrors the matcher's monotone connectives (`:538-543`); every leaf must be
         // answerable, otherwise the composite silently drops one.
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().all(ledger_filter_is_evaluable)
         }
-        // Everything else is the matcher's `_ => false` at `:546`, including the anti-monotone
+        // Everything else is the matcher's outer `_ => false` at `:544`, including the anti-monotone
         // `TargetFilter::Not`.
         _ => false,
     }
@@ -1149,20 +1163,28 @@ fn casting_restriction_applies(
         // CR 307.1: A player may cast a sorcery during a main phase of their turn when the stack is empty.
         CastingRestriction::AsSorcery => is_sorcery_speed_window(state, player),
         CastingRestriction::DuringCombat => state.phase.is_combat(),
-        CastingRestriction::DuringOpponentsTurn => state.active_player != player,
+        // CR 102.3 / CR 805.4a: "an opponent's turn" is a team-aware relation.
+        // Under shared team turns a turn where a teammate holds `active_player`
+        // still belongs to the caster's own team, so `active_player != player`
+        // over-permits. Same authority as `ParsedCondition::IsOpponentsTurn`.
+        CastingRestriction::DuringOpponentsTurn => {
+            super::players::is_opponent(state, player, state.active_player)
+        }
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringOpponentsUpkeep => {
-            state.active_player != player && state.phase == Phase::Upkeep
+            super::players::is_opponent(state, player, state.active_player)
+                && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringAnyUpkeep => state.phase == Phase::Upkeep,
         CastingRestriction::DuringYourEndStep => {
             state.active_player == player && state.phase == Phase::End
         }
         CastingRestriction::DuringOpponentsEndStep => {
-            state.active_player != player && state.phase == Phase::End
+            super::players::is_opponent(state, player, state.active_player)
+                && state.phase == Phase::End
         }
         // CR 508.1: Declare attackers step.
         CastingRestriction::DeclareAttackersStep => state.phase == Phase::DeclareAttackers,
@@ -1615,6 +1637,17 @@ pub(crate) fn evaluate_condition(
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
         // CR 102.1: "The active player is the player whose turn it is."
         ParsedCondition::IsYourTurn => state.active_player == player,
+        // CR 102.3 / CR 805.4a: the active player is on a team other than
+        // `player`'s. Delegates to the single team-aware authority, so a turn
+        // where a TEAMMATE holds `active_player` (CR 805.4 shared team turns —
+        // the active team is still `player`'s own team) is NOT reported as an
+        // opponent's turn, which `active_player != player` would do.
+        ParsedCondition::IsOpponentsTurn => {
+            super::players::is_opponent(state, player, state.active_player)
+        }
+        // CR 503.1: The game is currently in the upkeep step. Player scope, if
+        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
+        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -3423,6 +3456,143 @@ mod tests {
             ObjectId(1),
             &not_your_turn
         ));
+    }
+
+    /// Trade Caravan's activated ability, as the Oracle parser actually emits
+    /// it. The gate under test is the PARSED restriction, not a hand-built
+    /// one, so a parser regression fails these cases too.
+    fn trade_caravan_activation_restrictions() -> Vec<ActivationRestriction> {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Remove two currency counters from ~: Untap target basic land. \
+             Activate only during an opponent's upkeep.",
+            "Trade Caravan",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Nomad".to_string()],
+        );
+        assert_eq!(parsed.abilities.len(), 1, "got {:#?}", parsed.abilities);
+        parsed.abilities[0].activation_restrictions.clone()
+    }
+
+    /// CR 602.5b + CR 102.3 + CR 503.1 + CR 805.4a: "Activate only during an
+    /// opponent's upkeep" must gate real activation legality, so this drives the
+    /// production entry point `check_activation_restrictions` (which reaches
+    /// `activation_restriction_applies`) rather than `evaluate_condition`
+    /// directly, across the full turn-scope × step matrix.
+    #[test]
+    fn opponents_upkeep_activation_gate_allows_only_opponent_upkeep() {
+        let restrictions = trade_caravan_activation_restrictions();
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let activator = PlayerId(0);
+        let allowed = |state: &crate::types::game_state::GameState| {
+            check_activation_restrictions(state, activator, ObjectId(10), 0, &restrictions).is_ok()
+        };
+
+        // Opponent's turn, upkeep step -> activation permitted.
+        state.active_player = PlayerId(1);
+        state.phase = Phase::Upkeep;
+        assert!(allowed(&state), "opponent's upkeep must permit activation");
+
+        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        state.phase = Phase::PreCombatMain;
+        assert!(
+            !allowed(&state),
+            "opponent's main phase must deny activation"
+        );
+
+        // Your own upkeep -> denied (IsOpponentsTurn false).
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        assert!(!allowed(&state), "your own upkeep must deny activation");
+    }
+
+    /// CR 102.3 + CR 805.4 + CR 810.2: under shared team turns the turn belongs
+    /// to a TEAM, so an upkeep in which a teammate holds `active_player` is the
+    /// activator's OWN team's upkeep and must not open the window. This is
+    /// exactly what the weaker `Not(IsYourTurn)` encoding got wrong — the
+    /// teammate is not the activator, so "not your turn" held and the ability
+    /// became activatable during the activator's own team's upkeep.
+    #[test]
+    fn opponents_upkeep_activation_gate_denies_own_team_upkeep_in_two_headed_giant() {
+        use crate::types::format::FormatConfig;
+
+        let restrictions = trade_caravan_activation_restrictions();
+        // Seats 0/1 are one team, seats 2/3 the other.
+        let mut state =
+            crate::types::game_state::GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let activator = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let allowed = |state: &crate::types::game_state::GameState| {
+            check_activation_restrictions(state, activator, ObjectId(10), 0, &restrictions).is_ok()
+        };
+
+        // Teammate holds `active_player` -> still the activator's own team's
+        // upkeep (CR 805.4a), so activation is denied. This is the regression:
+        // `Not(IsYourTurn)` would have permitted it.
+        state.active_player = PlayerId(1);
+        assert!(
+            !allowed(&state),
+            "a teammate's upkeep is the activator's own team's upkeep, not an opponent's"
+        );
+
+        // Opposing team's upkeep -> permitted.
+        state.active_player = PlayerId(2);
+        assert!(
+            allowed(&state),
+            "an opposing team's upkeep must permit activation"
+        );
+
+        // Activator holds `active_player` -> denied.
+        state.active_player = PlayerId(0);
+        assert!(!allowed(&state), "your own upkeep must deny activation");
+    }
+
+    /// CR 102.3 + CR 805.4a: every opponent-scoped casting restriction uses
+    /// the same team-aware relation as the parsed activation condition. A
+    /// teammate holding `active_player` is not an opponent, including in the
+    /// upkeep and end-step siblings of the whole-turn restriction.
+    #[test]
+    fn opponent_scoped_casting_restrictions_exclude_teammate_turns() {
+        use crate::types::format::FormatConfig;
+
+        let mut state =
+            crate::types::game_state::GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let caster = PlayerId(0);
+        let source = ObjectId(10);
+
+        for (restriction, phase) in [
+            (
+                CastingRestriction::DuringOpponentsTurn,
+                Phase::PreCombatMain,
+            ),
+            (CastingRestriction::DuringOpponentsUpkeep, Phase::Upkeep),
+            (CastingRestriction::DuringOpponentsEndStep, Phase::End),
+        ] {
+            state.phase = phase;
+            state.active_player = PlayerId(1);
+            assert!(
+                check_casting_restrictions(
+                    &state,
+                    caster,
+                    source,
+                    std::slice::from_ref(&restriction),
+                )
+                .is_err(),
+                "a teammate's {phase:?} must not satisfy {restriction:?}"
+            );
+
+            state.active_player = PlayerId(2);
+            assert!(
+                check_casting_restrictions(
+                    &state,
+                    caster,
+                    source,
+                    std::slice::from_ref(&restriction),
+                )
+                .is_ok(),
+                "an opposing team's {phase:?} must satisfy the restriction"
+            );
+        }
     }
 
     #[test]

@@ -1151,6 +1151,13 @@ pub(crate) fn apply_combat_damage(
     assignments: &[(ObjectId, DamageAssignment)],
 ) -> Vec<GameEvent> {
     let mut events = Vec::new();
+    // CR 510.2 + CR 732.2a: the pre-batch life totals, so the loop-detection ring can be
+    // invalidated on the DAMAGE EVENT rather than on a `WaitingFor` window that an
+    // unblocked attacker never opens. Snapshotted per batch, not hoisted: first-strike
+    // and regular damage are two separate CR 510.2 events (`:131` / `:188`) and a
+    // double-strike attacker must be caught at the first, not only the second. See
+    // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
+    let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
     // CR 510.2: accumulates per-player, per-source damage for this step only.
     // `(player, [(source_id, amount)], step_total)`.
     type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
@@ -1339,6 +1346,16 @@ pub(crate) fn apply_combat_damage(
 
     // --- Phase D: Fire prevention riders once per shield (CR 615.5 + CR 615.13) ---
     fire_combat_prevention_riders(state, &prevention_tally, &mut events);
+
+    // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
+    // prohibition keys on. Placed LAST on purpose — the batch moves life in three
+    // places, and only a call here sees all three: Phase C's
+    // `apply_damage_after_replacement` (CR 120.3a), the per-source lifelink gain
+    // (CR 119.3 + CR 702.15b) above, and a prevention rider's `runtime_execute`
+    // (CR 615.5) fired on the line before. One guard in this shared function rather
+    // than one at each caller (`:131` first strike, `:188` regular), so a third caller
+    // added later inherits it.
+    state.invalidate_loop_ring_on_unobserved_life_move(&lives_before);
 
     events
 }

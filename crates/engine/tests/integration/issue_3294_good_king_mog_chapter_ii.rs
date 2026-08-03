@@ -70,7 +70,7 @@ fn chapter_ii_parses_to_delayed_spell_cast_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*def.effect else {
         panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
     };
-    let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(

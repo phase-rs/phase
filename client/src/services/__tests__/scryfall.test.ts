@@ -1,14 +1,31 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../..",
 );
+
+function withTempDir(run: (dir: string) => void, prefix = "scryfall-") {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function makeLocalDataMap(
   cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string; oracle_id?: string }>,
@@ -484,15 +501,6 @@ describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () 
 
 describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
   const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
-
-  function withTempDir(run: (dir: string) => void) {
-    const dir = mkdtempSync(path.join(tmpdir(), "scryfall-gen-"));
-    try {
-      run(dir);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
 
   it("keys image data by face oracle_id when reversible cards omit root oracle_id", () => {
     withTempDir((dir) => {
@@ -986,4 +994,339 @@ describe("local face size resolution", () => {
     };
     expect(resolvePrintingImageUrl(placeholder, 0, "small")).toBeNull();
   });
+});
+
+describe("scryfall-fetch mv-failure recovery (PR #6775 review)", () => {
+  const LIB_PATH = path
+    .join(REPO_ROOT, "scripts/lib/scryfall-fetch.sh")
+    .replace(/\\/g, "/");
+
+  // Runs `scryfall_download` in a sourced shell where `curl` and `mv` are
+  // shadowed by shell functions. Function-shadowing (not a `cp` reassignment
+  // of SCRYFALL_CURL) is required: SCRYFALL_CURL's real curl invocation is
+  // array-expanded ("${SCRYFALL_CURL[@]}" -o "$tmp" "$url"), so a stub must be
+  // a same-named function to intercept it, not a value substituted in for the
+  // array's first word. The shared finalizer captures mv stderr while it
+  // decides whether another writer produced a valid destination, so the
+  // anti-vacuity marker for mv is recorded through a shell variable rather
+  // than stderr text. The validator is different: the real source
+  // deliberately runs it inside a subshell (`( "$validator" "$file" )`, see
+  // scryfall_download's header comment) to keep a caller-supplied
+  // validator's shell-variable writes from leaking back into this library's
+  // scope. That isolation is intentional and stays in place — but it means
+  // a shell-variable marker for the validator would read back as "never
+  // called" even when it was. A subshell isolates variable writes, not file
+  // writes, so the validator stub instead records its own invocation as a
+  // marker *file* under `dir`.
+  function runMvFailureScript(
+    dir: string,
+    opts: {
+      validator?: string;
+      destContent?: string; // undefined => destination absent
+      curlPayload?: string;
+      mvSucceeds?: boolean;
+    },
+  ): {
+    out: string;
+    dest: string;
+    stderr: string;
+    validatorCalls: number;
+  } {
+    const dest = path.join(dir, "dest.json").replace(/\\/g, "/");
+    const payload = path.join(dir, "fixture-payload.json").replace(/\\/g, "/");
+    const marker = path.join(dir, "validator-called").replace(/\\/g, "/");
+    const stderr = path.join(dir, "scryfall.stderr").replace(/\\/g, "/");
+    writeFileSync(payload, opts.curlPayload ?? JSON.stringify({ ok: true }));
+    if (opts.destContent !== undefined) {
+      writeFileSync(dest, opts.destContent);
+    }
+
+    const validatorArg = opts.validator ? ` "${opts.validator}"` : "";
+    // The marker file (not a shell variable — see the class comment above)
+    // proves the caller-supplied validator was actually invoked, not just
+    // that a validator arg was passed: a stub that hardcodes "validator arg
+    // present -> fail" without ever calling through would leave no marker
+    // behind, and the invocation count below would remain zero.
+    const validatorDef = opts.validator
+      ? `${opts.validator}() { echo 1 >> "${marker}"; jq -e '.data' "$1" >/dev/null 2>&1; }\n`
+      : "";
+    const mvDef = opts.mvSucceeds
+      ? "" // no override: the real `mv` binary runs, and succeeds.
+      : 'mv() { MV_CALLED=1; return 1; }\n';
+
+    const finalScript = `
+set -uo pipefail
+source "${LIB_PATH}"
+SCRYFALL_CURL=(curl)
+curl() {
+  local out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -o) out="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  cp "${payload}" "$out"
+}
+${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg} 2> "${stderr}"
+echo "RC=$?"
+echo "MV_CALLED=\${MV_CALLED:-0}"
+echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
+`;
+
+    const out = execFileSync("bash", ["-c", finalScript], {
+      cwd: REPO_ROOT,
+      stdio: "pipe",
+      timeout: 20_000,
+    }).toString();
+    const validatorCalls = existsSync(marker)
+      ? readFileSync(marker, "utf8").trim().split("\n").length
+      : 0;
+    return {
+      out,
+      dest,
+      stderr: readFileSync(stderr, "utf8"),
+      validatorCalls,
+    };
+  }
+
+  it("case 1: mv fails, destination exists and passes the default validator -> rc 0, tmp cleaned, destination byte-identical to before", () => {
+    withTempDir((dir) => {
+      const before = JSON.stringify({ ok: true, marker: "pre-existing" });
+      const { out, dest } = runMvFailureScript(dir, { destContent: before });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(readFileSync(dest, "utf8")).toBe(before);
+    });
+  });
+
+  it("case 2: mv fails, destination absent -> rc 1, tmp cleaned", () => {
+    withTempDir((dir) => {
+      const { out, dest, stderr } = runMvFailureScript(dir, {});
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
+      expect(() => readFileSync(dest, "utf8")).toThrow();
+    });
+  });
+
+  it("case 3: mv fails, destination is invalid JSON -> rc 1, tmp cleaned", () => {
+    withTempDir((dir) => {
+      const before = "not-json{";
+      const { out, dest, stderr } = runMvFailureScript(dir, {
+        destContent: before,
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      expect(out).toMatch(/TMP_COUNT=0/);
+      expect(stderr).toContain("scryfall: could not rename");
+      // Untouched: the recovery path must never overwrite a bad destination
+      // with the freshly-downloaded (but un-mv'd) tmp content either.
+      expect(readFileSync(dest, "utf8")).toBe(before);
+    });
+  });
+
+  it("case 4: mv fails, destination is valid JSON but fails the caller-supplied validator -> rc 1, validator actually invoked", () => {
+    withTempDir((dir) => {
+      // Syntactically valid JSON, but missing the `.data` field the
+      // caller-supplied validator requires — must NOT be accepted merely
+      // because it parses.
+      const before = JSON.stringify({ foo: "bar" });
+      const { out, validatorCalls } = runMvFailureScript(dir, {
+        destContent: before,
+        // The download itself must PASS the caller validator (it is checked
+        // on the tmp file before the mv) so this case reaches the mv-failure
+        // recovery branch and fails there, on the destination's shape.
+        curlPayload: JSON.stringify({ data: [{ fresh: true }] }),
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=1");
+      // The tmp gate and the failed-rename recovery check both run the
+      // caller-supplied validator. Pinning two calls proves this failed on
+      // the destination's shape rather than merely at the pre-mv gate.
+      expect(validatorCalls).toBe(2);
+    });
+  });
+
+  it("case 4b (positive control for case 4): mv fails, destination is valid JSON and PASSES the caller-supplied validator -> rc 0, destination unchanged", () => {
+    withTempDir((dir) => {
+      const before = JSON.stringify({ data: [{ foo: "bar" }] });
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
+        destContent: before,
+        // Same pre-mv gate consideration as case 4: the download must pass
+        // the caller validator for the recovery branch to be reached at all.
+        curlPayload: JSON.stringify({ data: [{ fresh: true }] }),
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(readFileSync(dest, "utf8")).toBe(before);
+      // Both acceptance points must use the caller-supplied validator.
+      expect(validatorCalls).toBe(2);
+    });
+  });
+
+  it("case 5: mv succeeds -> normal path, destination written from the download, no recovery marker", () => {
+    withTempDir((dir) => {
+      const payload = JSON.stringify({ ok: true, fresh: true });
+      const { out, dest } = runMvFailureScript(dir, {
+        mvSucceeds: true,
+        curlPayload: payload,
+      });
+
+      expect(out).not.toContain("MV_CALLED=1");
+      expect(out).toContain("RC=0");
+      expect(readFileSync(dest, "utf8")).toBe(payload);
+    });
+  });
+
+  it("case 5b: freshly-downloaded content fails the caller-supplied validator -> rc 1, destination never written", () => {
+    withTempDir((dir) => {
+      // Valid JSON (passes the transport-level scryfall_validate_json
+      // default gate that always runs on the fresh tmp file) but missing the
+      // `.data` field the caller-supplied validator requires. The caller
+      // validator gates the tmp file BEFORE the mv, so the bad body must
+      // never land at the destination where a later non-validating reader
+      // (scryfall_fetch_bulk's other callers) would trust it.
+      const payload = JSON.stringify({ ok: true, fresh: true });
+      const { out, dest, validatorCalls } = runMvFailureScript(dir, {
+        mvSucceeds: true,
+        curlPayload: payload,
+        validator: "scryfall_test_validate_has_data",
+      });
+
+      expect(out).not.toContain("MV_CALLED=1");
+      expect(validatorCalls).toBe(1);
+      expect(out).toContain("RC=1");
+      expect(existsSync(dest)).toBe(false);
+      // No orphaned tmp file either.
+      expect(out).toMatch(/TMP_COUNT=0/);
+    });
+  });
+
+  // Runs gen-scryfall-sets.sh hermetically: a stub `curl` on PATH only ever
+  // serves file:// URLs (our fixture) and fails fast — no live-network
+  // fallback — for anything else, so a regression that stops reading the
+  // SCRYFALL_SETS_FILE/URL/OUTPUT seams can never hit the live
+  // https://api.scryfall.com/sets endpoint from these tests.
+  function runSetsScript(dir: string, cachedContent: string): Record<string, unknown> {
+    const binDir = path.join(dir, "bin");
+    mkdirSync(binDir);
+    const stubPath = path.join(binDir, "curl");
+    writeFileSync(
+      stubPath,
+      `#!/usr/bin/env bash
+out=""
+url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http*|file://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  file://*)
+    src="\${url#file://}"
+    case "$src" in
+      /?:*) src="\${src#/}" ;;
+    esac
+    cp "$src" "$out"
+    exit 0
+    ;;
+  *)
+    echo "stub-curl: refusing non-file:// URL: $url" >&2
+    exit 1
+    ;;
+esac
+`,
+    );
+    chmodSync(stubPath, 0o755);
+
+    const badCache = path.join(dir, "sets.json");
+    writeFileSync(badCache, cachedContent);
+    const validFixture = path.join(dir, "fixture-sets.json");
+    writeFileSync(
+      validFixture,
+      JSON.stringify({
+        data: [
+          {
+            code: "abc",
+            name: "A Boring Cardboard",
+            icon_svg_uri: "https://img.example/abc.svg",
+            released_at: "2024-01-01",
+          },
+        ],
+      }),
+    );
+    const output = path.join(dir, "scryfall-sets.json");
+
+    let threw: unknown;
+    try {
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-sets.sh")], {
+        // A temp cwd keeps a misbehaving run (seams unread, real relative
+        // "data/scryfall" + "client/public/scryfall-sets.json" paths used
+        // instead) from writing into the actual repo checkout.
+        cwd: dir,
+        env: {
+          ...process.env,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          SCRYFALL_SETS_FILE: badCache,
+          SCRYFALL_SETS_URL: pathToFileURL(validFixture).href,
+          SCRYFALL_SETS_OUTPUT: output,
+        },
+        stdio: "pipe",
+        timeout: 20_000,
+      });
+    } catch (err) {
+      threw = err;
+    }
+
+    if (threw !== undefined) {
+      // Assert *why* it failed, not just *that* it failed — a broken stub,
+      // missing bash, or a PATH that doesn't propagate through MSYS would
+      // also throw. The only regression this branch should ever report is
+      // "seams unread, so the script reached for its hardcoded
+      // https://api.scryfall.com URL and our stub curl refused it"; any
+      // other failure cause fails loudly on the assertion below instead.
+      const err = threw as { stderr?: Buffer | string; stdout?: Buffer | string };
+      const stderrText = err.stderr?.toString() ?? "";
+      expect(stderrText).toContain("stub-curl: refusing non-file:// URL");
+    }
+
+    expect(threw).toBeUndefined();
+    return JSON.parse(readFileSync(output, "utf8"));
+  }
+
+  it("case 6: gen-scryfall-sets.sh discards an invalid cached sets file and refetches from SCRYFALL_SETS_URL", () => {
+    withTempDir((dir) => {
+      const generated = runSetsScript(dir, "not-json{");
+      expect(generated.abc).toMatchObject({ name: "A Boring Cardboard" });
+    });
+  });
+
+  it.each([
+    ["empty data array", JSON.stringify({ data: [] })],
+    ["non-array data", JSON.stringify({ data: "oops" })],
+  ])(
+    "case 6b (%s): a cached sets file that is valid JSON but fails the .data array-shape check is discarded and refetched",
+    (_label, cachedContent) => {
+      withTempDir((dir) => {
+        // jq -e '.data' alone is truthy for any non-null value: {"data":"oops"}
+        // would crash the map() transform, and {"data":[]} would be cached as
+        // a permanently-empty scryfall-sets.json behind the OUTPUT early-exit.
+        // Both must be treated exactly like a corrupt cache: discard, refetch.
+        const generated = runSetsScript(dir, cachedContent);
+        expect(generated.abc).toMatchObject({ name: "A Boring Cardboard" });
+      });
+    },
+  );
 });

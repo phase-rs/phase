@@ -6,7 +6,20 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{TargetEffectDetail, TargetSelectionConstraint};
-use crate::types::identifiers::CardId;
+use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
+
+/// Completes the CR 603.3c test fixture for a trigger whose choices are still
+/// being made. Production construction retains the same firing in both the
+/// pending and stack carriers until the entry is committed or removed.
+fn mark_ordinary_pending_trigger_construction(state: &mut GameState, entry_id: ObjectId) {
+    assert_eq!(
+        state.stack_trigger_firings.get(&entry_id),
+        Some(&TriggerFiring::Ordinary),
+        "test setup must push the ordinary trigger before parking its cursor"
+    );
+    state.pending_trigger_entry = Some(entry_id);
+    state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
+}
 
 #[test]
 fn trigger_target_selection_select_targets_pushes_to_stack() {
@@ -115,7 +128,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
 
     let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
 
@@ -231,7 +244,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
 
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: PlayerId(0),
@@ -321,7 +334,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
         modal: ModalChoice {
@@ -460,7 +473,7 @@ fn setup_vindictive_lich_pending_trigger(state: &mut GameState) {
     let entry_id =
         crate::game::triggers::push_pending_trigger_to_stack(state, pending, &mut setup_events);
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(state, entry_id);
 }
 
 #[test]
@@ -605,7 +618,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
         modal: ModalChoice {
@@ -730,7 +743,7 @@ fn triggered_commander_modal_cap_uses_controller_board_state() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
 
     let waiting = begin_pending_trigger_target_selection(&mut state)
         .unwrap()
@@ -815,7 +828,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: PlayerId(0),
         trigger_controller: None,
@@ -972,7 +985,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: PlayerId(0),
         trigger_controller: Some(PlayerId(0)),
@@ -1090,7 +1103,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
         modal: ModalChoice {
@@ -1204,7 +1217,7 @@ fn all_modes_exhausted_clears_pending_trigger() {
         &mut setup_events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
-    state.pending_trigger_entry = Some(entry_id);
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
 
     // Call the private function via the engine path.
     let result = begin_pending_trigger_target_selection(&mut state).unwrap();

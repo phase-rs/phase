@@ -219,6 +219,7 @@ pub fn cast_paradigm_copy(
                 actual_mana_spent: 0,
             },
         },
+        None,
         events,
     );
 

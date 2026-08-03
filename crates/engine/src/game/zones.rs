@@ -1764,8 +1764,12 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             // `stack_paid_facts`). A miss is normal: the resolution pop already
             // removed the entry before the card is routed to its next zone.
             if let Some(idx) = state.stack.iter().position(|e| e.id == object_id) {
-                crate::game::stack::remove_stack_entry_at(state, idx)
-                    .expect("position yielded a live stack index");
+                crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+                )
+                .expect("position yielded a live stack index");
             }
         }
         Zone::Exile => state.exile.retain(|id| *id != object_id),

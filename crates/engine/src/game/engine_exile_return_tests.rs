@@ -1361,6 +1361,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         controller: PlayerId(0),
         source_id: delayed_source,
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     });
     state.exile_links.push(ExileLink {
         exiled_id: returned_id,

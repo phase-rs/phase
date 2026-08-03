@@ -3873,6 +3873,23 @@ fn parse_symbolic_mana_color_spent_condition(
     Ok((rest, condition))
 }
 
+/// CR 106.3 + CR 601.2h: legacy leading-word form, "at least N <color> mana was
+/// spent to cast <self>" → `AbilityCondition::ManaColorSpent`.
+///
+/// SHADOWED, kept as a fallback only. `parse_mana_color_spent_condition_text`
+/// has exactly one caller (`parse_condition_text`), and every non-test caller of
+/// that reaches it only through `.or_else(..)` AFTER
+/// `try_nom_condition_as_ability_condition`, whose `parse_inner_condition`
+/// fall-through now recognizes this exact phrase via
+/// `parse_color_mana_spent_threshold` and bridges it to the canonical
+/// `AbilityCondition::QuantityCheck { ManaSpentToCast { scope, OfColor } }`.
+/// So on the production path this arm no longer fires for any real input; the
+/// generic form carries an explicit `CastManaObjectScope` (CR 400.7d) that
+/// `ManaColorSpent` cannot express.
+///
+/// `parse_symbolic_mana_color_spent_condition` above is NOT shadowed — the
+/// `{W}{W}` symbolic form has no `parse_inner_condition` grammar and stays live
+/// for 22 cards.
 fn parse_word_mana_color_spent_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
@@ -4799,6 +4816,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // predicate (Layer 6 / duration `ForAsLongAs`); no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
+        // CR 102.3 + CR 805.4a: the team-aware opponent-turn predicate has
+        // no `AbilityCondition` counterpart yet. Return `None` rather than
+        // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::None => None,
     }
 }
@@ -8854,6 +8875,13 @@ mod tests {
         );
     }
 
+    /// CR 106.3 + CR 601.2h + CR 400.7d: the leading-word Adamant rider now
+    /// bridges through `parse_inner_condition` →
+    /// `parse_color_mana_spent_threshold` to the canonical generic shape, which
+    /// (unlike the legacy `ManaColorSpent`) records the subject anaphora as an
+    /// explicit `CastManaObjectScope`. Runtime reading is unchanged:
+    /// `QuantityCheck` resolves `ManaSpentToCast { SelfObject, .. }` against the
+    /// ability's own source object, exactly as the `ManaColorSpent` arm did.
     #[test]
     fn leading_word_mana_spent_condition_parses_adamant() {
         let (condition, body) = strip_leading_general_conditional(
@@ -8863,11 +8891,82 @@ mod tests {
         assert_eq!(body, "it deals 4 damage instead.");
         assert_eq!(
             condition,
-            Some(AbilityCondition::ManaColorSpent {
-                color: ManaColor::Red,
-                minimum: 3,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::OfColor {
+                            color: ManaColor::Red
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
             })
         );
+    }
+
+    /// CR 400.7d: the "that spell" anaphora on the PRODUCTION path.
+    ///
+    /// `parse_condition_text`'s leading-word arm
+    /// (`parse_word_mana_color_spent_condition`) only ever accepted the
+    /// `{this spell, it, them, ~}` subject set and flattened the anaphora away
+    /// into a scope-less `ManaColorSpent`. That arm is now shadowed: every
+    /// non-test caller reaches `try_nom_condition_as_ability_condition` first,
+    /// and its `parse_inner_condition` fall-through recognizes "that spell" and
+    /// records it as `CastManaObjectScope::TriggeringSpell`.
+    ///
+    /// RULING — this is acceptable and strictly more faithful. CR 400.7d
+    /// distinguishes reading the payment record of the object the ability is on
+    /// from reading that of a referenced spell; the generic shape carries the
+    /// distinction, the legacy shape could not. Zero live cards use "that
+    /// spell" in this rider today (all 11 leading-word Adamant cards say "this
+    /// spell"), so this is a latent capability, not a behavior change. The
+    /// runtime `QuantityCheck` reader resolves `TriggeringSpell` through the
+    /// trigger event context rather than `ability.source_id`, which is the
+    /// correct reading for that phrasing.
+    #[test]
+    fn leading_word_mana_spent_condition_records_that_spell_anaphora() {
+        let condition = try_nom_condition_as_ability_condition(
+            "at least three white mana was spent to cast that spell",
+            &mut ParseContext::default(),
+        )
+        .expect("the generic grammar must recognize the 'that spell' anaphora");
+        assert_eq!(
+            condition,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::OfColor {
+                            color: ManaColor::White
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        // Reach-guard + contrast: "this spell" stays `SelfObject`, so the scope
+        // axis is genuinely threaded rather than hardcoded.
+        let self_scoped = try_nom_condition_as_ability_condition(
+            "at least three white mana was spent to cast this spell",
+            &mut ParseContext::default(),
+        )
+        .expect("the 'this spell' anaphora must still parse");
+        assert!(matches!(
+            self_scoped,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        ..
+                    },
+                },
+                ..
+            }
+        ));
     }
 
     /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through

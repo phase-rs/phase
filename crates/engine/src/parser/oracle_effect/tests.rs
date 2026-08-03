@@ -1,5 +1,11 @@
-use super::lower::rewrite_parent_target_to_last_created;
+use super::lower::{
+    rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
+};
 use super::*;
+use crate::parser::oracle_ir::ast::EntersUnderSpec;
+use crate::parser::oracle_nom::enters_under::{
+    bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
+};
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
@@ -35,6 +41,22 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
             }
         ),
         "the shared walker must not visit Effect::Shuffle"
+    );
+}
+
+#[test]
+fn do_the_same_type_rewrite_does_not_overwrite_logical_target_leaves() {
+    let original = TargetFilter::And {
+        filters: vec![TargetFilter::Typed(TypedFilter::creature())],
+    };
+    let mut filter = original.clone();
+    assert!(
+        !replace_type_filters(&mut filter, &[TypeFilter::Subtype("Aura".to_string())]),
+        "a logical target composition is not a direct card selector"
+    );
+    assert_eq!(
+        filter, original,
+        "the type-substitution path must not rewrite unrelated logical leaves"
     );
 }
 
@@ -1504,7 +1526,7 @@ fn stensian_class_builds_whenever_event_this_combat_delayed_trigger() {
         );
     };
     assert!(!uses_tracked_set);
-    let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+    let DelayedTriggerCondition::WheneverEvent { trigger, .. } = condition else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::DamageDone);
@@ -4977,6 +4999,60 @@ fn target_subject_damage_equal_to_its_power_uses_target_source_power() {
     );
 }
 
+#[test]
+fn source_power_toughness_rebind_preserves_other_source_refs() {
+    let mut amount = QuantityExpr::Sum {
+        exprs: vec![
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Source,
+                },
+            },
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Source,
+                },
+            },
+        ],
+    };
+
+    rebind_source_amount(
+        &mut amount,
+        ObjectScope::Target,
+        SourceRefRebind::PowerOrToughness,
+    );
+
+    assert!(matches!(
+        amount,
+        QuantityExpr::Sum { exprs }
+            if matches!(
+                exprs.as_slice(),
+                [
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Target,
+                        },
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                ]
+            )
+    ));
+}
+
 /// Self-Destruct's second damage instruction inherits the target creature from
 /// the first subject clause; it must not resolve against the spell source.
 #[test]
@@ -5070,6 +5146,54 @@ fn named_damage_source_multi_recipient_chain_keeps_cant_block_rider() {
     assert!(
         has_cant_block,
         "Chandra, Pyromaster's printed CantBlock rider must remain in the chain: {definition:#?}"
+    );
+}
+
+/// CR 208.1 + issue #6208: Punishing Punch — "Target creature you control deals
+/// damage equal to TWICE its power to target creature an opponent controls." The
+/// multiplier form lowered "its power" via the CDA path to `Power{Source}` (which
+/// reads the spell — power 0 — so it dealt nothing); it must bind to the target
+/// subject exactly like the singular form above. Self-subject "twice its power"
+/// (Duggan, a bare `DealDamage`) is unaffected and keeps `Power{Source}` — see
+/// `duggan_private_detective_full_kit_parses` as the regression guard.
+#[test]
+fn target_subject_damage_twice_its_power_uses_target_source_power() {
+    let clause = parse_effect_clause(
+        "target creature you control deals damage equal to twice its power to target creature an opponent controls",
+        &mut ParseContext::default(),
+    );
+    let Effect::TargetOnly { target } = &clause.effect else {
+        panic!(
+            "expected TargetOnly source wrapper, got {:?}",
+            clause.effect
+        );
+    };
+    assert!(matches!(target, TargetFilter::Typed(_)));
+    let sub = clause
+        .sub_ability
+        .as_ref()
+        .expect("damage should be in sub-ability after source target");
+    let Effect::DealDamage {
+        amount,
+        damage_source,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected DealDamage sub-effect, got {:?}", sub.effect);
+    };
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Multiply { factor: 2, inner }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power { scope: ObjectScope::Target }
+                    }
+                )
+        ),
+        "amount must be 2 x TARGET power (not Source, which reads the spell), got {amount:?}"
     );
 }
 
@@ -24118,6 +24242,189 @@ fn exile_all_creatures_and_spacecraft_lowers_to_mass_zone_change() {
     }
 }
 
+/// CR 406.2 + CR 404.1 (Ultimate Nullification): "Exile all creatures
+/// and graveyards" is ONE mass exile spanning the battlefield and every
+/// graveyard — a single `ChangeZoneAll { Or[Creature+InZone(BF),
+/// Card+InAnyZone([Graveyard])] }`, never a creature wipe plus an orphaned
+/// `Unimplemented { "graveyards" }` conjunct (the pre-fix parse). The self-return
+/// tail (`Put ~ on the bottom of its owner's library`) chains as a
+/// `PutAtLibraryPosition { SelfRef, Bottom }`.
+#[test]
+fn ultimate_nullification_exiles_creatures_and_all_graveyards() {
+    let def = parse_effect_chain(
+        "Exile all creatures and graveyards. Put ~ on the bottom of its owner's library.",
+        AbilityKind::Spell,
+    );
+
+    let target = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected ChangeZoneAll to Exile, got {other:?}"),
+    };
+    let filters = match target {
+        TargetFilter::Or { filters } => filters,
+        other => panic!("expected an Or of a battlefield leg and a graveyard leg, got {other:?}"),
+    };
+    // Battlefield creature leg: Typed(Creature) scoped to the battlefield so
+    // `extract_zones` yields Battlefield ∪ Graveyard.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )),
+        "missing battlefield creature leg, got {filters:?}"
+    );
+    // Whole-graveyard leg: every card (`TypeFilter::Card`), every owner
+    // (`controller: None`), in the graveyard zone.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.controller.is_none()
+                    && tf.properties.contains(&FilterProp::InAnyZone { zones: vec![Zone::Graveyard] })
+        )),
+        "missing all-cards all-graveyards leg, got {filters:?}"
+    );
+
+    // No coverage-gap sentinel anywhere in the lowered chain — the pre-fix parse
+    // emitted `Effect::Unimplemented { name: "graveyards" }`.
+    fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+    assert!(
+        !chain_has_unimplemented(&def),
+        "chain must not retain an Unimplemented node: {def:#?}"
+    );
+
+    // The self-return tail: put the spell on the bottom of its owner's library.
+    fn find_put_at_library(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::PutAtLibraryPosition { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_put_at_library)
+    }
+    let put = find_put_at_library(&def).expect("expected a PutAtLibraryPosition tail");
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                position: LibraryPosition::Bottom,
+                ..
+            }
+        ),
+        "self-return must be PutAtLibraryPosition {{ SelfRef, Bottom }}, got {:?}",
+        put.effect
+    );
+}
+
+/// Reach-guard: a pure permanent-type union with NO zone leg ("Exile all
+/// creatures and artifacts") must be DECLINED by the heterogeneous recognizer and
+/// keep the existing type-union lowering — crucially with NO `InZone(Battlefield)`
+/// scoping injected (that belongs only to the mixed permanent+zone form).
+#[test]
+fn exile_permanents_and_zones_declines_pure_type_union() {
+    let def = parse_effect_chain("Exile all creatures and artifacts.", AbilityKind::Spell);
+    let filters = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target: TargetFilter::Or { filters },
+            ..
+        } => filters,
+        other => panic!("expected ChangeZoneAll with an Or filter, got {other:?}"),
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected exactly Creature/Artifact legs, got {filters:?}"
+    );
+    assert!(
+        filters
+            .iter()
+            .all(|f| matches!(f, TargetFilter::Typed(tf) if tf.properties.is_empty())),
+        "pure type union must carry no InZone scoping, got {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)
+        )),
+        "expected a Creature leg, got {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Artifact)
+        )),
+        "expected an Artifact leg, got {filters:?}"
+    );
+}
+
+/// Generalization: the zone-union tail is a building block, not a "graveyards"
+/// special case — "Exile all creatures and graveyards and hands" carries both
+/// zones on the whole-zone leg's `InAnyZone`.
+#[test]
+fn exile_permanents_and_zones_generalizes_to_multiple_zones() {
+    let def = parse_effect_chain(
+        "Exile all creatures and graveyards and hands.",
+        AbilityKind::Spell,
+    );
+    let filters = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target: TargetFilter::Or { filters },
+            ..
+        } => filters,
+        other => panic!("expected ChangeZoneAll with an Or filter, got {other:?}"),
+    };
+    // Battlefield permanent leg: the "creatures" operand scoped to the
+    // battlefield — validated from the same `filters` result as the zone leg so
+    // the union really carries both.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )),
+        "expected a Creature + InZone(Battlefield) leg, got {filters:?}"
+    );
+    // Whole-zone leg: every card, every owner, across both trailing zones.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.properties.contains(&FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard, Zone::Hand]
+                    })
+        )),
+        "expected a Card + InAnyZone([Graveyard, Hand]) leg, got {filters:?}"
+    );
+}
+
+// NOTE: the Thought Distortion regression now lives at the PRODUCTION boundary
+// (`crate::database::synthesis` tests →
+// `thought_distortion_declines_recognizer_at_production_boundary`), which parses
+// the card's COMPLETE Oracle text through `build_oracle_face` and asserts the
+// preserved `RevealHand`→opponent binding and `ChangeZoneAll { origin: Hand }`
+// shape — a stronger guard than an isolated-sentence `parse_effect_chain` call.
+
 #[test]
 fn parse_put_on_top_or_bottom_possessive() {
     // "Target creature's owner puts it on their choice of the top or bottom of their library."
@@ -24126,8 +24433,14 @@ fn parse_put_on_top_or_bottom_possessive() {
         AbilityKind::Spell,
     );
     assert!(
-        matches!(*def.effect, Effect::PutOnTopOrBottom { .. }),
-        "Expected PutOnTopOrBottom, got {:?}",
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                chooser: TargetFilter::ParentTargetOwner,
+                ..
+            }
+        ),
+        "Expected an owner-chosen PutOnTopOrBottom, got {:?}",
         def.effect
     );
 }
@@ -24203,6 +24516,7 @@ fn parse_aether_gust_effect_chain() {
             &*sub.effect,
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::ParentTarget,
+                chooser: TargetFilter::ParentTargetOwner,
             }
         ),
         "Expected ParentTarget PutOnTopOrBottom continuation, got {:?}",
@@ -29359,6 +29673,146 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
 }
 
+/// Issue #6507 (CR 122.1): `condition_refs_source_object` must
+/// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
+/// no mining counters on this land") as source-referential — that gate is what
+/// threads `SelfRef` as the chunk subject so the rider's bare "it" binds to
+/// the source. Adjacent-variant hostiles: `Target`/`Recipient`-scoped counter
+/// reads (the deliberately excluded "if that creature has … counters" class)
+/// must stay non-source-referential.
+#[test]
+fn condition_refs_source_object_source_counter_quantity_check() {
+    fn counters_check(scope: ObjectScope) -> AbilityCondition {
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope,
+                    counter_type: Some(crate::types::counter::parse_counter_type("mining")),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }
+    }
+
+    // Positive: source-scoped counter threshold (the Gemstone Mine class).
+    assert!(condition_refs_source_object(&counters_check(
+        ObjectScope::Source
+    )));
+    // Wrapped-expression positive: the walker must see through arithmetic
+    // wrappers (`Offset { CountersOn { Source } }` still reads the source).
+    assert!(condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    },
+                }),
+                offset: 1,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    // Existing wrapper recursion still applies to the new arm.
+    assert!(condition_refs_source_object(&AbilityCondition::Not {
+        condition: Box::new(counters_check(ObjectScope::Source)),
+    }));
+    assert!(condition_refs_source_object(&AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::IsYourTurn,
+            counters_check(ObjectScope::Source),
+        ],
+    }));
+    // `QuantityCheck` must inspect both sides of the comparison, not only the
+    // customary left-hand counter threshold.
+    assert!(condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                },
+            },
+        }
+    ));
+
+    // Adjacent-variant hostiles: target-/recipient-scoped counter reads keep
+    // their current (non-source) binding.
+    assert!(!condition_refs_source_object(&counters_check(
+        ObjectScope::Target
+    )));
+    assert!(!condition_refs_source_object(&counters_check(
+        ObjectScope::Recipient
+    )));
+    // A QuantityCheck with no counter read at all stays non-source-referential.
+    assert!(!condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 7 },
+        }
+    ));
+
+    // Two-operand wrapper arms: the walker must recurse into BOTH branches so a
+    // source-counter read hidden in either operand still registers, and a
+    // wrapper with neither operand reading the source stays negative. These
+    // arms were previously undriven by this test (only Ref/Offset were).
+    let source_read = QuantityExpr::Ref {
+        qty: QuantityRef::CountersOn {
+            scope: ObjectScope::Source,
+            counter_type: None,
+        },
+    };
+    // Sum { exprs } — recurse via `.any(..)`: source read in one operand → true.
+    assert!(condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Sum {
+                exprs: vec![QuantityExpr::Fixed { value: 1 }, source_read.clone()],
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    // Difference { left, right } — recurse via `left || right`: source read on
+    // the right operand alone still registers.
+    assert!(condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Fixed { value: 3 }),
+                right: Box::new(source_read.clone()),
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }
+    ));
+    // Neither-operand-source Sum stays negative (no false positive).
+    assert!(!condition_refs_source_object(
+        &AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed { value: 1 },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                ],
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+}
+
 // --- Suffix condition extraction tests ---
 
 #[test]
@@ -30111,6 +30565,262 @@ fn suffix_condition_with_otherwise_integration() {
             .unwrap();
 }
 
+// --- CR 110.2a controller-override binding (#6691) ---
+
+/// CR 110.2a (docs/MagicCompRules.txt:618) + CR 400.1 (:1933) + CR 400.3
+/// (:1937) + CR 404.1 (:2030) + CR 108.3 (:564): Jailbreak's
+/// "under their control" binds to the moved card's OWNER, because a card in an
+/// opponent's graveyard is in ITS OWNER's graveyard.
+///
+/// REVERT-FAILING ASSERTION: `enters_under == Some(ParentTargetOwner)`. Before
+/// the fix the clause was dropped entirely and this field was `None`, the
+/// existing no-override carrier. It therefore could not preserve Jailbreak's
+/// explicitly named owner-controller — the exact defect #6691 reports.
+#[test]
+fn jailbreak_enters_under_their_control_binds_to_the_owner() {
+    // Verbatim Oracle text (client/public/card-data.json).
+    let parsed = parse_oracle_text(
+        "Return target permanent card in an opponent's graveyard to the battlefield under \
+         their control. When that permanent enters, return up to one target permanent card \
+         with equal or lesser mana value from your graveyard to the battlefield.",
+        "Jailbreak",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Jailbreak must parse a spell ability");
+    match &*ability.effect {
+        Effect::ChangeZone {
+            origin,
+            destination,
+            enters_under,
+            target,
+            ..
+        } => {
+            assert_eq!(
+                *enters_under,
+                Some(ControllerRef::ParentTargetOwner),
+                "the CR 110.2a control clause must bind to the moved card's owner"
+            );
+            // Reach guards: the excision must not have corrupted the rest of
+            // the clause (foot-gun #6 — a degraded parse would pass vacuously).
+            assert_eq!(*origin, Some(Zone::Graveyard));
+            assert_eq!(*destination, Zone::Battlefield);
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected a typed permanent filter, got {target:?}");
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent
+                    }
+                )),
+                "the opponent-ownership NP that LICENSES the binding must survive: {tf:?}"
+            );
+        }
+        other => panic!("Jailbreak must lower to a ChangeZone, got {other:?}"),
+    }
+    // The consumed clause must not be re-emitted as a dangling gap.
+    let dump = format!("{parsed:?}");
+    assert!(
+        !dump.contains("change_zone_enters_under_anaphor"),
+        "Jailbreak must be BOUND, not failed closed"
+    );
+}
+
+/// CR 110.2a: `"under your control"` is unchanged — the 558-card population
+/// that already worked must stay byte-identical through the new grammar.
+#[test]
+fn under_your_control_still_binds_to_you_after_the_collapse() {
+    let def = parse_effect_chain(
+        "Return target creature card from your graveyard to the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::ChangeZone { enters_under, .. } => {
+            assert_eq!(*enters_under, Some(ControllerRef::You));
+        }
+        other => panic!("expected ChangeZone, got {other:?}"),
+    }
+}
+
+/// CR 110.2 (docs/MagicCompRules.txt:616): owner forms use the existing
+/// per-moved-object-owner carrier (`None`), rather than a player override, and
+/// specifically must not be misread as the third-person `TheirAnaphor` (B3).
+#[test]
+fn owner_forms_still_produce_no_controller_override() {
+    for text in [
+        "Return target creature card from your graveyard to the battlefield under its owner's \
+         control.",
+        "Return target creature card from your graveyard to the battlefield under their owner's \
+         control.",
+        "Return target creature card from your graveyard to the battlefield under their owners' \
+         control.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        match &*def.effect {
+            Effect::ChangeZone { enters_under, .. } => {
+                assert_eq!(*enters_under, None, "{text}");
+            }
+            other => panic!("expected ChangeZone for {text}, got {other:?}"),
+        }
+    }
+}
+
+/// CR 110.2a fail-closed: an anaphor with no nameable antecedent must become an
+/// honest `Effect::unimplemented`, NEVER a silently-defaulted controller.
+///
+/// REVERT-FAILING ASSERTION: the effect is the `change_zone_enters_under_anaphor`
+/// gap. Before the fix this parsed to a `ChangeZone` with `enters_under: None`,
+/// the existing no-override carrier, while the card reported as fully
+/// supported despite losing its explicitly printed controller.
+#[test]
+fn unbindable_anaphor_fails_closed_instead_of_defaulting() {
+    // `TargetFilter::Any`-style filter with NO ownership NP and no relative
+    // player scope: neither antecedent source can fire.
+    let def = parse_effect_chain(
+        "Return target creature card to the battlefield under that player's control.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::Unimplemented { name, .. } => {
+            assert_eq!(name, "change_zone_enters_under_anaphor");
+        }
+        other => panic!("an unbindable control clause must fail closed, got {other:?}"),
+    }
+}
+
+/// CR 110.2a fail-closed regression for the production SearchDestination
+/// assembly path. Search lowering may preinstall its own executable ChangeZone;
+/// an unbound controller clause must replace that whole assembly, including an
+/// attachment rider, rather than merely append an honest gap beside it.
+#[test]
+fn unbindable_search_destination_removes_move_and_attachment() {
+    let def = parse_effect_chain(
+        "Search your library for an Aura card, put it onto the battlefield under that player's \
+         control attached to target creature, then shuffle.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "change_zone_enters_under_anaphor"
+        ),
+        "the unbound SearchDestination must replace its preinstalled search assembly: {def:#?}"
+    );
+    assert!(
+        def.else_ability.is_none() && !def.forward_result,
+        "the gap must not retain an alternate branch: {def:#?}"
+    );
+    let mut chain = Vec::new();
+    collect_chain_defs(&def, &mut chain);
+    assert!(
+        chain.iter().any(|definition| matches!(
+            definition.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "change_zone_enters_under_anaphor"
+        )),
+        "the unbound SearchDestination must report its controller gap: {def:#?}"
+    );
+    assert!(
+        chain.iter().all(|definition| !matches!(
+            definition.effect.as_ref(),
+            Effect::ChangeZone { .. } | Effect::Attach { .. }
+        )),
+        "no executable move or attachment may survive beside the gap: {def:#?}"
+    );
+}
+
+/// CR 110.2a reach guard for the paired fail-closed SearchDestination case:
+/// a bindable clause must still assemble the production SearchLibrary →
+/// ChangeZone → Attach path. This prevents the negative regression above from
+/// passing because the search-destination continuation stopped assembling.
+#[test]
+fn bindable_search_destination_keeps_move_and_attachment() {
+    let def = parse_effect_chain(
+        "Search your library for an Aura card, put it onto the battlefield under your control \
+         attached to target creature, then shuffle.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain = Vec::new();
+    collect_chain_defs(&def, &mut chain);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::SearchLibrary { .. }),
+        "the bindable sibling must begin at its SearchLibrary production entry: {def:#?}"
+    );
+    assert!(
+        chain
+            .iter()
+            .all(|definition| !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. })),
+        "the bindable sibling must reach SearchDestination assembly: {def:#?}"
+    );
+    let search_index = chain
+        .iter()
+        .position(|definition| matches!(definition.effect.as_ref(), Effect::SearchLibrary { .. }))
+        .expect("the bindable sibling must retain its SearchLibrary production entry");
+    assert_eq!(
+        search_index, 0,
+        "the SearchLibrary production entry must precede the destination chain: {def:#?}"
+    );
+    let attachment_index = chain
+        .iter()
+        .position(|definition| {
+            definition.forward_result
+                && matches!(
+                    definition.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        enters_under: Some(ControllerRef::You),
+                        ..
+                    }
+                )
+                && matches!(
+                    definition
+                        .sub_ability
+                        .as_deref()
+                        .map(|sub| sub.effect.as_ref()),
+                    Some(Effect::Attach { .. })
+                )
+        })
+        .expect("the bindable SearchDestination must retain its move and attachment");
+    assert!(
+        search_index < attachment_index,
+        "SearchLibrary must precede its battlefield move and attachment: {def:#?}"
+    );
+}
+
+/// CR 110.2a fail-closed regression for a direct return with an attachment
+/// rider. The unbound controller gap must replace the whole clause, rather
+/// than leaving an Attach sub-ability to resolve without its zone change.
+#[test]
+fn unbindable_attached_return_removes_attachment() {
+    let def = parse_effect_chain(
+        "Return target Aura card from a graveyard to the battlefield under their control \
+         attached to target creature.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Unimplemented { name, .. }
+                if name == "change_zone_enters_under_anaphor"
+        ),
+        "the unbound attached return must fail closed: {def:#?}"
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "no executable attachment may survive below the gap: {def:#?}"
+    );
+}
+
 // --- ReturnDestination flag propagation tests ---
 
 #[test]
@@ -30120,7 +30830,7 @@ fn return_destination_under_your_control() {
     assert_eq!(target_text, "target creature");
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(!d.enter_tapped);
     assert!(!d.transformed);
 }
@@ -30133,15 +30843,21 @@ fn return_destination_tapped() {
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
     assert!(d.enter_tapped);
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
 }
 
 #[test]
 fn return_destination_owners_control_not_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield under its owner's control");
     let d = dest.expect("should parse destination");
+    // CR 110.2 (docs/MagicCompRules.txt:616): the owner form is RECOGNIZED as a
+    // clause but restates the default, so binding it yields
+    // `EntersUnderSpec::Default` — never a controller override, and never the
+    // third-person `TheirAnaphor`.
+    assert_eq!(d.control, Some(ControlClausePossessor::Owner));
     assert_eq!(
-        d.enters_under, None,
+        bind_control_clause(d.control, ControlAnaphorAntecedent::Unnameable),
+        EntersUnderSpec::Default,
         "owner's control should not set a controller override"
     );
 }
@@ -30151,7 +30867,7 @@ fn return_destination_tapped_under_your_control() {
     let (_, dest) = strip_return_destination_ext("it to the battlefield tapped under your control");
     let d = dest.expect("should parse destination");
     assert!(d.enter_tapped);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
 }
 
 #[test]
@@ -30160,7 +30876,7 @@ fn return_destination_transformed_under_your_control() {
         strip_return_destination_ext("it to the battlefield transformed under your control");
     let d = dest.expect("should parse destination");
     assert!(d.transformed);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(!d.enter_tapped);
 }
 
@@ -30168,7 +30884,7 @@ fn return_destination_transformed_under_your_control() {
 fn return_destination_plain_battlefield() {
     let (_, dest) = strip_return_destination_ext("target creature to the battlefield");
     let d = dest.expect("should parse destination");
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
     assert!(!d.enter_tapped);
     assert!(!d.transformed);
 }
@@ -30184,7 +30900,7 @@ fn return_destination_tapped_and_attacking() {
     assert!(d.enter_tapped);
     assert!(d.enters_attacking);
     assert!(!d.transformed);
-    assert_eq!(d.enters_under, None);
+    assert_eq!(d.control, None);
 }
 
 /// CR 110.2a + CR 708.3 + CR 614.1: order-independent entry-riders trailing
@@ -30199,7 +30915,7 @@ fn return_destination_face_down_and_tapped_after_control() {
     assert_eq!(target_text, "it");
     let d = dest.expect("should parse destination");
     assert_eq!(d.zone, Zone::Battlefield);
-    assert_eq!(d.enters_under, Some(ControllerRef::You));
+    assert_eq!(d.control, Some(ControlClausePossessor::You));
     assert!(d.face_down, "face down rider must be captured");
     assert!(d.enter_tapped, "tapped rider must be captured");
     assert!(!d.transformed);
@@ -30243,8 +30959,10 @@ fn return_destination_face_down_before_control_splice() {
         strip_return_destination_ext("it to the battlefield face down under its owner's control");
     let d = dest.expect("should parse destination");
     assert!(d.face_down);
+    assert_eq!(d.control, Some(ControlClausePossessor::Owner));
     assert_eq!(
-        d.enters_under, None,
+        bind_control_clause(d.control, ControlAnaphorAntecedent::Unnameable),
+        EntersUnderSpec::Default,
         "owner's control must not set a controller override"
     );
 }
@@ -31222,6 +31940,23 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
         }
     ));
     assert!(connector.duration.is_none());
+
+    let planeswalker_only = parse_effect_chain(
+        "that player can't attack planeswalkers you control during their next turn.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        planeswalker_only.effect.as_ref(),
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                activity: ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Planeswalker,
+                    protected_player: None,
+                },
+                ..
+            },
+        }
+    ));
 }
 
 #[test]
@@ -31231,6 +31966,10 @@ fn scoped_cant_attack_prohibition_supports_both_verbs_and_all_defended_scopes() 
     for verb in ["can't", "cannot"] {
         for (scope, expected_defended) in [
             ("you", AttackTargetFilter::Player),
+            (
+                "planeswalkers you control",
+                AttackTargetFilter::Planeswalker,
+            ),
             (
                 "you or planeswalkers you control",
                 AttackTargetFilter::PlayerOrPlaneswalker,
@@ -33187,6 +33926,57 @@ fn per_opponent_fanout_excludes_non_battlefield_zone_targets() {
     assert!(
         !target_filter_is_single_object_target(&filter),
         "zone-card targets such as that player's graveyard must not use battlefield target fanout"
+    );
+}
+
+/// The graveyard exception to per-opponent target fanout must admit an
+/// instant-or-sorcery disjunction only when every alternative is independently
+/// scoped to the paired target player's graveyard. A permissive `Or` would let
+/// one broad branch inherit the other branch's safety-critical zone binding.
+#[test]
+fn per_opponent_graveyard_fanout_requires_every_or_branch_to_be_fully_scoped() {
+    let scoped = |kind| {
+        TargetFilter::Typed(
+            TypedFilter::new(kind)
+                .controller(ControllerRef::TargetPlayer)
+                .properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ]),
+        )
+    };
+    let safely_scoped = TargetFilter::Or {
+        filters: vec![scoped(TypeFilter::Instant), scoped(TypeFilter::Sorcery)],
+    };
+    assert!(target_filter_is_explicit_target_player_graveyard_card(
+        &safely_scoped
+    ));
+
+    let unscoped_sorcery = TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Sorcery)
+            .controller(ControllerRef::TargetPlayer)
+            .properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]),
+    );
+    let mixed_scope = TargetFilter::Or {
+        filters: vec![scoped(TypeFilter::Instant), unscoped_sorcery],
+    };
+    assert!(
+        !target_filter_is_explicit_target_player_graveyard_card(&mixed_scope),
+        "every disjunct must carry the TargetPlayer ownership and graveyard restrictions"
+    );
+
+    let non_typed_branch = TargetFilter::Or {
+        filters: vec![scoped(TypeFilter::Instant), TargetFilter::ParentTarget],
+    };
+    assert!(
+        !target_filter_is_explicit_target_player_graveyard_card(&non_typed_branch),
+        "non-typed alternatives must not qualify for the nonbattlefield fanout exception"
     );
 }
 
@@ -35252,12 +36042,82 @@ fn that_player_adds_mana_injects_scoped_player_recipient() {
         } => {
             assert_eq!(
                 target,
-                Some(TargetFilter::ScopedPlayer),
-                "subject-predicate path must stamp ScopedPlayer recipient"
+                Some(crate::types::ability::ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer
+                }),
+                "subject-predicate path must stamp a ScopedPlayer RECIPIENT role"
             );
         }
         other => panic!("expected Effect::Mana, got {other:?}"),
     }
+}
+
+/// Matrix row 16 (BLOCKER B1) — the SUBJECT-PREDICATE stamping route must
+/// COMBINE, not clobber.
+///
+/// CR 601.2c: there are TWO places in the parser where a subject-derived
+/// recipient is stamped onto an already-parsed `Effect::Mana` — the subject-led
+/// wrapper in `oracle_effect/mana.rs` and subject-predicate classification here.
+/// Both carried the identical `if target.is_none()` idiom, which silently
+/// DISCARDED the recipient whenever the inner clause had already produced a
+/// count source. Fixing only one route fixes the card and leaves the class
+/// broken.
+///
+/// Asserting `Both` (not merely "non-`None`") is what fails a plain
+/// `ManaTargetRole::Recipient { .. }` wrap — the exact mistake a mechanical
+/// compiler-driven sweep would make here.
+#[test]
+fn that_player_adds_for_each_target_opponent_combines_recipient_and_count_source() {
+    use crate::types::ability::{ControllerRef as CR, ManaTargetRole, TypedFilter};
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause(
+        "that player adds {R} for each card in target opponent's hand.",
+        &mut ctx,
+    );
+
+    // Positive reach guard: the sentence must reach `Effect::Mana` at all, so
+    // the role assertion below cannot pass vacuously on an `Unimplemented`.
+    let Effect::Mana { target, .. } = &clause.effect else {
+        panic!("expected Effect::Mana, got {:?}", clause.effect);
+    };
+
+    assert_eq!(
+        target,
+        &Some(ManaTargetRole::Both {
+            recipient: TargetFilter::ScopedPlayer,
+            count_source: TargetFilter::Typed(TypedFilter::default().controller(CR::Opponent)),
+        }),
+        "the stripped subject is the RECIPIENT and the for-each clause is the \
+         COUNT SOURCE — two independent instances of 'target' (CR 601.2c)"
+    );
+}
+
+/// Paired over-application negative for the test above: the SAME route with NO
+/// inner count source must still yield a plain `Recipient`. A `with_recipient`
+/// that always promoted to `Both` would surface a phantom second target slot.
+#[test]
+fn that_player_adds_without_a_count_source_stays_recipient_only() {
+    use crate::types::ability::ManaTargetRole;
+
+    let mut ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    let clause = parse_effect_clause("that player adds {R}.", &mut ctx);
+    let Effect::Mana { target, .. } = &clause.effect else {
+        panic!("expected Effect::Mana, got {:?}", clause.effect);
+    };
+    assert_eq!(
+        target,
+        &Some(ManaTargetRole::Recipient {
+            recipient: TargetFilter::ScopedPlayer
+        }),
+        "a bare subject-led mana declares ONE role, not a phantom count source"
+    );
 }
 
 /// CR 503.1a + CR 608.2d (issue #1535): Braids, Conjurer Adept — "at the
@@ -36422,6 +37282,47 @@ fn intensify_parser_maps_source_and_owned_scopes() {
             amount: QuantityExpr::Fixed { value: 3 },
         } if subtype == "Chorus"
     ));
+}
+
+/// The controller-specific "if you discard a card this way" continuation shares
+/// the generic reflexive connector with the player-anaphor forms used by Chains.
+/// Great Desert Hellion must retain its conditioned intensify rider.
+#[test]
+fn great_desert_hellion_unless_discard_keeps_conditioned_intensify() {
+    let parsed = parse_oracle_text(
+        "Starting intensity 1\nMenace\nAt the beginning of your upkeep, sacrifice Great Desert Hellion unless you discard a card. If you discard a card this way, Great Desert Hellion intensifies by 1.",
+        "Great Desert Hellion",
+        &[],
+        &["Creature".to_string()],
+        &["Hellion".to_string()],
+    );
+    let upkeep = parsed
+        .triggers
+        .iter()
+        .find(|trigger| matches!(trigger.phase, Some(Phase::Upkeep)))
+        .expect("expected Great Desert Hellion's upkeep trigger");
+    let intensify = upkeep
+        .execute
+        .as_deref()
+        .and_then(|ability| ability.sub_ability.as_deref())
+        .expect("expected an intensify rider after the unless-discard action");
+    assert!(
+        matches!(
+            intensify.effect.as_ref(),
+            Effect::Intensify {
+                scope: IntensityScope::Source,
+                amount: QuantityExpr::Fixed { value: 1 },
+            }
+        ),
+        "upkeep rider must remain source intensify, got {:?}",
+        intensify.effect
+    );
+    assert_eq!(
+        intensify.condition,
+        Some(AbilityCondition::effect_performed()),
+        "intensify must be gated on the optional discard succeeding, got {:?}",
+        intensify.condition
+    );
 }
 
 #[test]
@@ -39094,11 +39995,29 @@ fn identity_crisis_parses_multi_zone_player_exile() {
 #[test]
 fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     use crate::types::ability::ControllerRef;
+    // Bare "cards" form (CR 108.2): no type restriction (empty type_filters).
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
             "cards from target player's hand and graveyard."
         ),
         Some((
+            vec![],
+            ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        ))
+    );
+    // Type-qualified form (CR 205.2a): carries the noncreature/nonland restriction
+    // AND the owner scope AND the zone union (Thought Distortion).
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "noncreature, nonland cards from that player's hand and graveyard."
+        ),
+        Some((
+            vec![
+                TypeFilter::Card,
+                TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
             ControllerRef::TargetPlayer,
             vec![Zone::Hand, Zone::Graveyard]
         ))
@@ -40987,7 +41906,7 @@ fn plargg_and_nassari_full_trigger_chain_choose_then_cast_others() {
         ref filter,
         ref zones,
         max_total_mv,
-        exile_instead_of_graveyard,
+        ref graveyard_replacement,
     } = *cast.effect
     else {
         panic!("expected FreeCastFromZones tail, got {:?}", cast.effect);
@@ -40998,7 +41917,7 @@ fn plargg_and_nassari_full_trigger_chain_choose_then_cast_others() {
     );
     assert_eq!(*zones, vec![Zone::Exile]);
     assert_eq!(max_total_mv, None);
-    assert!(!exile_instead_of_graveyard);
+    assert!(graveyard_replacement.is_none());
     let TargetFilter::And { filters: ref cf } = *filter else {
         panic!("expected And cast filter, got {filter:?}");
     };
@@ -41974,6 +42893,129 @@ fn spell_graveyard_replacement_rider_recognises_determiner_and_destination_varia
         parse_spell_graveyard_replacement_rider("draw a card instead"),
         None,
     );
+}
+
+/// CR 614.1a + CR 608.2g: "a spell cast this way" is the multi-cast form,
+/// not the legacy singular `that spell` rider. It must parse all destinations
+/// through its own all-consuming route before assembly decides whether a prior
+/// free-cast window can absorb it.
+#[test]
+fn spells_cast_this_way_graveyard_replacement_rider_recognises_destinations() {
+    use crate::types::ability::{LibraryPosition, SpellStackToGraveyardReplacement};
+    for (clause, expected) in [
+        (
+            "if a spell cast this way would be put into a graveyard, exile it instead.",
+            SpellStackToGraveyardReplacement::Exile,
+        ),
+        (
+            "if a spell cast this way would be put into a graveyard, put it on the bottom of its owner's library instead",
+            SpellStackToGraveyardReplacement::Library {
+                position: LibraryPosition::Bottom,
+            },
+        ),
+        (
+            "if a spell cast this way would be put into a graveyard, return it to its owner's hand instead",
+            SpellStackToGraveyardReplacement::Hand,
+        ),
+    ] {
+        assert_eq!(
+            parse_spells_cast_this_way_graveyard_replacement_rider(clause),
+            Some(expected),
+            "should recognise multi-cast rider clause: {clause:?}"
+        );
+    }
+    assert_eq!(
+        parse_spells_cast_this_way_graveyard_replacement_rider(
+            "if a spell cast this way would be put into a graveyard, exile it instead, then draw a card",
+        ),
+        None,
+        "the exact multi-cast rider must not partially consume a larger clause"
+    );
+}
+
+/// Diluvian Primordial's exact targeted per-opponent graveyard-cast grammar
+/// must lower to the existing paired fanout and a free during-resolution cast,
+/// with the cast-this-way destination rider attached to that cast.
+#[test]
+fn per_opponent_graveyard_free_cast_uses_paired_fanout_and_exile_rider() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhen this creature enters, for each opponent, you may cast up to one target instant or sorcery card from that player's graveyard without paying its mana cost. If a spell cast this way would be put into a graveyard, exile it instead.",
+        "Diluvian Primordial",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let def = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("Diluvian Primordial ETB must lower to a typed trigger body");
+    assert!(
+        !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+        "the exact Oracle text must not degrade to Unimplemented: {def:?}"
+    );
+
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        )),
+        "one optional object target must be paired with each opponent"
+    );
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+    let Effect::CastFromZone {
+        target,
+        without_paying_mana_cost,
+        driver,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected typed CastFromZone, got {:?}", def.effect);
+    };
+    assert!(*without_paying_mana_cost);
+    assert_eq!(*driver, CastFromZoneDriver::DuringResolution);
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected instant-or-sorcery graveyard target, got {target:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for filter in filters {
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed instant-or-sorcery branch, got {filter:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::TargetPlayer));
+        assert!(filter.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::TargetPlayer,
+        }));
+        assert!(filter.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }));
+    }
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.contains(&TypeFilter::Instant)
+    )));
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.contains(&TypeFilter::Sorcery)
+    )));
+    assert!(matches!(
+        def.sub_ability
+            .as_deref()
+            .map(|rider| rider.effect.as_ref()),
+        Some(Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -46076,6 +47118,245 @@ fn repeat_process_directive_ignores_non_repeat_flip_branch() {
     assert!(
         try_parse_repeat_process_directive("if you win the flip, draw a card", &mut ctx).is_none(),
         "a non-repeat flip branch must not be absorbed by the repeat directive"
+    );
+}
+
+/// CR 608.2c: "..., then do the same for <type> cards" replicates the antecedent
+/// mass zone-change for a sibling card type — the antecedent action is repeated
+/// verbatim modulo the stated type substitution, preserving zones and controller.
+/// Estrid, the Masked's ult ("Return all non-Aura enchantment cards from your
+/// graveyard to the battlefield, then do the same for Aura cards.") must emit TWO
+/// returns: the non-Aura enchantments, then the Auras.
+///
+/// Building-block level: exercises the "do the same for <type>" clause class, not
+/// Estrid alone. Regression guard for #4779 (Auras never returned because the
+/// comma-"then do the same" tail was glued into the first clause and dropped).
+#[test]
+fn do_the_same_for_type_replicates_mass_zone_change_with_swapped_type() {
+    use crate::types::zones::Zone;
+    let parsed = parse_oracle_text(
+        "Return all non-Aura enchantment cards from your graveyard to the battlefield, then do the same for Aura cards.",
+        "Estrid, the Masked",
+        &[],
+        &["Planeswalker".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "expected one ability, got {:?}",
+        parsed.abilities
+    );
+    let primary = &parsed.abilities[0];
+
+    // Primary: return all NON-Aura enchantment cards, graveyard -> battlefield.
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*primary.effect
+    else {
+        panic!("primary must be ChangeZoneAll, got {:?}", primary.effect);
+    };
+    assert_eq!(*origin, Some(Zone::Graveyard));
+    assert_eq!(*destination, Zone::Battlefield);
+    let TargetFilter::Typed(pt) = target else {
+        panic!("primary target must be Typed, got {target:?}");
+    };
+    assert!(
+        pt.type_filters.iter().any(|t| matches!(
+            t,
+            TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Aura")
+        )),
+        "primary must exclude Auras (Non(Aura)), got {:?}",
+        pt.type_filters
+    );
+
+    // Sub-ability: the "do the same for Aura cards" clone — same zones and
+    // controller as the antecedent, with the type swapped to Aura and the
+    // Non(Aura) exclusion dropped.
+    let sub = primary
+        .sub_ability
+        .as_ref()
+        .expect("expected a 'do the same for Aura cards' sub-ability");
+    let Effect::ChangeZoneAll {
+        origin: sub_origin,
+        destination: sub_dest,
+        target: sub_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("sub-ability must be ChangeZoneAll, got {:?}", sub.effect);
+    };
+    assert_eq!(
+        *sub_origin,
+        Some(Zone::Graveyard),
+        "Aura return must keep the graveyard origin"
+    );
+    assert_eq!(
+        *sub_dest,
+        Zone::Battlefield,
+        "Aura return must keep the battlefield destination"
+    );
+    let TargetFilter::Typed(st) = sub_target else {
+        panic!("sub target must be Typed, got {sub_target:?}");
+    };
+    assert!(
+        st.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Aura")),
+        "sub-ability must return Aura cards, got {:?}",
+        st.type_filters
+    );
+    assert!(
+        !st.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Non(_))),
+        "sub-ability must NOT inherit the antecedent's Non(Aura) exclusion, got {:?}",
+        st.type_filters
+    );
+    assert_eq!(
+        st.controller, pt.controller,
+        "Aura return must keep the antecedent's controller (You)"
+    );
+}
+
+/// CR 608.2c: the type substitution must reach a filtered tracked
+/// set without replacing its provenance wrapper. Glimpse of Tomorrow's second
+/// instruction acts only on Aura permanents revealed by its preceding reveal;
+/// changing the outer target to Typed(Aura) would instead discard "this way".
+#[test]
+fn do_the_same_for_type_retypes_nested_tracked_set_filter() {
+    let primary = parse_effect_chain(
+        "Put all non-Aura permanent cards revealed this way onto the battlefield, then do the same for Aura cards.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::ChangeZoneAll {
+        target: primary_target,
+        ..
+    } = &*primary.effect
+    else {
+        panic!("primary must be ChangeZoneAll, got {:?}", primary.effect);
+    };
+    let TargetFilter::TrackedSetFiltered {
+        id: primary_id,
+        filter: primary_filter,
+        ..
+    } = primary_target
+    else {
+        panic!("primary must preserve the revealed-card tracked set, got {primary_target:?}");
+    };
+    assert!(
+        matches!(
+            primary_filter.as_ref(),
+            TargetFilter::Typed(typed)
+                if typed.type_filters.iter().any(|filter| matches!(
+                    filter,
+                    TypeFilter::Non(inner)
+                        if matches!(&**inner, TypeFilter::Subtype(subtype) if subtype == "Aura")
+                ))
+        ),
+        "primary must retain the non-Aura restriction, got {primary_filter:?}"
+    );
+
+    let sub = primary
+        .sub_ability
+        .as_ref()
+        .expect("expected the Aura continuation");
+    let Effect::ChangeZoneAll {
+        target: continuation_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("continuation must be ChangeZoneAll, got {:?}", sub.effect);
+    };
+    let TargetFilter::TrackedSetFiltered {
+        id: continuation_id,
+        filter: continuation_filter,
+        ..
+    } = continuation_target
+    else {
+        panic!(
+            "continuation must retain the revealed-card tracked set, got {continuation_target:?}"
+        );
+    };
+    assert_eq!(
+        continuation_id, primary_id,
+        "both instructions must refer to the same revealed-card set"
+    );
+    assert!(
+        matches!(
+            continuation_filter.as_ref(),
+            TargetFilter::Typed(typed)
+                if typed.type_filters.iter().any(
+                    |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Aura")
+                )
+        ),
+        "continuation must select Auras inside the tracked set, got {continuation_filter:?}"
+    );
+}
+
+/// CR 608.2c: Glimpse of Tomorrow keeps its Aura partition and its later
+/// rest-placement instruction in one sentence. This guards the comma-then
+/// boundary between the continuation and the following cleanup clause.
+#[test]
+fn glimpse_of_tomorrow_keeps_aura_partition_and_rest_placement() {
+    fn contains_aura_tracked_set(def: &AbilityDefinition) -> bool {
+        let current = matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                target:
+                    TargetFilter::TrackedSetFiltered {
+                        filter,
+                        ..
+                    },
+                ..
+            } if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(typed)
+                    if typed.type_filters.iter().any(
+                        |type_filter| matches!(
+                            type_filter,
+                            TypeFilter::Subtype(subtype) if subtype == "Aura"
+                        )
+                    )
+            )
+        );
+        current
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(contains_aura_tracked_set)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_aura_tracked_set)
+    }
+
+    let parsed = parse_oracle_text(
+        "Suspend 3—{R}{R}\nShuffle all permanents you own into your library, then reveal that many cards from the top of your library. Put all non-Aura permanent cards revealed this way onto the battlefield, then do the same for Aura cards, then put the rest on the bottom of your library in a random order.",
+        "Glimpse of Tomorrow",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.abilities.iter().any(contains_aura_tracked_set),
+        "Glimpse must retain the Aura continuation inside its revealed-card tracked set"
+    );
+    let json = serde_json::to_string(&parsed).expect("serialize Glimpse parse");
+    assert!(
+        // allow-noncombinator: test assertion checks the serialized AST, not parser dispatch
+        !json.contains("\"Unimplemented\""),
+        "Glimpse's handled sentence must not leave an unimplemented clause: {json}"
+    );
+    assert!(
+        // allow-noncombinator: test assertion checks the serialized AST, not parser dispatch
+        json.contains("\"type\":\"PutAtLibraryPosition\"")
+            && json.contains("\"position\":{\"type\":\"Bottom\"}"),
+        "Glimpse must retain the later rest-on-bottom placement: {json}"
     );
 }
 

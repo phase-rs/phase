@@ -151,6 +151,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         | AttackTargetFilter::Planeswalker
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
+        | AttackTargetFilter::Monarch
         | AttackTargetFilter::Battle => false,
     }
 }

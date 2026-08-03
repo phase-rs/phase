@@ -396,7 +396,14 @@ pub(crate) fn handle_decide_additional_cost(
             )
         })
     {
-        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+        return handle_decide_repeatable_additional_cost(
+            state,
+            player,
+            pending,
+            additional_cost,
+            pay,
+            events,
+        );
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
@@ -410,7 +417,14 @@ pub(crate) fn handle_decide_additional_cost(
             }),
             _,
         ) => {
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         (None, AdditionalCost::Kicker { .. }) => {
             let mut pending = pending;
@@ -426,11 +440,19 @@ pub(crate) fn handle_decide_additional_cost(
         ) => {
             let mut pending = pending;
             pending.additional_cost_flow = Some(additional_cost.clone());
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         _ => {}
     }
 
+    let pending_before = pending.clone();
     let cost_source = pending.additional_cost_source;
     let current_instance = pending.additional_cost_queue.first().cloned();
     let mut ability = pending.ability;
@@ -619,6 +641,17 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     if let Some(cost) = cost_to_pay {
+        if matches!(cost, AbilityCost::PayLife { .. }) {
+            super::life_safety::begin_optional_additional_cost_attempt(
+                state,
+                player,
+                &pending_before,
+                additional_cost,
+                pay,
+                &cost,
+                &updated_pending,
+            );
+        }
         pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
@@ -965,9 +998,11 @@ fn handle_decide_repeatable_additional_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
+    additional_cost: &AdditionalCost,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let pending_before = pending.clone();
     let queued_instance = pending.additional_cost_queue.first().cloned();
     let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
     let queued_origin_ordinal = queued_instance
@@ -1001,6 +1036,17 @@ fn handle_decide_repeatable_additional_cost(
             .ability
             .context
             .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+    }
+    if matches!(cost, AbilityCost::PayLife { .. }) {
+        super::life_safety::begin_optional_additional_cost_attempt(
+            state,
+            player,
+            &pending_before,
+            additional_cost,
+            pay,
+            &cost,
+            &pending,
+        );
     }
     pay_additional_cost(state, player, cost, pending, events)
 }
@@ -6693,6 +6739,13 @@ pub(crate) fn handle_defiler_payment(
     let mut cost = pending.cost.clone();
 
     if pay {
+        super::life_safety::begin_defiler_payment_attempt(
+            state,
+            player,
+            &pending,
+            life_cost,
+            mana_reduction,
+        );
         // CR 118.3b + CR 119.4 + CR 119.8: Defiler's optional life payment is a
         // cost — route through the single-authority helper so the replacement
         // pipeline and CantLoseLife lock are honored. If the cost can't be paid
@@ -10003,17 +10056,13 @@ fn handle_resolution_cast_success(
             remaining_mv_budget,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
             source,
             member_pool,
         } => {
-            if exile_instead_of_graveyard {
-                // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
-                apply_spell_graveyard_replacement_rider(
-                    state,
-                    cast_object,
-                    SpellStackToGraveyardReplacement::Exile,
-                );
+            if let Some(destination) = graveyard_replacement.clone() {
+                // CR 614.1a: Carry the exact printed replacement destination.
+                apply_spell_graveyard_replacement_rider(state, cast_object, destination);
             }
             let casts_left = remaining_casts.saturating_sub(1);
             // CR 202.3: shrink the shared budget by what was actually spent on
@@ -10048,7 +10097,7 @@ fn handle_resolution_cast_success(
                     remaining_mv_budget: budget_left,
                     filter,
                     zones,
-                    exile_instead_of_graveyard,
+                    graveyard_replacement,
                     source,
                     member_pool,
                 },
@@ -10171,8 +10220,12 @@ fn handle_resolution_cast_rejection(
     // finishes entering the stack because we abort before the Hand→Stack
     // zone move in `finalize_cast_with_phyrexian_choices`.
     if let Some(pos) = state.stack.iter().rposition(|entry| entry.id == object_id) {
-        super::stack::remove_stack_entry_at(state, pos)
-            .expect("rposition yielded a live stack index");
+        super::stack::remove_nonresolving_stack_entry_at(
+            state,
+            pos,
+            super::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("rposition yielded a live stack index");
     }
 
     let needs_choice = match reject_action {

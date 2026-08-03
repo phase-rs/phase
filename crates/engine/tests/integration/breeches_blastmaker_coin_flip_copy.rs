@@ -315,26 +315,9 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
 
     let trigger_event = state.current_trigger_event.clone();
     let mut events = Vec::new();
-    push_pending_trigger_to_stack(
-        &mut state,
-        PendingTrigger {
-            source_id: breeches,
-            controller: PlayerId(0),
-            condition: None,
-            ability: Box::new(ability),
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event,
-            modal: None,
-            mode_abilities: vec![],
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        &mut events,
-    );
+    let mut pending = PendingTrigger::ordinary(breeches, PlayerId(0), None, Box::new(ability), 0);
+    pending.trigger_event = trigger_event;
+    push_pending_trigger_to_stack(&mut state, pending, &mut events);
 
     (state, spell, breeches)
 }
@@ -620,13 +603,13 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
         // the general reflexive-discard rule keys on this lifetime.
         lifetime: engine::types::ability::DelayedTriggerLifetime::Reflexive,
     };
-    state.delayed_triggers.push(DelayedTrigger {
+    state.delayed_triggers.push(DelayedTrigger::new(
         condition,
-        ability: Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
-        controller: PlayerId(0),
-        source_id: source,
-        one_shot: true,
-    });
+        Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
+        PlayerId(0),
+        source,
+        true,
+    ));
 
     let life_before = state.players[0].life;
 

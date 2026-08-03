@@ -26,7 +26,8 @@ use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
+    CastPaymentMode, GameState, LoopDetectionMode, PersistedGameState, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1514,6 +1515,8 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
     };
     let schema = ShortcutDecisionSchema {
         iteration_count: IterationCount::UntilLethal,
+        // No narrowed CR 732.2a bound — the global cap, as every offer states today.
+        max_iterations: ShortcutDecisionSchema::default().max_iterations,
         points: vec![DecisionPoint {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
@@ -2892,10 +2895,18 @@ fn object_growth_library_observer_does_not_suppress_offer() {
 
     // Sanity: Kodama really is in the library (not the battlefield), so any offer
     // must come from correctly IGNORING it, not from it having been removed.
+    let kodama_obj = &runner.state().objects[&kodama];
     assert_eq!(
-        runner.state().objects.get(&kodama).unwrap().zone,
+        kodama_obj.zone,
         Zone::Library,
         "the growing-class observer must sit in the library for this to discriminate",
+    );
+    assert_eq!(
+        kodama_obj.trigger_definitions.len(),
+        1,
+        "reach-guard: the observer must have PARSED — a misparse leaves zero trigger \
+         defs and the offer below forms for the wrong reason (nothing to ignore); got {}",
+        kodama_obj.trigger_definitions.len()
     );
 
     let outcome = runner
@@ -3947,6 +3958,8 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
     };
     let schema = ShortcutDecisionSchema {
         iteration_count: IterationCount::UntilLethal,
+        // No narrowed CR 732.2a bound — the global cap, as every offer states today.
+        max_iterations: ShortcutDecisionSchema::default().max_iterations,
         points: vec![DecisionPoint {
             slot,
             kind: DecisionPointKind::Targets {
@@ -4211,11 +4224,21 @@ const PLAIN_DRAW_TRIGGER_ORACLE: &str =
     "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card.";
 
 /// The passing 51st Sprout Swarm / Witherbloom object-growth row plus exactly ONE
-/// extra P0 battlefield permanent carrying `bystander_oracle`. Returns the final
-/// `WaitingFor` plus the bystander's id, so the caller can reach-guard its zone.
-fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId) {
+/// extra battlefield permanent, controlled by `bystander_controller`, carrying
+/// `bystander_oracle`. Returns the final `WaitingFor` plus the bystander's id, so the
+/// caller can reach-guard its zone.
+///
+/// `phase` parameterises the loop window's step (CR 500.1 / CR 506.1), which is what
+/// the CR 510.2 phase-unreachability rows key on; `bystander_controller` parameterises
+/// the observer's controller, which is what the CR 117.1b sole-driver rows key on. Both
+/// axes exist so a row can move exactly ONE variable against its own control.
+fn object_growth_with_bystander_at(
+    phase: Phase,
+    bystander_controller: PlayerId,
+    bystander_oracle: &str,
+) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(phase);
     scenario.add_creature_from_oracle(
         P0,
         "Witherbloom, the Balancer",
@@ -4224,7 +4247,13 @@ fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId
         WITHERBLOOM_AFFINITY_ORACLE,
     );
     let bystander = scenario
-        .add_creature_from_oracle(P0, "BBFU10 Bystander", 2, 2, bystander_oracle)
+        .add_creature_from_oracle(
+            bystander_controller,
+            "BBFU10 Bystander",
+            2,
+            2,
+            bystander_oracle,
+        )
         .id();
     let mut fodder = Vec::new();
     for _ in 0..4 {
@@ -4258,6 +4287,11 @@ fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId
     (runner, bystander)
 }
 
+/// The shipped two-call-site shape: P0's own bystander, precombat main.
+fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId) {
+    object_growth_with_bystander_at(Phase::PreCombatMain, P0, bystander_oracle)
+}
+
 /// T16 (BB-FU10 RULING deliverable). With Step 0c applied, a shipped
 /// battlefield-entry-ledger observer anywhere on a functioning battlefield
 /// SUPPRESSES a CR 732.2a object-growth offer that fires without it.
@@ -4269,16 +4303,31 @@ fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId
 /// growing class — the one error direction `ability_scan`'s ADD-1 contract
 /// forbids.
 ///
-/// **`BB-FU10-N` is the narrowing follow-up that will flip assertion (1) back to
-/// an offer** (gate the veto on whether the observer's filter can actually match
-/// the growing class, mirroring `etb_observer_provably_excludes_class`). Do NOT
-/// "fix" this test by deleting it — update it when `BB-FU10-N` lands.
+/// **`BB-FU10-N` SHIPPED IN THIS COMMIT.** Assertion (1) is now an **OFFER**. The
+/// flip's mechanism is **X2 phase/step unreachability** (CR 510.2 / CR 506.1;
+/// CR 500.1 for the phase list), *not* filter-matching: Park Heights Pegasus's
+/// ledger filter is `Typed{Creature}`, which genuinely **does** match a Saproling
+/// token, so gating the veto on filter-match leaves this card vetoed — measured by
+/// rebuilding the same board with a `Typed{Artifact}` ledger filter, which still
+/// vetoed at BASE. The card's trigger is `damage_kind: CombatOnly` and the loop
+/// window is `PreCombatMain`, so the observer cannot fire inside the window. The
+/// shallow filter-match narrowing now also ships (a `QuantityCheck`-shaped ledger read
+/// sitting directly in a block-(1) trigger's `execute.condition`, proven sole-source by
+/// single-field clone-and-rescan); rows `K4-N1`/`K4-N2` are its matched pair. Measured on
+/// the current card pool that shape matches exactly ONE printed card — this one — which
+/// it correctly REFUSES, because `Typed{Creature}` genuinely counts a Saproling creature
+/// token. Everything the shallow form cannot reach — `trigger.condition` observers (21
+/// cards), statics (16), abilities (13), `casting_options` (4), replacements (1), compound
+/// conditions, rhs-position reads, blocks (2)/(3)/(5b) — remains **`BB-FU10-N2`**.
 ///
-/// REVERT-PROBE: set the `BattlefieldEntriesThisTurn` arm's `sibling` back to
-/// `false` in `game/ability_scan.rs` → (1) FAILS (the offer returns). Measured
-/// both directions; the (2) control is granted in BOTH builds.
+/// REVERT-PROBE: delete X2's `continue` in
+/// `fire_time_conditions_read_growing_class_scoped` block (1) ⇒ this row returns to
+/// a veto and FAILS. The (2) control is granted in BOTH builds. **Second,
+/// independent probe:** make `trigger_event_unreachable_in_phase` return `false`
+/// unconditionally ⇒ the same failure ⇒ the *predicate*, not the plumbing, carries
+/// the flip.
 #[test]
-fn object_growth_ledger_observer_bystander_suppresses_offer() {
+fn object_growth_phase_unreachable_ledger_observer_does_not_suppress_offer() {
     use engine::types::zones::Zone;
 
     // (2) ANTI-VACUITY CONTROL first: an otherwise byte-identical board whose
@@ -4319,13 +4368,2457 @@ fn object_growth_ledger_observer_bystander_suppresses_offer() {
         "(3) reach-guard: exactly one trigger definition carries the ledger read"
     );
 
-    // (1) THE VETO — the disclosed, sound post-0c behaviour.
+    // (1) THE OFFER — X2's phase-unreachability relief (CR 510.2 / CR 506.1).
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut {
+            certificate,
+            predicted_winner,
+            ..
+        } => {
+            assert!(
+                certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+                "(1) the detected loop's unbounded axis must be TokensCreated, got {:?}",
+                certificate.unbounded
+            );
+            assert_eq!(
+                *predicted_winner, None,
+                "(1) this is an Advantage offer, not a predicted win"
+            );
+        }
+        other => panic!(
+            "(1) CR 510.2 / CR 506.1: Park Heights Pegasus's combat-damage trigger cannot \
+             fire inside a PreCombatMain loop window, so it must NOT suppress the \
+             CR 732.2a object-growth offer; got {other:?}"
+        ),
+    }
+}
+
+/// HF-X2-a (hostile fixture for X2-1) — the SAME Park Heights Pegasus board with the
+/// loop window at `Phase::CombatDamage`. There the observer's combat-damage event IS
+/// reachable (CR 510.2), `trigger_event_unreachable_in_phase` returns `false`, and the
+/// conservative veto is preserved. Paired with X2-1 this is a matched pair moving
+/// exactly ONE variable: the window's phase.
+///
+/// The control half proves the board still detects a loop at this step, so the subject
+/// half's no-offer is a real veto and not a dead harness.
+///
+/// REVERT-PROBE: drop the `phase != Phase::CombatDamage` conjunct from the damage arm
+/// ⇒ the subject half flips to an offer ⇒ FAILS.
+#[test]
+fn combat_damage_step_ledger_observer_still_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    // Control: the plain-draw bystander on the same board at the same step.
+    let (control_runner, _) =
+        object_growth_with_bystander_at(Phase::CombatDamage, P0, PLAIN_DRAW_TRIGGER_ORACLE);
+    assert!(
+        matches!(
+            control_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "HF-X2-a REACH-GUARD: the loop must still be detected and offered at \
+         Phase::CombatDamage, else the subject half below proves nothing. \
+         (Pre-registered STOP branch: if this fails, report the rejecting gate and \
+         DROP HF-X2-a — X2-4a/X2-4b keep the phase-keying proof.) got {:?}",
+        control_runner.state().waiting_for
+    );
+
+    // Subject: Pegasus, whose CombatOnly trigger IS reachable in this step.
+    let (runner, bystander) =
+        object_growth_with_bystander_at(Phase::CombatDamage, P0, PARK_HEIGHTS_PEGASUS_ORACLE);
+
+    // (3) reach-guards — block (2) hard-skips non-battlefield zones, and this row's claim is
+    // about ONE named TRIGGER surface: without these the veto could arrive from a surface the
+    // row does not name (wrong-attribution vacuity).
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones, so a veto from this \
+         bystander would not be attributable to it at all"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: this row's claim is about ONE named trigger surface; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}, so a veto here would not be attributable to \
+         the trigger",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
     assert!(
         !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
-        "(1) CR 732.2a: a live observer reading the battlefield-entry ledger must \
-         VETO the object-growth certificate; got {:?}. If BB-FU10-N (the narrowing \
-         follow-up) has landed, this assertion is expected to flip back to an OFFER \
-         — update it, do not delete the test.",
+        "CR 510.2: in the combat damage step the observer's event IS reachable, so the \
+         veto must be preserved; got {:?}",
         runner.state().waiting_for
     );
+}
+
+/// Smuggler's Share, verbatim (Scryfall `cards/named?exact=`), behind the harness's
+/// shared `"Flying, trample\n"` keyword prefix so subject and control differ ONLY in
+/// the ledger clause. Its trigger is `TriggerMode::Phase` with `phase: End`.
+const SMUGGLERS_SHARE_ORACLE: &str = "Flying, trample\nAt the beginning of each end step, draw a card for each opponent who drew two or more cards this turn, then create a Treasure token for each opponent who had two or more lands enter the battlefield under their control this turn.";
+
+/// X2-2 — a SECOND trigger mode reaches the same relief. Smuggler's Share's
+/// `{Phase, End}` observer cannot fire inside a `PreCombatMain` loop window
+/// (CR 500.1 / CR 506.1), so it must not suppress the CR 732.2a offer.
+///
+/// REVERT-PROBE: delete X2's `TriggerMode::Phase` arm (or widen it to `p == phase`)
+/// ⇒ the veto returns ⇒ FAILS.
+#[test]
+fn smugglers_share_end_step_observer_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    // (2) ANTI-VACUITY CONTROL, granted in BOTH builds.
+    let (control_runner, _) = object_growth_with_bystander(PLAIN_DRAW_TRIGGER_ORACLE);
+    assert!(
+        matches!(
+            control_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "(2) control: a plain draw-trigger bystander must not suppress the offer"
+    );
+
+    let (runner, bystander) = object_growth_with_bystander(SMUGGLERS_SHARE_ORACLE);
+
+    // (3) reach-guards — block (1) hard-skips non-battlefield zones.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "(3) reach-guard: exactly one trigger definition carries the ledger read"
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "(1) unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "(1) CR 500.1 / CR 506.1: an end-step observer cannot fire inside a \
+             precombat-main loop window, so it must not suppress the offer; got {other:?}"
+        ),
+    }
+}
+
+/// HF-X2-c (hostile fixture for X2-2) — the SAME Smuggler's Share board with the loop
+/// window at `Phase::End`. Now `def.phase == Some(End) == phase`, the ⛔ PINNED strict
+/// inequality returns `false`, and the veto is preserved. That refusal is a SOUNDNESS
+/// bound, not conservatism for its own sake: per CR 117.3a the end-step ability is put
+/// on the stack BEFORE the priority at which CR 732.2a lets a shortcut be proposed, and
+/// CR 608.2h determines its information at resolution — inside the window.
+///
+/// REVERT-PROBE: widen the `Phase` arm to `def.phase.is_some()` ⇒ this flips to an
+/// offer ⇒ FAILS.
+#[test]
+fn end_step_window_end_step_observer_still_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    let (control_runner, _) =
+        object_growth_with_bystander_at(Phase::End, P0, PLAIN_DRAW_TRIGGER_ORACLE);
+    assert!(
+        matches!(
+            control_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "HF-X2-c REACH-GUARD: the loop must still be detected and offered at Phase::End, \
+         else the subject half proves nothing. (Pre-registered STOP branch: if this \
+         fails, report the rejecting gate and DROP HF-X2-c.) got {:?}",
+        control_runner.state().waiting_for
+    );
+
+    let (runner, bystander) =
+        object_growth_with_bystander_at(Phase::End, P0, SMUGGLERS_SHARE_ORACLE);
+
+    // (3) reach-guards — see the sibling row: the veto must be attributable to the ONE
+    // named trigger surface, not to some other surface on this bystander.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: this row's claim is about ONE named trigger surface; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "CR 117.3a + CR 608.2h: an end-step observer in an END-STEP window keeps its \
+         veto — the strict-inequality pin; got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// The Prydwen, Steel Flagship, verbatim (Scryfall `cards/named?exact=`), behind the
+/// harness's shared keyword prefix. Its ETB matcher is `nontoken artifact you control`,
+/// which is triple-disjoint from a P0 Saproling creature TOKEN.
+const PRYDWEN_ORACLE: &str = "Flying, trample\nFlying\nWhenever another nontoken artifact you control enters, create a 2/2 white Human Knight creature token with \"This token gets +2/+2 as long as an artifact entered the battlefield under your control this turn.\"\nCrew 2";
+
+/// The SAME card with its ETB matcher widened from `nontoken artifact` to `creature`,
+/// which genuinely DOES match the loop's Saproling fodder.
+const PRYDWEN_BROAD_ORACLE: &str = "Flying, trample\nFlying\nWhenever another creature you control enters, create a 2/2 white Human Knight creature token with \"This token gets +2/+2 as long as an artifact entered the battlefield under your control this turn.\"\nCrew 2";
+
+/// K3-1 + HF-K3 — REGRESSION LOCK on the already-shipped
+/// `etb_observer_provably_excludes_class` narrowing (no code changes in this commit).
+/// A matched pair one matcher-noun apart: the disjoint `nontoken artifact` matcher is
+/// skipped (CR 603.6a) and the offer forms; widening it to `creature` makes it
+/// genuinely match the Saproling fodder and the veto returns.
+///
+/// REVERT-PROBE (K3-1): delete the `etb_observer_provably_excludes_class` call in
+/// `fire_time_conditions_read_growing_class_scoped` block (1) ⇒ the offer disappears ⇒
+/// FAILS. It is NOT the `ability_scan` `sibling` flip — measured, that does not flip
+/// this row.
+#[test]
+fn prydwen_artifact_matcher_bystander_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, bystander) = object_growth_with_bystander(PRYDWEN_ORACLE);
+
+    // (3) reach-guards, ALL BEFORE the offer match. On a positive (offer-forming) row a
+    // parse failure yields NO observer at all, which would make the offer trivially green —
+    // these guards are what make that vacuity mode loud. `Crew` is a keyword, not an
+    // `abilities[]` entry, so the ONE surface here is the ETB trigger.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: the ETB observer must have PARSED — a misparse leaves zero trigger \
+         defs and the offer below forms for the wrong reason; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "K3-1: unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "K3-1 CR 603.6a: an ETB matcher provably disjoint from the fodder class must \
+             not suppress the offer; got {other:?}"
+        ),
+    }
+
+    // HF-K3: the genuinely-matching sibling keeps its veto.
+    let (broad_runner, broad_bystander) = object_growth_with_bystander(PRYDWEN_BROAD_ORACLE);
+
+    // (3) reach-guards on the BROAD half — this is a veto row, so the veto must be
+    // attributable to the ONE named trigger surface and not to any other.
+    let broad_obj = &broad_runner.state().objects[&broad_bystander];
+    assert_eq!(
+        broad_obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        broad_obj.trigger_definitions.len(),
+        1,
+        "reach-guard: this row's claim is about ONE named trigger surface; got {}",
+        broad_obj.trigger_definitions.len()
+    );
+    assert!(
+        broad_obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        broad_obj.abilities.len(),
+        broad_obj
+            .abilities
+            .iter()
+            .map(|a| a.kind)
+            .collect::<Vec<_>>(),
+    );
+
+    assert!(
+        !matches!(
+            broad_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "HF-K3: an ETB matcher that DOES match the Saproling fodder must keep vetoing; \
+         got {:?}",
+        broad_runner.state().waiting_for
+    );
+}
+
+/// A non-mana activated ability whose body reads a live board aggregate
+/// (`QuantityRef::ObjectCount`). `ability_scan`'s `ObjectCount` arm self-asserts
+/// `sibling: true` BEFORE it inspects the filter, so this surface vetoes regardless of
+/// whose creatures the filter names — which is exactly why CR 117.1b (whose PRIORITY
+/// the window belongs to), not the filter, is X1's relief axis.
+const AGGREGATE_ACTIVATED_ORACLE: &str =
+    "Flying, trample\n{2}: Draw a card for each creature you control.";
+
+/// Circle of Dreams Druid's mana ability, verbatim (Scryfall `cards/named?exact=`),
+/// behind the shared keyword prefix — the same `ObjectCount` aggregate read on a MANA
+/// ability, which CR 605.3a keeps activatable without priority.
+const AGGREGATE_MANA_ORACLE: &str = "Flying, trample\n{T}: Add {G} for each creature you control.";
+
+/// A SECOND, non-activated class-reading surface on the same object: a trigger whose
+/// body carries the same `ObjectCount` aggregate. `TriggerMode::Attacks` is
+/// unclassifiable by phase, so X2 cannot relieve it either.
+const AGGREGATE_TWO_SURFACE_ORACLE: &str = "Flying, trample\n{2}: Draw a card for each creature you control.\nWhenever this creature attacks, draw a card for each creature you control.";
+
+/// X1-2 — CR 117.1b's relief is keyed on the OBSERVER'S CONTROLLER, and the matched
+/// pair moves exactly that one variable. The DRIVER'S OWN class-reading activated
+/// ability keeps vetoing (the driver holds priority inside its own shortcut and can
+/// activate it); the identical ability under an OPPONENT is relieved.
+///
+/// REVERT-PROBE: invert the `obj.controller != driver` comparison ⇒ the two halves swap
+/// ⇒ BOTH assertions FAIL.
+#[test]
+fn driver_own_activated_ability_still_vetoes() {
+    use engine::types::ability::AbilityKind;
+    use engine::types::zones::Zone;
+
+    // PAIRED POSITIVE first: the same ability under an OPPONENT is relieved.
+    let (foreign_runner, _) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P1, AGGREGATE_ACTIVATED_ORACLE);
+    assert!(
+        matches!(
+            foreign_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "X1 PAIRED POSITIVE (CR 117.1b + CR 732.2c): no player but the sole driver \
+         receives priority inside the taken shortcut, so an OPPONENT's activated \
+         ability cannot read the growing class and must not suppress the offer; got {:?}",
+        foreign_runner.state().waiting_for
+    );
+
+    // SUBJECT: byte-identical board, ability under the DRIVER.
+    let (own_runner, bystander) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P0, AGGREGATE_ACTIVATED_ORACLE);
+
+    // (3) reach-guards — the veto must come from the ONE named ACTIVATED-ability surface.
+    // `kind == Activated` is what item A makes load-bearing on the very relief this row
+    // exercises, and `trigger_definitions.is_empty()` keeps block (1) silent so the verdict
+    // is attributable to block (2).
+    let obj = &own_runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.abilities.len(),
+        1,
+        "reach-guard: exactly one ability surface; got {:?}",
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        obj.abilities[0].kind,
+        AbilityKind::Activated,
+        "reach-guard: X1's relief is stated for ACTIVATED abilities only, so this row's \
+         subject must BE one; got {:?}",
+        obj.abilities[0].kind
+    );
+    assert!(
+        obj.trigger_definitions.is_empty(),
+        "reach-guard: block (1) must be silent, so the verdict is attributable to block \
+         (2); got {} trigger def(s)",
+        obj.trigger_definitions.len()
+    );
+
+    assert!(
+        !matches!(
+            own_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "X1-2: the DRIVER's own class-reading activated ability must keep vetoing — the \
+         driver does hold priority inside its own window; got {:?}",
+        own_runner.state().waiting_for
+    );
+}
+
+/// HF-X1-a — CR 605.3a BOUNDS X1. A mana ability is activatable outside the priority
+/// rule (while another player is casting a spell or activating an ability), so an
+/// OPPONENT's class-reading MANA ability is NOT relieved and keeps vetoing. The paired
+/// positive is the identical aggregate read on a NON-mana ability under the same
+/// opponent, which IS relieved — so the only variable is `is_mana_ability`.
+///
+/// REVERT-PROBE: delete the `!is_mana_ability(..)` conjunct ⇒ the mana half is relieved
+/// ⇒ FAILS.
+#[test]
+fn foreign_mana_ability_still_vetoes() {
+    use engine::types::ability::AbilityKind;
+    use engine::types::zones::Zone;
+
+    // PAIRED POSITIVE: the same aggregate read on a NON-mana ability, same controller.
+    let (nonmana_runner, _) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P1, AGGREGATE_ACTIVATED_ORACLE);
+    assert!(
+        matches!(
+            nonmana_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "HF-X1-a PAIRED POSITIVE: an opponent's NON-mana activated ability is relieved"
+    );
+
+    let (mana_runner, bystander) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P1, AGGREGATE_MANA_ORACLE);
+
+    // (3) reach-guards. The row's WHOLE claim is the CR 605.3a mana carve-out, so nothing
+    // short of proving the def IS a mana ability makes the veto attributable to it.
+    let obj = &mana_runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.abilities.len(),
+        1,
+        "reach-guard: exactly one ability surface; got {:?}",
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        obj.abilities[0].kind,
+        AbilityKind::Activated,
+        "reach-guard: a mana ability is an ACTIVATED ability; got {:?}",
+        obj.abilities[0].kind
+    );
+    assert!(
+        engine::game::mana_abilities::is_mana_ability(&obj.abilities[0]),
+        "reach-guard: this row's entire claim is the CR 605.3a mana carve-out, so the def \
+         must actually BE a mana ability — otherwise the veto is attributable to the \
+         ordinary foreign-activated path and the row proves nothing"
+    );
+    assert!(
+        obj.trigger_definitions.is_empty(),
+        "reach-guard: block (1) must be silent, so the verdict is attributable to block \
+         (2); got {} trigger def(s)",
+        obj.trigger_definitions.len()
+    );
+
+    assert!(
+        !matches!(
+            mana_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "HF-X1-a CR 605.3a: a mana ability is activatable without priority, so an \
+         opponent's class-reading MANA ability must keep vetoing; got {:?}",
+        mana_runner.state().waiting_for
+    );
+}
+
+/// NW-1' — X1's relief is PER-ABILITY and PER-SURFACE, never per-object. The two halves
+/// carry the SAME opponent-controlled object; half B adds one extra surface (a trigger
+/// whose body carries the same `ObjectCount` aggregate, scanned by block (1), which X1
+/// does not touch and which `TriggerMode::Attacks` leaves unclassifiable for X2). Half A
+/// offering is what proves half B's veto comes from the second surface and not from the
+/// object's mere presence.
+///
+/// This is also the closure for the §I `ActivationRestriction` composition hazard at
+/// the offer level: the firewall never reads `activation_restrictions`
+/// (`ability_scan.rs:4238` destructures it as `_`), so a row keyed on that field would
+/// be dominated. This row instead asserts the property the revert-probes actually flip.
+///
+/// REVERT-PROBE: widen X1's relief from the per-ability test to the whole object (skip
+/// the object in block (2) AND block (1)) ⇒ half B flips to an offer ⇒ FAILS.
+#[test]
+fn foreign_object_second_surface_still_vetoes_after_x1() {
+    use engine::types::ability::AbilityKind;
+    use engine::types::zones::Zone;
+
+    // half A: the relieved surface alone ⇒ offer.
+    let (one_surface, _) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P1, AGGREGATE_ACTIVATED_ORACLE);
+    assert!(
+        matches!(
+            one_surface.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "NW-1' half A: with ONLY the foreign activated ability, X1 relieves and the \
+         offer forms — so half B's veto is attributable to the added surface"
+    );
+
+    // half B: the same object plus one more class-reading surface ⇒ veto.
+    let (two_surface, bystander) =
+        object_growth_with_bystander_at(Phase::PreCombatMain, P1, AGGREGATE_TWO_SURFACE_ORACLE);
+    let obj = &two_surface.state().objects[&bystander];
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "NW-1' reach-guard: the second surface really is a trigger definition"
+    );
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "NW-1' reach-guard: block (2) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.abilities.len(),
+        1,
+        "NW-1' reach-guard: the FIRST surface is exactly one ability def; got {:?}",
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        obj.abilities[0].kind,
+        AbilityKind::Activated,
+        "NW-1' reach-guard: half A's relieved surface is an ACTIVATED ability, so half B's \
+         first surface must be the same one; got {:?}",
+        obj.abilities[0].kind
+    );
+    assert!(
+        !matches!(
+            two_surface.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "NW-1': X1 relieves the ABILITY, not the OBJECT — another class-reading surface \
+         on the same permanent must keep vetoing; got {:?}",
+        two_surface.state().waiting_for
+    );
+}
+
+// ===========================================================================
+// PR-7 Phase 1b — CR 732.2a loop-detect ring retention across a FORCED
+// pre-priority window and the action that answers it.
+//
+// Both rows LOAD a committed real 4-player dump through the production restore
+// chokepoint (`PersistedGameState::Raw(..).into_game_state()`, the same path the
+// server's `from_persisted` and WASM's `decode_restored_game_state` funnel
+// through) and DRIVE through the public `apply()` boundary. Synthetic
+// `GameScenario` boards are deliberately NOT used here: the property under test
+// is an accumulation across dozens of real beats.
+// ===========================================================================
+
+fn gunzip_dump(gz: &[u8]) -> String {
+    use std::io::Read;
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+fn restore_dump(json: &str) -> GameState {
+    let envelope: serde_json::Value =
+        serde_json::from_str(json).expect("dump envelope parses as JSON");
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("the real 4p gameState must restore through the persisted-state boundary")
+        .into_game_state()
+}
+
+/// Opponents the ENGINE considers living. `Player::is_eliminated` is the authority the
+/// CR 732.2a detector uses when it builds its `living` set — `eliminated_players` and
+/// `life > 0` are not sufficient on their own, so this reads the field the detector reads.
+fn engine_live_opponents(state: &GameState, of: PlayerId) -> Vec<PlayerId> {
+    state
+        .players
+        .iter()
+        .filter(|p| p.id != of && !p.is_eliminated)
+        .map(|p| p.id)
+        .collect()
+}
+
+/// Actions a dump driver must never take: they end the game or bypass the reducer, and a
+/// generic "first legal action" driver otherwise picks them and fakes a result.
+fn dump_driver_forbids(a: &GameAction) -> bool {
+    matches!(a, GameAction::Concede { .. } | GameAction::Debug(_))
+}
+
+/// The seat that can act on this beat plus its legal actions, read through the same
+/// per-viewer enumerator the multiplayer transport uses. `WaitingFor::acting_player` is
+/// the engine's own answer to "whose beat is this", so it is tried first; the all-seat
+/// scan is the fallback and costs roughly 4x per beat.
+fn dump_beat_actor(state: &GameState) -> Option<(PlayerId, Vec<GameAction>)> {
+    if let Some(p) = state.waiting_for.acting_player() {
+        let (actions, _costs, _grouped) = engine::ai_support::legal_actions_for_viewer(state, p);
+        if !actions.is_empty() {
+            return Some((p, actions));
+        }
+    }
+    for p in state.players.iter().map(|p| p.id) {
+        let (actions, _costs, _grouped) = engine::ai_support::legal_actions_for_viewer(state, p);
+        if !actions.is_empty() {
+            return Some((p, actions));
+        }
+    }
+    None
+}
+
+/// One beat of the drain-loop drive policy: at `Priority` ALWAYS pass (the mandatory
+/// triggers resolve and re-trigger — that IS the loop; casting here wanders off it), and
+/// answer every other prompt, preferring a target choice aimed at `pin`.
+///
+/// Returns the beat's `GameEvent`s so a caller can key on what the beat actually DID
+/// (`CombatDamageDealtToPlayer` / `DamageDealt` for the CR 510.2 rows) instead of
+/// inferring it from phase and life deltas. Callers that only need liveness ignore it.
+fn dump_drive_one_beat(
+    state: &mut GameState,
+    pin: Option<PlayerId>,
+) -> Result<Vec<GameEvent>, String> {
+    let Some((who, actions)) = dump_beat_actor(state) else {
+        return Err(format!("no legal actor at {:?}", state.waiting_for));
+    };
+    let chosen = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        actions
+            .iter()
+            .find(|a| matches!(a, GameAction::PassPriority))
+            .cloned()
+    } else {
+        pin.and_then(|t| {
+            actions.iter().find(|a| {
+                matches!(a, GameAction::SelectTargets { targets }
+                    if targets.iter().any(|r| matches!(r, TargetRef::Player(p) if *p == t)))
+            })
+        })
+        .or_else(|| {
+            actions
+                .iter()
+                .find(|a| !matches!(a, GameAction::PassPriority) && !dump_driver_forbids(a))
+        })
+        .or_else(|| actions.iter().find(|a| !dump_driver_forbids(a)))
+        .cloned()
+    };
+    let Some(action) = chosen else {
+        return Err(format!("empty action list at {:?}", state.waiting_for));
+    };
+    apply(state, who, action.clone())
+        .map(|r| r.events)
+        .map_err(|e| format!("apply err ({action:?}): {e:?}"))
+}
+
+/// Phase 1b, BOTH clear sites. The CR 732.2a ring must survive (i) the forced
+/// pre-priority window itself — the sampler's clear arm, which BASE took for every
+/// window except `OrderTriggers` — and (ii) the action that ANSWERS that window, which
+/// `apply_action`'s deliberate-break clear discarded unconditionally.
+///
+/// Fixture: `dellian_emblem_conqueror_4p.json.gz`, the real 4p Delianfel/Bloodthirsty
+/// Conqueror drain (P0 69 / P1 12 / P2 13 / P3 28, all four living, stack 152, ring 0,
+/// `loop_detection: Interactive`). It ships AT a `TriggerTargetSelection` window, which is
+/// precisely the window class BASE wiped.
+///
+/// NON-VACUITY: the fixture drives hundreds of real beats (it is NOT a saved-offer board
+/// that halts at beat 0), and the BASE measurement is the positive control that the
+/// instrument CAN report a large ring — it reports 16 once only ONE opponent is left
+/// alive, while measuring exactly 1 over the whole ≥2-living stretch. A `>= 5` assertion
+/// over that same stretch cannot pass on a BASE tree.
+///
+/// REVERT-PROBES (MEASURED outcomes, not predicted ones):
+/// ⓐ restore `apply_action`'s clear to its action-only form (drop the
+///   `!state.waiting_for.is_forced_cascade_window()` conjunct) ⇒ (i) FAILS FIRST — and (ii)
+///   and (iii) are never reached. The prediction that ⓐ would leave (i) passing was WRONG,
+///   and the reason is the interlock between the two sites: with the answer clearing the
+///   ring, the drive can never carry >= 2 frames INTO a forced window either, so the
+///   sampler half has nothing left to retain. The two clear sites are therefore not
+///   independently observable on this fixture — ⓐ still proves a one-site fix is inert,
+///   just at (i) rather than at (ii).
+/// ⓑ restore the sampler's `!matches!(wf, WaitingFor::OrderTriggers { .. })` arm ⇒ (i)
+///   FAILS.
+///
+/// DISCRIMINANT GUARD on (ii): `apply_action` has a PRE-EXISTING action-side exemption for
+/// `GameAction::OrderTriggers`, so if the window (ii) happens to catch were an
+/// `OrderTriggers` window, (ii) would be satisfied without the new window-keyed conjunct
+/// being consulted at all. The window's discriminant is therefore captured alongside
+/// `(before, after)` and asserted to be something else — a fixture or engine change that
+/// drifts (ii) onto an `OrderTriggers` window fails loudly instead of going quietly
+/// vacuous.
+#[test]
+fn two_site_retention_survives_a_prompt_and_its_answer() {
+    let json = gunzip_dump(include_bytes!(
+        "../fixtures/dellian_emblem_conqueror_4p.json.gz"
+    ));
+    let mut state = restore_dump(&json);
+
+    // Reach guards on the loaded board — every assertion below is meaningless without them.
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: the dump must load with a SAMPLING loop-detection mode, else the \
+         ring is never populated and every retention assertion is vacuous; got {:?}",
+        state.loop_detection
+    );
+    assert_eq!(
+        engine_live_opponents(&state, P0).len(),
+        3,
+        "reach-guard: the dump must load with 3 living opponents"
+    );
+    assert_eq!(
+        state.loop_detect_ring.len(),
+        0,
+        "reach-guard: the dump ships with an EMPTY ring — every frame below was accumulated \
+         by this drive, not restored"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+        "reach-guard: the dump ships AT a TriggerTargetSelection window (CR 603.3d), the \
+         window class BASE wiped; got {:?}",
+        state.waiting_for
+    );
+
+    let pin = engine_live_opponents(&state, P0).first().copied();
+
+    // (i) the `:3457` sampler half: a forced pre-priority window observed with an
+    //     ALREADY-ACCUMULATED ring (>= 2 frames, so a single fresh sample cannot explain it).
+    let mut prompt_ring: Option<usize> = None;
+    // (ii) the `apply_action` half: the ring across the ANSWER to such a window, with the
+    //      window itself so the row can prove it was not the pre-exempt `OrderTriggers`.
+    let mut answer_ring: Option<(WaitingFor, usize, usize)> = None;
+    // (iii) the ≥2-living stretch, where BASE measured a maximum of exactly 1.
+    let mut max_ring_two_or_more_living = 0usize;
+
+    for _ in 0..400 {
+        if engine_live_opponents(&state, P0).len() >= 2 {
+            max_ring_two_or_more_living =
+                max_ring_two_or_more_living.max(state.loop_detect_ring.len());
+        }
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+        let forced = state.waiting_for.is_forced_cascade_window();
+        let before = state.loop_detect_ring.len();
+        let window = (forced && before >= 2).then(|| state.waiting_for.clone());
+        if forced && before >= 2 {
+            prompt_ring.get_or_insert(before);
+        }
+        if dump_drive_one_beat(&mut state, pin).is_err() {
+            break;
+        }
+        if let (Some(window), None) = (window, answer_ring.as_ref()) {
+            answer_ring = Some((window, before, state.loop_detect_ring.len()));
+        }
+        // Every assertion below is already satisfiable — stop driving. The drive is the
+        // expensive part of this row (a per-beat legal-action enumeration on a 152-entry
+        // stack), and continuing past the evidence buys nothing.
+        if prompt_ring.is_some() && answer_ring.is_some() && max_ring_two_or_more_living >= 5 {
+            break;
+        }
+    }
+
+    let observed = prompt_ring.unwrap_or_else(|| {
+        panic!(
+            "(i) CR 603.3d: no forced pre-priority window was ever reached carrying an \
+             accumulated ring of >= 2 frames. BASE behaviour (the sampler clearing at every \
+             non-OrderTriggers window) is exactly this; max ring seen at >= 2 living was {max_ring_two_or_more_living}"
+        )
+    });
+    assert!(
+        observed >= 2,
+        "(i) the ring must be RETAINED across the forced window itself"
+    );
+
+    let (window, before, after) = answer_ring.expect(
+        "(ii) the drive must have applied the answer to a forced window that carried an \
+         accumulated ring — otherwise the apply_action half is untested",
+    );
+    assert!(
+        !matches!(window, WaitingFor::OrderTriggers { .. }),
+        "(ii) DISCRIMINANT GUARD: `apply_action` already exempts `GameAction::OrderTriggers` \
+         on the ACTION side, so an OrderTriggers window would satisfy the survival assertion \
+         below without the window-keyed conjunct ever being consulted. The window measured \
+         here must be one of the newly exempt classes; got {}",
+        window.variant_name()
+    );
+    assert!(
+        after >= before,
+        "(ii) CR 603.3d + CR 732.2a: answering a forced pre-priority window is not a \
+         deliberate break, so the accumulated ring must SURVIVE the answer; \
+         ring went {before} -> {after}. Dropping the \
+         `!state.waiting_for.is_forced_cascade_window()` conjunct at apply_action's clear \
+         reproduces this failure — measured, it takes (i) down first, because the answer-side \
+         clear also stops the ring ever reaching a forced window with >= 2 frames."
+    );
+
+    assert!(
+        max_ring_two_or_more_living >= 5,
+        "(iii) two full periods of the drain need 2k+1 = 5 retained frames while >= 2 \
+         opponents are still alive; BASE measured exactly 1 over that stretch. Got \
+         {max_ring_two_or_more_living}"
+    );
+}
+
+/// Phase 1b crown-safety row. Retention only ADDS older frames to the ring, and
+/// `find_live_loop_winner` scans every suffix, so a window that crowns today must still
+/// crown after the exemption. Dump C is the population where that is measurable: it ships
+/// with exactly ONE living opponent, which is the only shape `loop_check`'s
+/// `nonfallers.len() == 1` crown gate admits.
+///
+/// ARM CHOICE (this is the anti-vacuity decision, stated explicitly): the fixture ships AT
+/// `WaitingFor::LoopShortcut`, so loading it and asserting the saved payload would drive
+/// **0 beats** and prove nothing — the assertion would read the offer the dump was saved
+/// with. This row therefore DECLINES the saved offer first, forcing the detector to
+/// RE-DERIVE the crown from live beats, and asserts a non-zero driven beat count before
+/// asserting anything about the payload. `revive_decline` (reviving P1/P2 to three living
+/// opponents) is FORBIDDEN here: at three living opponents the crown gate short-circuits
+/// and there is no crown left to assert.
+///
+/// REVERT-PROBES: ⓐ implement the withdrawn "count + clear_loop_detect_ring + Path-A
+/// early-return" remedy ⇒ C's crown disappears as soon as a `TriggerTargetSelection`
+/// enters the accumulation — this row is the measured reason that remedy stays withdrawn;
+/// ⓑ narrow `find_live_loop_winner` to the first prior frame only ⇒ the crown is lost.
+#[test]
+fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
+    let json = gunzip_dump(include_bytes!(
+        "../fixtures/tenacity_exquisite_blood_4p.json.gz"
+    ));
+    let mut state = restore_dump(&json);
+
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: sampling mode required; got {:?}",
+        state.loop_detection
+    );
+    assert_eq!(
+        engine_live_opponents(&state, P0),
+        vec![PlayerId(3)],
+        "reach-guard: dump C ships with EXACTLY ONE living opponent (P3) — the only \
+         population the CR 732.2a crown gate admits"
+    );
+    let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for.clone() else {
+        panic!(
+            "reach-guard: dump C ships AT a saved offer; got {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(proposer, P0);
+
+    // Discard the saved offer so the detector must re-derive it from live beats.
+    apply(&mut state, proposer, GameAction::DeclineShortcut).expect("decline the saved offer");
+
+    let pin = engine_live_opponents(&state, P0).first().copied();
+    let mut beats = 0usize;
+    for _ in 0..200 {
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+        if let Err(why) = dump_drive_one_beat(&mut state, pin) {
+            panic!("drive stopped after {beats} beats: {why}");
+        }
+        beats += 1;
+    }
+
+    // ANTI-VACUITY CONTROL: a zero here means the row asserted the dump's saved offer
+    // instead of a re-derived one, and both revert-probes above would be inert. The
+    // exact count is reported (not just `> 0`) so a change in how far the detector has
+    // to drive to re-derive the crown surfaces as a diff rather than passing silently.
+    assert_eq!(
+        beats, 6,
+        "the `c decline` arm re-derives the crown after a measured 6 driven beats — a 0 here \
+         would mean the row read the dump's saved offer back instead of re-deriving one, \
+         which is what makes both revert-probes above live"
+    );
+
+    let WaitingFor::LoopShortcut {
+        predicted_winner,
+        certificate,
+        schema,
+        ..
+    } = state.waiting_for.clone()
+    else {
+        panic!(
+            "the crown must survive pause retention; after {beats} beats waiting_for was {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(predicted_winner, Some(P0), "the crown still names P0");
+    assert_eq!(certificate.win_kind, WinKind::LethalDamage);
+    assert_eq!(
+        certificate.unbounded,
+        vec![ResourceAxis::Life(P0), ResourceAxis::Life(PlayerId(3))],
+        "the re-derived certificate names the same two life axes as BASE"
+    );
+    assert!(
+        schema.points.is_empty(),
+        "a choice-free drain publishes no decision points"
+    );
+    assert_eq!(schema.iteration_count, IterationCount::UntilLethal);
+}
+
+/// Seam D (CR 732.2a): a `template: None` declaration against a NON-EMPTY schema BYPASSES the
+/// declare-time pin firewall entirely — `predictability_gate` and `validate_pins` are simply not
+/// run, because there is no template to run them against. That bypass is legitimate for exactly
+/// one drive shape: the object-growth route, which re-derives its template from
+/// `state.last_loop_action_sequence` and never reads `proposal.template`. With an EMPTY sequence
+/// there is nothing to re-derive from, so a pin-consuming drive would run with no pins at all.
+///
+/// This row is the two-conjunct guard's matched pair, on ONE fixture and ONE schema so nothing
+/// but the sequence differs between the halves:
+///
+/// * EMPTY sequence  ⇒ fail-closed manual-play handback (Priority), APNAP never opens.
+/// * NON-EMPTY sequence ⇒ APNAP opens unchanged — the reach-guard proving the guard is not a
+///   blanket "reject every `template: None`", which would break every shipped object-growth
+///   declaration.
+///
+/// REVERT-PROBE: delete the `None if state.last_loop_action_sequence.is_empty()` arm ⇒ the first
+/// half opens `RespondToShortcut` and FAILS. Drop the sequence conjunct instead (reject on
+/// `template.is_none()` alone) ⇒ the second half FAILS.
+#[test]
+fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+    use engine::types::identifiers::CardId;
+
+    let source = YieldTarget::ThisObject {
+        source_id: ObjectId(1),
+        incarnation: None,
+        trigger_description: None,
+    };
+    let schema = ShortcutDecisionSchema {
+        iteration_count: IterationCount::UntilLethal,
+        max_iterations: ShortcutDecisionSchema::default().max_iterations,
+        points: vec![DecisionPoint {
+            slot: DecisionSlot { source, index: 0 },
+            kind: DecisionPointKind::Targets {
+                legal_targets: vec![TargetRef::Player(P1)],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
+            },
+        }],
+        convoke_tappable_count: 0,
+    };
+
+    let declare_with_sequence = |sequence: Vec<LoopActionContext>| -> WaitingFor {
+        let (mut runner, _kickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
+        runner.state_mut().last_loop_action_sequence = sequence;
+        runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: Some(P0),
+            certificate: synthetic_lethal_cert(),
+            schema: schema.clone(),
+        };
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::UntilLethal,
+                template: None,
+            })
+            .expect("declare dispatch succeeds (a rejection is a manual fallback, not an error)");
+        runner.state().waiting_for.clone()
+    };
+
+    // The object-growth route's routing signal: a captured recast context. Only its PRESENCE
+    // matters to the guard, which is exactly the discriminant `materialize` dispatches on.
+    let recast = LoopActionContext {
+        card_id: CardId(7),
+        controller: P0,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::Used,
+        },
+        convoke: None,
+        pins: Vec::new(),
+    };
+
+    let empty_sequence = declare_with_sequence(Vec::new());
+    assert!(
+        matches!(empty_sequence, WaitingFor::Priority { .. }),
+        "CR 732.2a: a pin-consuming schema declared with NO template and NO re-derivable \
+         sequence must fail closed to manual play, not open APNAP; got {empty_sequence:?}"
+    );
+
+    let with_sequence = declare_with_sequence(vec![recast]);
+    assert!(
+        matches!(with_sequence, WaitingFor::RespondToShortcut { .. }),
+        "reach-guard: the object-growth route re-derives its template from the sequence and \
+         must keep opening APNAP — the guard is two-conjunct, not a blanket template-None \
+         rejection; got {with_sequence:?}"
+    );
+}
+
+/// A loop-free board that carries the CR 732.2a ring ACROSS TURN BOUNDARIES and still
+/// refuses to offer — the no-false-positive control for widening
+/// [`WaitingFor::is_forced_cascade_window`] to the CR 703.1 turn-based actions.
+///
+/// CR 732.2a says a proposed shortcut "may even cross multiple turns", which is why the
+/// class now retains across CR 502.3 untap / CR 508.1 declare attackers / CR 509.1
+/// declare blockers / CR 514.1 cleanup discard. Retention is NECESSARY BUT NOT YET
+/// SUFFICIENT for that: `loop_states_equal` still compares `turn_number`, so no
+/// cross-turn pair certifies today — which is exactly what the ATTRIBUTION half below
+/// measures. The risk that widening introduces is the
+/// mirror image of the bug it fixes: a ring that now survives turn cycling might
+/// accumulate on an ordinary board and certify a loop that isn't there.
+///
+/// FIXTURE (loop-free by construction, and hostile on purpose): P0 has an upkeep ticker
+/// ("At the beginning of your upkeep, you gain 1 life"), a drain cleric (gain ⇒ each
+/// opponent loses 1) and a "may draw" scribe (opponent loses life ⇒ optional draw). Each
+/// of P0's upkeeps runs a FINITE 3-deep cascade — nothing re-triggers the ticker — yet the
+/// per-turn shape is drain-like (P1 loses 1 every other turn), which is exactly the shape
+/// a naive detector would mistake for a loop. The cascade ends at the scribe's CR 603.5
+/// "may" pause, which leaves the stack already popped, so the sampler's clear arm never
+/// fires on the tail resolution and the accumulated frames survive into the rest of the
+/// turn. That is what makes cross-turn retention observable on a board with no loop at
+/// all.
+///
+/// NON-VACUITY, both halves, measured (300 beats, 23 turns):
+/// * POSITIVE — the ring really is retained across turn boundaries: at beat 58 the drive
+///   sits at a `DeclareAttackers` window in turn 6 holding 4 frames whose OLDEST was
+///   sampled in turn 4. Without the widening that frame cannot exist: BASE clears at
+///   `DeclareAttackers`. So the widening is demonstrably LIVE on this board.
+/// * DISCRIMINANT GUARD — `OptionalEffectChoice` is a PRE-EXISTING member of the class and
+///   also occurs on this board (10 times). The retention witness is therefore required to
+///   be one of the NEWLY exempt turn-based windows; an `OptionalEffectChoice` witness
+///   would satisfy the row without the widening being consulted at all.
+/// * NEGATIVE — no `LoopShortcut` / `RespondToShortcut` is ever raised, even after the ring
+///   saturates at all 16 frames (measured: reached by turn 22, spanning ~9 turn boundaries).
+/// * ATTRIBUTION — the decline is a MEASURED comparison failure, not an absent one. The
+///   engine's own recurrence gate `loop_states_equal_modulo_resources` reports FALSE on the
+///   oldest/newest retained pair, while reporting TRUE on the oldest against itself (the
+///   positive control that the comparator is live on this data, trap 7). The monotone axis
+///   is named and asserted: each turn's CR 504.1 draw strictly shrinks the library, so no
+///   two retained frames can be the same position. Measured at the witness beat: P0's
+///   library 60 → 59, P1's 59 → 58. (Honest scope: equalizing library and hand alone does
+///   NOT flip the gate to true — turn number and life differ too. The library shrink is
+///   asserted as a monotone non-recurrence witness, not as the sole cause.)
+///
+/// REVERT-PROBE (measured, not predicted): delete the CR 703.1 turn-based members from
+/// `is_forced_cascade_window` and the POSITIVE half fails — the retention witness is never
+/// found, because `apply_action` clears the ring on the very first `DeclareAttackers` of
+/// each turn.
+#[test]
+fn drawgo_ring_spans_turns_but_never_offers() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Test Upkeep Ticker",
+        2,
+        2,
+        "At the beginning of your upkeep, you gain 1 life.",
+    );
+    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Test May Scribe",
+        2,
+        2,
+        "Whenever an opponent loses life, you may draw a card.",
+    );
+    // CR 504.1: both players draw every turn, so the libraries must outlast the drive —
+    // a deck-out would end the game and silently truncate every assertion below.
+    let names: Vec<String> = (0..60).map(|i| format!("Filler {i}")).collect();
+    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    scenario.with_library_top(P0, &refs);
+    scenario.with_library_top(P1, &refs);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let mut state = runner.state().clone();
+
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: a non-sampling mode never populates the ring, making every \
+         assertion below vacuous; got {:?}",
+        state.loop_detection
+    );
+    assert_eq!(
+        state.loop_detect_ring.len(),
+        0,
+        "reach-guard: the board must start with an EMPTY ring — every frame below is \
+         accumulated by this drive"
+    );
+
+    // The cross-turn retention witness: (window name, live turn, oldest frame's turn,
+    // ring before the answer, ring after it, oldest frame, newest frame).
+    let mut witness: Option<(String, u32, u32, usize, usize, GameState, GameState)> = None;
+    let mut offer_at: Option<(usize, String)> = None;
+    let mut turns_seen: Vec<u32> = Vec::new();
+
+    for beat in 0..300usize {
+        if !turns_seen.contains(&state.turn_number) {
+            turns_seen.push(state.turn_number);
+        }
+        let name = state.waiting_for.variant_name().to_string();
+        if matches!(
+            state.waiting_for,
+            WaitingFor::LoopShortcut { .. } | WaitingFor::RespondToShortcut { .. }
+        ) {
+            offer_at = Some((beat, name));
+            break;
+        }
+        // The witness must be a NEWLY exempt CR 703.1 turn-based window, never the
+        // pre-existing `OptionalEffectChoice` member (see DISCRIMINANT GUARD above).
+        let turn_based = matches!(
+            state.waiting_for,
+            WaitingFor::UntapChoice { .. }
+                | WaitingFor::ChooseUntapSubset { .. }
+                | WaitingFor::DeclareAttackers { .. }
+                | WaitingFor::ExertChoice { .. }
+                | WaitingFor::EnlistChoice { .. }
+                | WaitingFor::DeclareBlockers { .. }
+                | WaitingFor::DiscardToHandSize { .. }
+        );
+        let before = state.loop_detect_ring.len();
+        let pair = (witness.is_none() && turn_based && before >= 4)
+            .then(|| {
+                let front = state.loop_detect_ring.front()?.clone();
+                let back = state.loop_detect_ring.back()?.clone();
+                (front.turn_number < state.turn_number).then_some((front, back))
+            })
+            .flatten();
+        let live_turn = state.turn_number;
+        if dump_drive_one_beat(&mut state, None).is_err() {
+            break;
+        }
+        if let Some((front, back)) = pair {
+            witness = Some((
+                name,
+                live_turn,
+                front.turn_number,
+                before,
+                state.loop_detect_ring.len(),
+                (*front).clone(),
+                (*back).clone(),
+            ));
+        }
+    }
+
+    assert!(
+        turns_seen.len() >= 3,
+        "reach-guard: the drive must cross at least 2 full turn boundaries for a \
+         cross-turn claim to mean anything; saw turns {turns_seen:?}"
+    );
+
+    let (window, live_turn, frame_turn, before, after, oldest, newest) = witness.expect(
+        "POSITIVE HALF: no CR 703.1 turn-based window (CR 502.3 / CR 508.1 / CR 509.1 / \
+             CR 514.1) was ever reached holding >= 4 frames whose oldest was sampled in an \
+             EARLIER turn. That is precisely BASE behaviour — dropping the turn-based \
+             members from `is_forced_cascade_window` reproduces this failure, because \
+             `apply_action` then clears the ring at the first declare-attackers of every \
+             turn. Without this witness the no-offer assertion below is vacuous.",
+    );
+    assert!(
+        after >= before,
+        "answering the forced turn-based window {window} must not discard the ring \
+         (CR 703.1 + CR 117.3a: no player had priority there, so the answer is not a \
+         deliberate break); ring went {before} -> {after}"
+    );
+    assert!(
+        frame_turn < live_turn,
+        "the retained frame must predate the live turn; frame turn {frame_turn}, live \
+         turn {live_turn}"
+    );
+
+    assert!(
+        offer_at.is_none(),
+        "NO-FALSE-POSITIVE: this board has no loop — each upkeep runs a FINITE cascade and \
+         nothing re-triggers the ticker — so no CR 732.2a shortcut may ever be offered, \
+         however many frames the widened class lets the ring carry across turns. Got an \
+         offer at {offer_at:?} (witness: {window} in turn {live_turn} held a turn-{frame_turn} frame)"
+    );
+
+    // ATTRIBUTION: the decline is a measured comparison FAILURE on a live comparator,
+    // not an absent comparison.
+    assert!(
+        loop_states_equal_modulo_resources(&oldest, &oldest),
+        "positive control (trap 7): the engine's recurrence gate must report TRUE on a \
+         retained frame against itself, else the FALSE asserted next is an inert \
+         instrument rather than a measured non-recurrence"
+    );
+    assert!(
+        !loop_states_equal_modulo_resources(&oldest, &newest),
+        "the turn-{frame_turn} and turn-{} frames must NOT compare recurrent — that \
+         comparison failing is WHY no offer forms",
+        newest.turn_number
+    );
+    for (i, (old_p, new_p)) in oldest.players.iter().zip(newest.players.iter()).enumerate() {
+        assert!(
+            new_p.library.len() < old_p.library.len(),
+            "CR 504.1: every turn's draw strictly shrinks each library, which is the \
+             monotone axis that makes two retained frames un-recurrable. P{i} went \
+             {} -> {} across the retained window",
+            old_p.library.len(),
+            new_p.library.len()
+        );
+    }
+}
+
+// ===========================================================================
+// CR 510.2 EVENT-KEYED loop-ring invalidation.
+//
+// `WaitingFor::AssignCombatDamage` / `AssignBlockerDamage` are excluded from
+// `is_forced_cascade_window` because CR 510.2 deals the assigned damage with no
+// intervening priority. That WINDOW-keyed exclusion is necessary but NOT
+// sufficient: the window opens only when a damage DIVISION choice is required
+// (`game::combat_damage`: "Auto-assign for unblocked, single blocker, or
+// blocked-but-no-current-blockers"). An UNBLOCKED attacker moves a life total
+// with NO window to exclude — and with the CR 703.1 turn-based members now in
+// the class, `DeclareAttackers` / `DeclareBlockers` no longer clear the ring
+// either, so the ring rides straight through the life change.
+//
+// The sufficient guard is `GameState::invalidate_loop_ring_on_unobserved_life_move`,
+// called at the end of `apply_combat_damage` — the CR 510.2 batch itself.
+// ===========================================================================
+
+fn player_life(state: &GameState, p: PlayerId) -> i32 {
+    state
+        .players
+        .iter()
+        .find(|pl| pl.id == p)
+        .map(|pl| pl.life)
+        .expect("seat exists")
+}
+
+/// `dump_drive_one_beat`, but it actually fights.
+///
+/// MEASURED, and the reason this helper exists: at a CR 508.1 / CR 509.1 declaration the
+/// generic driver takes the FIRST legal action, and that is the EMPTY declaration —
+/// 14 `DeclareAttackers` windows over 400 beats produced
+/// `DeclareAttackers { attacks: [], bands: [] }` every time and ZERO combat damage. A row
+/// about CR 510.2 driven by that policy is vacuous by construction. Here the largest
+/// non-empty declaration wins, so the attack and the block both really happen; every
+/// other window keeps the shared policy.
+fn combat_drive_one_beat(state: &mut GameState) -> Result<Vec<GameEvent>, String> {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::DeclareAttackers { .. } | WaitingFor::DeclareBlockers { .. }
+    ) {
+        if let Some((who, actions)) = dump_beat_actor(state) {
+            let biggest = actions
+                .iter()
+                .filter_map(|a| match a {
+                    GameAction::DeclareAttackers { attacks, .. } => Some((attacks.len(), a)),
+                    GameAction::DeclareBlockers { assignments } => Some((assignments.len(), a)),
+                    _ => None,
+                })
+                .max_by_key(|(n, _)| *n)
+                .filter(|(n, _)| *n > 0)
+                .map(|(_, a)| a.clone());
+            if let Some(action) = biggest {
+                return apply(state, who, action.clone())
+                    .map(|r| r.events)
+                    .map_err(|e| format!("apply err ({action:?}): {e:?}"));
+            }
+        }
+    }
+    dump_drive_one_beat(state, None)
+}
+
+/// The shared board for both CR 510.2 rows. P0 runs the same loop-FREE upkeep cascade
+/// `drawgo_ring_spans_turns_but_never_offers` uses (ticker → drain cleric → "may" scribe),
+/// which is what accumulates a CR 732.2a ring at all; the trio carries Defender so the
+/// only creature that can attack is the dedicated 3/3, making the combat shape of each
+/// row a deliberate fixture property rather than an artifact of which creature the driver
+/// happened to declare.
+///
+/// `p1_wall` gives P1 a single 0/20 blocker. With it, the attack is BLOCKED and CR 510.2
+/// moves no player's life (creature-only damage). Without it, the attacker is UNBLOCKED
+/// and CR 510.2 moves P1's life with no assignment window — CR 510.1c's window needs 2+
+/// blockers to divide damage among.
+fn combat_ring_board(p1_wall: bool) -> GameState {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    // Deep life totals on BOTH seats: the drive must outlast several turn cycles of
+    // combat damage plus the cleric's drain, and a CR 704.5a death would end the game
+    // and silently truncate every assertion below.
+    scenario.with_life(P0, 400);
+    scenario.with_life(P1, 400);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Test Upkeep Ticker",
+        2,
+        2,
+        "Defender\nAt the beginning of your upkeep, you gain 1 life.",
+    );
+    scenario.add_creature_from_oracle(
+        P0,
+        "Test Drain Cleric",
+        2,
+        2,
+        &format!("Defender\n{DRAIN_CLERIC}"),
+    );
+    scenario.add_creature_from_oracle(
+        P0,
+        "Test May Scribe",
+        2,
+        2,
+        "Defender\nWhenever an opponent loses life, you may draw a card.",
+    );
+    scenario.add_creature(P0, "Test Lone Attacker", 3, 3);
+    if p1_wall {
+        // 0 power so the trade kills nothing and the block repeats every turn cycle;
+        // toughness 20 so the 3/3 never kills it either. Defender is load-bearing, not
+        // flavour: without it the wall attacks on P1's turn, is still TAPPED on P0's, and
+        // cannot block — measured, the attack then went through unblocked and the row
+        // silently became a duplicate of the unblocked one.
+        scenario.add_creature_from_oracle(P1, "Test Wall", 0, 20, "Defender");
+    }
+    // CR 504.1: both players draw every turn, so the libraries must outlast the drive —
+    // a deck-out would end the game and truncate the row.
+    let names: Vec<String> = (0..60).map(|i| format!("Filler {i}")).collect();
+    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    scenario.with_library_top(P0, &refs);
+    scenario.with_library_top(P1, &refs);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    runner.state().clone()
+}
+
+/// HIGH-1: the CR 510.2 damage EVENT clears the CR 732.2a ring even though no
+/// `AssignCombatDamage` window ever opens.
+///
+/// FIXTURE: P0 attacks with one unblocked 3/3 into an empty board while the loop-free
+/// upkeep cascade keeps the ring populated. CR 510.1c's assignment window needs a
+/// division choice, so on this board it never opens at all — which is exactly the hole
+/// the window-keyed exclusion leaves and the reason the fence has to be event-keyed.
+///
+/// ASSERTIONS, in the order they discharge each other:
+/// 1. REACH-GUARD — the drive reaches a CR 510.2 beat that damaged P1 while the ring
+///    already carried >= 2 frames. Without that, "the ring is empty afterwards" is
+///    unobservable: an already-empty ring would satisfy it.
+/// 2. DISCRIMINANT GUARD — no `AssignCombatDamage` / `AssignBlockerDamage` window is
+///    observed anywhere in the drive. This row's whole point is that the damage lands
+///    with NO window; a fixture drift that introduces a division choice would make the
+///    window-keyed exclusion sufficient and the row vacuous, so it fails loudly instead.
+/// 3. LIFE-MOVE WITNESS — P1's life strictly decreased across that beat, so assertion 4
+///    is about a real CR 119.3 / CR 120.3a life movement.
+/// 4. THE DELIVERABLE — the ring is empty immediately after the beat.
+///
+/// REVERT-PROBE (measured, recorded in the handoff report): delete the
+/// `invalidate_loop_ring_on_unobserved_life_move` call from `apply_combat_damage` ⇒
+/// assertion 4 FAILS while 1–3 still PASS, which is what proves 4 is the discriminator.
+#[test]
+fn unblocked_attacker_damage_clears_the_loop_ring_with_no_window() {
+    let mut state = combat_ring_board(false);
+
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: a non-sampling mode never populates the ring; got {:?}",
+        state.loop_detection
+    );
+    assert_eq!(
+        state.loop_detect_ring.len(),
+        0,
+        "reach-guard: every frame below is accumulated by this drive, not preloaded"
+    );
+
+    let mut assignment_window: Option<String> = None;
+    // (beat, ring before, ring after, P1 life before, P1 life after, combat damage)
+    let mut witness: Option<(usize, usize, usize, i32, i32, u32)> = None;
+    let mut max_ring = 0usize;
+    let mut damage_beats = 0usize;
+
+    for beat in 0..400usize {
+        if matches!(
+            state.waiting_for,
+            WaitingFor::AssignCombatDamage { .. } | WaitingFor::AssignBlockerDamage { .. }
+        ) {
+            assignment_window.get_or_insert_with(|| state.waiting_for.variant_name().to_string());
+        }
+        let before = state.loop_detect_ring.len();
+        max_ring = max_ring.max(before);
+        let life_before = player_life(&state, P1);
+        let Ok(events) = combat_drive_one_beat(&mut state) else {
+            break;
+        };
+        let dealt: u32 = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::CombatDamageDealtToPlayer {
+                    player_id,
+                    total_damage,
+                    ..
+                } if *player_id == P1 => Some(*total_damage),
+                _ => None,
+            })
+            .sum();
+        if dealt > 0 {
+            damage_beats += 1;
+            if witness.is_none() && before >= 2 {
+                witness = Some((
+                    beat,
+                    before,
+                    state.loop_detect_ring.len(),
+                    life_before,
+                    player_life(&state, P1),
+                    dealt,
+                ));
+                // The evidence is complete; the rest of the drive only costs time. The
+                // window guard has already covered every beat up to here, and the loop
+                // below re-checks the settled window once more.
+                break;
+            }
+        }
+    }
+    if matches!(
+        state.waiting_for,
+        WaitingFor::AssignCombatDamage { .. } | WaitingFor::AssignBlockerDamage { .. }
+    ) {
+        assignment_window.get_or_insert_with(|| state.waiting_for.variant_name().to_string());
+    }
+
+    let (beat, before, after, life_before, life_after, dealt) = witness.unwrap_or_else(|| {
+        panic!(
+            "reach-guard: no CR 510.2 beat dealt combat damage to P1 while the ring held \
+             >= 2 frames, so the clear below would be unobservable. Combat-damage beats \
+             seen: {damage_beats}; max ring: {max_ring}. ATTRIBUTION: if \
+             `is_forced_cascade_window` no longer exempts \
+             `DeclareAttackers`/`DeclareBlockers`, the ring is wiped before combat and \
+             this guard reds first — read that as a class-membership regression, not as a \
+             failure of the combat-damage fence below"
+        )
+    });
+
+    assert!(
+        assignment_window.is_none(),
+        "DISCRIMINANT GUARD: this row exists because an UNBLOCKED attacker deals CR 510.2 \
+         damage with NO window — CR 510.1c's assignment window opens only for a division \
+         choice. A {assignment_window:?} window means the fixture drifted into the case \
+         the window-keyed exclusion already covers, making the row vacuous."
+    );
+    assert!(
+        life_after < life_before,
+        "LIFE-MOVE WITNESS: CR 120.3a — {dealt} combat damage to P1 must have reduced its \
+         life; got {life_before} -> {life_after} at beat {beat}"
+    );
+    assert!(
+        before >= 2,
+        "reach-guard: the ring must carry >= 2 frames INTO the damage beat; got {before}"
+    );
+    assert_eq!(
+        after, 0,
+        "CR 510.2 + CR 704.5a: the damage batch moved a life total with no intervening \
+         priority, so the ring accumulated before it may not be compared across it — it \
+         must be EMPTY after the beat. Ring went {before} -> {after} at beat {beat} \
+         (P1 {life_before} -> {life_after}). Deleting the \
+         `invalidate_loop_ring_on_unobserved_life_move` call from `apply_combat_damage` \
+         reproduces this failure: with `DeclareAttackers` / `DeclareBlockers` in the \
+         forced-cascade class and no assignment window ever opening, nothing else clears \
+         here."
+    );
+}
+
+/// The matched negative: CR 510.2 damage that moves NO player's life leaves the ring
+/// alone. Same board, but P1 fields a single 0/20 wall, so the 3/3 is blocked and the
+/// whole batch is creature-to-creature.
+///
+/// This pins the `p.life != before` predicate as load-bearing. Replacing it with an
+/// unconditional `clear()` — "clear on every combat damage" — still passes the row above
+/// but flips this one to FAIL, and would be a needless retention regression on every
+/// board where creatures merely trade.
+///
+/// NON-VACUITY: the witness requires a beat that BOTH dealt combat damage to a creature
+/// (`DamageDealt { target: Object, is_combat: true }`) AND left every player's life
+/// unchanged, with the ring already carrying >= 2 frames. A beat where no combat happened
+/// cannot satisfy it, so the row cannot pass by the attack never occurring. The single
+/// blocker also keeps CR 510.1c's division window shut, matching the row above.
+#[test]
+fn creature_only_combat_damage_leaves_the_loop_ring_intact() {
+    let mut state = combat_ring_board(true);
+
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: a non-sampling mode never populates the ring; got {:?}",
+        state.loop_detection
+    );
+
+    // (beat, ring before, ring after, creature damage dealt)
+    let mut witness: Option<(usize, usize, usize, u32)> = None;
+    let mut max_ring = 0usize;
+    let mut creature_damage_beats = 0usize;
+
+    for beat in 0..400usize {
+        let before = state.loop_detect_ring.len();
+        max_ring = max_ring.max(before);
+        let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+        let Ok(events) = combat_drive_one_beat(&mut state) else {
+            break;
+        };
+        let to_creatures: u32 = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Object(_),
+                    amount,
+                    is_combat: true,
+                    ..
+                } => Some(*amount),
+                _ => None,
+            })
+            .sum();
+        let lives_after: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+        if to_creatures > 0 && lives_after == lives_before {
+            creature_damage_beats += 1;
+            if witness.is_none() && before >= 2 {
+                witness = Some((beat, before, state.loop_detect_ring.len(), to_creatures));
+                break;
+            }
+        }
+    }
+
+    let (beat, before, after, dealt) = witness.unwrap_or_else(|| {
+        panic!(
+            "reach-guard: no beat dealt CR 510.2 damage to a creature with every player's \
+             life unchanged while the ring held >= 2 frames. Creature-damage beats seen: \
+             {creature_damage_beats}; max ring: {max_ring}. ATTRIBUTION: if \
+             `is_forced_cascade_window` no longer exempts \
+             `DeclareAttackers`/`DeclareBlockers`, the ring is wiped before combat and \
+             this guard reds first — read that as a class-membership regression, not as a \
+             failure of the combat-damage fence below"
+        )
+    });
+
+    assert!(
+        after >= before,
+        "CR 119.3: no player's life moved in this CR 510.2 batch ({dealt} damage, all of it \
+         to creatures), so there is nothing for the loop-ring prohibition to fence and the \
+         accumulated ring must SURVIVE. Ring went {before} -> {after} at beat {beat}. \
+         Replacing the `p.life != before` predicate in \
+         `invalidate_loop_ring_on_unobserved_life_move` with an unconditional `clear()` \
+         reproduces this failure."
+    );
+}
+
+// ===========================================================================
+// X1-1 — CR 117.1b on a REAL 4-player dump.
+// ===========================================================================
+
+/// Sprout Swarm in P0's hand in the dump-A capture.
+const X1_SPROUT: ObjectId = ObjectId(64);
+/// An untapped P0 fodder Saproling to convoke for the {G}.
+const X1_FODDER: ObjectId = ObjectId(421);
+
+/// X1-1 (⛔ the §H.2-gated row). The real 4-player Witherbloom / Sprout Swarm /
+/// Lumaret capture: P0 drives a Saproling object-growth loop while three opponents sit
+/// on utility lands whose activated abilities read the growing class, plus P0's own
+/// Jadar (a `{Phase, End}` observer). Pre-fix the CR 732.2a firewall vetoed and no offer
+/// surfaced.
+///
+/// ⛔ BLOCKING PRECONDITIONS (plan §H.2), MEASURED BEFORE THIS ROW WAS WRITTEN, at the
+/// C-2 firewall call on this exact board:
+/// * `scope.sole_driver == Some(PlayerId(0))` — the driving player. X1's own key.
+/// * `scope.phase_invariant == Some(PreCombatMain)` — the value is REPORTED here, not
+///   pre-asserted: asserting a literal on a loaded dump would smuggle in an unverified
+///   premise. The row asserts only that the guard was reachable.
+/// * `trigger_event_unreachable_in_phase(<Jadar obj 75: mode=Phase, phase=Some(End),
+///   damage_kind=Any>, PreCombatMain) == true` — SUFFICIENCY, not just reachability:
+///   the dump's veto set spans BOTH classes (4 of 5 blockers are X1-class opponent
+///   lands, the 5th is Jadar in the X2 class), so the offer needs both guards to fire.
+///   Instrument control on the same run: 48 `true` / 208 `false` over the board's
+///   trigger population, so the predicate is not constant.
+///
+/// ⛔ HONEST EVIDENCE BASIS: BASE is a measured no-offer trajectory whose FIRST veto was
+/// object 75. First-veto evidence bounds NOTHING about the remaining veto set — the
+/// firewall returns on the first `true` (13 `return true` sites in
+/// `fire_time_conditions_read_growing_class_scoped`). The offer-level assertion below is
+/// what carries this row's claim; the BASE figure is provenance, not proof.
+///
+/// REVERT-PROBE: delete the `obj.controller != driver` conjunct in block (2) ⇒ the
+/// opponents' utility-land abilities veto again ⇒ the offer disappears ⇒ FAILS.
+#[test]
+fn witherbloom_lumaret_4p_offers_with_opponent_utility_lands() {
+    use engine::types::ability::AbilityKind;
+    use engine::types::game_state::LoopDetectionMode;
+    use engine::types::zones::Zone;
+
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/witherbloom_sprout_lumaret_4p.json.gz"
+    )));
+    state.loop_detection = LoopDetectionMode::On;
+
+    // ── fixture preconditions (hold in BOTH revert modes ⇒ the offer is non-vacuous) ──
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "fixture precondition: ordinary P0 priority pre-cast, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state
+            .objects
+            .get(&X1_SPROUT)
+            .map(|o| (o.name.as_str(), o.zone)),
+        Some(("Sprout Swarm", Zone::Hand)),
+        "fixture precondition: Sprout Swarm is in P0's hand"
+    );
+    let fodder = state.objects.get(&X1_FODDER).expect("fodder present");
+    assert!(
+        fodder.name == "Saproling" && fodder.controller == P0 && !fodder.tapped,
+        "fixture precondition: an untapped P0 Saproling to convoke"
+    );
+    // The X1 class is really present: opponents control battlefield permanents.
+    let foreign_permanents = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects.get(id).is_some_and(|o| o.controller != P0))
+        .count();
+    assert!(
+        foreign_permanents >= 3,
+        "fixture precondition: the dump carries opponent-controlled permanents (the X1 \
+         class); got {foreign_permanents}"
+    );
+
+    // ── SHAPE, not just a count. This offer rests on the X1 (`obj.controller != driver`)
+    // relief, and item A narrows that relief to `kind == AbilityKind::Activated` with
+    // `activator_filter.is_none()`. A bare `foreign_permanents >= 3` count cannot tell
+    // whether the relieved population is the one item A governs; this does.
+    let foreign_ability_kinds: Vec<AbilityKind> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|o| o.controller != P0)
+        .flat_map(|o| o.abilities.iter().map(|a| a.kind))
+        .collect();
+    assert!(
+        !foreign_ability_kinds.is_empty(),
+        "fixture precondition: the foreign battlefield ability population must be NON-EMPTY, \
+         else item A's `kind == Activated` narrowing has nothing to act on here and this \
+         row's offer is not evidence about X1 at all"
+    );
+    assert!(
+        foreign_ability_kinds
+            .iter()
+            .all(|k| *k == AbilityKind::Activated),
+        "fixture precondition: every foreign battlefield ability def must be `Activated` — \
+         item A relieves ONLY that kind, so a non-`Activated` def here would keep vetoing \
+         and the offer would be attributable to something else; got {foreign_ability_kinds:?}"
+    );
+    assert!(
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|o| o.controller != P0)
+            .all(|o| o.abilities.iter().all(|a| a.activator_filter.is_none())),
+        "fixture precondition: no foreign def carries an `activator_filter` — item E refuses \
+         relief on ANY `Some(..)`, so one here would suppress this offer"
+    );
+    let jadar = state
+        .objects
+        .get(&engine::types::identifiers::ObjectId(75))
+        .expect("fixture precondition: object 75 is present");
+    assert_eq!(
+        (jadar.name.as_str(), jadar.zone, jadar.controller),
+        ("Jadar, Ghoulcaller of Nephalia", Zone::Battlefield, P0),
+        "fixture precondition: the driver-side observer this row names"
+    );
+    assert_eq!(
+        jadar.trigger_definitions.len(),
+        1,
+        "fixture precondition: Jadar carries exactly one trigger definition; got {}",
+        jadar.trigger_definitions.len()
+    );
+
+    let outcome = GameRunner::from_state(state)
+        .cast(X1_SPROUT)
+        .accept_optional()
+        .convoke_with(&[X1_FODDER])
+        .commit()
+        .resolve();
+
+    // ── reach-guard: the cast really resolved and grew the class ──
+    assert_eq!(
+        outcome.zone_of(X1_SPROUT),
+        Zone::Hand,
+        "reach-guard: Buyback returned Sprout Swarm to P0's hand"
+    );
+
+    // ── DISCRIMINATOR: the CR 732.2a offer surfaces ──
+    match outcome.final_waiting_for() {
+        WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            certificate,
+            ..
+        } => {
+            assert_eq!(*proposer, P0, "the driver proposes");
+            assert_eq!(
+                *predicted_winner, None,
+                "an Advantage offer has no predicted winner"
+            );
+            assert_eq!(
+                certificate.win_kind,
+                WinKind::Advantage,
+                "CR 732.2a: this is a beneficial (advantage) loop, not a mandatory win"
+            );
+            assert!(
+                certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+                "the unbounded axes must include TokensCreated, got {:?}",
+                certificate.unbounded
+            );
+        }
+        other => panic!(
+            "X1-1: CR 117.1b — no player but the sole driver receives priority inside the \
+             taken shortcut, so the opponents' utility-land abilities cannot read the \
+             growing class and must not suppress the offer; got {other:?}. \
+             ⛔ PRE-REGISTERED STOP BRANCH: do NOT widen X1's conjunct, X2's arms, or any \
+             downstream gate to manufacture this offer. Run the veto-enumeration \
+             diagnostic (convert the 13 `return true` sites in \
+             `fire_time_conditions_read_growing_class_scoped` to log-and-continue, replay, \
+             record every vetoing object id and its block), name the next rejecter and its \
+             call count in the PR body, and STOP."
+        ),
+    }
+}
+
+// ===========================================================================
+// K4 — CR 608.2i + CR 608.2j ledger-FILTER exclusion (the shallow BB-FU10-N narrowing).
+// Every fixture carries the harness's shared `"Flying, trample\n"` keyword prefix, so
+// subject and control differ ONLY in the ledger clause.
+// ===========================================================================
+
+/// FIXTURE C (PRIMARY) — measured `mode=DamageDone`, `phase=null`, `damage_kind=Any`,
+/// `constraint=null`. `damage_kind: Any` is what makes this pair STRUCTURALLY independent
+/// of the CR 510.2 phase relief, whose damage arm requires `CombatOnly`.
+const LEDGER_ARTIFACT_FILTER_ORACLE: &str = "Flying, trample\nWhenever this creature deals damage to a player, draw a card if you had two or more artifacts enter the battlefield under your control this turn.";
+
+/// FIXTURE D (PRIMARY) — fixture C with one Oracle noun changed. Measured: the two
+/// serialized trigger definitions are 984 bytes each and differ at exactly TWO token
+/// positions — `filter.type_filters[0]` and the humanized `description` string — both
+/// projections of that ONE noun, and `description` is a display string no scan predicate
+/// reads.
+const LEDGER_CREATURE_FILTER_ORACLE: &str = "Flying, trample\nWhenever this creature deals damage to a player, draw a card if you had two or more creatures enter the battlefield under your control this turn.";
+
+/// FIXTURE A (CORROBORATING) — a DIFFERENT `TriggerMode`. Measured `mode=Phase`,
+/// `phase=PreCombatMain`, `damage_kind=Any`, `constraint=OnlyDuringYourTurn`. Its
+/// independence from the phase relief rests on the ⛔ STRICT-INEQUALITY pin
+/// (`p != phase`, so `PreCombatMain` in a `PreCombatMain` window is NOT relieved) — hence
+/// corroborating rather than primary.
+const PHASE_LEDGER_ARTIFACT_FILTER_ORACLE: &str = "Flying, trample\nAt the beginning of your precombat main phase, draw a card if you had two or more artifacts enter the battlefield under your control this turn.";
+
+/// FIXTURE B (CORROBORATING) — fixture A one Oracle noun apart.
+const PHASE_LEDGER_CREATURE_FILTER_ORACLE: &str = "Flying, trample\nAt the beginning of your precombat main phase, draw a card if you had two or more creatures enter the battlefield under your control this turn.";
+
+/// K4-N1 (PRIMARY) — CR 608.2i + CR 608.2j. A ledger observer whose entry filter PROVABLY cannot
+/// count the growing fodder has a read whose value is invariant across the loop's growth,
+/// so it does not observe the loop and must not suppress the CR 732.2a offer.
+///
+/// ATTRIBUTION, structural rather than argued:
+/// * the CR 510.2 relief cannot move this row — `damage_kind: Any` (measured) can never
+///   satisfy its damage arm, which requires `CombatOnly` (pinned by
+///   `trigger_event_unreachable_in_phase_shape_is_pinned` arm 2), and `mode: DamageDone`
+///   never reaches its Phase arm.
+/// * the CR 117.1b relief cannot move it — the bystander is the DRIVER'S OWN.
+///   ⇒ the flip is attributable to the ledger-filter narrowing alone.
+///
+/// REVERT-PROBES: (1) delete the `&& !class_members.is_some_and(..)` guard ⇒ veto ⇒ FAILS.
+/// (2) make `execute_ledger_condition_provably_excludes_class` return `false`
+/// unconditionally ⇒ the same failure ⇒ the PREDICATE, not the plumbing, carries the flip.
+#[test]
+fn noncombat_damage_ledger_observer_whose_filter_excludes_the_class_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    // (2) ANTI-VACUITY CONTROL, granted in BOTH builds.
+    let (control_runner, _) = object_growth_with_bystander(PLAIN_DRAW_TRIGGER_ORACLE);
+    assert!(
+        matches!(
+            control_runner.state().waiting_for,
+            WaitingFor::LoopShortcut { .. }
+        ),
+        "(2) control: a plain draw-trigger bystander must not suppress the offer"
+    );
+
+    let (runner, bystander) = object_growth_with_bystander(LEDGER_ARTIFACT_FILTER_ORACLE);
+
+    // (3) reach-guards.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "(3) reach-guard: exactly one trigger definition carries the ledger read"
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "(1) unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "(1) CR 608.2j: a `Typed{{Artifact}}` entry filter cannot count a Saproling \
+             creature token, so the observer's read is invariant across the loop's growth \
+             and must not suppress the offer; got {other:?}. \
+             ⛔ PRE-REGISTERED FAILURE BRANCH: report the NEXT rejecter by name and its \
+             call count and STOP — do not widen a conjunct to manufacture the offer. \
+             Conjunct (a) is measured to pass; the remaining candidates in order are (c) \
+             and the offer-path gates downstream of the firewall."
+        ),
+    }
+}
+
+/// K4-N2 (PRIMARY) — THE ROW THAT KILLS THE LAZY-BUT-UNSOUND NARROWING. Fixture D is
+/// fixture C with one Oracle noun changed, and its `Typed{Creature}` filter GENUINELY
+/// counts the Saproling creature token the loop creates each cycle. So the veto must
+/// survive.
+///
+/// This pair IS the acceptance criterion: a correct narrowing moves K4-N1 and not this
+/// row; a blanket relaxation moves both; an inert guard moves neither.
+///
+/// REVERT-PROBE: make conjunct (c) unconditionally `true` (a blanket relaxation) ⇒ this
+/// row flips to an offer ⇒ FAILS.
+#[test]
+fn noncombat_damage_ledger_observer_whose_filter_matches_the_class_still_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, bystander) = object_growth_with_bystander(LEDGER_CREATURE_FILTER_ORACLE);
+
+    // (3) reach-guards. Anti-vacuity for a VETO row: the sibling POSITIVE
+    // `noncombat_damage_ledger_observer_whose_filter_excludes_the_class_does_not_suppress_offer`
+    // shows the same board DOES offer when the filter excludes, so this row's veto is
+    // attributable to the filter and not to the board.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (1) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: exactly one trigger definition carries the ledger read; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "CR 608.2j: a `Typed{{Creature}}` entry filter DOES count a Saproling creature \
+         token, so the observer genuinely observes the loop and must keep vetoing; got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// K4-N4a (CORROBORATING) — the same relief through a DIFFERENT `TriggerMode`, which is
+/// what proves it keys on the ledger FILTER and not on any one trigger shape.
+///
+/// ⚠ Independence from the CR 510.2 relief is CONDITIONAL on the ⛔ strict-inequality pin
+/// (`p != phase`): fixture A is `phase: Some(PreCombatMain)` in a `PreCombatMain` window,
+/// so the phase arm answers `false` and cannot classify it. Hence corroborating.
+#[test]
+fn phase_reachable_ledger_observer_whose_filter_excludes_the_class_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, bystander) = object_growth_with_bystander(PHASE_LEDGER_ARTIFACT_FILTER_ORACLE);
+
+    // (3) reach-guards, ALL BEFORE the offer match. This is a POSITIVE row: a parse failure
+    // yields no observer at all and the offer would form trivially, so these guards are what
+    // make that vacuity mode loud.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (1) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: the ledger observer must have PARSED — a misparse leaves zero trigger \
+         defs and the offer below forms for the wrong reason; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "K4-N4a: unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "K4-N4a CR 608.2j: a phase-REACHABLE observer whose entry filter excludes the \
+             fodder must not suppress the offer; got {other:?}"
+        ),
+    }
+}
+
+/// K4-N4b (CORROBORATING) — fixture B, one Oracle noun from K4-N4a, keeps its veto.
+///
+/// REVERT-PROBE: make conjunct (c) unconditional ⇒ flips ⇒ FAILS.
+#[test]
+fn phase_reachable_ledger_observer_whose_filter_matches_the_class_still_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    let (runner, bystander) = object_growth_with_bystander(PHASE_LEDGER_CREATURE_FILTER_ORACLE);
+
+    // (3) reach-guards. Anti-vacuity for a VETO row: the sibling POSITIVE
+    // `phase_reachable_ledger_observer_whose_filter_excludes_the_class_does_not_suppress_offer`
+    // shows the same board DOES offer when the filter excludes.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "reach-guard: block (1) hard-skips non-battlefield zones"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "reach-guard: exactly one trigger definition carries the ledger read; got {}",
+        obj.trigger_definitions.len()
+    );
+    assert!(
+        obj.abilities.is_empty(),
+        "reach-guard: this row's claim is about ONE named TRIGGER surface; the bystander \
+         also carries {} ability def(s) {:?}",
+        obj.abilities.len(),
+        obj.abilities.iter().map(|a| a.kind).collect::<Vec<_>>(),
+    );
+
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "K4-N4b: the matching half of the corroborating pair must keep vetoing; got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+// ===========================================================================
+// R6a — the ∞ badge is a lie once the collapse is SCHEDULED, and CR 732.2c
+// bounds the boundary prompt by the count the table accepted.
+// ===========================================================================
+
+/// Sprout Swarm in P0's hand in the `witherbloom_sprout_lumaret_simple_4p` capture.
+const R6A_SPROUT: ObjectId = ObjectId(405);
+/// The one untapped P0 Saproling in that capture — the {G} convoke fodder.
+const R6A_FODDER: ObjectId = ObjectId(1412);
+
+/// Load the simple 4p Witherbloom/Sprout capture and drive one real buyback+convoke
+/// recast through the cast pipeline, returning the state AT the CR 732.2a offer.
+fn r6a_offer_state() -> GameState {
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/witherbloom_sprout_lumaret_simple_4p.json.gz"
+    )));
+    state.loop_detection = LoopDetectionMode::On;
+    let outcome = GameRunner::from_state(state)
+        .cast(R6A_SPROUT)
+        .accept_optional()
+        .convoke_with(&[R6A_FODDER])
+        .commit()
+        .resolve();
+    outcome.state().clone()
+}
+
+/// Proposer declares `Fixed(n)`; every living opponent accepts (APNAP).
+fn r6a_declare_and_accept_all(state: &mut GameState, proposer: PlayerId, n: u32) {
+    apply(
+        state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: None,
+        },
+    )
+    .expect("the proposer declares the object-growth shortcut");
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("each living opponent accepts");
+    }
+}
+
+/// Pass priority through the real production path until the CR 500.5 step/phase
+/// boundary surfaces a non-`Priority` prompt (the `LoopCollapse` pay-amount) or the
+/// phase advances with no prompt. Bounded so a wedge fails loudly.
+fn r6a_drive_to_boundary(state: &mut GameState) {
+    let start_phase = state.phase;
+    for _ in 0..64 {
+        let WaitingFor::Priority { player } = state.waiting_for.clone() else {
+            return;
+        };
+        apply(state, player, GameAction::PassPriority)
+            .expect("pass priority toward the next phase boundary");
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.phase != start_phase {
+            return;
+        }
+    }
+    panic!("r6a_drive_to_boundary: no phase boundary within 64 passes");
+}
+
+/// R6a-1 (PRIMARY). MEASURED DEFECT: accepting the Witherbloom/Sprout loop writes
+/// `unbounded_resources = {P0: [Life(0), TokensCreated]}` and that mark survives to the
+/// CR 500.5 boundary, so the HUD renders an "∞ Life" badge beside P0's *finite*, growing
+/// life total. CR 732.2c: once the last player accepted, the shortcut IS taken at the
+/// named `Fixed(N)` — the growth is bounded, so no `∞` row may render for a scheduled axis.
+///
+/// FILTER THE PROJECTION, NEVER THE STORE. The store must still carry the mark (it is what
+/// CR 104.4b / CR 110.1 lockstep and `zones::apply_zone_exit_cleanup`'s defuse read until
+/// the boundary applies the growth), so this row asserts BOTH halves.
+///
+/// §15 NON-VACUITY: the emptiness assertion is paired with the store's NON-emptiness and a
+/// non-empty `unbounded_loop_pile` — the same `state` the projection reads is measurably
+/// populated, so the instrument demonstrably CAN report a row. Emptiness is asserted on the
+/// WIRE (`derive_views`), never on `state`.
+///
+/// REVERT-PROBES (both RUN, both observed to fail):
+/// ⓐ delete the `if scheduled.contains(&axis) { continue; }` filter in `derive_views`
+///    ⇒ the `Life(0)` and `TokensCreated` rows render ⇒ assertion (3) FAILS.
+/// ⓑ make `GameState::scheduled_collapse_axes` return an empty set ⇒ (3) FAILS the same
+///    way AND `clear_collapsed_materializations` stops removing at the boundary — which is
+///    what proves the projection and the collapse share ONE authority rather than two
+///    copies of the same match.
+#[test]
+fn scheduled_collapse_renders_no_unbounded_badge() {
+    let mut state = r6a_offer_state();
+
+    // (0) reach-guard: the real cast reached the CR 732.2a offer.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the buyback+convoke recast must surface P0's offer, got {:?}",
+        state.waiting_for
+    );
+
+    r6a_declare_and_accept_all(&mut state, P0, 200);
+
+    // (1) POSITIVE CONTROL — the accept really marked the ∞ axes in the STORE. Without
+    // this the emptiness in (3) would be vacuous.
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("accept must mark P0's ∞ axes in the store")
+        .clone();
+    assert!(
+        marked.contains(&ResourceAxis::Life(P0)),
+        "MEASURED defect axis: the accept marks Life(P0) ∞, got {marked:?}"
+    );
+    assert!(
+        marked.contains(&ResourceAxis::TokensCreated),
+        "the accept marks TokensCreated ∞, got {marked:?}"
+    );
+    assert!(
+        !state.unbounded_loop_pile.is_empty(),
+        "the object-growth accept writes a non-empty ∞ pile (store still populated)"
+    );
+    assert_eq!(
+        state.pending_unbounded_materialization.len(),
+        1,
+        "exactly one controller has a scheduled collapse"
+    );
+    // The growth really is finite: P0's life is a concrete number, not ∞.
+    let life = state.players.iter().find(|p| p.id == P0).unwrap().life;
+    assert!(
+        life > 0,
+        "the axis the badge lies about is a finite life total, got {life}"
+    );
+
+    // (2) FAIL-CLOSED CONTROL, in the SAME state: every ∞ axis the accept scheduled is
+    // covered by the shared authority. An axis it does not name keeps its badge (R6a-2/-3).
+    let scheduled = state.scheduled_collapse_axes(
+        state
+            .pending_unbounded_materialization
+            .get(&P0)
+            .expect("stash present"),
+    );
+    assert!(
+        marked.iter().all(|a| scheduled.contains(a)),
+        "every marked axis on this board is scheduled; marked={marked:?} scheduled={scheduled:?}"
+    );
+
+    // (3) DISCRIMINATOR — on the WIRE, for EVERY viewer (and the spectator view), no ∞ row.
+    // ALL THREE ∞ surfaces share the one authority, so the HUD can never hide a resource badge
+    // while a card group still renders ∞. The PER-SURFACE positive rows live on their own real
+    // fixtures — `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile` (pile)
+    // and `kilo_live_offer_from_real_dump::kilo_accept_marks_pentad_charge_as_unbounded_display_
+    // target` (counter pills) — so a regression on ONE surface stays visible even though this
+    // row flips on all of them at once.
+    for viewer in [None, Some(P0), Some(P1), Some(P2), Some(PlayerId(3))] {
+        let views = engine::game::derived_views::derive_views(&state, viewer);
+        assert!(
+            views.unbounded_resources.is_empty(),
+            "CR 732.2c: a scheduled finite collapse must render NO ∞ row (viewer {viewer:?}), \
+             got {:?}",
+            views.unbounded_resources
+        );
+        assert!(
+            views.unbounded_pile.is_empty(),
+            "CR 732.2c: ...and no ∞ card group beside it (viewer {viewer:?}), got {:?}",
+            views.unbounded_pile
+        );
+    }
+
+    // (3b) A TRIPWIRE, NOT A SECOND PRODUCER. Multiplayer broadcasts (`phase-server`) and the
+    // WASM `wrap_filtered` getter go through `derive_filtered_views`, which CALLS
+    // `derive_views(filtered_state, viewer)` and then overrides only
+    // `unique_authorized_submitter` and `blocker_assignment_pairs`. It WRAPS; it does not
+    // bypass. So gating in `derive_views` alone could not have leaked ∞ to the broadcast
+    // path — there is no other producer of these three fields, and this row costs zero
+    // production code.
+    //
+    // What it DOES guard is the INPUT: `filter_state_for_viewer` is a clone-and-redact with
+    // ZERO `unbounded` references today, so it passes `pending_unbounded_materialization`
+    // through unredacted and the gate sees the same stash the hot-seat viewer does. If a
+    // future redaction ever drops that stash from the filtered clone, the gate goes silently
+    // INERT on the broadcast path only — filtered viewers get the ∞ rows back while the local
+    // viewer does not. That is the regression this row catches.
+    for viewer in [P0, P1, P2, PlayerId(3)] {
+        let filtered = engine::game::visibility::filter_state_for_viewer(&state, viewer);
+        let views =
+            engine::game::derived_views::derive_filtered_views(&state, &filtered, Some(viewer));
+        assert!(
+            views.unbounded_resources.is_empty() && views.unbounded_pile.is_empty(),
+            "CR 732.2c: the viewer-FILTERED broadcast path hides the same rows (viewer \
+             {viewer:?}), got {:?} / {:?}",
+            views.unbounded_resources,
+            views.unbounded_pile
+        );
+    }
+
+    // (4) THE STORE IS UNTOUCHED — the projection filtered, it did not mutate.
+    assert_eq!(
+        state.unbounded_resources.get(&P0),
+        Some(&marked),
+        "the ∞ store must survive the projection (CR 104.4b / CR 110.1 lockstep + the \
+         zone-exit defuse still need it until the boundary)"
+    );
+    assert!(
+        !state.unbounded_loop_pile.is_empty(),
+        "the ∞ pile must survive the projection too"
+    );
+}
+
+/// R6a-3 (FAIL-CLOSED). An ∞ axis the accept marked but NO registered materialization
+/// collapses must keep rendering its badge — the filter is keyed on what is actually
+/// scheduled, never on what is merely *labellable*.
+///
+/// This is the row that kills the lazy-but-unsound filter: `LoopCollapseAxis`
+/// `from_resource_axis` maps `TokensCreated` / `Counter(..)` / `Life(..)` to a label, so
+/// building the hide-set from "does this axis have a collapse label" is a one-liner that
+/// passes R6a-1 and silently hides an axis nothing will ever collapse.
+///
+/// REVERT-PROBE (RUN): build the projection filter from
+/// `LoopCollapseAxis::from_resource_axis(axis).is_some()` instead of from
+/// `scheduled_collapse_axes` ⇒ this row's `TokensCreated` badge vanishes ⇒ FAILS, while
+/// R6a-1 still passes.
+#[test]
+fn unregistered_axis_still_renders_its_infinity_badge() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 200);
+
+    // Keep the marks, DROP the registrations: the exact shape of an axis that is
+    // collapsible-LABELLED but has nothing scheduled to collapse it.
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .expect("accept marked the ∞ axes")
+        .clone();
+    assert!(
+        marked.contains(&ResourceAxis::TokensCreated) && marked.contains(&ResourceAxis::Life(P0)),
+        "reach-guard: both labellable axes are marked, got {marked:?}"
+    );
+    // Positive control on the SAME state, BEFORE the drop: with the stash present the rows
+    // are hidden, so the flip below is attributable to the missing registration alone.
+    assert!(
+        engine::game::derived_views::derive_views(&state, None)
+            .unbounded_resources
+            .is_empty(),
+        "control: with the stash present the scheduled rows are hidden"
+    );
+    state.pending_unbounded_materialization.clear();
+
+    let rows = engine::game::derived_views::derive_views(&state, None).unbounded_resources;
+    let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
+    assert!(
+        axes.contains(&ResourceAxis::TokensCreated),
+        "FAIL-CLOSED: a collapsible-LABELLED axis with NO registered materialization is \
+         still unbounded and must keep its ∞ badge, got {axes:?}"
+    );
+    assert!(
+        axes.contains(&ResourceAxis::Life(P0)),
+        "FAIL-CLOSED: same for the life axis, got {axes:?}"
+    );
+}
+
+/// R4-C4b (CR 732.2c). "Once the last player has either accepted or shortened the shortcut
+/// proposal, the shortcut is taken" — its ending point is fixed at the accepted N, so the
+/// CR 500.5 boundary collapse prompt may not offer a WIDER range than the table agreed to.
+/// BASE re-asked with `max = MAX_SHORTCUT_CYCLES` (1000), letting a controller who proposed
+/// 7 cycles walk away with 1000.
+///
+/// REVERT-PROBE (RUN): restore `max: crate::game::engine::MAX_SHORTCUT_CYCLES` ⇒ `max`
+/// reads 1000 ⇒ FAILS. `min: 0` is asserted unchanged (a collapse-to-nothing stays legal).
+#[test]
+fn accepted_fixed_count_bounds_the_boundary_collapse_prompt() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 7);
+    assert!(
+        state.pending_unbounded_materialization.contains_key(&P0),
+        "reach-guard: the accept scheduled a collapse, so the boundary WILL prompt"
+    );
+
+    r6a_drive_to_boundary(&mut state);
+
+    match &state.waiting_for {
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+            min,
+            max,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the loop controller is prompted");
+            assert_eq!(
+                *max, 7,
+                "CR 732.2c: the accepted Fixed(7) bounds the collapse prompt (BASE: 1000)"
+            );
+            assert_eq!(*min, 0, "a collapse-to-nothing stays legal");
+        }
+        other => {
+            panic!("the CR 500.5 boundary must prompt P0 for the collapse count, got {other:?}")
+        }
+    }
+
+    // REJECTION DISCRIMINATOR — the bound is ENFORCED by the reducer, not merely advertised
+    // in the prompt. This is the control a widened-`max` BASE cannot pass: with
+    // `max = MAX_SHORTCUT_CYCLES` a submit of 8 is ACCEPTED, so this assertion is what makes
+    // the range assertion above load-bearing rather than cosmetic.
+    let over = apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 8 });
+    assert!(
+        matches!(&over, Err(EngineError::InvalidAction(msg)) if msg.contains("[0, 7]")),
+        "CR 732.2c: collapsing PAST the accepted count must be rejected, got {over:?}"
+    );
+
+    // The bound is honored end-to-end: submitting exactly N is still accepted.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 7 })
+        .expect("collapsing at exactly the accepted count is legal");
+}
+
+/// R6a FIX-2 (CR 732.2c). MEASURED DEFECT in the first cut of the collapse bound: the stash
+/// `register_pending_materialization` APPENDS ("two accepts by the same controller, coexist"),
+/// but the bound was written with a bare `insert`, i.e. it OVERWROTE. A controller who accepts
+/// `Fixed(1)` and then, in the SAME phase, accepts `Fixed(1000)` therefore ends up with a
+/// two-item stash bounded at 1000 — and since the boundary applies ONE submitted amount to
+/// EVERY item, the first accept's loop would materialize 1000 times though the table agreed to
+/// exactly one.
+///
+/// SHIPPED SEMANTICS, PINNED HERE EXPLICITLY: the bound is the MINIMUM of the accepted counts.
+/// The second accept's agreed 1000 is UNDER-delivered down to 1. That is still a divergence
+/// from what the table agreed to — but it is the safe polarity: no accept in the stash can ever
+/// be over-materialized, which is the CR 732.2c violation ("the shortcut is taken" at the count
+/// the last player accepted, not at some later, larger one). The exact per-accept bound needs
+/// the flat stash to become accept-grouped and is deliberately NOT smuggled in here; the
+/// boundary's pause-safety `sort_by_key` reorders that flat list, so a positional parallel
+/// bound vector is not a valid shortcut to it.
+///
+/// REVERT-PROBE (RUN): restore `pending_materialization_count.insert(proposal.proposer, n)` in
+/// `materialize_fixed_shortcut` ⇒ the bound reads 1000, the prompt offers `max == 1000`, and the
+/// out-of-range submit is ACCEPTED ⇒ assertions (4), (5) and (6) FAIL.
+#[test]
+fn two_accepts_in_one_phase_bound_the_collapse_to_the_smallest_accepted_count() {
+    let mut state = r6a_offer_state();
+
+    // (1) reach-guard: the first real cast reached the CR 732.2a offer.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the first buyback+convoke recast must surface P0's offer, got {:?}",
+        state.waiting_for
+    );
+    let phase_at_first_accept = state.phase;
+    r6a_declare_and_accept_all(&mut state, P0, 1);
+    assert_eq!(
+        state.pending_materialization_count.get(&P0).copied(),
+        Some(1),
+        "the first accept records its own Fixed(1) bound"
+    );
+
+    // (2) The buyback returned Sprout Swarm to hand and priority came back, so a SECOND real
+    // cast is available in the SAME phase — this is what makes the append reachable at all.
+    let fodder = *state
+        .battlefield
+        .iter()
+        .find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && !o.tapped && o.name.contains("Saproling"))
+        })
+        .expect("an untapped P0 Saproling remains to convoke the second cast");
+    let mut state = GameRunner::from_state(state)
+        .cast(R6A_SPROUT)
+        .accept_optional()
+        .convoke_with(&[fodder])
+        .commit()
+        .resolve()
+        .state()
+        .clone();
+
+    // (3) reach-guard: the second cast really produced a second offer, in the same phase.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the second recast must surface a second offer, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.phase, phase_at_first_accept,
+        "both accepts land in ONE phase, so they share ONE stash and ONE boundary prompt"
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 1000);
+
+    // (4) THE PREMISE + THE FIX. The stash APPENDED (two items, one boundary amount for both),
+    // and the bound is the MINIMUM — not the latest write.
+    assert_eq!(
+        state
+            .pending_unbounded_materialization
+            .get(&P0)
+            .map(Vec::len),
+        Some(2),
+        "premise: the two accepts coexist in ONE stash, so ONE amount will scale BOTH"
+    );
+    assert_eq!(
+        state.pending_materialization_count.get(&P0).copied(),
+        Some(1),
+        "CR 732.2c: min(1, 1000) — the later Fixed(1000) may NOT re-scale the Fixed(1) accept \
+         (BASE overwrite: 1000)"
+    );
+
+    let p0_permanents = |s: &GameState| {
+        s.battlefield
+            .iter()
+            .filter(|id| s.objects.get(id).is_some_and(|o| o.controller == P0))
+            .count()
+    };
+    let permanents_before = p0_permanents(&state);
+    let life_before = state.players.iter().find(|p| p.id == P0).unwrap().life;
+
+    r6a_drive_to_boundary(&mut state);
+
+    // (5) The prompt advertises the minimum.
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+        max,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the CR 500.5 boundary must prompt P0 for the collapse count, got {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(*player, P0, "the loop controller is prompted");
+    assert_eq!(
+        *max, 1,
+        "CR 732.2c: the prompt is bounded by the SMALLEST accepted count (BASE: 1000)"
+    );
+
+    // (6) And the reducer ENFORCES it — the second accept's agreed 1000 is unreachable.
+    let over = apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 1000 });
+    assert!(
+        matches!(&over, Err(EngineError::InvalidAction(msg)) if msg.contains("[0, 1]")),
+        "CR 732.2c: the later accept's 1000 cannot be collapsed at, got {over:?}"
+    );
+
+    // (7) WHAT B'S 1000 ACTUALLY BECOMES: exactly 1. Each of the two stashed sequences replays
+    // ONCE — one new token and one life per sequence — so the first accept keeps precisely the
+    // single cycle the table agreed to, and the second is capped down to the same.
+    //
+    // NOT the BASE discriminator, and deliberately not claimed as one: this submits
+    // `amount: 1`, which the BASE overwrite ALSO materializes as Δ2. A bare-`insert` revert
+    // probe was RUN and fails only at assertion (5) (`left: Some(1000)`). What BASE gets
+    // wrong is that it ADVERTISES `max: 1000` and PERMITS a 1000× submit — assertions (4),
+    // (5) and (6) are the rows that catch that. This row exists to pin the post-collapse
+    // board, i.e. that the enforced bound is also the delivered one.
+    apply(&mut state, P0, GameAction::SubmitPayAmount { amount: 1 })
+        .expect("collapsing at the minimum accepted count is legal");
+    assert_eq!(
+        p0_permanents(&state) - permanents_before,
+        2,
+        "one materialized cycle per stashed accept, never 1000"
+    );
+    assert_eq!(
+        state.players.iter().find(|p| p.id == P0).unwrap().life - life_before,
+        2,
+        "same for the life axis: one cycle per stashed accept"
+    );
+}
+
+/// R6a FIX-4 (CR 732.2c). The AI's `LoopCollapse` candidate was a hardcoded `amount: 1`, from
+/// when the prompt's `max` was the fixed engine-wide `MAX_SHORTCUT_CYCLES`. Binding `max` to
+/// the accepted count makes `max == 0` reachable — a shortcut everyone accepted at `Fixed(0)`
+/// — and the reducer rejects `amount > max`, so the generator's SOLE candidate would be
+/// illegal and an AI-seated controller would have no legal action at this prompt.
+///
+/// Driven end-to-end: a real cast → a real `Fixed(0)` declaration → real APNAP accepts → the
+/// real CR 500.5 boundary prompt → the production `ai_support::legal_actions` generator → the
+/// production `apply()` reducer.
+///
+/// REVERT-PROBE (RUN, MEASURED): restore `GameAction::SubmitPayAmount { amount: 1 }` in
+/// `ai_support::candidates` ⇒ `legal_actions` returns `[]`. `legal_actions` validates its
+/// candidates against the reducer, so the illegal `amount: 1` is not merely rejected on
+/// submit — it is dropped, leaving the AI with NO legal action at this prompt. Assertion (3)
+/// FAILS (`left: []`).
+#[test]
+fn ai_collapse_candidate_is_clamped_to_the_accepted_bound() {
+    let mut state = r6a_offer_state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the offer, got {:?}",
+        state.waiting_for
+    );
+    r6a_declare_and_accept_all(&mut state, P0, 0);
+    r6a_drive_to_boundary(&mut state);
+
+    // (1) reach-guard: a `Fixed(0)` accept really does register a stash and really does prompt.
+    // (2) ...with the zero-width range the clamp exists for.
+    let WaitingFor::PayAmountChoice {
+        resource: engine::types::game_state::PayableResource::LoopCollapse { .. },
+        min,
+        max,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "reach-guard: a Fixed(0) accept must still reach the boundary prompt, got {:?}",
+            state.waiting_for
+        )
+    };
+    assert_eq!(
+        (*min, *max),
+        (0, 0),
+        "CR 732.2c: Fixed(0) bounds the prompt to exactly 0"
+    );
+
+    // (3) The production candidate generator offers the clamped amount (BASE: a hardcoded 1).
+    let candidates = engine::ai_support::legal_actions(&state);
+    assert_eq!(
+        candidates,
+        vec![GameAction::SubmitPayAmount { amount: 0 }],
+        "the AI's sole collapse candidate is clamped to the accepted bound"
+    );
+
+    // (4) ...and it is actually LEGAL — the assertion that makes (3) load-bearing rather than
+    // a restatement of the generator.
+    apply(&mut state, P0, candidates[0].clone())
+        .expect("the AI's generated candidate must be accepted by the reducer");
 }

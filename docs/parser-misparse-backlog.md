@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4721
-- **Total card appearances across root causes:** 4755 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4719
+- **Total card appearances across root causes:** 4753 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -17,7 +17,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 330 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 247 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 239 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 211 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -39,7 +39,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 25 | Wrong / dropped effect duration | 28 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 20 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 16 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 13 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 10 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 5 | manual triage |
 
@@ -209,7 +209,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Devoted Sultai
 - Devout Harpist
 - Dewdrop Cure
-- Diluvian Primordial
 - Dimension X Pizzasaur
 - Diplomatic Escort
 - Dire Fleet Warmonger
@@ -513,7 +512,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Olog-hai Crusher
 - Omega, Heartless Evolution
 - On Wings of Gold
-- Onakke Oathkeeper
 - Only the Best
 - Oracle of Tragedy
 - Orcish Veteran
@@ -2566,7 +2564,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (246 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (239 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2577,14 +2575,11 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - A-Brinebound Gift
 - A-Death-Priest of Myrkul
 - A-Nahiri, Heir of the Ancients
-- A-Radha, Coalition Warlord
 - A-Rockslide Sorcerer
 - A-Shipwreck Sifters
 - A-Umara Mystic
-- A-Zar Ojanen, Scion of Efrava
 - Aang and Katara
 - All Will Be One
-- Alpha Deathclaw
 - Ana Battlemage
 - Angel of Serenity
 - Angelic Intervention
@@ -2610,9 +2605,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Cairn Wanderer
 - Camato Scout
 - Campsite Cuisine
-- Case of the Pilfered Proof
 - Case of the Stashed Skeleton
-- Champions of the Shoal
 - Circle of Flame
 - Cloak and Dagger, Entwined
 - Coalborn Entity
@@ -2623,9 +2616,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Corpse Explosion
 - Crashing Wave
 - Crop Sigil
-- Cryoshatter
 - Cryptic Pursuit
-- Culvert Ambusher
 - Cut Short
 - Dakkon, Shadow Slayer
 - Daretti, Ingenious Iconoclast
@@ -5053,7 +5044,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (14 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (13 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -5072,7 +5063,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
 - Tomb Tyrant
-- Trade Caravan
 - Uthros Research Craft
 - Uthros, Titanic Godcore
 

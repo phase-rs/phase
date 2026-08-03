@@ -12,7 +12,7 @@ use crate::types::game_state::{
     MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
     StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
@@ -30,8 +30,66 @@ use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// Transfers an already-popped stack entry into the active resolution carrier.
+pub(super) fn begin_resolving_stack_entry(
+    state: &mut GameState,
+    entry: StackEntry,
+    firing: Option<TriggerFiring>,
+) {
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
+    debug_assert_eq!(
+        matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }),
+        firing.is_some()
+    );
+    state.resolving_stack_entry = Some(entry);
+    state.resolving_trigger_firing = firing;
+}
+
+/// Settles the active resolution carrier after its owning resolution completes.
+pub(super) fn finish_resolving_stack_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) {
+    let entry = state.resolving_stack_entry.take();
+    let firing = state.resolving_trigger_firing.take();
+    debug_assert!(
+        firing.is_none()
+            || entry
+                .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+    );
+    if let Some(firing) = firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+}
+
 /// CR 405.1: Add an object to the stack.
-pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
+    let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        .then_some(TriggerFiring::Ordinary);
+    push_to_stack_with_firing(state, entry, trigger_firing, events);
+}
+
+/// Push a scheduler-owned triggered ability with its exact firing class.
+pub(crate) fn push_triggered_to_stack(
+    state: &mut GameState,
+    entry: StackEntry,
+    firing: TriggerFiring,
+    events: &mut Vec<GameEvent>,
+) {
+    debug_assert!(matches!(
+        entry.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    push_to_stack_with_firing(state, entry, Some(firing), events);
+}
+
+fn push_to_stack_with_firing(
+    state: &mut GameState,
+    mut entry: StackEntry,
+    trigger_firing: Option<TriggerFiring>,
+    events: &mut Vec<GameEvent>,
+) {
     let source_ref = state
         .objects
         .get(&entry.source_id)
@@ -75,7 +133,10 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
     // CR 733: journal the settled push after every source-referential stamp
     // above has been written into the entry, so the record carries the stamped
     // values themselves rather than the state they were derived from.
-    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Put);
+    journal_stack_push(state, &entry, trigger_firing, ResolvedStackPushOrigin::Put);
+    if let Some(firing) = trigger_firing {
+        state.stack_trigger_firings.insert(entry.id, firing);
+    }
     state.stack.push_back(entry);
 }
 
@@ -106,6 +167,7 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
 pub(crate) fn push_copy_to_stack(
     state: &mut GameState,
     mut entry: StackEntry,
+    copied_trigger_firing: Option<TriggerFiring>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 701.27f: an activated or triggered ability of a permanent may transform
@@ -134,7 +196,12 @@ pub(crate) fn push_copy_to_stack(
     // CR 733: same journal point as [`push_to_stack`]. The copy's deliberately
     // different stamping is already baked into `entry`, so this records the same
     // operand set under a different origin rather than a sibling command.
-    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Copy);
+    let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        .then_some(copied_trigger_firing.unwrap_or(TriggerFiring::Ordinary));
+    journal_stack_push(state, &entry, trigger_firing, ResolvedStackPushOrigin::Copy);
+    if let Some(firing) = trigger_firing {
+        state.stack_trigger_firings.insert(entry.id, firing);
+    }
     state.stack.push_back(entry);
 }
 
@@ -144,11 +211,17 @@ pub(crate) fn push_copy_to_stack(
 /// index it will occupy is the current depth. Reading that here — before either
 /// caller's `push_back` — is the one piece of shared logic the two authorities
 /// could otherwise get out of step on.
-fn journal_stack_push(state: &mut GameState, entry: &StackEntry, origin: ResolvedStackPushOrigin) {
+fn journal_stack_push(
+    state: &mut GameState,
+    entry: &StackEntry,
+    trigger_firing: Option<TriggerFiring>,
+    origin: ResolvedStackPushOrigin,
+) {
     let resulting_position = state.stack.len();
     let cause = state.current_or_begin_rules_execution_node();
     let command = ResolvedStackPushCommand {
         entry: Box::new(entry.clone()),
+        trigger_firing,
         origin,
         resulting_position,
         cause,
@@ -184,6 +257,11 @@ pub fn apply_resolved_stack_push(
     state: &mut GameState,
     command: &ResolvedStackPushCommand,
 ) -> Result<(), ResolvedStackPushReplayInvariantError> {
+    if matches!(command.entry.kind, StackEntryKind::TriggeredAbility { .. })
+        != command.trigger_firing.is_some()
+    {
+        return Err(ResolvedStackPushReplayInvariantError::TriggerFiringShapeMismatch);
+    }
     if state.stack.len() != command.resulting_position {
         return Err(ResolvedStackPushReplayInvariantError::StackDepthMismatch {
             expected: command.resulting_position,
@@ -206,6 +284,9 @@ pub fn apply_resolved_stack_push(
     }
 
     state.stack.push_back(command.entry.as_ref().clone());
+    if let Some(firing) = command.trigger_firing {
+        state.stack_trigger_firings.insert(command.entry.id, firing);
+    }
     Ok(())
 }
 
@@ -281,6 +362,23 @@ pub(crate) struct PoppedStackEntry {
     pub entry: StackEntry,
     pub paid_facts: Option<StackPaidSnapshot>,
     pub trigger_event_batch: Option<Vec<GameEvent>>,
+    pub trigger_firing: Option<TriggerFiring>,
+}
+
+/// Takes the firing classification coupled to a stack entry.
+///
+/// Current scheduler pushes always install a row for triggered entries. Older
+/// persisted states and direct fixture construction can lack that row, in which
+/// case the canonical unknown-legacy form preserves the pair without inventing
+/// a receipt-eligible delayed identity.
+fn take_stack_trigger_firing(state: &mut GameState, entry: &StackEntry) -> Option<TriggerFiring> {
+    let firing = state.stack_trigger_firings.remove(&entry.id);
+    if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+        Some(firing.unwrap_or(TriggerFiring::UnknownLegacy))
+    } else {
+        debug_assert!(firing.is_none());
+        None
+    }
 }
 
 /// CR 405.2: removes one object from the stack at a known index.
@@ -303,7 +401,7 @@ pub(crate) struct PoppedStackEntry {
 /// with its own record, and routing it through this authority would journal one
 /// mutation twice, so a replay would remove two entries where execution removed
 /// one.
-pub(crate) fn remove_stack_entry_at(
+fn remove_stack_entry_at_unobserved(
     state: &mut GameState,
     index: usize,
 ) -> Option<PoppedStackEntry> {
@@ -315,6 +413,7 @@ pub(crate) fn remove_stack_entry_at(
     let entry = state.stack.remove(index);
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+    let trigger_firing = take_stack_trigger_firing(state, &entry);
 
     // CR 733: journal once ALL THREE removals have settled, so the record
     // describes a stack the entry has already left. An out-of-range index is the
@@ -335,17 +434,44 @@ pub(crate) fn remove_stack_entry_at(
         entry,
         paid_facts,
         trigger_event_batch,
+        trigger_firing,
     })
+}
+
+/// Removes a stack entry for a non-resolution reason and observes the exact
+/// firing only after the entry and side tables have been settled.
+pub(super) fn remove_nonresolving_stack_entry_at(
+    state: &mut GameState,
+    index: usize,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) -> Option<PoppedStackEntry> {
+    let popped = remove_stack_entry_at_unobserved(state, index)?;
+    if let Some(firing) = popped.trigger_firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+    Some(popped)
 }
 
 /// CR 405.2: removes the topmost object from the stack.
 ///
-/// A thin wrapper over [`remove_stack_entry_at`] — the top of an N-deep stack is
+/// A thin wrapper over [`remove_stack_entry_at_unobserved`] — the top of an N-deep stack is
 /// index N-1 — kept because the resolution and drain callers have no index to
-/// pass and reading `remove_stack_entry_at(state, state.stack.len() - 1)` at
+/// pass and reading `remove_stack_entry_at_unobserved(state, state.stack.len() - 1)` at
 /// each of them would obscure that they are simply resolving the top object.
 pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
-    remove_stack_entry_at(state, state.stack.len().checked_sub(1)?)
+    remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
+}
+
+/// Removes the top stack entry outside normal resolution.
+pub(super) fn pop_nonresolving_top_stack_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) -> Option<PoppedStackEntry> {
+    let popped = pop_top_stack_entry(state)?;
+    if let Some(firing) = popped.trigger_firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+    Some(popped)
 }
 
 /// Replays one already-resolved CR 405.2 stack removal.
@@ -384,6 +510,7 @@ pub fn apply_resolved_stack_removal(
     let entry = state.stack.remove(command.index);
     state.stack_paid_facts.remove(&entry.id);
     state.stack_trigger_event_batches.remove(&entry.id);
+    state.stack_trigger_firings.remove(&entry.id);
     Ok(())
 }
 
@@ -411,7 +538,10 @@ pub fn apply_resolved_stack_removal(
 /// piece of construction state owned by
 /// `engine::drop_mid_construction_pending_trigger`, which calls this and then
 /// clears it.
-pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+pub(super) fn pop_uncommitted_pending_trigger_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) {
     let Some(entry_id) = state.pending_trigger_entry.take() else {
         // No cursor: nothing was consumed and nothing settled, so there is no
         // mutation to journal.
@@ -422,9 +552,26 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
             let entry = state.stack.pop_back().expect("the entry was just observed");
             state.stack_paid_facts.remove(&entry_id);
             state.stack_trigger_event_batches.remove(&entry_id);
-            entry
+            let firing = take_stack_trigger_firing(state, &entry);
+            PoppedStackEntry {
+                entry,
+                paid_facts: None,
+                trigger_event_batch: None,
+                trigger_firing: firing,
+            }
         })
         .map(Box::new);
+
+    if let Some(removed) = removed.as_ref() {
+        let pending_firing = state
+            .pending_trigger_firing
+            .expect("uncommitted trigger removal must retain its pending firing carrier");
+        assert_eq!(
+            removed.trigger_firing,
+            Some(pending_firing),
+            "uncommitted trigger removal carriers must agree"
+        );
+    }
 
     // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
     // `.take()` above is unconditional, so a guard that declines to pop still
@@ -433,7 +580,9 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
     let cause = state.current_or_begin_rules_execution_node();
     let command = ResolvedUncommittedTriggerRemovalCommand {
         consumed_entry_id: entry_id,
-        removed,
+        removed: removed
+            .as_ref()
+            .map(|removed| Box::new(removed.entry.clone())),
         resulting_depth: state.stack.len(),
         cause,
     };
@@ -441,6 +590,9 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
         .resolved_rules_journal
         .record_uncommitted_trigger_removal(command)
         .expect("resolved uncommitted trigger removal must have a live journal cause");
+    if let Some(firing) = removed.and_then(|removed| removed.trigger_firing) {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
 }
 
 /// Installs one already-resolved CR 603.3d removal verbatim.
@@ -508,6 +660,9 @@ pub fn apply_resolved_uncommitted_trigger_removal(
         state.stack_paid_facts.remove(&command.consumed_entry_id);
         state
             .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_firings
             .remove(&command.consumed_entry_id);
     }
     Ok(())
@@ -763,19 +918,30 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 603.3d: A stale construction cursor on a malformed trigger
             // with no legal required targets cannot keep a triggered ability
             // suspended forever.
+            if let Some(firing) = state.pending_trigger_firing.take() {
+                assert_eq!(
+                    state.stack_trigger_firings.get(&pending_id).copied(),
+                    Some(firing),
+                    "stale pending trigger must transfer its firing to the live stack entry"
+                );
+            }
             state.pending_trigger_entry = None;
             state.pending_trigger = None;
             state.pending_trigger_event_batch.clear();
         }
     }
 
-    // CR 707.10: A fresh resolution invalidates any previously stashed
-    // resolving entry. `resolving_stack_entry` is set below and must persist
-    // across an optional-choice round-trip (the Chain cycle's "you may copy
-    // this spell" defers the copy past a player decision, by which point the
-    // spell has left the stack) — so it is cleared here at the start of the
-    // *next* resolution rather than at the end of this one.
-    state.resolving_stack_entry = None;
+    // CR 608.2c: A resolution that completed at the preceding Priority
+    // boundary must settle its exact carrier before another stack object can
+    // begin resolving. A parked continuation remains live and therefore still
+    // fails the invariant below rather than being silently cleared.
+    super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+    // CR 707.10: A prior resolution must have settled before another stack
+    // object can begin resolving. A parked continuation owns its carrier until
+    // its own completion or abort path; silently clearing it here would lose a
+    // receipt-eligible delayed firing.
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -789,10 +955,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         entry,
         paid_facts: paid_snapshot,
         trigger_event_batch,
+        trigger_firing,
     }) = pop_top_stack_entry(state)
     else {
         return;
     };
+    // CR 603.4 + CR 608.2b: transfer the exact firing before any branch can
+    // abort, resolve, or park this popped triggered ability.
+    begin_resolving_stack_entry(state, entry.clone(), trigger_firing);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -804,6 +974,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         events.push(GameEvent::StackResolved {
             object_id: entry.id,
         });
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.resolution_source_relatch = None;
         return;
     }
 
@@ -828,6 +1003,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             events.push(GameEvent::StackResolved {
                 object_id: entry.id,
             });
+            finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
+            );
+            state.resolution_source_relatch = None;
             return;
         }
     }
@@ -967,6 +1147,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
+        state.resolution_source_relatch = None;
         return;
     }
 
@@ -1082,13 +1267,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 707.10: Expose the resolving stack entry so a `CopySpell` carried as
+    // CR 707.10: Preserve the resolving stack entry so a `CopySpell` carried as
     // the spell's own effect (the Chain cycle's "you may copy this spell")
     // can copy itself even though `resolve_top` has already popped it off the
     // stack — and even after the spell has moved to the graveyard while an
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
-    state.resolving_stack_entry = Some(entry.clone());
     // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
     // the duration of its own resolution, so a triggered ability of the SAME object that
     // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
@@ -1166,6 +1350,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // CR 706.2 + CR 706.4: clear the carried die-roll result at the
                 // same cross-resolution boundary as the batched subject count.
                 state.die_result_this_resolution = None;
+                finish_resolving_stack_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::AllTargetsIllegal,
+                );
+                state.resolution_source_relatch = None;
                 return;
             }
             execute_effect(state, &validated, events);
@@ -1244,7 +1433,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .and_then(|a| a.context.cast_from_zone)
             .or_else(|| super::casting::spell_cast_origin(state, entry.id));
         if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
         } else {
             false
         }
@@ -2023,7 +2212,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
                 });
                 if has_warp {
-                    create_warp_delayed_trigger(state, entry.id, entry.controller);
+                    create_warp_delayed_trigger(state, entry.id, entry.controller, events);
                 }
                 // CR 702.185a + CR 400.7: stamp the per-object warp marker after
                 // `reset_for_battlefield_entry` cleared it, mirroring the Evoke /
@@ -2239,12 +2428,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 702.109a: a dash-cast permanent gains haste and is returned to
             // its owner's hand at the beginning of the next end step.
             if casting_variant == CastingVariant::Dash {
-                crate::game::dash::install_dash_riders(state, entry.id, entry.controller);
+                crate::game::dash::install_dash_riders(state, entry.id, entry.controller, events);
             }
             // CR 702.152a: a blitz-cast permanent gains haste and a dies-draw
             // trigger, and is sacrificed at the beginning of the next end step.
             if casting_variant == CastingVariant::Blitz {
-                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller);
+                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller, events);
             }
         }
     }
@@ -2261,6 +2450,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
+    // The popped object remains the resolving carrier through every typed
+    // resolution frame, including a direct optional-choice frame. In particular,
+    // a self-moving trigger needs that carrier to establish its CR 400.7j
+    // re-entry link after an accepted choice (Ajani, Nacatl Pariah).
+    if super::triggers::resolution_completion_can_settle(state)
+        && state.active_spell_resolution().is_none()
+        && state.pending_resolution_completion.is_none()
+    {
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.resolution_source_relatch = None;
+    }
 }
 
 /// CR 113.3b + CR 113.7a: Resolve an activated keyword ability from the stack.
@@ -3257,7 +3460,8 @@ fn resolve_batched(
 ) -> u32 {
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
-    state.resolving_stack_entry = None;
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
@@ -3269,7 +3473,7 @@ fn resolve_batched(
         let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        popped.push(removed.entry);
+        popped.push(removed);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -3281,7 +3485,7 @@ fn resolve_batched(
             subject_match_count,
             die_result,
             ..
-        } = &top.kind
+        } = &top.entry.kind
         {
             state.current_trigger_event = Some(te.clone());
             state.current_trigger_events = vec![te.clone()];
@@ -3291,6 +3495,10 @@ fn resolve_batched(
             // result" sub-ability (see `resolve_top`).
             state.die_result_this_resolution = *die_result;
         }
+    }
+
+    if let Some(popped) = popped.first() {
+        begin_resolving_stack_entry(state, popped.entry.clone(), popped.trigger_firing);
     }
 
     // CR 608.2: Apply the effect N times through the existing per-resolution body.
@@ -3304,14 +3512,28 @@ fn resolve_batched(
     // cross-resolution boundary as the batched subject count.
     state.die_result_this_resolution = None;
 
-    // §5.4: one StackResolved per consumed entry.
-    for entry in &popped {
-        events.push(GameEvent::StackResolved {
-            object_id: entry.id,
-        });
-    }
+    let popped_count = popped.len() as u32;
 
-    popped.len() as u32
+    // §5.4: one StackResolved and terminal settlement per consumed entry.
+    for (index, popped) in popped.into_iter().enumerate() {
+        events.push(GameEvent::StackResolved {
+            object_id: popped.entry.id,
+        });
+        if index == 0 {
+            finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        } else if let Some(firing) = popped.trigger_firing {
+            super::lifecycle::record_delayed_terminal(
+                firing,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        }
+    }
+    state.resolution_source_relatch = None;
+
+    popped_count
 }
 
 /// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
@@ -3591,7 +3813,8 @@ fn resolve_inert_noop_batch(
     consumed: u32,
     events: &mut Vec<GameEvent>,
 ) -> u32 {
-    state.resolving_stack_entry = None;
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
@@ -3601,6 +3824,12 @@ fn resolve_inert_noop_batch(
         events.push(GameEvent::StackResolved {
             object_id: removed.entry.id,
         });
+        if let Some(firing) = removed.trigger_firing {
+            super::lifecycle::record_delayed_terminal(
+                firing,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        }
     }
     consumed
 }
@@ -3673,6 +3902,7 @@ struct BatchRunKey<'a> {
     description: Option<&'a str>,
     paid: Option<&'a StackPaidSnapshot>,
     trigger_event: Option<&'a GameEvent>,
+    trigger_firing: Option<TriggerFiring>,
 }
 
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
@@ -3690,6 +3920,7 @@ impl PartialEq for BatchRunKey<'_> {
             || self.description != other.description
             || self.paid != other.paid
             || self.trigger_event != other.trigger_event
+            || self.trigger_firing != other.trigger_firing
         {
             return false;
         }
@@ -3983,6 +4214,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         description: description.as_deref(),
         paid: state.stack_paid_facts.get(&entry.id),
         trigger_event: trigger_event.as_ref(),
+        trigger_firing: state.stack_trigger_firings.get(&entry.id).copied(),
     })
 }
 
@@ -4204,6 +4436,7 @@ pub(crate) fn create_warp_delayed_trigger(
     state: &mut GameState,
     object_id: ObjectId,
     controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
 ) {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
@@ -4266,7 +4499,9 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
             source_id: object_id,
             one_shot: true,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
+        events,
     );
 }
 
@@ -4623,6 +4858,10 @@ mod tests {
             },
         });
         state.pending_trigger_entry = Some(entry_id);
+        state
+            .stack_trigger_firings
+            .insert(entry_id, TriggerFiring::Ordinary);
+        state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
         state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
@@ -9896,10 +10135,20 @@ mod tests {
         /// mark layers entered. Flips no devotion / land-presence gate and matches
         /// no artifact/land filter.
         fn add_colorless_creature_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            add_colorless_creature_entry_under(state, card_id, PlayerId(0))
+        }
+
+        /// The same entrant under an explicit controller, for controller-keyed
+        /// population fixtures (CR 613.1b).
+        fn add_colorless_creature_entry_under(
+            state: &mut GameState,
+            card_id: u64,
+            controller: PlayerId,
+        ) -> ObjectId {
             let id = create_object(
                 state,
                 CardId(card_id),
-                PlayerId(0),
+                controller,
                 "Insect".to_string(),
                 Zone::Battlefield,
             );
@@ -10180,6 +10429,404 @@ mod tests {
                 "artifact entry matches artifact count filter — must escalate"
             );
             assert_pt_identical(&normal, &forced, "count-anthem matching escalation");
+        }
+
+        /// Build a board pairing a GREEN-keyed count magnitude with a color
+        /// wash: one enchantment carries "creatures get +X/+X, X = number of
+        /// green creatures" AND "creatures are green in addition to their other
+        /// colors" (layer 5). Two pre-existing 2/2 Bears — green via the wash,
+        /// so the count starts at 2 and both flush to 4/4.
+        fn green_count_anthem_with_color_wash_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(280 + i),
+                    PlayerId(0),
+                    format!("WashBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![];
+                o.color = vec![];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(290),
+                PlayerId(0),
+                "Color Wash Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            // "creatures are green in addition to their other colors" (layer 5).
+            let mut wash = StaticDefinition::new(StaticMode::Continuous);
+            wash.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+            wash.modifications = vec![ContinuousModification::AddColor {
+                color: ManaColor::Green,
+            }];
+            // "creatures get +X/+X, X = number of green creatures" (layer 7c).
+            let green_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::HasColor {
+                    color: ManaColor::Green,
+                }],
+                ..Default::default()
+            });
+            let mut count = StaticDefinition::new(StaticMode::Continuous);
+            count.affected = Some(TargetFilter::Typed(TypedFilter::creature()));
+            count.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_creatures.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_creatures,
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![wash.clone(), count.clone()]);
+                o.static_definitions = vec![wash, count].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// COLOR channel (CR 613.1e + CR 613.1g): a population keyed on COLOR
+        /// whose entrant has that color rewritten by another layer must
+        /// escalate. A layer-5 `AddColor` washes the colorless entrant green
+        /// before the layer-7c count applies, so a pre-layer probe would see a
+        /// colorless entrant, keep the incremental arm, and leave pre-existing
+        /// Bears at a stale 4/4 where the correct CR 613 board is 5/5.
+        /// `modification_characteristic_writes` classifies the color writers as
+        /// `CharacteristicKinds::COLOR` and the counted filter reads the same
+        /// kind, so the sets intersect, the gate escalates and the two boards
+        /// agree.
+        ///
+        /// This is the discriminating fixture for that channel: revert the
+        /// `COLOR` arm of the classifier and the escalation assertion fails; keep
+        /// the arm but break the escalation plumbing and the identity assertion
+        /// fails on the Bears' derived power/toughness.
+        #[test]
+        fn color_change_entry_escalates_when_population_is_color_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(green_count_anthem_with_color_wash_board, |s| {
+                    add_colorless_creature_entry(s, 291)
+                });
+            assert!(
+                escalated,
+                "a layer-5 color wash reaching the entrant moves a color-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            let bear_pts = |state: &GameState| {
+                let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|o| o.name.starts_with("WashBear"))
+                    .map(|o| (o.power, o.toughness))
+                    .collect();
+                pts.sort();
+                pts
+            };
+            // The washed entrant is green by the time the count applies, so the
+            // count is 3, not the pre-layer 2.
+            assert_eq!(
+                bear_pts(&forced),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the washed entrant — the correct CR 613 board"
+            );
+            assert_eq!(
+                bear_pts(&normal),
+                bear_pts(&forced),
+                "escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "color-keyed population escalation");
+        }
+
+        /// Build a board pairing a PURE layer-4 type-writer with a
+        /// condition-gated fixed anthem — the CONDITION-channel analogue of the
+        /// Ashaya CDA regression. Source A: "creatures you control are lands in
+        /// addition to their other types" (no dynamic magnitude, no
+        /// population-sensitive affected set, no entry replacement). Source B:
+        /// "creatures you control get +2/+2 as long as you control four or more
+        /// lands" (`QuantityComparison` over `ObjectCount(Land)` — the ONLY
+        /// population read on the board, and it lives in a `condition`, not in
+        /// any effect's magnitude or affected set). One pre-existing GateBear,
+        /// two plain lands: pre-entry land count = 2 lands + 1 creature-as-land
+        /// = 3, gate OFF.
+        fn type_writer_with_condition_gated_anthem_board() -> GameState {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, StaticCondition, StaticDefinition,
+                TypeFilter as TF, TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            let bear = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(0),
+                "GateBear".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&bear).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            for i in 0..2 {
+                let land = create_object(
+                    &mut state,
+                    CardId(301 + i),
+                    PlayerId(0),
+                    format!("QuietLand{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&land).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Land];
+                o.card_types.core_types = vec![CoreType::Land];
+            }
+            let type_writer = create_object(
+                &mut state,
+                CardId(310),
+                PlayerId(0),
+                "Creatures Are Lands".to_string(),
+                Zone::Battlefield,
+            );
+            let mut writer_sd = StaticDefinition::new(StaticMode::Continuous);
+            writer_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            writer_sd.modifications = vec![ContinuousModification::AddType {
+                core_type: CoreType::Land,
+            }];
+            {
+                let o = state.objects.get_mut(&type_writer).unwrap();
+                o.base_static_definitions = Arc::new(vec![writer_sd.clone()]);
+                o.static_definitions = vec![writer_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(311),
+                PlayerId(0),
+                "Land Threshold Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut anthem_sd = StaticDefinition::new(StaticMode::Continuous);
+            anthem_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            anthem_sd.modifications = vec![
+                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddToughness { value: 2 },
+            ];
+            anthem_sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TFil::new(TF::Land)),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![anthem_sd.clone()]);
+                o.static_definitions = vec![anthem_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3c) CONDITION-channel blindness — perturbing only POST-layer:
+        /// CR 611.3a + CR 613.1 + CR 613.1d. A plain creature entering is NOT a
+        /// land at gate time, so neither Axis 2a (no population-reading effect
+        /// magnitude or affected set is live) nor Axis 2b's pre-layer membership
+        /// probe fires; but the type-writer makes the entrant a land in layer 4
+        /// and the count crosses the anthem's threshold, changing PRE-EXISTING
+        /// recipients. The blindness disjunct's condition channel
+        /// (`static_condition_characteristic_reads`, unioned into `ReadKinds` by
+        /// `live_characteristic_reads`) MUST escalate this entry, and the board
+        /// must match a forced-Full pass (GateBear
+        /// 4/4, not stale 2/2).
+        #[test]
+        fn condition_gated_anthem_entry_escalates_when_entrant_types_rewritten() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(type_writer_with_condition_gated_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 320)
+                });
+            assert!(
+                escalated,
+                "entrant becomes a land in layer 4 and flips the threshold gate — must escalate"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "condition-channel type-rewrite escalation",
+            );
+            // Vacuity guard: `escalated` depends only on the classifier, so pin
+            // that the threshold gate actually flips — GateBear ends the pass
+            // at 4/4 (base 2/2 + the now-live +2/+2), not a stale 2/2.
+            let gatebear_pt = |state: &GameState| {
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .find(|o| o.name == "GateBear")
+                    .map(|o| (o.power, o.toughness))
+                    .unwrap()
+            };
+            assert_eq!(
+                gatebear_pt(&forced),
+                (Some(4), Some(4)),
+                "the entrant-turned-land crosses the GE-4 land threshold"
+            );
+        }
+
+        /// Board for the CONTROLLER channel (CR 613.1b). P0 controls two 2/2s
+        /// and an anthem whose dynamic magnitude counts "creatures you control",
+        /// plus a theft enchantment whose layer-2 `ChangeController` claims
+        /// every creature for the enchantment's controller. The theft's affected
+        /// filter is deliberately controller-FREE: a controller-keyed affected
+        /// filter would make layer 2 self-referential, and the point under test
+        /// is the counted population, not the affected set.
+        fn controller_keyed_count_anthem_with_control_theft_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, ControllerRef, StaticDefinition, TypeFilter as TF,
+                TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(380 + i),
+                    PlayerId(0),
+                    format!("TheftBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let yours = TargetFilter::Typed(TFil {
+                type_filters: vec![TF::Creature],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            });
+            let anthem = create_object(
+                &mut state,
+                CardId(385),
+                PlayerId(0),
+                "Ally Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut anthem_sd = StaticDefinition::new(StaticMode::Continuous);
+            anthem_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            anthem_sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: yours.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: yours },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![anthem_sd.clone()]);
+                o.static_definitions = vec![anthem_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            let thief = create_object(
+                &mut state,
+                CardId(386),
+                PlayerId(0),
+                "Mass Mind Control".to_string(),
+                Zone::Battlefield,
+            );
+            let mut theft_sd = StaticDefinition::new(StaticMode::Continuous);
+            theft_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            theft_sd.modifications = vec![ContinuousModification::ChangeController];
+            {
+                let o = state.objects.get_mut(&thief).unwrap();
+                o.base_static_definitions = Arc::new(vec![theft_sd.clone()]);
+                o.static_definitions = vec![theft_sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3d) CONTROLLER-channel blindness — CR 613.1b + CR 613.1 + CR 109.3.
+        /// The entrant arrives under the OPPONENT, so a pre-layer probe of
+        /// "creatures you control" says the count is unperturbed; layer 2 then
+        /// hands the entrant to the anthem's controller and the count goes
+        /// 2 -> 3, which moves PRE-EXISTING recipients. CR 109.3 puts controller
+        /// outside an object's characteristics, so this is not reachable by the
+        /// card-type disjunct — `modification_characteristic_writes` has to
+        /// classify `ChangeController` as a `CharacteristicKinds::CONTROLLER`
+        /// write in its own right for this entry to escalate.
+        #[test]
+        fn controller_change_entry_escalates_when_population_is_controller_keyed() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                controller_keyed_count_anthem_with_control_theft_board,
+                |s| add_colorless_creature_entry_under(s, 390, PlayerId(1)),
+            );
+            assert!(
+                escalated,
+                "layer 2 moves the entrant into the counted population — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "controller-channel escalation");
+            // Vacuity guard: `escalated` depends only on the classifier, so pin
+            // that the stolen entrant really does move the count — TheftBears
+            // end the pass at 5/5 (base 2/2 + three creatures now controlled),
+            // not the pre-layer 4/4.
+            let theftbear_pt = |state: &GameState| {
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .find(|o| o.name == "TheftBear0")
+                    .map(|o| (o.power, o.toughness))
+                    .unwrap()
+            };
+            assert_eq!(
+                theftbear_pt(&forced),
+                (Some(5), Some(5)),
+                "the stolen entrant is counted among \"creatures you control\""
+            );
         }
 
         /// (4) MEDIUM-2 — whole-board TALLY affected filter
@@ -10658,6 +11305,1355 @@ mod tests {
                 crate::game::layers::incremental_flush_must_escalate(&state, &entered_ids),
                 "absent gate-truth key must fail closed and escalate (invariant 1)"
             );
+        }
+
+        // ------------------------------------------------------------------
+        // Read/write-kind relation fixtures (CR 613.1).
+        //
+        // Each board mirrors the color-wash fixture's shape: one enchantment
+        // carrying TWO Continuous static definitions, a vanilla entrant (so
+        // `entered_object_blocks_incremental` stays quiet), and a divergence
+        // that surfaces in power/toughness (all `assert_pt_identical` compares).
+        //
+        // Non-vacuity invariants, checked per fixture: the entrant must NOT
+        // satisfy the population-sensitive read PRE-layer (otherwise Axis 2a
+        // escalates and the kind relation goes untested), it must satisfy it
+        // POST-layer, and the writer's layer must run strictly before the
+        // reading layer.
+        // ------------------------------------------------------------------
+
+        /// Install a battlefield enchantment carrying `defs` as both its base
+        /// and its live static definitions, matching how the pre-existing
+        /// escalation boards install anthems.
+        fn install_static_enchantment(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            defs: Vec<crate::types::ability::StaticDefinition>,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.base_static_definitions = Arc::new(defs.clone());
+            o.static_definitions = defs.into();
+            o.base_card_types.core_types = vec![CoreType::Enchantment];
+            o.card_types.core_types = vec![CoreType::Enchantment];
+            id
+        }
+
+        /// Create a vanilla 2/2 creature with an explicit name and color set.
+        fn add_relation_bear(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            colors: Vec<ManaColor>,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.base_power = Some(2);
+            o.base_toughness = Some(2);
+            o.power = Some(2);
+            o.toughness = Some(2);
+            o.base_card_types.core_types = vec![CoreType::Creature];
+            o.card_types.core_types = vec![CoreType::Creature];
+            o.base_color.clone_from(&colors);
+            o.color = colors;
+            id
+        }
+
+        /// Sorted `(power, toughness)` of every battlefield object whose name
+        /// starts with `prefix`.
+        fn pts_named(state: &GameState, prefix: &str) -> Vec<(Option<i32>, Option<i32>)> {
+            let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|o| o.name.starts_with(prefix))
+                .map(|o| (o.power, o.toughness))
+                .collect();
+            pts.sort();
+            pts
+        }
+
+        /// `pts_named`'s twin for boards where a layer-1 `SetName` override
+        /// (CR 707.9b) rewrites the live name: selects on the PRINTED name,
+        /// which `reset_recipient_to_base` restores at the top of every pass.
+        fn pts_base_named(state: &GameState, prefix: &str) -> Vec<(Option<i32>, Option<i32>)> {
+            let mut pts: Vec<(Option<i32>, Option<i32>)> = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|o| o.base_name.starts_with(prefix))
+                .map(|o| (o.power, o.toughness))
+                .collect();
+            pts.sort();
+            pts
+        }
+
+        /// A `Continuous` static definition over `affected` applying `mods`.
+        fn continuous_static(
+            affected: TargetFilter,
+            mods: Vec<crate::types::ability::ContinuousModification>,
+        ) -> crate::types::ability::StaticDefinition {
+            let mut def = crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::Continuous,
+            );
+            def.affected = Some(affected);
+            def.modifications = mods;
+            def
+        }
+
+        /// `AddDynamicPower` + `AddDynamicToughness` off one `ObjectCount`.
+        fn dynamic_pt_count(
+            counted: TargetFilter,
+        ) -> Vec<crate::types::ability::ContinuousModification> {
+            use crate::types::ability::ContinuousModification;
+            let count = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: counted },
+            };
+            vec![
+                ContinuousModification::AddDynamicPower {
+                    value: count.clone(),
+                },
+                ContinuousModification::AddDynamicToughness { value: count },
+            ]
+        }
+
+        /// (2.1) KEYWORD channel (CR 613.1f). A layer-6 `AddKeyword` reaches the
+        /// entrant while the anthem's magnitude counts creatures WITH that
+        /// keyword. Pre-layer the entrant has no flying, so every membership
+        /// probe reports "no perturbation"; post-layer it does, so the count
+        /// moves 2 → 3 and the pre-existing FlyBears go 4/4 → 5/5.
+        ///
+        /// Discriminating for BOTH halves of the relation: revert the
+        /// `AddKeyword` family to EMPTY on the write side, or the `WithKeyword`
+        /// family to EMPTY on the read side, and the escalation assertion fails.
+        fn flying_count_anthem_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::Keyword;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 600 + i, &format!("FlyBear{i}"), vec![]);
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let flying_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(flying_creatures),
+            );
+            install_static_enchantment(&mut state, 610, "Flying Count Anthem", vec![grant, count]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_escalates_when_population_is_keyword_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(flying_count_anthem_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 611)
+                });
+            assert!(
+                escalated,
+                "a layer-6 keyword grant reaching the entrant moves a keyword-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            assert_eq!(
+                pts_named(&forced, "FlyBear"),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the entrant once it has flying — correct CR 613 board"
+            );
+            assert_eq!(
+                pts_named(&normal, "FlyBear"),
+                pts_named(&forced, "FlyBear"),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "keyword-keyed escalation");
+        }
+
+        /// (2.2) POWER/TOUGHNESS channel (CR 613.1g + CR 613.4b/c). A layer-7b
+        /// `SetToughness` reaches the entrant while the anthem's magnitude counts
+        /// creatures with toughness ≥ 4 at layer 7c.
+        ///
+        /// Because power/toughness is ONE kind, a P/T-keyed count anthem is
+        /// itself a P/T writer and would satisfy the relation on its own reach.
+        /// The count anthem's affected set is therefore "creatures you control"
+        /// while the entrant enters under the OPPONENT (mirroring
+        /// `controller_keyed_count_anthem_with_control_theft_board`), which makes
+        /// `SetToughness`
+        /// the only entrant-reaching writer and gives the revert-check SetPT-arm
+        /// granularity rather than whole-kind granularity.
+        fn tough_count_anthem_with_set_toughness_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 620 + i, &format!("ToughBear{i}"), vec![]);
+            }
+            // Layer 7b, controller-agnostic: reaches the opponent's entrant too.
+            let setter = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetToughness { value: 4 }],
+            );
+            let tough_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }],
+                ..Default::default()
+            });
+            // Layer 7c, "creatures you control": deliberately EXCLUDES the
+            // opponent-controlled entrant.
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tough_creatures,
+                        },
+                    },
+                }],
+            );
+            install_static_enchantment(
+                &mut state,
+                630,
+                "Toughness Count Anthem",
+                vec![setter, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn pt_change_entry_escalates_when_population_is_pt_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(tough_count_anthem_with_set_toughness_board, |s| {
+                    add_colorless_creature_entry_under(s, 631, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "a layer-7b toughness set reaching the entrant moves a P/T-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            assert_eq!(
+                pts_named(&forced, "ToughBear"),
+                vec![(Some(5), Some(4)); 2],
+                "full pass counts the entrant once its toughness is set to 4"
+            );
+            assert_eq!(
+                pts_named(&normal, "ToughBear"),
+                pts_named(&forced, "ToughBear"),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "P/T-keyed escalation");
+        }
+
+        /// (2.3) NAME channel (CR 613.1c + CR 612.8). A layer-3 `SetTextName`
+        /// reaches the entrant while the anthem's magnitude counts creatures by
+        /// name. Pre-layer the entrant is "Insect" and matches nothing;
+        /// post-layer it is a third "Doppelganger" and the pre-existing pair
+        /// goes 4/4 → 5/5.
+        fn named_count_anthem_with_name_rewrite_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 640 + i, "Doppelganger", vec![]);
+            }
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetTextName {
+                    name: "Doppelganger".to_string(),
+                }],
+            );
+            let doppelgangers = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::Named {
+                    name: "Doppelganger".to_string(),
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(doppelgangers),
+            );
+            install_static_enchantment(
+                &mut state,
+                650,
+                "Doppelganger Count Anthem",
+                vec![rename, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn name_change_entry_escalates_when_population_is_name_keyed() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(named_count_anthem_with_name_rewrite_board, |s| {
+                    add_colorless_creature_entry(s, 651)
+                });
+            assert!(
+                escalated,
+                "a layer-3 name rewrite reaching the entrant moves a name-keyed \
+                 count — the entry must escalate to a full re-evaluation"
+            );
+            // The two pre-existing Doppelgangers are the only 2/2 printed bodies;
+            // the entrant is a 1/1, so it cannot be confused with them.
+            let bears = |s: &GameState| {
+                let mut pts: Vec<(Option<i32>, Option<i32>)> = s
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .filter(|o| o.base_power == Some(2) && o.base_toughness == Some(2))
+                    .map(|o| (o.power, o.toughness))
+                    .collect();
+                pts.sort();
+                pts
+            };
+            assert_eq!(
+                bears(&forced),
+                vec![(Some(5), Some(5)); 2],
+                "full pass counts the renamed entrant — correct CR 613 board"
+            );
+            assert_eq!(
+                bears(&normal),
+                bears(&forced),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "name-keyed escalation");
+        }
+
+        /// (2.4) NARROWING NEGATIVE. A layer-6 keyword grant reaches the entrant,
+        /// but nothing live READS abilities: the only population read is an
+        /// artifact count (CR 613.1d) and both affected filters are plain
+        /// typelines. `{Abilities, PowerToughness} ∩ {CardTypes} = ∅`, so the
+        /// entry must stay on the incremental fast path — a board the previous
+        /// one-sided gate had no way to keep there, since it escalated on any
+        /// recognized writer plus any population read.
+        ///
+        /// Revert direction: make `AddKeyword` write `ALL` and the assertion
+        /// flips, which is what proves the narrowing is the classifier's doing.
+        fn artifact_count_anthem_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::Keyword;
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 660 + i, &format!("DisjointBear{i}"), vec![]);
+            }
+            // One pre-existing artifact so the counted population is non-empty.
+            let relic = create_object(
+                &mut state,
+                CardId(662),
+                PlayerId(0),
+                "Relic".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&relic).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Artifact];
+                o.card_types.core_types = vec![CoreType::Artifact];
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let artifacts = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                dynamic_pt_count(artifacts),
+            );
+            install_static_enchantment(
+                &mut state,
+                670,
+                "Artifact Count With Grant",
+                vec![grant, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_stays_incremental_when_population_reads_are_disjoint() {
+            use crate::types::Keyword;
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 671)
+                });
+            assert!(
+                !escalated,
+                "a keyword grant cannot move an artifact-keyed count — \
+                 {{Abilities}} ∩ {{CardTypes}} = ∅, so the entry must stay incremental"
+            );
+            // Non-vacuity: the grant really does reach the entrant, so the
+            // narrowing is the kind relation's doing and not a missed match.
+            let entrant = normal
+                .battlefield
+                .iter()
+                .filter_map(|id| normal.objects.get(id))
+                .find(|o| o.name == "Insect")
+                .expect("entrant on battlefield");
+            assert!(
+                entrant.has_keyword(&Keyword::Flying),
+                "the entrant must actually be a recipient of the layer-6 grant"
+            );
+            assert_pt_identical(&normal, &forced, "disjoint-kind non-escalation");
+        }
+
+        /// (2.5) AFFECTED-FILTER READ CHANNEL. This board has NO dynamic
+        /// magnitude and NO static condition — the ONLY name read on it lives in
+        /// another modification's AFFECTED FILTER. A layer-3 `SetTextName`
+        /// renames the entering artifact to "Doppelganger", which adds that name
+        /// to the reference set of the buff's `DifferentNameFrom` filter and
+        /// therefore REMOVES the pre-existing Doppelganger creature from the
+        /// buff's affected set (5/5 → 2/2).
+        ///
+        /// Pre-layer the entering Treasure does not match the reference filter
+        /// (which is keyed on the name it does not yet have), so Axis 2a's
+        /// per-entrant narrowing reports "no perturbation" and only the kind
+        /// relation can catch this. Revert direction: drop the affected-filter
+        /// channel from `live_characteristic_reads` and `ReadKinds` becomes
+        /// empty, so the gate exits at stage 2 and the board goes stale.
+        fn name_rewrite_with_affected_filter_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            add_relation_bear(&mut state, 680, "Doppelganger", vec![]);
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::SetTextName {
+                    name: "Doppelganger".to_string(),
+                }],
+            );
+            // "each artifact you control named Doppelganger" — the entrant only
+            // joins this set AFTER layer 3 renames it.
+            let named_artifacts = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Artifact],
+                properties: vec![FilterProp::Named {
+                    name: "Doppelganger".to_string(),
+                }],
+                ..Default::default()
+            });
+            let buff = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::DifferentNameFrom {
+                        filter: Box::new(named_artifacts),
+                    }],
+                    ..Default::default()
+                }),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            install_static_enchantment(&mut state, 690, "Different Name Buff", vec![rename, buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_affected_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(name_rewrite_with_affected_filter_read_board, |s| {
+                    add_artifact_entry(s, 691)
+                });
+            assert!(
+                escalated,
+                "a layer-3 rename feeding another static's AFFECTED FILTER must \
+                 escalate — the affected-filter read channel is unconditional"
+            );
+            let bear = |s: &GameState| {
+                s.battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .find(|o| o.base_power == Some(2))
+                    .map(|o| (o.power, o.toughness))
+                    .expect("pre-existing Doppelganger on battlefield")
+            };
+            assert_eq!(
+                bear(&forced),
+                (Some(2), Some(2)),
+                "full pass drops the pre-existing Doppelganger out of the buff \
+                 once the renamed artifact joins the reference set"
+            );
+            assert_eq!(
+                bear(&normal),
+                bear(&forced),
+                "escalated entry must derive the same board as full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "affected-filter read channel");
+        }
+
+        /// (2.6) CONDITION READ CHANNEL through the walker's NET-NEW recursion.
+        /// The buff is gated by `RecipientMatchesFilter` over a keyword filter —
+        /// a condition whose MEMBERSHIP twin
+        /// (`static_condition_uses_object_population`) answers `false`, so Axis
+        /// 2b never looks at it. Only `static_condition_characteristic_reads`
+        /// recursing into that filter puts `Abilities` into `ReadKinds`, which is
+        /// what makes the layer-6 grant reaching the entrant intersect.
+        ///
+        /// The DISCRIMINATING assertion here is the escalation bit: revert the
+        /// `SourceMatchesFilter` / `RecipientMatchesFilter` arms to EMPTY and it
+        /// flips. The identity assertion is the usual under-escalation tripwire,
+        /// not an independent proof of divergence.
+        fn condition_keyed_buff_with_keyword_grant_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            use crate::types::{Keyword, StaticCondition};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 700 + i, &format!("CondBear{i}"), vec![]);
+            }
+            let grant = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }],
+            );
+            let mut buff = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            buff.condition = Some(StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    }],
+                    ..Default::default()
+                }),
+            });
+            install_static_enchantment(&mut state, 710, "Flying-Gated Buff", vec![grant, buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn keyword_grant_entry_escalates_through_condition_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(condition_keyed_buff_with_keyword_grant_board, |s| {
+                    add_colorless_creature_entry(s, 711)
+                });
+            assert!(
+                escalated,
+                "a live condition reading keywords through its own filter must put \
+                 Abilities in ReadKinds, so the layer-6 grant intersects and escalates"
+            );
+            assert_eq!(
+                pts_named(&forced, "CondBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the granted flying satisfies the recipient condition on the full pass"
+            );
+            assert_pt_identical(&normal, &forced, "condition-filter read channel");
+        }
+
+        /// (2.7) CONDITION-ADJACENT NARROWING NEGATIVE. `ChangeController` is the
+        /// writer the PREVIOUS gate recognized (it was one of its three
+        /// population keys), and it genuinely reaches the entrant here. Every
+        /// live read on this board is keyed purely on power/toughness — the
+        /// counted filter and both affected filters use a bare `PtComparison`
+        /// with no type constraint and no controller scope — so
+        /// `{Controller} ∩ {PowerToughness} = ∅` and the control theft cannot
+        /// move anything. The old gate escalated this board; the relation keeps
+        /// it incremental.
+        fn pt_keyed_count_anthem_with_control_theft_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 720 + i, &format!("ScopeBear{i}"), vec![]);
+            }
+            // Layer 2: steals every object with power ≤ 1, i.e. the 1/1 entrant.
+            let thief = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    ..Default::default()
+                }),
+                vec![ContinuousModification::ChangeController],
+            );
+            let tough_objects = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 2 },
+                }],
+                ..Default::default()
+            });
+            let count = continuous_static(
+                tough_objects.clone(),
+                vec![ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tough_objects,
+                        },
+                    },
+                }],
+            );
+            install_static_enchantment(
+                &mut state,
+                730,
+                "Toughness Count With Theft",
+                vec![thief, count],
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn control_change_entry_stays_incremental_when_reads_are_pt_only() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(pt_keyed_count_anthem_with_control_theft_board, |s| {
+                    add_colorless_creature_entry_under(s, 731, PlayerId(1))
+                });
+            assert!(
+                !escalated,
+                "control theft cannot move a purely P/T-keyed population — \
+                 {{Controller}} ∩ {{PowerToughness}} = ∅, so the entry stays incremental"
+            );
+            // Non-vacuity: the layer-2 writer really does reach the entrant, so
+            // the old one-sided gate would have escalated this exact board.
+            let entrant = normal
+                .battlefield
+                .iter()
+                .filter_map(|id| normal.objects.get(id))
+                .find(|o| o.name == "Insect")
+                .expect("entrant on battlefield");
+            assert_eq!(
+                entrant.controller,
+                PlayerId(0),
+                "the entrant must actually be a recipient of the layer-2 control change"
+            );
+            assert_pt_identical(&normal, &forced, "controller-vs-P/T non-escalation");
+        }
+
+        /// (2.8) CR 613.6 SELF-EXCLUSION CARVE-OUT. One Continuous definition
+        /// whose modifications WRITE exactly the kind its OWN affected filter
+        /// READS, and nothing else on the board reads anything: the buff is
+        /// `AddPower`/`AddToughness` (writes `{PowerToughness}`) over "creatures
+        /// with power ≤ 1" (reads `{CardTypes, PowerToughness}`). There is no
+        /// dynamic magnitude and no static condition, so the affected filter is
+        /// the whole read union.
+        ///
+        /// CR 613.6 locks the effect's affected-object set the first time the
+        /// effect applies and retains it for the rest of the pass, so the buff
+        /// cannot push the entrant back out of the set it was just admitted to.
+        /// Its own write is therefore not a read it can move, and the entry must
+        /// stay incremental.
+        ///
+        /// Revert direction: drop the per-modification exclusion and test stage 4
+        /// against the whole `ReadKinds` union again — `{PowerToughness}` then
+        /// intersects its own affected filter's reads and the escalation
+        /// assertion flips.
+        fn self_reading_pt_buff_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, PtStat, PtValueScope};
+            let mut state = setup();
+            for i in 0..2 {
+                add_relation_bear(&mut state, 740 + i, &format!("SelfBear{i}"), vec![]);
+            }
+            // Layer 7c. Pre-existing 2/2 bears are out of the set (power 2 > 1);
+            // the 1/1 entrant is in it, and stays in it after the +3/+3 that
+            // would otherwise disqualify it.
+            let buff = continuous_static(
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    properties: vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    ..Default::default()
+                }),
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+            );
+            install_static_enchantment(&mut state, 742, "Self-Reading Buff", vec![buff]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn pt_writer_entry_stays_incremental_when_only_its_own_affected_filter_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(self_reading_pt_buff_board, |s| {
+                    add_colorless_creature_entry(s, 743)
+                });
+            assert!(
+                !escalated,
+                "CR 613.6 retains the effect's own affected set, so a modification \
+                 cannot move the filter that admitted it — the entry stays incremental"
+            );
+            let entrant = |s: &GameState| {
+                s.battlefield
+                    .iter()
+                    .filter_map(|id| s.objects.get(id))
+                    .find(|o| o.name == "Insect")
+                    .map(|o| (o.power, o.toughness))
+                    .expect("entrant on battlefield")
+            };
+            // Non-vacuity: the P/T writer genuinely reaches the entrant, and the
+            // retained set keeps `AddToughness` applying even though `AddPower`
+            // already pushed current power past the filter's threshold.
+            assert_eq!(
+                entrant(&forced),
+                (Some(4), Some(4)),
+                "the entrant must actually be a recipient of the layer-7c buff"
+            );
+            assert_eq!(
+                pts_named(&forced, "SelfBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-existing 2/2 bears never satisfy the power ≤ 1 filter"
+            );
+            assert_eq!(
+                entrant(&normal),
+                entrant(&forced),
+                "the incremental entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "CR 613.6 self-exclusion carve-out");
+        }
+
+        // ------------------------------------------------------------------
+        // RESOLUTION-CREATED continuous effects (CR 611.2b + CR 611.2c).
+        //
+        // A `TransientContinuousEffect` is the third `ActiveContinuousEffect`
+        // producer, alongside printed statics and granted-inner statics. It is
+        // the only one whose affected set is FROZEN (CR 611.2c) while its two
+        // gates stay LIVE, so it is the only one where the affected-filter
+        // channel reports EMPTY and a gate is the sole live read. Those gates
+        // are the "for as long as" DURATION (CR 611.2b) and the retained
+        // CONDITION, which is the source definition's own CR 611.3a gate
+        // carried along; `transient_effect_is_live` consults exactly that pair.
+        // Every board below builds its effect through the single construction
+        // authority — see `install_gated_transient` for which production path
+        // produces this shape and which does NOT.
+        // ------------------------------------------------------------------
+
+        /// Install a resolution-created continuous effect that RETAINS a gate,
+        /// through the single construction authority
+        /// (`GameState::add_transient_continuous_effect`), one effect per
+        /// recipient.
+        ///
+        /// CR 611.2c: the affected set is already frozen to `SpecificObject` —
+        /// a filter that reads NO layer-writable characteristic — which is what
+        /// every transient looks like once its effect has begun. The gate rides
+        /// alongside and stays live: a `Duration::ForAsLongAs` re-evaluates per
+        /// pass because CR 611.2b makes the effect last exactly as long as its
+        /// stated condition holds, and a retained `condition` re-evaluates
+        /// because it is the source `StaticDefinition`'s own CR 611.3a gate.
+        /// That asymmetry (frozen set, live gate) is what these boards
+        /// exercise.
+        ///
+        /// REACHABILITY: `Effect::GenericEffect` is NOT the producer of the
+        /// retained-`condition` shape. Per CR 608.2h + CR 611.2d its resolver
+        /// determines an in-effect "if <condition>" exactly once, at
+        /// resolution, and installs the transient with `condition: None`
+        /// (`effects/effect.rs::resolve`). A conditioned transient comes from
+        /// riders that hand a `StaticDefinition`'s condition straight to the
+        /// constructor — `effects/counter.rs::apply_source_static` (the
+        /// `CounterSourceRider::LosesAbilities` rider) is the live example, and
+        /// no shipped card gives that rider a condition yet, so the
+        /// `condition`-gated boards below are preventive. The
+        /// `Duration::ForAsLongAs` shape needs no such caveat: it is what the
+        /// parser emits for any "for as long as …" clause it can read
+        /// (`parser/oracle_nom/duration.rs`), and gain-control, phasing and
+        /// copy effects install it today.
+        fn install_gated_transient(
+            state: &mut GameState,
+            source: ObjectId,
+            recipients: &[ObjectId],
+            mods: Vec<crate::types::ability::ContinuousModification>,
+            duration: Duration,
+            condition: Option<crate::types::ability::StaticCondition>,
+        ) {
+            for &id in recipients {
+                state.add_transient_continuous_effect(
+                    source,
+                    PlayerId(0),
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id },
+                    mods.clone(),
+                    condition.clone(),
+                );
+            }
+        }
+
+        /// (3.1) TRANSIENT CONDITION READ CHANNEL. The only live read of card
+        /// types on this board lives in the CONDITION of a resolution-created
+        /// continuous effect whose affected set is already frozen to
+        /// `SpecificObject` (CR 611.2c), i.e. to an EMPTY-read filter. A
+        /// separate printed layer-4 `AddType{Land}` (CR 613.1d) reaches the
+        /// entrant, so the Land population that condition counts moves for
+        /// every pre-existing recipient.
+        ///
+        /// CR 611.2c freezes the affected SET and nothing else; the retained
+        /// gate is the source definition's own CR 611.3a condition, so it keeps
+        /// re-evaluating on every pass, here per recipient
+        /// (`FilterProp::Another`). Pre-entry each 2/2 recipient sees exactly
+        /// 1 OTHER Land so `GE 2` is OFF; post-entry it sees 2 and turns ON
+        /// (3/3).
+        ///
+        /// DISCRIMINATING because the transient is the ONLY condition on the
+        /// board: drop the `e.condition` channel from `live_characteristic_reads`
+        /// and `ReadKinds` loses CardTypes entirely. Stage 4 then exempts the
+        /// layer-4 writer under CR 613.6 — the only other CardTypes read is its
+        /// OWN affected filter — the entry stays on the incremental path, and
+        /// the pre-existing recipients keep a stale 2/2. The entry-perturbation
+        /// probe cannot rescue it: the entrant is not a Land until layer 4 has
+        /// run, so `entered_object_perturbs_static_condition` sees no
+        /// perturbation. The recipient-context gate is what keeps this board on
+        /// the `e.condition` channel — `transient_source_level_condition_read_board`
+        /// covers the source-level twin, which that channel never sees.
+        fn transient_condition_read_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    760 + i,
+                    &format!("TransientBear{i}"),
+                    vec![],
+                ));
+            }
+            // CR 613.1d: printed layer-4 type-changer, unconditional. Every
+            // creature is also a Land, so it reaches the entrant and MOVES the
+            // counted population.
+            let to_land = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::AddType {
+                    core_type: CoreType::Land,
+                }],
+            );
+            install_static_enchantment(&mut state, 762, "Land Conversion", vec![to_land]);
+            let source = install_static_enchantment(&mut state, 763, "Other-Lands Grant", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ],
+                Duration::UntilEndOfTurn,
+                // Recipient-relative: "two or more OTHER Lands".
+                Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                properties: vec![FilterProp::Another],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 2 },
+                }),
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn type_rewrite_entry_escalates_through_transient_condition_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_condition_read_board, |s| {
+                    add_colorless_creature_entry(s, 764)
+                });
+            assert!(
+                escalated,
+                "a resolution-created effect's retained condition is a LIVE read \
+                 (CR 611.3a), so a layer-4 type rewrite reaching the entrant moves \
+                 the population it counts — the entry must escalate"
+            );
+            // Non-vacuity: CR 611.2c really did freeze the affected set, so the
+            // affected-filter channel reports EMPTY and the condition channel is
+            // the only thing that can put CardTypes in ReadKinds.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                            && tce.condition.is_some()
+                    }),
+                "the grant must have resolved into SpecificObject-bound transients \
+                 that still carry their condition"
+            );
+            // Non-vacuity: the gate is genuinely OFF before the entry, so the 3/3
+            // below is the entrant's doing and not an already-buffed board.
+            let mut pre = transient_condition_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "TransientBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry each recipient sees only 1 OTHER Land, so GE 2 is OFF"
+            );
+            assert_eq!(
+                pts_named(&forced, "TransientBear"),
+                vec![(Some(3), Some(3)); 2],
+                "the full pass counts the entrant once layer 4 makes it a Land, so \
+                 each recipient sees 2 OTHER Lands and the gate turns ON"
+            );
+            assert_eq!(
+                pts_named(&normal, "TransientBear"),
+                pts_named(&forced, "TransientBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient condition read channel");
+        }
+
+        /// (3.2) TRANSIENT SOURCE-LEVEL GATE. Same frozen-set/live-gate
+        /// asymmetry, but the gate is a plain SOURCE-LEVEL presence check (the
+        /// source definition's own CR 611.3a condition, carried onto the
+        /// transient) instead of a recipient-context count, and NOTHING on the
+        /// board writes the kinds it reads. That makes the entry-perturbation
+        /// probe the only disjunct that can catch it: an opponent's creature
+        /// entering flips `IsPresent{creature an opponent controls}` from OFF
+        /// to ON, and every recipient frozen into the effect's set (CR 611.2c)
+        /// goes 2/2 → 5/5.
+        ///
+        /// DISCRIMINATING: drop the transient walk from
+        /// `any_active_static_condition_perturbed_by_entry` and the
+        /// printed-static walk sees no condition at all, the kind relation
+        /// exits at stage 3 (`{PowerToughness} ∩ {CardTypes, Controller} = ∅`),
+        /// and the recipients stay stale at 2/2.
+        fn transient_source_level_gate_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    770 + i,
+                    &format!("GatedBear{i}"),
+                    vec![],
+                ));
+            }
+            let source =
+                install_static_enchantment(&mut state, 772, "Opponent-Gated Grant", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+                Duration::UntilEndOfTurn,
+                // CR 109.5: a resolved effect RETAINS its controller, so "an
+                // opponent" is read against P0. OFF on this board.
+                Some(StaticCondition::IsPresent {
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::Opponent),
+                        ..Default::default()
+                    })),
+                }),
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn opponent_entry_escalates_through_transient_source_level_gate() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_source_level_gate_board, |s| {
+                    add_colorless_creature_entry_under(s, 773, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "CR 611.2c freezes a resolved effect's affected SET, not its gate — \
+                 an entry that flips a transient's source-level presence gate must \
+                 escalate or every frozen recipient keeps a stale board"
+            );
+            // Non-vacuity: the gate is genuinely OFF before the entry.
+            let mut pre = transient_source_level_gate_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "GatedBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry no opponent controls a creature, so the gate is OFF"
+            );
+            assert_eq!(
+                pts_named(&forced, "GatedBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the opponent's entrant turns the gate ON for every frozen recipient"
+            );
+            assert_eq!(
+                pts_named(&normal, "GatedBear"),
+                pts_named(&forced, "GatedBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient source-level gate");
+        }
+
+        /// The name a layer-1 override (CR 707.9b) stamps onto every creature on
+        /// the (3.3)/(3.4) boards.
+        const OVERRIDDEN_NAME: &str = "Cloned Bear";
+
+        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
+        /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
+        /// false and every gather strips it off the effect it pushes.
+        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+            crate::types::ability::StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Named {
+                            name: OVERRIDDEN_NAME.to_string(),
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: count },
+            }
+        }
+
+        /// Two 2/2 recipients, a printed LAYER-1 `SetName` override (CR 707.9b)
+        /// over creatures, and one +1/+1 transient per recipient gated on
+        /// `install_gate`.
+        ///
+        /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
+        /// condition and a `ForAsLongAs` duration are both evaluated inside
+        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
+        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
+        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
+        /// within one pass. (A retained recipient-context condition is instead
+        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
+        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
+        /// the entrant is still printed-named there — that divergence is exactly
+        /// the staleness these boards catch.
+        ///
+        /// Nothing else on the board is a creature, so the overridden-name
+        /// population is exactly the creature count: 2 before the entry, 3
+        /// after, which moves a `GE 3` gate from OFF to ON.
+        fn transient_name_count_gate_board(
+            install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
+        ) -> GameState {
+            use crate::types::ability::ContinuousModification;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    780 + i,
+                    &format!("NameBear{i}"),
+                    vec![],
+                ));
+            }
+            // CR 707.9b: a layer-1 copiable-value name override, which MOVES the
+            // counted population by reaching the entrant.
+            let rename = continuous_static(
+                TargetFilter::Typed(TypedFilter::creature()),
+                vec![ContinuousModification::SetName {
+                    name: OVERRIDDEN_NAME.to_string(),
+                }],
+            );
+            install_static_enchantment(&mut state, 782, "Mass Renaming", vec![rename]);
+            let source = install_static_enchantment(&mut state, 783, "Name-Gated Grant", vec![]);
+            install_gate(&mut state, source, &bears);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (3.3) TRANSIENT SOURCE-LEVEL CONDITION, READ CHANNEL. The twin of
+        /// (3.1) with the recipient context removed. A source-level condition
+        /// never reaches `ActiveContinuousEffect::condition`:
+        /// `gather_transient_continuous_effects` strips it (only a
+        /// recipient-context condition is retained), and while the gate is OFF
+        /// the effect is not gathered at all. So the ONLY way NameText enters
+        /// `ReadKinds` is the walk over `state.transient_continuous_effects`.
+        ///
+        /// DISCRIMINATING: drop that walk and `ReadKinds` holds only the
+        /// CardTypes its affected filters read, which is disjoint from the
+        /// layer-1 `SetName` writer's `{NameText}` — the relation exits at
+        /// stage 3, the entry stays incremental, and the recipients keep a
+        /// stale 2/2 while a full pass says 3/3. The perturbation probe cannot
+        /// rescue it either: the entrant still carries its printed name when
+        /// the probe runs, so it does not perturb the overridden-name count.
+        fn transient_source_level_condition_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            transient_name_count_gate_board(|state, source, bears| {
+                install_gated_transient(
+                    state,
+                    source,
+                    bears,
+                    vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ],
+                    Duration::UntilEndOfTurn,
+                    Some(overridden_name_count_at_least(3)),
+                )
+            })
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_transient_source_level_condition_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_source_level_condition_read_board, |s| {
+                    add_colorless_creature_entry(s, 784)
+                });
+            assert!(
+                escalated,
+                "a source-level gate on a resolution-created effect is stripped from \
+                 the gathered effect, so only the transient walk can put NameText in \
+                 ReadKinds — a layer-1 name override reaching the entrant must escalate"
+            );
+            // Non-vacuity, fixture side: the installed gate really is the
+            // board-wide count — no `FilterProp::Another`, nothing else
+            // recipient-relative — so it is source-level.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        matches!(tce.affected, TargetFilter::SpecificObject { .. })
+                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                    }),
+                "the fixture must install SpecificObject-bound transients whose gate is \
+                 source-level, or the `e.condition` channel would cover this board"
+            );
+            // Non-vacuity, GATHERED side: asserting the fixture only proves what
+            // was installed. Run the real gather and confirm the condition is
+            // gone from every effect it produces — that strip is the whole
+            // premise of this test, so it is asserted, not inferred.
+            let mut gathered = Vec::new();
+            crate::game::layers::gather_transient_continuous_effects(&forced, &mut gathered);
+            assert!(
+                !gathered.is_empty() && gathered.iter().all(|e| e.condition.is_none()),
+                "the gather must strip this source-level condition; if it retained it, \
+                 `e.condition` would cover the board and the transient walk would be \
+                 untested here"
+            );
+            let mut pre = transient_source_level_condition_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_base_named(&pre, "NameBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry only 2 permanents carry the overridden name, so GE 3 is OFF"
+            );
+            assert_eq!(
+                pts_base_named(&forced, "NameBear"),
+                vec![(Some(3), Some(3)); 2],
+                "layer 1 renames the entrant too, making it the third — the gate turns ON"
+            );
+            assert_eq!(
+                pts_base_named(&normal, "NameBear"),
+                pts_base_named(&forced, "NameBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient source-level condition reads");
+        }
+
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
+        /// with the gate moved from `tce.condition` into
+        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
+        /// long as its stated condition holds). `transient_effect_is_live`
+        /// evaluates it in the same gather, and no gather ever copies a
+        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
+        /// is invisible to every channel except the transient walk.
+        ///
+        /// DISCRIMINATING: drop `transient_duration_condition` from
+        /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
+        /// as in (3.3) — recipients keep a stale 2/2.
+        fn transient_duration_gate_read_board() -> GameState {
+            use crate::types::ability::ContinuousModification;
+            transient_name_count_gate_board(|state, source, bears| {
+                install_gated_transient(
+                    state,
+                    source,
+                    bears,
+                    vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ],
+                    Duration::ForAsLongAs {
+                        condition: overridden_name_count_at_least(3),
+                    },
+                    None,
+                )
+            })
+        }
+
+        #[test]
+        fn name_rewrite_entry_escalates_through_transient_duration_gate_reads() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_duration_gate_read_board, |s| {
+                    add_colorless_creature_entry(s, 785)
+                });
+            assert!(
+                escalated,
+                "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
+                 it reads are live reads — a layer-1 name override reaching the entrant \
+                 must escalate"
+            );
+            // Non-vacuity: the gate lives in the DURATION, not in `condition`,
+            // so no `tce.condition` channel could have covered this board.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        tce.condition.is_none()
+                            && matches!(tce.duration, Duration::ForAsLongAs { .. })
+                    }),
+                "the fixture must gate purely through `Duration::ForAsLongAs`"
+            );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_base_named(&pre, "NameBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry only 2 permanents carry the overridden name, so the \
+                 duration has not started"
+            );
+            assert_eq!(
+                pts_base_named(&forced, "NameBear"),
+                vec![(Some(3), Some(3)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration holds"
+            );
+            assert_eq!(
+                pts_base_named(&normal, "NameBear"),
+                pts_base_named(&forced, "NameBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient duration gate reads");
+        }
+
+        /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
+        /// of (3.2) with the gate moved into the duration: Master Thief's "for
+        /// as long as you control this creature" shape, inverted to an
+        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// board writes the kinds the gate reads, so the read union cannot see
+        /// the flip — while the duration is unmet the effect is not gathered at
+        /// all and `all_writes` is empty, which exits the kind relation at
+        /// stage 1.
+        ///
+        /// DISCRIMINATING: drop `transient_duration_condition` from
+        /// `transient_gate_conditions` and the probe's transient arm sees only
+        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
+        /// stays incremental, and the frozen recipients keep a stale 2/2 while
+        /// a full pass says 5/5.
+        fn transient_duration_gate_probe_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, StaticCondition};
+            use crate::types::ControllerRef;
+            let mut state = setup();
+            let mut bears = Vec::new();
+            for i in 0..2 {
+                bears.push(add_relation_bear(
+                    &mut state,
+                    790 + i,
+                    &format!("DurationBear{i}"),
+                    vec![],
+                ));
+            }
+            let source =
+                install_static_enchantment(&mut state, 792, "Opponent-Gated Duration", vec![]);
+            install_gated_transient(
+                &mut state,
+                source,
+                &bears,
+                vec![
+                    ContinuousModification::AddPower { value: 3 },
+                    ContinuousModification::AddToughness { value: 3 },
+                ],
+                // CR 611.2b + CR 109.5: the duration is re-read every pass and
+                // "an opponent" stays bound to the resolver, P0.
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::Opponent),
+                            ..Default::default()
+                        })),
+                    },
+                },
+                None,
+            );
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        #[test]
+        fn opponent_entry_escalates_through_transient_duration_gate() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(transient_duration_gate_probe_board, |s| {
+                    add_colorless_creature_entry_under(s, 793, PlayerId(1))
+                });
+            assert!(
+                escalated,
+                "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
+                 an entry that starts a `for as long as` duration must escalate or every \
+                 frozen recipient keeps a stale board"
+            );
+            // Non-vacuity: the gate lives in the DURATION only.
+            assert!(
+                !forced.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.iter().all(|tce| {
+                        tce.condition.is_none()
+                            && matches!(tce.duration, Duration::ForAsLongAs { .. })
+                    }),
+                "the fixture must gate purely through `Duration::ForAsLongAs`"
+            );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
+            assert_eq!(
+                pts_named(&pre, "DurationBear"),
+                vec![(Some(2), Some(2)); 2],
+                "pre-entry no opponent controls a creature, so the duration never started"
+            );
+            assert_eq!(
+                pts_named(&forced, "DurationBear"),
+                vec![(Some(5), Some(5)); 2],
+                "the opponent's entrant starts the duration for every frozen recipient"
+            );
+            assert_eq!(
+                pts_named(&normal, "DurationBear"),
+                pts_named(&forced, "DurationBear"),
+                "the escalated entry must derive the same board as a full re-evaluation"
+            );
+            assert_pt_identical(&normal, &forced, "transient duration gate probe");
         }
 
         /// Assert every battlefield object's computed power/toughness/loyalty and

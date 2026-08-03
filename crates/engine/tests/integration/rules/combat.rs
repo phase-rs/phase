@@ -817,6 +817,241 @@ fn add_sphere_of_safety(scenario: &mut GameScenario, player: PlayerId) -> Object
     builder.id()
 }
 
+/// Build the exact static ability of Onakke Oathkeeper. The test fixture uses a
+/// creature shell because its combat-tax behavior, rather than printed P/T, is
+/// the behavior under test.
+fn add_onakke_oathkeeper(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    let def = parse_static_line(
+        "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.",
+    )
+    .expect("Onakke Oathkeeper should parse");
+    let mut builder = scenario.add_creature(player, "Onakke Oathkeeper", 2, 2);
+    builder.with_static_definition(def);
+    builder.id()
+}
+
+/// Park a three-player combat at declaration with two legal planeswalker
+/// targets: one controlled by Onakke Oathkeeper's controller (P1), and one
+/// controlled by a different defending player (P2).
+fn build_3p_onakke_oathkeeper_scenario(
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
+    const P2: PlayerId = PlayerId(2);
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let oathkeeper = add_onakke_oathkeeper(&mut scenario, P1);
+    let protected = scenario
+        .add_creature(P1, "Protected Jace", 2, 2)
+        .as_planeswalker_with_loyalty("Jace", 4)
+        .id();
+    let other = scenario
+        .add_creature(P2, "Other Chandra", 2, 2)
+        .as_planeswalker_with_loyalty("Chandra", 4)
+        .id();
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let second_attacker = scenario.add_creature(P0, "Wolf", 2, 2).id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker, second_attacker],
+        valid_attack_targets: vec![
+            AttackTarget::Player(P1),
+            AttackTarget::Planeswalker(protected),
+            AttackTarget::Planeswalker(other),
+        ],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    (
+        runner,
+        oathkeeper,
+        attacker,
+        second_attacker,
+        protected,
+        other,
+    )
+}
+
+/// CR 506.3 + CR 508.1b + CR 508.1h: Onakke Oathkeeper taxes an attack at a
+/// planeswalker controlled by its controller, but not an attack at that player
+/// or a planeswalker controlled by another player. The three assertions drive
+/// the real declaration pipeline and fail if either the type or controller
+/// component of the parsed `Planeswalker` scope is lost.
+#[test]
+fn onakke_oathkeeper_taxes_only_planeswalkers_controlled_by_its_controller() {
+    let (mut protected_runner, _, attacker, _, protected, _) =
+        build_3p_onakke_oathkeeper_scenario();
+    protected_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(protected))],
+            bands: vec![],
+        })
+        .expect("attack at Onakke controller's planeswalker should enter tax payment");
+    match &protected_runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player,
+            context,
+            total_cost,
+            per_creature,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(matches!(context, CombatTaxContext::Attacking));
+            assert_eq!(total_cost.mana_value(), 1);
+            assert_eq!(per_creature.len(), 1);
+        }
+        other => panic!("expected CombatTaxPayment for protected planeswalker, got {other:?}"),
+    }
+
+    let (mut player_runner, _, attacker, _, _, _) = build_3p_onakke_oathkeeper_scenario();
+    player_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("attack at Onakke controller should be legal without a tax");
+    assert!(
+        !matches!(
+            player_runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "Onakke Oathkeeper must not tax attacks at its controller directly",
+    );
+
+    let (mut other_runner, _, attacker, _, _, other) = build_3p_onakke_oathkeeper_scenario();
+    other_runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("attack at another player's planeswalker should be legal without a tax");
+    assert!(
+        !matches!(
+            other_runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { .. }
+        ),
+        "Onakke Oathkeeper must not tax planeswalkers its controller does not control",
+    );
+}
+
+/// CR 508.1h: the relative clause counts every creature that controller has
+/// attacking the protected planeswalker. Its defended-player provenance is
+/// live while the source remains on the battlefield, then disappears when the
+/// source leaves.
+#[test]
+fn onakke_oathkeeper_scales_per_attacker_and_tracks_live_source_controller() {
+    const P2: PlayerId = PlayerId(2);
+    let (mut runner, _oathkeeper, attacker, second_attacker, protected, _other) =
+        build_3p_onakke_oathkeeper_scenario();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker, AttackTarget::Planeswalker(protected)),
+                (second_attacker, AttackTarget::Planeswalker(protected)),
+            ],
+            bands: vec![],
+        })
+        .expect("two protected-planeswalker attackers should enter tax payment");
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(
+                total_cost.mana_value(),
+                2,
+                "two attackers scale {{1}} to {{2}}"
+            );
+        }
+        other => panic!("expected CombatTaxPayment for two attackers, got {other:?}"),
+    }
+
+    // Start a fresh declaration for the provenance assertions: the first
+    // declaration has intentionally committed two attackers to its tax window.
+    let (mut runner, oathkeeper, attacker, _, _, other) = build_3p_onakke_oathkeeper_scenario();
+
+    // A static source's controller is queried live. Give the Oathkeeper to P2
+    // through the production Layer 2 control-change path: P1 is now untaxed
+    // directly, while P2's planeswalker is protected.
+    runner.state_mut().add_transient_continuous_effect(
+        oathkeeper,
+        P2,
+        engine::types::ability::Duration::Permanent,
+        engine::types::ability::TargetFilter::SpecificObject { id: oathkeeper },
+        vec![engine::types::ability::ContinuousModification::ChangeController],
+        None,
+    );
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("P1 is no longer the static source controller");
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("P2's planeswalker should now be taxed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), oathkeeper, Zone::Graveyard, &mut events);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .tapped = false;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Planeswalker(other)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Planeswalker(other))],
+            bands: vec![],
+        })
+        .expect("removing Oathkeeper removes its static tax");
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::CombatTaxPayment { .. }
+    ));
+}
+
 fn add_enchantment(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
     scenario
         .add_creature(player, name, 2, 2)

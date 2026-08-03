@@ -37,6 +37,7 @@ use engine::game::engine::{apply, start_game};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
+use engine::types::ability::{Effect, TriggerDefinition};
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
@@ -114,14 +115,23 @@ fn p0_tapped_vanilla_saprolings(state: &GameState) -> BTreeSet<ObjectId> {
         .collect()
 }
 
-/// Drive the APNAP accept: P0 (the proposer) declares, then every prompted opponent accepts
-/// in turn order until the protocol closes back to ordinary priority.
+/// Drive the APNAP accept at the harness default of one cycle. CR 732.2c makes the
+/// accepted count BINDING on the boundary collapse prompt, so any test that later submits
+/// a larger N must declare that N here — use [`drive_all_accept_n`].
 fn drive_all_accept(state: &mut GameState) {
+    drive_all_accept_n(state, 1);
+}
+
+/// Drive the APNAP accept at `n`: P0 (the proposer) declares `Fixed(n)`, then every
+/// prompted opponent accepts in turn order until the protocol closes back to ordinary
+/// priority. CR 732.2c: `n` is the count the table agrees to, so it bounds the CR 500.5
+/// boundary collapse prompt — a test collapsing to N must accept at ≥ N.
+fn drive_all_accept_n(state: &mut GameState, n: u32) {
     apply(
         state,
         P0,
         GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(1),
+            count: IterationCount::Fixed(n),
             template: None,
         },
     )
@@ -209,7 +219,33 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
     );
 
     // (2) DERIVED — derive_views projects the pile (battlefield-filtered, public board state).
-    let derived = derive_views(&state, Some(P0));
+    //
+    // R6a (CR 732.2c): this accept ALSO scheduled a finite `TokensCreated` collapse, and a
+    // scheduled axis is already bounded — so the ∞ group must be hidden on the WIRE in
+    // lockstep with its resource badge. Filter the PROJECTION, never the store: the store
+    // assertions above and the round-trip below are unchanged and still pass.
+    assert!(
+        derive_views(&state, Some(P0)).unbounded_pile.is_empty(),
+        "CR 732.2c: a scheduled finite collapse hides the ∞ group (the store keeps it)"
+    );
+    // Non-vacuity + the ORIGINAL claim, retained: with nothing scheduled the projection is
+    // still exactly the battlefield-filtered pile set.
+    //
+    // NOT A SYNTHETIC STATE — "pile present, stash absent" is engine-reachable, and this is
+    // the production sequence that reaches it (cited so the next auditor need not re-derive
+    // it): accept an object-growth loop → the CR 500.5 boundary prompt → `SubmitPayAmount` →
+    // the handler's `take_pending_materialization` (`game::engine_resolution_choices`) empties
+    // the stash FIRST → the `Tokens` mint then PAUSES on an optional token-doubling
+    // replacement (CR 616.1) → the pause path calls `clear_collapsed_materializations(player,
+    // &collapsed)` with `collapsed` NOT containing the still-paused `Tokens` item ⇒ pile and
+    // ∞ axes preserved, stash already gone. NOT A CLAIM — ASSERTED, in
+    // `combo_infinite_pile::med_tokens_boundary_mint_pause_preserves_replacement_choice`, whose
+    // closing two assertions drive that exact sequence and check
+    // `pending_unbounded_materialization[P0]` ABSENT while `derive_views(..).unbounded_pile` is
+    // non-empty. That test is this arm's production-reachability evidence.
+    let mut unscheduled = state.clone();
+    unscheduled.pending_unbounded_materialization.clear();
+    let derived = derive_views(&unscheduled, Some(P0));
     let derived_set: BTreeSet<ObjectId> = derived.unbounded_pile.iter().copied().collect();
     assert_eq!(
         derived_set, oracle,
@@ -225,7 +261,20 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
         Some(&oracle),
         "the ∞ pile survives a serde round-trip (post-fix saves reload it)"
     );
-    let reloaded_set: BTreeSet<ObjectId> = derive_views(&reloaded, Some(P0))
+    // R6a (CR 732.2c): the stash round-trips too, so the reloaded state's collapse is still
+    // SCHEDULED and its ∞ group stays hidden on the WIRE — same gate, same authority.
+    assert!(
+        derive_views(&reloaded, Some(P0)).unbounded_pile.is_empty(),
+        "CR 732.2c: the reloaded scheduled collapse still hides the ∞ group"
+    );
+    // Same engine-reachable "pile present, stash absent" shape as above — see the
+    // `SubmitPayAmount` → `take_pending_materialization` → CR 616.1 mint-pause →
+    // `clear_collapsed_materializations` sequence cited at (2).
+    let mut reloaded_unscheduled = reloaded.clone();
+    reloaded_unscheduled
+        .pending_unbounded_materialization
+        .clear();
+    let reloaded_set: BTreeSet<ObjectId> = derive_views(&reloaded_unscheduled, Some(P0))
         .unbounded_pile
         .iter()
         .copied()
@@ -575,7 +624,23 @@ fn build_fresh_4p_cast_offer_accept_writes_infinite_pile() {
     );
 
     // (2) DERIVED — derive_views projects the pile.
-    let derived_set: BTreeSet<ObjectId> = derive_views(runner.state(), Some(P0))
+    //
+    // R6a (CR 732.2c): the accept also scheduled a finite `TokensCreated` collapse ⇒ the ∞
+    // group is hidden on the WIRE while it is scheduled. Store unchanged (see the round-trip).
+    assert!(
+        derive_views(runner.state(), Some(P0))
+            .unbounded_pile
+            .is_empty(),
+        "CR 732.2c: a scheduled finite collapse hides the ∞ group (the store keeps it)"
+    );
+    // Non-vacuity + the ORIGINAL claim, retained. "Pile present, stash absent" is
+    // engine-reachable, not synthetic — the `SubmitPayAmount` → `take_pending_materialization`
+    // → CR 616.1 mint-pause → `clear_collapsed_materializations` sequence cited in
+    // `real_4p_object_growth_accept_writes_infinite_pile`, ASSERTED by
+    // `med_tokens_boundary_mint_pause_preserves_replacement_choice`'s closing two assertions.
+    let mut unscheduled = runner.state().clone();
+    unscheduled.pending_unbounded_materialization.clear();
+    let derived_set: BTreeSet<ObjectId> = derive_views(&unscheduled, Some(P0))
         .unbounded_pile
         .iter()
         .copied()
@@ -713,7 +778,7 @@ fn real_4p_observed_drive_sequence_replays_captured_period_n_times() {
         !seq.is_empty(),
         "the offer carries the real recast period the DriveSequence replays"
     );
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 3);
 
     // An OBSERVED loop's accept registers ONE DriveSequence over the whole loop (all axes) instead
     // of the batched Tokens/Counters/Life. Emulate that route: drop the batched token stash the
@@ -830,7 +895,7 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
         state.waiting_for
     );
 
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 5);
 
     // Reach-guard (accept-capture, §1): accepting the object-growth loop stashed the
     // fodder's copiable profile for P0. Non-vacuity anchor for the negatives below.
@@ -944,7 +1009,7 @@ fn real_4p_object_growth_boundary_collapse_mints_finite_tokens() {
 fn loop_collapse_large_mint_does_not_overflow_small_stack() {
     let mut state: GameState =
         serde_json::from_str(&OFFER_STATE).expect("the real 4p offer dump must deserialize");
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 1000);
     let before = p0_saproling_ids(&state).len();
     drive_priority_to_next_boundary(&mut state);
     assert!(
@@ -1339,7 +1404,7 @@ fn real_4p_one_shot_bootstrap_seeds_tapped_infinite_pile_and_w_plus_1_untapped()
     );
 
     // ── Step 2: APNAP accept → materialize.
-    drive_all_accept(runner.state_mut());
+    drive_all_accept_n(runner.state_mut(), 5);
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "after all accept, materialize hands priority back, got {:?}",
@@ -1382,7 +1447,23 @@ fn real_4p_one_shot_bootstrap_seeds_tapped_infinite_pile_and_w_plus_1_untapped()
     );
 
     // derive_views projects the pile; it survives a serde round-trip.
-    let derived_set: BTreeSet<ObjectId> = derive_views(runner.state(), Some(P0))
+    //
+    // R6a (CR 732.2c): the accept also scheduled a finite `TokensCreated` collapse ⇒ the ∞
+    // group is hidden on the WIRE while it is scheduled. Store unchanged (round-trip below).
+    assert!(
+        derive_views(runner.state(), Some(P0))
+            .unbounded_pile
+            .is_empty(),
+        "CR 732.2c: a scheduled finite collapse hides the ∞ group (the store keeps it)"
+    );
+    // Non-vacuity + the ORIGINAL claim, retained. "Pile present, stash absent" is
+    // engine-reachable, not synthetic — the `SubmitPayAmount` → `take_pending_materialization`
+    // → CR 616.1 mint-pause → `clear_collapsed_materializations` sequence cited in
+    // `real_4p_object_growth_accept_writes_infinite_pile`, ASSERTED by
+    // `med_tokens_boundary_mint_pause_preserves_replacement_choice`'s closing two assertions.
+    let mut unscheduled = runner.state().clone();
+    unscheduled.pending_unbounded_materialization.clear();
+    let derived_set: BTreeSet<ObjectId> = derive_views(&unscheduled, Some(P0))
         .unbounded_pile
         .iter()
         .copied()
@@ -1606,7 +1687,7 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
 
     let mut state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 5);
 
     // Graft a beneficial +1/+1 counter axis (UNOBSERVED on this board) and a life axis (OBSERVED)
     // onto the accepted token loop — the SAME single-authority writers the accept path uses.
@@ -1739,7 +1820,7 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
 
     let mut state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 5);
 
     // Graft a +1/+1 counter axis (UNOBSERVED at accept — MEASURED counter_growth_is_observed=false).
     let creature = *p0_saproling_ids(&state)
@@ -2097,7 +2178,7 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
 
     let mut state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 3);
 
     // Install an OPTIONAL token-count-doubling replacement ("you may create twice that many tokens
     // instead", CR 616.1) on a fresh P0 battlefield permanent — AFTER accept, so it never perturbs
@@ -2186,6 +2267,26 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
             .is_some_and(|p| !p.is_empty()),
         "REVERT-FLIP: the paused mint must preserve the ∞ token pile, not drop it"
     );
+
+    // PRODUCTION-REACHABILITY ANCHOR for the "pile present, stash absent" shape. Several R6a
+    // rows build that shape by cloning a post-accept state and clearing
+    // `pending_unbounded_materialization` by hand; these two lines assert the ENGINE produces it
+    // unaided, right here, so those clones are grounded in a measured production sequence rather
+    // than in a comment. The sequence is the CR 616.1 mint-pause above:
+    // `SubmitPayAmount` → `take_pending_materialization` (removes the whole stash) →
+    // `engine_resolution_choices`' pause guard → `clear_collapsed_materializations(player,
+    // &collapsed)` with the paused `Tokens` item ABSENT from `collapsed` ⇒ the pile survives
+    // while the stash is gone.
+    assert!(
+        !state.pending_unbounded_materialization.contains_key(&P0),
+        "the submit's take_pending_materialization removed P0's stash, got {:?}",
+        state.pending_unbounded_materialization.get(&P0)
+    );
+    assert!(
+        !derive_views(&state, Some(P0)).unbounded_pile.is_empty(),
+        "…and with no stash left to schedule a collapse, the ∞ pile renders on the WIRE — the \
+         engine-reachable 'pile present, stash absent' shape the clone-based R6a arms emulate"
+    );
 }
 
 /// [BLOCKER] (#6259 review, CR 732.2a pause-safety): a MIXED stash pausing on the `Tokens`
@@ -2226,7 +2327,7 @@ fn med_mixed_counter_tokens_pause_commits_finite_counter_and_keeps_only_tokens_u
 
     let mut state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    drive_all_accept(&mut state);
+    drive_all_accept_n(&mut state, 4);
 
     // Graft an UNOBSERVED +1/+1 counter axis onto a P0 Saproling — the same single-authority
     // writers the accept path uses (mirrors
@@ -2399,8 +2500,93 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 #[test]
 fn low3_unobserved_life_growth_accept_registers_batched_life() {
     use engine::analysis::resource::ResourceAxis;
+
+    let runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Absent);
+
+    // Reach-guard: the accept produced a non-empty deferred stash (not a no-op).
+    let stash = runner
+        .state()
+        .pending_unbounded_materialization
+        .get(&P0)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !stash.is_empty(),
+        "reach-guard: the accept must register a deferred materialization stash for P0"
+    );
+    // DISCRIMINATOR: the UNOBSERVED life growth routes to a BATCHED `Life` item carrying the
+    // per-cycle δ — produced by the real accept-time routing, never grafted.
+    assert!(
+        stash.iter().any(|m| matches!(
+            m,
+            PersistentAxisMaterialization::Life { player, per_cycle_delta }
+                if *player == P0 && *per_cycle_delta >= 1
+        )),
+        "the unobserved life loop must register a BATCHED Life stash (per_cycle_delta captured), \
+         got {stash:?}"
+    );
+    // DISCRIMINATOR: an UNOBSERVED loop BATCHES — it must NOT register a DriveSequence (that is the
+    // observed route; forcing the observed branch flips this).
+    assert!(
+        !stash
+            .iter()
+            .any(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
+        "an unobserved life loop batches; it must not register a DriveSequence, got {stash:?}"
+    );
+    // The life axis is ∞-marked (the mana axis is too; both are real unbounded axes here).
+    assert!(
+        runner
+            .state()
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.contains(&ResourceAxis::Life(P0))),
+        "the accepted loop marks the Life axis ∞ for P0"
+    );
+}
+
+/// Whether [`low3_life_engine_accepted`] installs a FUNCTIONING battlefield-entry trigger on the
+/// board before the loop is driven. `Present` is the hostile arm for the `token_profile.is_some()`
+/// conjunct of `life_etb_sourced` (engine.rs): it makes `board_has_functioning_etb_trigger` TRUE
+/// while the loop stays mana-only, so the conjunct is the ONLY thing still holding the route on the
+/// batched arm.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Low3BoardEtbTrigger {
+    Absent,
+    Present,
+}
+
+/// A minimal functioning battlefield-entry life trigger (the Prosperous Innkeeper shape, built
+/// directly because this fixture is synthetic and loads no card pool). Its EFFECT is deliberately
+/// `GainLife`: that is the production shape that double-pays when a `Tokens` collapse mints real
+/// CR 603.6a entries, and it is NOT a life OBSERVER — `life_growth_is_observed` keys on
+/// `TriggerEventKey::LifeChanged` / `ReplacementEvent::GainLife`, never on `EnterBattlefield` — so
+/// installing it cannot flip `life_observed` and mask what this arm is measuring.
+fn low3_board_etb_life_trigger() -> TriggerDefinition {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use engine::types::triggers::TriggerMode;
+
+    let mut def = TriggerDefinition::new(TriggerMode::ChangesZone);
+    def.destination = Some(Zone::Battlefield);
+    def.trigger_zones = vec![Zone::Battlefield];
+    def.execute = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )));
+    def.description =
+        Some("Whenever another creature you control enters, you gain 1 life.".to_string());
+    def
+}
+
+/// Build the LOW-3 mana+life engine, optionally graft a functioning board ETB trigger, drive one
+/// certified period, and take the offer through the real APNAP accept. Returns the post-accept
+/// runner. Shared so both arms inherit the same non-vacuity reach-guards (3-step period, surfaced
+/// offer) — the only difference between them is `etb`.
+fn low3_life_engine_accepted(etb: Low3BoardEtbTrigger) -> GameRunner {
     use engine::game::mana_abilities::is_mana_ability;
-    use engine::types::ability::{Effect, TapStateChange};
+    use engine::types::ability::TapStateChange;
 
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -2415,6 +2601,27 @@ fn low3_unobserved_life_growth_accept_registers_batched_life() {
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    if etb == Low3BoardEtbTrigger::Present {
+        // Grafted BEFORE the drive so the board is identical every cycle (a permanent that never
+        // changes cannot perturb the modulo-resources loop cover), and so the predicate the accept
+        // reads is the one this board really has. Nothing enters the battlefield during the
+        // mana+life period, so the trigger never actually fires — `board_has_functioning_etb_trigger`
+        // is a board-shape question, not a fired-this-cycle one.
+        let host = create_life_gainer(runner.state_mut(), P0, "Grafted Innkeeper");
+        graft_trigger(runner.state_mut(), host, low3_board_etb_life_trigger());
+        // Reach-guard: the graft must survive the layer rebuild and be ACTIVE (CR 113.6) on a
+        // battlefield permanent. Without this the arm would pass VACUOUSLY — a dropped graft leaves
+        // `board_has_functioning_etb_trigger` false, which is the `Absent` arm wearing a new name.
+        let state = runner.state();
+        let host_obj = &state.objects[&host];
+        assert!(
+            engine::game::functioning_abilities::active_trigger_definitions(state, host_obj).any(
+                |active| active.definition.destination == Some(Zone::Battlefield)
+                    && active.definition.mode == engine::types::triggers::TriggerMode::ChangesZone
+            ),
+            "reach-guard: the grafted battlefield-entry trigger must be ACTIVE on the host"
+        );
+    }
 
     // Derive the ability indices off the layer-built object (robust to parser ordering).
     let (mana_idx, life_idx, untap_idx) = {
@@ -2475,44 +2682,527 @@ fn low3_unobserved_life_growth_accept_registers_batched_life() {
             response: ShortcutResponse::Accept,
         })
         .expect("the single opponent accepts");
+    runner
+}
 
-    // Reach-guard: the accept produced a non-empty deferred stash (not a no-op).
+/// PINS the `token_profile.is_some()` conjunct of `life_etb_sourced` (engine.rs) — the conjunct the
+/// sibling test above cannot reach, because its board has no functioning ETB trigger at all, so
+/// `board_has_functioning_etb_trigger` short-circuits the predicate false before `token_profile` is
+/// ever consulted.
+///
+/// Same mana-only Lifedynamo loop, but with a functioning battlefield-entry trigger grafted onto the
+/// board. That makes TWO of the three conjuncts true (`!life.is_empty()` and
+/// `board_has_functioning_etb_trigger`), so `token_profile.is_some()` — false here, because a
+/// mana-only collapse mints no tokens and `current_period_fodder` returns `None` — is the ONLY thing
+/// still holding this loop on the BATCHED route.
+///
+/// Why that matters: the collapse re-earns an ETB-sourced life axis only if it MINTS the entries
+/// that re-fire the trigger. A mana engine mints nothing, so there is no double-pay and the O(N)
+/// replay is pure cost. Deleting the conjunct silently sends every life-growing loop with any board
+/// ETB trigger — mana engines included — down the concrete replay.
+///
+/// REVERT-PROBE (RUN): delete `&& token_profile.is_some()` from `life_etb_sourced` ⇒ this test's
+/// batched-`Life` assertion FAILS (the stash becomes a lone `DriveSequence`). The sibling
+/// `Absent`-arm test stays green under that same deletion, which is precisely why this arm exists.
+#[test]
+fn low3_mana_only_life_growth_stays_batched_despite_board_etb_trigger() {
+    let runner = low3_life_engine_accepted(Low3BoardEtbTrigger::Present);
+
     let stash = runner
         .state()
         .pending_unbounded_materialization
         .get(&P0)
         .cloned()
         .unwrap_or_default();
+    // Reach-guard: the accept produced a stash at all.
     assert!(
         !stash.is_empty(),
         "reach-guard: the accept must register a deferred materialization stash for P0"
     );
-    // DISCRIMINATOR: the UNOBSERVED life growth routes to a BATCHED `Life` item carrying the
-    // per-cycle δ — produced by the real accept-time routing, never grafted.
+    // Reach-guard: this really is the mana-only shape — a `Tokens` item would mean the loop DID
+    // mint fodder, `token_profile` would be `Some`, and the conjunct would no longer be the
+    // load-bearing one.
+    assert!(
+        !stash
+            .iter()
+            .any(|m| matches!(m, PersistentAxisMaterialization::Tokens(_))),
+        "reach-guard: the mana-only loop must stash no Tokens axis, got {stash:?}"
+    );
+    // DISCRIMINATOR: with the ETB trigger present and the loop token-less, the route stays BATCHED.
+    // Drop `token_profile.is_some()` from `life_etb_sourced` and this flips to a DriveSequence.
     assert!(
         stash.iter().any(|m| matches!(
             m,
             PersistentAxisMaterialization::Life { player, per_cycle_delta }
                 if *player == P0 && *per_cycle_delta >= 1
         )),
-        "the unobserved life loop must register a BATCHED Life stash (per_cycle_delta captured), \
+        "a token-less life loop must stay on the BATCHED Life route even with a board ETB trigger, \
          got {stash:?}"
     );
-    // DISCRIMINATOR: an UNOBSERVED loop BATCHES — it must NOT register a DriveSequence (that is the
-    // observed route; forcing the observed branch flips this).
     assert!(
         !stash
             .iter()
             .any(|m| matches!(m, PersistentAxisMaterialization::DriveSequence { .. })),
-        "an unobserved life loop batches; it must not register a DriveSequence, got {stash:?}"
+        "a token-less life loop must not route to the concrete replay, got {stash:?}"
     );
-    // The life axis is ∞-marked (the mana axis is too; both are real unbounded axes here).
+}
+
+// ───────── CR 732.2a + CR 603.6a: an ETB-SOURCED life axis routes to the concrete replay ─────────
+//
+// MEASURED DEFECT (real 4p Sprout Swarm dump `.fb-dumps/witherbloom-sprout-lumaret-works-slow`,
+// engine UNMODIFIED, `combofb_probe e no_spear_accept`): P0's board carried Bogwater Lumaret
+// ("Whenever ~ or another creature you control enters, you gain 1 life"). The accept registered
+// the BATCHED pair `[Tokens(Saproling), Life { player: P0, per_cycle_delta: 1 }]`.
+// `SubmitPayAmount(50)` took P0 from 546 to 596 (the batched +50) and left 50 real token-ETB
+// triggers on the stack; draining them paid the SAME life a SECOND time, ending at 646. The
+// batched arithmetic is not wrong — the ROUTE is: the collapse's own `Tokens` minting re-earns an
+// ETB-sourced life axis, so the accept pays twice. On the concrete replay the real ETB triggers
+// are the ONLY life source, which is what the board actually does.
+//
+// `combo_infinite_pile_4p_offer.json.gz` is a capture of the same game with NO life gainer on the
+// battlefield (MEASURED: accept ⇒ `unbounded == {TokensCreated}`, route `["Tokens"]`), so these
+// tests host the engine's own parse of a REAL card from this dump's pool — Prosperous Innkeeper's
+// "Whenever another creature you control enters, you gain 1 life" — on a live permanent.
+
+/// Prosperous Innkeeper's parsed "gain 1 life" battlefield-entry trigger, taken from the real
+/// object in this dump. Selected by EFFECT, never by index: the Innkeeper also carries a
+/// Treasure-token ETB trigger, and picking that one silently makes every life assertion vacuous.
+fn innkeeper_etb_life_trigger(state: &GameState) -> TriggerDefinition {
+    state
+        .objects
+        .values()
+        .filter(|o| o.name == "Prosperous Innkeeper")
+        .flat_map(|o| o.trigger_definitions.iter_unchecked())
+        .map(|entry| &entry.definition)
+        .find(|def| {
+            def.execute
+                .as_ref()
+                .is_some_and(|a| matches!(*a.effect, Effect::GainLife { .. }))
+        })
+        .expect("Prosperous Innkeeper's ETB life trigger is in this dump's card pool")
+        .clone()
+}
+
+/// MEASURED (revert-probe round 1): this dump carries Mortality Spear, whose life-conditional
+/// cost static makes `fire_time_conditions_read_projected_resource` true — so
+/// `life_growth_is_observed` already routes ANY life axis on this board to the replay, and a
+/// route test built on it passes with the fix reverted. Strip those statics (the honest analogue
+/// of a deck without that card, and exactly what the `combofb_probe e no_spear_accept` variant
+/// does on the live dump) so the ONLY thing that can flip the route is the ETB source.
+fn strip_life_conditional_cost_static(state: &mut GameState) {
+    let ids: Vec<ObjectId> = state
+        .objects
+        .values()
+        .filter(|o| o.name == "Mortality Spear")
+        .map(|o| o.id)
+        .collect();
     assert!(
-        runner
-            .state()
-            .unbounded_resources
-            .get(&P0)
-            .is_some_and(|axes| axes.contains(&ResourceAxis::Life(P0))),
-        "the accepted loop marks the Life axis ∞ for P0"
+        !ids.is_empty(),
+        "fixture precondition: this dump must contain the Mortality Spear whose static is stripped"
+    );
+    for id in ids {
+        let o = state.objects.get_mut(&id).unwrap();
+        o.static_definitions.clear();
+        o.base_static_definitions = std::sync::Arc::new(Vec::new());
+    }
+    mark_layers_full(state);
+    flush_layers(state);
+}
+
+/// Install `def` on `host` and rebuild layers so it FUNCTIONS in its source's zone (CR 113.6).
+fn graft_trigger(state: &mut GameState, host: ObjectId, def: TriggerDefinition) {
+    state
+        .objects
+        .get_mut(&host)
+        .expect("graft host")
+        .trigger_definitions
+        .push(def);
+    mark_layers_full(state);
+    flush_layers(state);
+}
+
+/// A plain 1/1 creature permanent for `owner` to host a grafted trigger. Deliberately NOT named
+/// "Saproling" so it cannot join the loop's content-equal fodder class.
+fn create_life_gainer(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+    let o = state.objects.get_mut(&id).unwrap();
+    o.power = Some(1);
+    o.toughness = Some(1);
+    o.base_power = Some(1);
+    o.base_toughness = Some(1);
+    o.card_types.core_types = vec![CoreType::Creature];
+    o.summoning_sick = false;
+    id
+}
+
+/// A coarse label per registered materialization — the ROUTE oracle. `DriveSequence` is the
+/// concrete replay; `Tokens`/`Counters`/`Life` are the batched N×δ collapse.
+fn route_labels(state: &GameState, player: PlayerId) -> Vec<String> {
+    state
+        .pending_unbounded_materialization
+        .get(&player)
+        .map(|v| {
+            v.iter()
+                .map(|m| match m {
+                    PersistentAxisMaterialization::DriveSequence { .. } => {
+                        "DriveSequence".to_string()
+                    }
+                    PersistentAxisMaterialization::Tokens(_) => "Tokens".to_string(),
+                    PersistentAxisMaterialization::Counters(_) => "Counters".to_string(),
+                    PersistentAxisMaterialization::Life {
+                        player,
+                        per_cycle_delta,
+                    } => format!("Life({player:?},{per_cycle_delta})"),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn life_of(state: &GameState, player: PlayerId) -> i32 {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("seat is in the dump")
+        .life
+}
+
+/// Resolve everything the collapse left on the stack — the step that EXPOSED the double-count
+/// (the batched route's 50 leftover token-ETB triggers paid the life a second time on the drain).
+fn drain_stack(state: &mut GameState) {
+    for _ in 0..8192 {
+        if state.stack.is_empty() {
+            return;
+        }
+        let WaitingFor::Priority { player } = state.waiting_for.clone() else {
+            return;
+        };
+        apply(state, player, GameAction::PassPriority).expect("pass priority to drain the stack");
+    }
+    panic!("drain_stack: the stack did not empty within 8192 passes");
+}
+
+/// Drive the accepted loop to its boundary, collapse at `n`, drain the stack, and return the
+/// number of Saprolings minted — the whole production tail in one place.
+fn collapse_at(state: &mut GameState, n: u32) -> usize {
+    let saps_before = p0_saproling_ids(state).len();
+    drive_priority_to_next_boundary(state);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice { player, resource: PayableResource::LoopCollapse { .. }, .. }
+                if player == P0
+        ),
+        "the boundary must prompt P0 for the LoopCollapse count, got {:?}",
+        state.waiting_for
+    );
+    apply(state, P0, GameAction::SubmitPayAmount { amount: n })
+        .expect("P0 submits the finite loop-collapse count");
+    drain_stack(state);
+    p0_saproling_ids(state).len() - saps_before
+}
+
+/// R6b-converge (CR 732.2a + CR 603.6a): the two collapse ROUTES must land on the SAME life total.
+///
+/// ARM 1 (ETB-observer board): a real parsed "whenever another creature you control enters, you
+/// gain 1 life" trigger on a P0 permanent. The accept must register `DriveSequence` — NOT the
+/// batched pair — and collapsing at N=5 must pay the life exactly ONCE, measured ACROSS the
+/// collapse *and* the stack drain (the drain is where the double-count surfaced: 596 → 646).
+///
+/// REVERT-PROBE (discriminating, RUN): drop the `life_etb_sourced` conjunct from the route
+/// decision in `materialize_object_growth_shortcut` ⇒ the route flips to
+/// `["Tokens", "Life(PlayerId(0),1)"]` and the life total over-counts by exactly N (the batched
+/// +N at the collapse plus the N real token ETBs on the drain).
+///
+/// MUST-NOT-FLIP, ARM 2: the same dump with NO life gainer grows no life axis (MEASURED:
+/// `unbounded == {TokensCreated}`) and must still register the batched `Tokens`.
+#[test]
+fn batched_and_replay_routes_converge_on_the_same_life_total() {
+    const N: u32 = 5;
+
+    // ── ARM 2 (must-NOT-flip): no life axis ⇒ the pure token loop still BATCHES. ──
+    let mut plain: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    strip_life_conditional_cost_static(&mut plain);
+    drive_all_accept_n(&mut plain, N);
+    assert_eq!(
+        route_labels(&plain, P0),
+        vec!["Tokens".to_string()],
+        "a pure token loop with NO life axis keeps the batched Tokens route"
+    );
+
+    // ── ARM 1 (primary): an ETB-sourced life axis ⇒ the concrete replay, paid exactly once. ──
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE).unwrap();
+    strip_life_conditional_cost_static(&mut state);
+    let etb_life = innkeeper_etb_life_trigger(&state);
+    let host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
+    graft_trigger(&mut state, host, etb_life);
+
+    drive_all_accept_n(&mut state, N);
+    assert_eq!(
+        route_labels(&state, P0),
+        vec!["DriveSequence".to_string()],
+        "an ETB-sourced life axis routes to the concrete replay (revert 4a ⇒ [Tokens, Life(..,1)])"
+    );
+
+    let life_before = life_of(&state, P0);
+    let minted = collapse_at(&mut state, N);
+
+    // (1) POSITIVE reach-guard: the collapse actually ran and minted N real tokens.
+    assert_eq!(
+        minted, N as usize,
+        "the collapse mints exactly N real Saprolings"
+    );
+    // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. The
+    //     batched route pays N at the collapse AND N again when the real ETBs drain ⇒ 2N.
+    let life_per_cycle = 1i32; // the single grafted ETB gainer on P0's battlefield
+    assert_eq!(
+        life_of(&state, P0) - life_before,
+        N as i32 * life_per_cycle,
+        "the ETB life is paid ONCE across collapse+drain (batched route ⇒ over-counts by N)"
+    );
+}
+
+/// MIXED-CAUSE (CR 732.2a): TWO ETB life gainers on P0's board ⇒ a batched route would carry
+/// `per_cycle_delta == 2`. The route must flip to the concrete replay for the WHOLE axis, and a
+/// materialization MUST still be registered (M5 reach-guard: an empty registration would make
+/// every downstream assertion vacuous).
+///
+/// This is why the fix is a ROUTE decision and not a registration-cancelling suppressor: a
+/// suppressor keyed on "an ETB source exists" would drop the whole `Life` registration and
+/// under-apply. Here it would pay N instead of 2N.
+///
+/// REVERT-PROBE (discriminating, RUN): drop the `life_etb_sourced` conjunct ⇒ the route flips to
+/// `["Tokens", "Life(PlayerId(0),2)"]` and the total becomes 4N (2N batched + 2N on the drain).
+#[test]
+fn mixed_cause_life_axis_routes_to_replay() {
+    const N: u32 = 5;
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    strip_life_conditional_cost_static(&mut state);
+    let etb_life = innkeeper_etb_life_trigger(&state);
+    let first = create_life_gainer(&mut state, P0, "Grafted Innkeeper A");
+    graft_trigger(&mut state, first, etb_life.clone());
+    let second = create_life_gainer(&mut state, P0, "Grafted Innkeeper B");
+    graft_trigger(&mut state, second, etb_life);
+
+    drive_all_accept_n(&mut state, N);
+    let labels = route_labels(&state, P0);
+    assert!(
+        !labels.is_empty(),
+        "M5 reach-guard: the route-flipped accept must register SOMETHING, got {labels:?}"
+    );
+    assert_eq!(
+        labels,
+        vec!["DriveSequence".to_string()],
+        "a mixed-cause life axis routes wholesale to the concrete replay, got {labels:?}"
+    );
+
+    let life_before = life_of(&state, P0);
+    let minted = collapse_at(&mut state, N);
+
+    assert_eq!(
+        minted, N as usize,
+        "reach-guard: the collapse minted N tokens"
+    );
+    // DISCRIMINATOR: BOTH gainers pay, once each, per driven cycle ⇒ 2 per cycle.
+    assert_eq!(
+        life_of(&state, P0) - life_before,
+        N as i32 * 2,
+        "per_cycle_delta == 2 is paid in full ONCE (a suppressor ⇒ N, the batched route ⇒ 4N)"
+    );
+}
+
+/// CR 732.2a + CR 109.5: an OPPONENT's controller-agnostic ETB life-gainer sits on the board
+/// alongside P0's own. P0's accept must still materialize P0's FULL delta — a board-level
+/// boolean suppressor ("some ETB life-gainer exists ⇒ drop the life axis") would name the wrong
+/// beneficiary and silently zero P0's gain.
+///
+/// REVERT-PROBE (discriminating, RUN): replace the route flip with a board-level suppressor of
+/// the `Life` registration ⇒ P0's Δlife collapses to 0 while P1's stays N.
+#[test]
+fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
+    const N: u32 = 5;
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    strip_life_conditional_cost_static(&mut state);
+    let etb_life = innkeeper_etb_life_trigger(&state);
+
+    // P0's own gainer ("another creature YOU control enters").
+    let p0_host = create_life_gainer(&mut state, P0, "Grafted Innkeeper");
+    graft_trigger(&mut state, p0_host, etb_life.clone());
+
+    // P1 gets a Soul-Warden-shaped copy: the same parsed GainLife trigger with the `You`
+    // controller narrowing dropped, so P0's tokens feed P1's life too.
+    let mut soul_warden = etb_life;
+    soul_warden.valid_card = None;
+    let p1_host = create_life_gainer(&mut state, P1, "Grafted Soul Warden");
+    graft_trigger(&mut state, p1_host, soul_warden);
+
+    drive_all_accept_n(&mut state, N);
+    let labels = route_labels(&state, P0);
+    assert!(
+        !labels.is_empty(),
+        "reach-guard: the accept must register a materialization, got {labels:?}"
+    );
+    assert_eq!(
+        labels,
+        vec!["DriveSequence".to_string()],
+        "the ETB-sourced axis routes to the replay even with a foreign gainer present"
+    );
+
+    let p0_before = life_of(&state, P0);
+    let p1_before = life_of(&state, P1);
+    let minted = collapse_at(&mut state, N);
+
+    assert_eq!(
+        minted, N as usize,
+        "reach-guard: the collapse minted N tokens"
+    );
+    // DISCRIMINATOR: P0's OWN axis is materialized in full — a board-level suppressor zeroes it.
+    assert_eq!(
+        life_of(&state, P0) - p0_before,
+        N as i32,
+        "P0's own ETB life axis is paid in full despite the opponent's gainer"
+    );
+    // POSITIVE control: the opponent's gainer really did fire, so the assertion above is not
+    // passing because nothing triggered at all.
+    assert_eq!(
+        life_of(&state, P1) - p1_before,
+        N as i32,
+        "the opponent's controller-agnostic gainer also pays once per driven cycle"
+    );
+}
+
+/// R4-C1 COMBINED GATE (4a + 4b together; per-commit green is explicitly insufficient).
+///
+/// The same ETB life gainer as `batched_and_replay_routes_converge_on_the_same_life_total`, but
+/// with `batched: true` — the "Whenever ONE OR MORE creatures you control enter, you gain 1 life"
+/// shape (CR 603.2c). Collapsing at N now produces N SEPARATE same-turn token batches (one per
+/// replayed cycle), so the total is right only if BOTH fixes hold:
+///
+/// * 4a (route): the ETB-sourced axis must take the concrete replay. Reverting it re-introduces
+///   the batched `Life` on top of the real entries ⇒ amplified over-count.
+/// * 4b (index): each replayed cycle's entry must carry its OWN zone-change index. Reverting it
+///   leaves every entry on the `0` placeholder, so `batched_zone_change_already_collected` keys
+///   all N batches to `(def, 0)` and only the FIRST fires ⇒ the trigger-count assertion fails.
+///
+/// Both revert-probes were RUN; observed values are in the assertion messages.
+#[test]
+fn combined_batched_etb_gainer_fires_once_per_replayed_cycle() {
+    const N: u32 = 5;
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    strip_life_conditional_cost_static(&mut state);
+    let mut batched_gainer = innkeeper_etb_life_trigger(&state);
+    batched_gainer.batched = true;
+    let host = create_life_gainer(&mut state, P0, "Grafted Batched Innkeeper");
+    graft_trigger(&mut state, host, batched_gainer);
+
+    drive_all_accept_n(&mut state, N);
+    assert_eq!(
+        route_labels(&state, P0),
+        vec!["DriveSequence".to_string()],
+        "4a: a batched ETB life gainer still routes the axis to the concrete replay"
+    );
+
+    let life_before = life_of(&state, P0);
+    let minted = collapse_at(&mut state, N);
+
+    // POSITIVE reach-guard: N cycles really replayed.
+    assert_eq!(minted, N as usize, "the replay minted one token per cycle");
+    // DISCRIMINATOR (needs BOTH fixes): N distinct same-turn batches ⇒ N fires ⇒ +N.
+    // revert 4b ⇒ all N batches collide on `(def, 0)` ⇒ +1. revert 4a ⇒ batched Life on top ⇒ >N.
+    assert_eq!(
+        life_of(&state, P0) - life_before,
+        N as i32,
+        "each replayed cycle is its OWN batch and fires once (revert 4b ⇒ 1, revert 4a ⇒ more)"
+    );
+}
+
+/// NON-`GainLife` LIFE SOURCE (CR 732.2a + CR 603.6a + CR 702.15b): the Terror-of-the-Peaks
+/// shape — an ETB *damage* trigger on a permanent with LIFELINK. The life axis is just as
+/// ETB-sourced as Soul Warden's, but it never passes through `Effect::GainLife`: it reaches
+/// `apply_life_gain` from `effects/deal_damage.rs`'s CR 702.15b lifelink leg.
+///
+/// This is the fixture that forced the route predicate to be AXIS-shaped rather than
+/// EFFECT-shaped. An earlier form asked whether the trigger's effect chain contained an
+/// `Effect::GainLife`; life reaches `apply_life_gain` from FOUR resolvers (`life.rs`,
+/// `double.rs`, `exchange_life.rs`, `deal_damage.rs`), so that test answers NO here, the loop
+/// keeps the batched `[Tokens, Life]` pair, and the 596-vs-646 double-apply reproduces.
+///
+/// REVERT-PROBE (discriminating, RUN): re-add the `Effect::GainLife` chain test as a conjunct of
+/// `board_has_functioning_etb_trigger` ⇒ this board's route flips back to
+/// `["Tokens", "Life(PlayerId(0),3)"]` and the assertion below fails on the labels.
+#[test]
+fn lifelink_etb_damage_life_axis_routes_to_replay() {
+    const N: u32 = 5;
+    // 3 opponents in this 4p pod × 1 damage each, all dealt by one lifelink source per entry.
+    const LIFELINK_PER_CYCLE: i32 = 3;
+
+    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+        .expect("the real 4p offer dump must deserialize into the current GameState");
+    strip_life_conditional_cost_static(&mut state);
+
+    // The real parsed battlefield-entry trigger CONDITION from this dump's pool, with only its
+    // EFFECT swapped for the Impact-Tremors damage body. What is under test is the life SOURCE,
+    // so the matcher half stays a real card's parse.
+    let mut ping = innkeeper_etb_life_trigger(&state);
+    ping.execute = Some(Box::new(engine::types::ability::AbilityDefinition::new(
+        engine::types::ability::AbilityKind::Spell,
+        Effect::DamageEachPlayer {
+            amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            player_filter: engine::types::ability::PlayerFilter::Opponent,
+        },
+    )));
+    let host = create_life_gainer(&mut state, P0, "Grafted Terror of the Peaks");
+    // CR 702.15b: damage dealt by a source with lifelink also causes its controller to gain that
+    // much life. `DamageContext::from_source` reads the EFFECTIVE keyword set, so the printed +
+    // base grant here is what makes the damage leg gain life.
+    {
+        let o = state.objects.get_mut(&host).expect("grafted host");
+        o.keywords.push(engine::types::keywords::Keyword::Lifelink);
+        o.base_keywords
+            .push(engine::types::keywords::Keyword::Lifelink);
+    }
+    graft_trigger(&mut state, host, ping);
+
+    drive_all_accept_n(&mut state, N);
+    let labels = route_labels(&state, P0);
+    assert!(
+        !labels.is_empty(),
+        "reach-guard: the accept must register a materialization, got {labels:?}"
+    );
+    assert_eq!(
+        labels,
+        vec!["DriveSequence".to_string()],
+        "a LIFELINK-sourced ETB life axis routes to the concrete replay \
+         (an Effect::GainLife shape test ⇒ [Tokens, Life(..,3)]), got {labels:?}"
+    );
+
+    let p0_before = life_of(&state, P0);
+    let p1_before = life_of(&state, P1);
+    let minted = collapse_at(&mut state, N);
+
+    assert_eq!(
+        minted, N as usize,
+        "reach-guard: the collapse minted N tokens"
+    );
+    // POSITIVE control: the damage really was dealt, so the lifelink assertion below cannot pass
+    // because nothing triggered at all.
+    assert_eq!(
+        life_of(&state, P1) - p1_before,
+        -(N as i32),
+        "each replayed cycle pings every opponent once"
+    );
+    // DISCRIMINATOR: the lifelink life is paid ONCE across collapse+drain. The batched route pays
+    // the `Life { per_cycle_delta: 3 }` at the collapse AND the N real token ETBs pay it again on
+    // the drain ⇒ 2 × 3N.
+    assert_eq!(
+        life_of(&state, P0) - p0_before,
+        N as i32 * LIFELINK_PER_CYCLE,
+        "the CR 702.15b lifelink gain is paid ONCE (batched route ⇒ double)"
     );
 }

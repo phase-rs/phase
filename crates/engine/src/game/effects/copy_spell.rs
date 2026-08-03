@@ -158,7 +158,8 @@ pub fn resolve(
 
     // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
     // copy-creation generation and emits `StackPushed`.
-    crate::game::stack::push_copy_to_stack(state, copy_entry, events);
+    let copied_trigger_firing = state.stack_trigger_firings.get(&top_entry.id).copied();
+    crate::game::stack::push_copy_to_stack(state, copy_entry, copied_trigger_firing, events);
 
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.

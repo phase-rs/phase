@@ -4,7 +4,6 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::triggers::{
     apply_resolved_trigger_collection, resolve_and_apply_trigger_collection,
     ConsumedTriggerEventOccurrence, PendingTrigger, PendingTriggerContext,
-    PendingTriggerDispatchOrigin,
 };
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
@@ -34,34 +33,21 @@ fn cause() -> RulesExecutionNodeRef {
 }
 
 fn pending_context(source_id: ObjectId) -> PendingTriggerContext {
-    PendingTriggerContext {
-        pending: PendingTrigger {
+    PendingTriggerContext::single(PendingTrigger::ordinary(
+        source_id,
+        PlayerId(0),
+        None,
+        Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
             source_id,
-            controller: PlayerId(0),
-            condition: None,
-            ability: Box::new(ResolvedAbility::new(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
-                },
-                Vec::new(),
-                source_id,
-                PlayerId(0),
-            )),
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event: None,
-            modal: None,
-            mode_abilities: Vec::new(),
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        trigger_events: Vec::new(),
-        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-    }
+            PlayerId(0),
+        )),
+        0,
+    ))
 }
 
 fn occurrence(player: PlayerId) -> ConsumedTriggerEventOccurrence {

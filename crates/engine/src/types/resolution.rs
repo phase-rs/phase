@@ -12,13 +12,14 @@ use serde_json::{Map, Value};
 use crate::types::ability::{AbilityDefinition, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
-    PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
-    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
-    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-    PostReplacementDrainStack, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
+    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
+    PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
+    PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
+    PendingLifeTotalAssignment, PendingMultiDraw, PendingPerCategoryZoneChoice,
+    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+    PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainStack,
+    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -423,6 +424,13 @@ impl ResolutionStack {
 
     pub fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
+    }
+
+    pub(crate) fn ability_continuations(&self) -> impl Iterator<Item = &PendingContinuation> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+            _ => None,
+        })
     }
 
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
@@ -2454,16 +2462,37 @@ impl ResolutionStateWire {
     ///
     /// Version 1 is read only through the legacy migration path below. Version
     /// 2 is the only shape this adapter writes for protocol-19 clients.
-    fn from_value(value: Value) -> Result<Self, String> {
+    fn from_value(mut value: Value) -> Result<Self, String> {
+        let version = {
+            let object = value
+                .as_object()
+                .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
+            object
+                .get("resolution_state_version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    "resolution state wire is missing a numeric resolution_state_version"
+                        .to_string()
+                })?
+        };
+
+        let decode_mode = match version {
+            LEGACY_RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV1,
+            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV2,
+            _ => {
+                return Err(format!(
+                    "unsupported resolution_state_version {version}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
+                ));
+            }
+        };
+        // `ResolutionStateWire` is a public persistence boundary in its own
+        // right. Its historic-shape preparation and raw-state materialization
+        // both belong to `GameStateDecode`; no wire branch gets a private
+        // `GameState` serde shortcut.
+        GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
         let object = value
             .as_object()
-            .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
-        let version = object
-            .get("resolution_state_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                "resolution state wire is missing a numeric resolution_state_version".to_string()
-            })?;
+            .expect("the checked resolution state wire remains an object");
 
         match version {
             // V1 reader compatibility path: historical keys are consumed here
@@ -2542,8 +2571,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("post_replacement_applied");
                 legacy_object.remove("post_replacement_event_source");
                 legacy_object.remove("post_replacement_event_target");
-                let mut legacy: GameState =
-                    serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
+                let mut legacy = GameStateDecode::materialize_prepared(legacy_value)?;
                 if let Some(frame) = legacy_ability.into_frame()? {
                     legacy.push_ability_continuation(frame);
                 }
@@ -2622,10 +2650,12 @@ impl ResolutionStateWire {
                         legacy.resolution_stack.push_inner(frame);
                     }
                 }
+                normalize_legacy_completed_resolution_carrier(&mut legacy);
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
+                crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
@@ -2655,8 +2685,7 @@ impl ResolutionStateWire {
                     return Err("v2 resolution state must not contain runtime resolution_stack"
                         .to_string());
                 }
-                let state: GameState =
-                    serde_json::from_value(state_value).map_err(|error| error.to_string())?;
+                let state = GameStateDecode::materialize_prepared(state_value)?;
                 frames
                     .validate(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
@@ -2666,6 +2695,7 @@ impl ResolutionStateWire {
                     return Err("v2 resolution frames cannot be represented by the legacy runtime slots"
                         .to_string());
                 }
+                crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })
@@ -2674,6 +2704,27 @@ impl ResolutionStateWire {
                 "unsupported resolution_state_version {other}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
             )),
         }
+    }
+}
+
+/// CR 608.2c: Historical v1 snapshots could retain a completed stack entry as
+/// incidental last-known information until the next resolution. A priority
+/// boundary with no typed resolution frame has no remaining resolution owner,
+/// so restore it as the canonical settled state. A newly announced stack
+/// object belongs to the next priority window; it cannot keep the prior
+/// resolution carrier alive.
+///
+/// This is intentionally limited to the v1 projection above. Current v2
+/// snapshots must preserve their exact active carrier and are validated rather
+/// than normalized during decode.
+fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.resolution_stack.is_empty()
+        && state.pending_resolution_completion.is_none()
+    {
+        state.resolving_stack_entry = None;
+        state.resolving_trigger_firing = None;
+        state.resolution_source_relatch = None;
     }
 }
 
@@ -3514,7 +3565,7 @@ mod tests {
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
     };
 
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
@@ -3538,6 +3589,41 @@ mod tests {
                 "data": { "pending": { "batched": false } }
             }])
         ));
+    }
+
+    #[test]
+    fn v1_restore_clears_completed_carrier_before_a_new_stack_object() {
+        let mut state = GameState::new_two_player(81);
+        let completed = StackEntry {
+            id: ObjectId(81),
+            source_id: ObjectId(81),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(81),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        let next = StackEntry {
+            id: ObjectId(82),
+            source_id: ObjectId(82),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(82),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        state.resolving_stack_entry = Some(completed);
+        state.stack.push_back(next);
+
+        normalize_legacy_completed_resolution_carrier(&mut state);
+
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_trigger_firing.is_none());
+        assert_eq!(state.stack.len(), 1);
     }
 
     fn resolved_draw(source_id: u64) -> ResolvedAbility {

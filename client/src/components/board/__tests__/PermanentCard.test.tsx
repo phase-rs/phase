@@ -1026,6 +1026,24 @@ describe("PermanentCard", () => {
     });
   });
 
+  it("submits an authorized untap decision from the board", () => {
+    const gameState: GameState = {
+      ...makeState(),
+      turn_decision_controller: 0,
+      active_player: 1,
+      waiting_for: { type: "UntapChoice", data: { player: 1, candidates: [1] } },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    const { container } = renderPermanent(new Set(), new Set(), new Set([1]));
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 1, untap: true },
+    });
+  });
+
   it("counts only active board-choice selections when enforcing count limits", () => {
     const gameState: GameState = {
       ...makeState(),

@@ -28,7 +28,12 @@ use crate::types::player::PlayerId;
 /// Returns `true` so the caller can override the spell's post-resolution
 /// destination from graveyard to exile (CR 608.2n displaced by the Rebound
 /// reminder text). Never fails — gating is performed by the caller.
-pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: PlayerId) -> bool {
+pub fn arm_rebound(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) -> bool {
     // CR 702.88a: at the beginning of your next upkeep, you may cast this
     // card from exile without paying its mana cost.
     let mut inner = ResolvedAbility::new(
@@ -71,8 +76,9 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     };
-    crate::game::triggers::install_delayed_trigger(state, rebound_cast);
+    crate::game::triggers::install_delayed_trigger(state, rebound_cast, events);
     true
 }
 
@@ -87,7 +93,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let exiled = ObjectId(100);
         let controller = PlayerId(0);
-        assert!(arm_rebound(&mut state, exiled, controller));
+        let mut events = Vec::new();
+        assert!(arm_rebound(&mut state, exiled, controller, &mut events));
         assert_eq!(state.delayed_triggers.len(), 1);
         let trig = &state.delayed_triggers[0];
         // CR 603.7b: keyed on the controller's next upkeep.
@@ -112,8 +119,19 @@ mod tests {
     #[test]
     fn two_rebound_arms_push_independent_triggers() {
         let mut state = GameState::new_two_player(42);
-        assert!(arm_rebound(&mut state, ObjectId(100), PlayerId(0)));
-        assert!(arm_rebound(&mut state, ObjectId(101), PlayerId(0)));
+        let mut events = Vec::new();
+        assert!(arm_rebound(
+            &mut state,
+            ObjectId(100),
+            PlayerId(0),
+            &mut events
+        ));
+        assert!(arm_rebound(
+            &mut state,
+            ObjectId(101),
+            PlayerId(0),
+            &mut events
+        ));
         // CR 603.7a: each resolution creates a separate delayed trigger.
         assert_eq!(state.delayed_triggers.len(), 2);
         assert_eq!(state.delayed_triggers[0].source_id, ObjectId(100));
@@ -125,7 +143,8 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let exiled = ObjectId(200);
         let controller = PlayerId(1);
-        arm_rebound(&mut state, exiled, controller);
+        let mut events = Vec::new();
+        arm_rebound(&mut state, exiled, controller, &mut events);
         let trig = &state.delayed_triggers[0];
         // CR 514.2: the granted permission must carry UntilEndOfTurn so it
         // is pruned at cleanup if the controller declines the optional cast.

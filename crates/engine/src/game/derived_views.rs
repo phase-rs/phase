@@ -385,10 +385,81 @@ pub struct DerivedViews {
 /// to avoid an O(n) clone of `state.objects` and other owned collections
 /// (GameState is not rpds-backed at the top level). The wire shape is
 /// `{ state: <GameState>, derived: <DerivedViews> }`.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
+}
+
+impl Serialize for ClientGameStateRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct ClientGameStateEnvelope<'a> {
+            state: &'a serde_json::Value,
+            derived: &'a DerivedViews,
+        }
+
+        let state = client_state_wire_value(self.state).map_err(serde::ser::Error::custom)?;
+        ClientGameStateEnvelope {
+            state: &state,
+            derived: &self.derived,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Produces the client-only state representation without changing the trusted
+/// persistence schema of [`GameState`]. Delayed-trigger receipts and their
+/// allocators authorize replay/transition handling; clients receive neither
+/// those private capabilities nor the resolved journal that contains them.
+fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(state)?;
+    let Some(root) = value.as_object_mut() else {
+        return Ok(value);
+    };
+
+    root.remove("next_delayed_trigger_token");
+    root.remove("next_delayed_trigger_instance");
+    root.remove("pending_trigger_firing");
+    root.remove("stack_trigger_firings");
+    root.remove("resolving_trigger_firing");
+    root.remove("resolved_rules_journal");
+
+    redact_private_trigger_firing(&mut value);
+
+    Ok(value)
+}
+
+/// Removes every private firing/provenance carrier recursively. Resolution
+/// frames evolve frequently, so redacting only named queue paths would leak a
+/// newly nested continuation without any compiler signal.
+fn redact_private_trigger_firing(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in [
+                "provenance",
+                "firing",
+                "firing_classification",
+                "trigger_firing",
+                "stack_trigger_firings",
+                "resolving_trigger_firing",
+            ] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                redact_private_trigger_firing(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                redact_private_trigger_firing(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl<'a> ClientGameStateRef<'a> {
@@ -722,6 +793,54 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
 
+    // CR 732.2c: once every player accepted the shortcut it IS taken, at the finite N the
+    // proposal named — so an axis with a scheduled collapse is already BOUNDED and must not
+    // render `∞` anywhere beside the finite totals it is growing. ONE authority
+    // (`GameState::scheduled_collapse_axes`), THREE consumers below: the per-axis resource
+    // badge rows, the ∞ object pile, and the ∞ counter pills. The gate is computed here,
+    // once per controller, precisely so no surface can re-derive it and drift — a HUD that
+    // hides the resource badge while a card group still shows ∞ is internally inconsistent.
+    //
+    // Filter the PROJECTION, never the store: `unbounded_resources` +
+    // `unbounded_loop_enablers` stay in CR 104.4b / CR 110.1 lockstep until the CR 500.5
+    // boundary applies the growth, which is what keeps `zones::apply_zone_exit_cleanup`'s
+    // defuse armed in the meantime.
+    //
+    // FAIL-CLOSED: only axes a registered materialization really collapses are hidden, so an
+    // unregistered ∞ axis (a mana engine registers none) still renders.
+    //
+    // CLASS RULE for the hide-set: hide only axes whose growth is still DEFERRED; never hide an
+    // axis that is ALREADY MATERIALIZED and spendable right now. `Tokens` / `Counters` / `Life`
+    // are deferred by construction — the growth is not on the board until the boundary applies
+    // it — so an `∞` for them is exactly the lie this gate kills. A `DriveSequence` is the one
+    // item that does NOT name a deferral: its `collapsed_axes` is `proposal.unbounded`, i.e.
+    // EVERY axis of the whole loop, and a `Mana(_)` among them is live *now* —
+    // `mana_payment::refill_infinite_mana` tops that controller's pool back to
+    // `INFINITE_MANA_PER_TYPE` off the STORE (which this projection deliberately never touches)
+    // after every action. Hiding it would show no `∞` beside a pool that keeps refilling: the
+    // same internally-inconsistent HUD as an `∞ Life` badge on a finite life total, inverted.
+    // CR 500.5: `turns::drain_pending_phase_transition_progress` clears the mana axis when the
+    // step/phase ends, and THAT is what legitimately ends the badge — not this projection.
+    //
+    // `Mana(_)` is today's only already-materialized axis: census of production readers of
+    // `GameState::unbounded_resources` (`refill_infinite_mana`, the CR 500.5 clear in `turns`,
+    // and this projection) shows it is the only axis any reader turns back into a spendable
+    // resource. Widen this `retain` only for an axis that gains the same property.
+    let scheduled_collapse: BTreeMap<PlayerId, BTreeSet<ResourceAxis>> = state
+        .pending_unbounded_materialization
+        .iter()
+        .map(|(&controller, items)| {
+            let mut axes = state.scheduled_collapse_axes(items);
+            axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)));
+            (controller, axes)
+        })
+        .collect();
+    let collapse_scheduled = |controller: PlayerId, axis: &ResourceAxis| -> bool {
+        scheduled_collapse
+            .get(&controller)
+            .is_some_and(|axes| axes.contains(axis))
+    };
+
     // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
     // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
     // short-circuit below) and stays empty (field omitted) when no loop is
@@ -729,6 +848,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (`attribution_player`); the frontend only formats each axis to a family.
     for (&controller, axes) in &state.unbounded_resources {
         for &axis in axes {
+            if collapse_scheduled(controller, &axis) {
+                continue;
+            }
             views.unbounded_resources.push(UnboundedResourceView {
                 player: attribution_player(axis, controller),
                 axis,
@@ -740,7 +862,15 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // winning controller's tapped fodder-class members — dropping any that have since
     // left the battlefield (stale member). Public board state (no viewer filtering);
     // the frontend renders `∞` on any group whose members are all pile members.
-    for ids in state.unbounded_loop_pile.values() {
+    //
+    // CR 732.2c: same gate, same authority as the badge rows above. The pile IS the
+    // `TokensCreated` axis — `clear_collapsed_materializations` drops it on exactly that
+    // axis collapsing — so once that axis has a scheduled finite mint the group must stop
+    // rendering ∞ in lockstep with its resource badge.
+    for (&controller, ids) in &state.unbounded_loop_pile {
+        if collapse_scheduled(controller, &ResourceAxis::TokensCreated) {
+            continue;
+        }
         for id in ids {
             if state.battlefield.contains(id) {
                 views.unbounded_pile.push(*id);
@@ -754,15 +884,28 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // the battlefield (stale member). Display-only per-object channel mirroring
     // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
     // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
-    for targets in state.unbounded_counter_targets.values() {
+    //
+    // CR 732.2c: same gate, same authority. A pill's axis is derived by the SHARED
+    // `(object, counter) -> ResourceAxis` mapping the collapse itself uses
+    // (`collapsed_counter_axis`), so a pill can never disagree with the badge it mirrors.
+    // The class lookup is LIVE by design here: this loop only emits pills for bearers still
+    // on the battlefield, so the object is present and its class is current.
+    for (&controller, targets) in &state.unbounded_counter_targets {
         for (id, ct) in targets {
-            if state.battlefield.contains(id) {
-                views
-                    .unbounded_counters
-                    .entry(*id)
-                    .or_default()
-                    .push(ct.clone());
+            if !state.battlefield.contains(id) {
+                continue;
             }
+            if collapse_scheduled(
+                controller,
+                &crate::types::game_state::collapsed_counter_axis(state, *id, ct),
+            ) {
+                continue;
+            }
+            views
+                .unbounded_counters
+                .entry(*id)
+                .or_default()
+                .push(ct.clone());
         }
     }
 
@@ -1420,18 +1563,21 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::DisplaySource;
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
-        TargetFilter, TargetRef,
+        DelayedTriggerCondition, Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot,
-        WaitingFor, ZoneChangeRecord,
+        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
+        StackPaidSnapshot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
+    };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
@@ -2561,6 +2707,177 @@ mod tests {
             .get(&PlayerId(1))
             .expect("P1 entry survives round-trip");
         assert_eq!(from_p1[0].damage, 14);
+    }
+
+    #[test]
+    fn client_wire_omits_private_delayed_trigger_authority() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(3_002),
+            PlayerId(0),
+            "Delayed source".into(),
+            Zone::Battlefield,
+        );
+        let provenance = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(17),
+            instance: DelayedTriggerInstanceId(23),
+            source_id: source,
+        };
+        state.next_delayed_trigger_token = 18;
+        state.next_delayed_trigger_instance = 24;
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "client-wire fixture".into(),
+                    description: None,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            controller: PlayerId(0),
+            source_id: source,
+            one_shot: true,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::ReceiptEligible(
+                provenance,
+            ),
+        });
+        state
+            .stack_trigger_firings
+            .insert(ObjectId(999), TriggerFiring::ReceiptEligible(provenance));
+        state.resolving_trigger_firing = Some(TriggerFiring::ReceiptEligible(provenance));
+        let delayed_pending_context = || {
+            PendingTriggerContext::delayed_for_test(
+                PendingTrigger {
+                    source_id: source,
+                    controller: PlayerId(0),
+                    condition: None,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Unimplemented {
+                            name: "delayed queue fixture".into(),
+                            description: None,
+                        },
+                        Vec::new(),
+                        source,
+                        PlayerId(0),
+                    )),
+                    timestamp: 0,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: None,
+                    modal: None,
+                    mode_abilities: Vec::new(),
+                    description: None,
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                },
+                provenance,
+            )
+        };
+        state.pending_trigger = Some(Box::new(delayed_pending_context().pending));
+        state.pending_trigger_firing = Some(TriggerFiring::ReceiptEligible(provenance));
+        state.deferred_triggers.push(delayed_pending_context());
+        state.pending_trigger_order = Some(crate::types::game_state::PendingTriggerOrder {
+            groups: vec![TriggerOrderGroup {
+                controller: PlayerId(0),
+                triggers: vec![delayed_pending_context()],
+                ordered: false,
+            }],
+            resume_after_ordering: None,
+        });
+
+        let persisted = serde_json::to_value(&state).expect("serialize trusted state");
+        assert_eq!(persisted["next_delayed_trigger_token"], 18);
+        assert_eq!(persisted["next_delayed_trigger_instance"], 24);
+        assert_eq!(
+            persisted["delayed_triggers"][0]["provenance"]["ReceiptEligible"]["token"],
+            17
+        );
+        assert!(persisted["stack_trigger_firings"].is_object());
+        assert_eq!(
+            persisted["resolving_trigger_firing"]["ReceiptEligible"]["instance"],
+            23,
+        );
+        assert_eq!(
+            persisted["pending_trigger_firing"]["ReceiptEligible"]["token"], 17,
+            "test precondition: trusted persistence retains active delayed authority"
+        );
+        assert_eq!(
+            persisted["deferred_triggers"][0]["firing"]["ReceiptEligible"]["token"], 17,
+            "test precondition: trusted persistence retains delayed queue authority"
+        );
+        assert_eq!(
+            persisted["pending_trigger_order"]["groups"][0]["triggers"][0]["firing"]
+                ["ReceiptEligible"]["instance"],
+            23,
+            "test precondition: trusted ordering queue retains delayed authority"
+        );
+
+        let client = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+            .expect("serialize client state");
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let filtered_client = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered client state");
+
+        for client_state in [&client["state"], &filtered_client["state"]] {
+            let error = serde_json::from_value::<GameState>(client_state.clone())
+                .expect_err("redacted client state must not restore as trusted authority");
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending trigger has no firing carrier"),
+                "client redaction must fail only because it removes private trigger authority: {error}"
+            );
+            for private_field in [
+                "next_delayed_trigger_token",
+                "next_delayed_trigger_instance",
+                "pending_trigger_firing",
+                "stack_trigger_firings",
+                "resolving_trigger_firing",
+                "resolved_rules_journal",
+            ] {
+                assert!(
+                    client_state.get(private_field).is_none(),
+                    "client wire must omit {private_field}"
+                );
+            }
+            assert!(
+                client_state["delayed_triggers"][0]
+                    .get("provenance")
+                    .is_none(),
+                "client wire must omit delayed-trigger provenance"
+            );
+            for contexts in [
+                &client_state["deferred_triggers"],
+                &client_state["pending_trigger_order"]["groups"][0]["triggers"],
+            ] {
+                let contexts = contexts.as_array().expect("nonempty trigger queue");
+                assert!(
+                    !contexts.is_empty(),
+                    "test precondition: trigger queue must remain present"
+                );
+                for context in contexts {
+                    assert!(
+                        context.get("firing").is_none(),
+                        "client wire must omit delayed firing classification"
+                    );
+                    let context = context.to_string();
+                    assert!(
+                        !context.contains("\"token\"") && !context.contains("\"instance\""),
+                        "client queue must omit delayed authority: {context}"
+                    );
+                }
+            }
+        }
     }
 
     /// CR 303.4 + CR 702.5: A Player-attached Aura on the battlefield must

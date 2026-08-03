@@ -41,6 +41,91 @@ pub struct LogicalZoneChangeGroupId(pub u64);
 #[serde(transparent)]
 pub struct TrackedSetId(pub u64);
 
+/// CR 603.7: Monotonic identity of one installed delayed triggered ability.
+///
+/// This is deliberately distinct from its source object: multiple delayed
+/// triggers may be created by the same source, and a source can change zones
+/// before its trigger fires.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct DelayedTriggerToken(pub u64);
+
+/// CR 603.7: Monotonic identity for one durable delayed-trigger installation.
+///
+/// This remains separate from [`DelayedTriggerToken`]: the token identifies the
+/// installation receipt while this value identifies the specific installed
+/// occurrence. Keeping both prevents a legacy record from being rebound to a
+/// later trigger merely because its source object is the same.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct DelayedTriggerInstanceId(pub u64);
+
+/// Private durable origin for a delayed-trigger installation.
+///
+/// This belongs to engine scheduling state, never to a public `GameEvent`.
+/// [`DelayedInstallIdentity::LegacyDelayed`] represents an older persisted
+/// record that cannot be matched unambiguously to a durable install command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct DelayedTriggerOrigin {
+    pub(crate) token: DelayedTriggerToken,
+    pub(crate) instance: DelayedTriggerInstanceId,
+    pub(crate) source_id: ObjectId,
+}
+
+/// Durable identity carried by a CR 603.7 delayed-trigger installation.
+///
+/// A legacy installation remains a delayed trigger for rules scheduling, but
+/// lacks the command-backed root required for prospective receipt tracking.
+/// A fresh installation always carries the full root and can be transported to
+/// the corresponding [`TriggerFiring`] without re-deriving it from a source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum DelayedInstallIdentity {
+    #[default]
+    LegacyDelayed,
+    ReceiptEligible(DelayedTriggerOrigin),
+}
+
+impl DelayedInstallIdentity {
+    pub(crate) fn origin(self) -> Option<DelayedTriggerOrigin> {
+        match self {
+            Self::LegacyDelayed => None,
+            Self::ReceiptEligible(origin) => Some(origin),
+        }
+    }
+
+    pub(crate) fn firing(self) -> TriggerFiring {
+        match self {
+            Self::LegacyDelayed => TriggerFiring::LegacyDelayed,
+            Self::ReceiptEligible(origin) => TriggerFiring::ReceiptEligible(origin),
+        }
+    }
+}
+
+/// Private classification of a triggered-ability firing.
+///
+/// CR 603.7: a delayed ability remains distinct from an ordinary triggered
+/// ability even when an older persisted delayed record has no reconstructible
+/// installation receipt. `UnknownLegacy` is intentionally fail-closed and is
+/// never inferred from an omitted historical discriminator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum TriggerFiring {
+    Ordinary,
+    LegacyDelayed,
+    ReceiptEligible(DelayedTriggerOrigin),
+    #[default]
+    UnknownLegacy,
+}
+
+impl TriggerFiring {
+    pub(crate) fn is_delayed(self) -> bool {
+        matches!(self, Self::LegacyDelayed | Self::ReceiptEligible(_))
+    }
+}
+
 /// Sentinel `incarnation` bound to a pre-migration `crew_activated_this_turn`
 /// record that serialized as a bare `ObjectId` (no incarnation was stored).
 ///

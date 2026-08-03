@@ -239,6 +239,7 @@ fn cast_one_copy(
                 actual_mana_spent: 0,
             },
         },
+        None,
         events,
     );
     events.push(GameEvent::SpellCast {

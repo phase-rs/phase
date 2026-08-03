@@ -2,8 +2,11 @@ mod candidates;
 mod combat_withdrawal;
 mod context;
 mod copy;
+mod evoke;
 pub mod filter;
 mod payment_continuation;
+mod prospective_mana;
+mod swarm;
 mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
@@ -47,6 +50,9 @@ pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
 };
+pub use evoke::{
+    evoke_prompt_facts, EvokeImmediateOutcome, EvokePromptDescriptor, EvokePromptFacts,
+};
 pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
@@ -55,6 +61,16 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
+pub use prospective_mana::{
+    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
+    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+};
+pub use swarm::{
+    adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
+    SWARM_WITNESS_MAX_DECLARATIONS,
+};
+#[cfg(feature = "test-support")]
+pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
 pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.

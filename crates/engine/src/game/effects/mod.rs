@@ -532,6 +532,28 @@ pub(crate) fn matches_player_scope(
                             && candidate_player_scalar_with_state(state, p, controller, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
+                    // CR 608.2c + CR 608.2h + CR 109.4: "each player who
+                    // controlled/owned a <filter> this way" — the candidate must
+                    // satisfy both `relation` and possession of a member of the
+                    // most recent tracked object set. Delegates to the single
+                    // authority shared with `quantity::resolve_player_count`.
+                    PlayerFilter::TrackedSetPossessor {
+                        relation,
+                        possession,
+                        filter,
+                        caused_by,
+                    } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && crate::game::quantity::possessed_tracked_set_member(
+                                state,
+                                p.id,
+                                *possession,
+                                filter,
+                                *caused_by,
+                                controller,
+                                source_id,
+                            )
+                    }
                 }
         })
 }
@@ -687,6 +709,22 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
+fn restore_continuation_trigger_firing(
+    state: &mut GameState,
+    continuation_firing: Option<crate::types::identifiers::TriggerFiring>,
+) {
+    match (state.resolving_trigger_firing, continuation_firing) {
+        // A paused triggered ability retains its live classification until the
+        // next stack resolution. A missing or disagreeing continuation carrier
+        // must not erase that delayed identity; decoded state rejects either
+        // malformed shape through `validate_trigger_firing_coherence`.
+        (Some(live), Some(stashed)) if live != stashed => {}
+        (Some(_), _) => {}
+        (None, Some(stashed)) => state.resolving_trigger_firing = Some(stashed),
+        (None, None) => {}
+    }
+}
+
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     counters::drain_pending_counter_moves(state, events);
     counters::drain_pending_counter_removals(state, events);
@@ -744,7 +782,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             parent_kind,
             search_attach_host,
             trigger_context,
+            trigger_firing,
         } = cont;
+        restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
         let source_id = chain.source_id;
         // CR 608.2: replay the resolving ability's snapshotted trigger
@@ -1613,6 +1653,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             parent_kind,
             search_attach_host,
             trigger_context,
+            trigger_firing,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -1624,6 +1665,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 // ability's resolution is anchored to its earliest pause, not
                 // re-latched to whatever is live at splice time.
                 trigger_context,
+                trigger_firing,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -2221,6 +2263,7 @@ fn try_begin_reflexive_target_selection_inner(
             events,
         );
         state.pending_trigger = Some(Box::new(pending_for_state));
+        state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
         state.pending_trigger_entry = Some(entry_id);
 
         match crate::game::engine::begin_pending_trigger_target_selection(state)
@@ -2314,6 +2357,7 @@ fn try_begin_reflexive_target_selection_inner(
         events,
     );
     state.pending_trigger = Some(Box::new(pending_for_state));
+    state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
     state.pending_trigger_entry = Some(entry_id);
     // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
     // before targets are chosen; finalization mutates this pending entry once
@@ -4626,21 +4670,26 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => {
-            matches!(
-                qty,
-                QuantityRef::TrackedSetSize
-                    | QuantityRef::FilteredTrackedSetSize { .. }
-                    | QuantityRef::TrackedSetAggregate { .. }
-                    | QuantityRef::DistinctCardTypes {
-                        source: CardTypeSetSource::TrackedSet { .. }
-                    }
-                    | QuantityRef::DistinctSubtypes {
-                        source: CardTypeSetSource::TrackedSet { .. },
-                        ..
-                    }
-            )
-        }
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::TrackedSetAggregate { .. }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+            }
+            | QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+                ..
+            } => true,
+            // CR 608.2c: a player-count whose filter is keyed on the chain's
+            // tracked object set is a CONSUMER of that set — the preceding
+            // producer must publish it, or the count resolves to 0. This is the
+            // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
+            // reference is nested inside the PLAYER filter, not the quantity.
+            // Not every `PlayerCount` qualifies, so it must be asked per filter.
+            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            _ => false,
+        },
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -4654,6 +4703,57 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             quantity_expr_references_tracked_set(left)
                 || quantity_expr_references_tracked_set(right)
         }
+    }
+}
+
+/// CR 608.2c: Does this player filter read the chain's tracked object set?
+///
+/// EXHAUSTIVE BY DESIGN — no `_` arm, and it must stay that way. Its sibling
+/// predicates (`quantity_expr_references_tracked_set`,
+/// `filter_references_tracked_set`) are `matches!`/wildcard allowlists that a
+/// new variant joins silently and WRONGLY: a non-listed consumer compiles
+/// clean, its producer never publishes, and the quantity resolves to 0 instead
+/// of its real value. This one makes the compiler demand an answer. Grouped `|`
+/// arms keep it readable; adding a variant to the `false` group is a decision,
+/// not an accident.
+fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
+    match filter {
+        // Reads `tracked_object_sets` + `tracked_set_member_causes`, which are
+        // published only when `next_sub_needs_tracked_set` reports a consumer.
+        PlayerFilter::TrackedSetPossessor { .. } => true,
+        // Reads `last_zone_changed_ids` — a DIFFERENT ledger, unconditionally
+        // recomputed after every effect and needing no publication gate.
+        PlayerFilter::ZoneChangedThisWay
+        // Reads the CR 701.x `player_actions_this_way` ledger.
+        | PlayerFilter::PerformedActionThisWay { .. }
+        // Plain relations, turn/combat ledgers, event-context anchors, vote
+        // ballots, linked-exile piles and per-candidate board/scalar
+        // comparisons — none consults `tracked_object_sets`.
+        | PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => false,
+        // The negation wrapper inherits its inner filter's consumption: an
+        // "all except <tracked-set possessor>" scope still needs the set.
+        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
     }
 }
 
@@ -6835,6 +6935,27 @@ fn previous_effect_amount_from_events(
         // event slice that may contain result-table branch effects or nested
         // rolls interleaved with the outer dice.
         Effect::RollDie { .. } => return state.die_result_this_resolution,
+        // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
+        // single authority for how many cards a draw instruction delivered — it
+        // commits the whole instruction's post-replacement total to
+        // `state.last_effect_count` once the sequence completes (a unit replaced
+        // by something else contributes 0; one doubled by a count modifier
+        // contributes its post-replacement count). Read that committed total
+        // instead of re-summing draw events, exactly as the `RollDie` arm above
+        // defers to `die_result_this_resolution`, so "draw N cards, then discard
+        // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
+        // Laquatus's Creativity; Last Stand) reads the true total rather than a
+        // per-unit or pre-replacement count. The same stamp feeds the condition
+        // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
+        // "if you draw one or more cards this way, discard two cards".
+        //
+        // Returns early rather than falling through the `> 0` filter below: a
+        // draw that delivered zero cards is a real zero result and must stamp
+        // `Some(0)`. "Draw a card for each Island you control, then discard that
+        // many cards" (Last Stand) controlling no Islands has to discard 0, not
+        // inherit the life-gain amount its preceding chain step left behind in
+        // `last_effect_amount`.
+        Effect::Draw { .. } => return state.last_effect_count,
         _ => 0,
     };
 
@@ -9809,15 +9930,63 @@ fn resolve_chain_body(
         // graveyard-redirect rider by stamping the granted casting permission. Do
         // not also execute the parser's structural rider (`ChangeZone` /
         // `PutAtLibraryPosition` targeting `ParentTarget`) as an immediate move,
-        // or the graveyard card leaves before the player can cast it. CastFromZone
-        // recognizes any redirect destination (exile / library / hand); Counter
-        // only ever carries the exile sub-ability rider (its library/hand redirect
-        // rides `countered_spell_zone`) and consumes it during `counter::resolve`
-        // (stack -> exile directly) — skip the follow-up move either way.
-        if (matches!(&ability.effect, Effect::CastFromZone { .. })
-            && cast_from_zone::graveyard_destination_rider(sub).is_some())
-            || (matches!(&ability.effect, Effect::Counter { .. })
-                && cast_from_zone::is_graveyard_exile_rider_subability(sub))
+        // or the graveyard card leaves before the player can cast it.
+        //
+        // Diluvian Primordial's canonical per-opponent fanout translates that
+        // CastFromZone into a FreeCastWindow. Consume its *direct* redirect
+        // rider rather than resolving it as an instruction: when a window opens,
+        // park the rider's direct SequentialSibling tail until that window
+        // closes; when none opens, resolve that tail immediately. This keeps an
+        // uncast selected card in its graveyard while preserving a later printed
+        // instruction such as "Then draw a card."
+        // Other CastFromZone shapes keep the established metadata-only rider
+        // handling. Counter only ever carries the exile sub-ability rider (its
+        // library/hand redirect rides `countered_spell_zone`) and consumes it
+        // during `counter::resolve` (stack -> exile directly).
+        let direct_cast_from_zone_graveyard_rider =
+            matches!(&ability.effect, Effect::CastFromZone { .. })
+                && cast_from_zone::graveyard_destination_rider(sub).is_some();
+        if direct_cast_from_zone_graveyard_rider {
+            let is_per_opponent_fanout =
+                crate::game::ability_utils::is_per_opponent_target_fanout(ability);
+            if is_per_opponent_fanout {
+                let mut direct_sequential_tail = sub
+                    .sub_ability
+                    .as_deref()
+                    .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
+                    .cloned();
+                if let Some(tail) = direct_sequential_tail.as_mut() {
+                    if should_propagate_parent_targets(ability, tail) {
+                        tail.targets = ability.targets.clone();
+                    }
+                    apply_parent_chain_context(
+                        tail,
+                        ability,
+                        effect_context_object.as_ref(),
+                        state,
+                    );
+                }
+                if matches!(
+                    state.waiting_for,
+                    WaitingFor::CastOffer {
+                        kind: CastOfferKind::FreeCastWindow { .. },
+                        ..
+                    }
+                ) {
+                    if let Some(tail) = direct_sequential_tail {
+                        prepend_to_pending_continuation(state, tail);
+                    }
+                } else if let Some(tail) = direct_sequential_tail {
+                    resolve_ability_chain(state, &tail, events, depth + 1)?;
+                }
+                return Ok(());
+            }
+            // Generic CastFromZone riders remain metadata consumed by the
+            // granting effect. Only the canonical fanout needs tail handling.
+            return Ok(());
+        }
+        if matches!(&ability.effect, Effect::Counter { .. })
+            && cast_from_zone::is_graveyard_exile_rider_subability(sub)
         {
             return Ok(());
         }
@@ -11699,6 +11868,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
     }
 }
@@ -12087,7 +12257,10 @@ mod tests {
         AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
         MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
-    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
+        TrackedSetId, TriggerFiring,
+    };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
@@ -12105,6 +12278,31 @@ mod tests {
     // that much damage. Before the fix the returned card was not bound as the
     // earlier-instruction referent (only PUBLIC-zone moves were), so the damage
     // resolved to 0.
+    #[test]
+    fn continuation_resume_preserves_live_delayed_trigger_firing() {
+        let mut state = GameState::new_two_player(42);
+        let live = TriggerFiring::ReceiptEligible(DelayedTriggerOrigin {
+            token: DelayedTriggerToken(7),
+            instance: DelayedTriggerInstanceId(11),
+            source_id: ObjectId(13),
+        });
+        state.resolving_trigger_firing = Some(live);
+
+        restore_continuation_trigger_firing(&mut state, None);
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(live),
+            "a missing continuation carrier must not erase active delayed identity"
+        );
+
+        restore_continuation_trigger_firing(&mut state, Some(TriggerFiring::Ordinary));
+        assert_eq!(
+            state.resolving_trigger_firing,
+            Some(live),
+            "a disagreeing continuation carrier must not overwrite active delayed identity"
+        );
+    }
+
     #[test]
     fn volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand() {
         use crate::game::scenario::{GameScenario, P0, P1};
@@ -12786,6 +12984,65 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 608.2c — issue #6943 (Faerie Slumber Party). The Seasoned Pyromancer
+    /// shape ONE LAYER UP: the tracked-set reference is nested inside the PLAYER
+    /// filter of a `PlayerCount`, not in the quantity itself.
+    ///
+    /// This is the cheapest layer at which the de-registration regression is
+    /// detectable, and its signature here is unique. `PlayerCount` is not
+    /// intrinsically a tracked-set consumer, so the enclosing predicate must ask
+    /// `player_filter_references_tracked_set` per filter. If it does not, the
+    /// producing `BounceAll` never publishes, the set selection returns `None`,
+    /// every player is rejected, and the count silently resolves to 0 — the card
+    /// creates ZERO tokens instead of six, with nothing failing to compile.
+    ///
+    /// Revert discriminator: dropping the `QuantityRef::PlayerCount` arm from
+    /// `quantity_expr_references_tracked_set` (i.e. restoring the `matches!`
+    /// allowlist) makes the first assertion fail.
+    #[test]
+    fn repeat_for_player_count_over_tracked_set_possessors_references_tracked_set() {
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+
+        // Faerie Slumber Party's repeat_for: "for each opponent who controlled a
+        // creature returned this way".
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    caused_by: None,
+                },
+            },
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: PlayerCount over TrackedSetPossessor is a tracked-set CONSUMER — \
+             without this the producer never publishes and the count resolves to 0"
+        );
+
+        // Paired negative: the arm must be FILTER-discriminating, not a blanket
+        // `PlayerCount => true` that would make every existing player-count card
+        // force a spurious tracked-set publication.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        });
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "a plain PlayerCount{{Opponent}} reads no tracked set and must NOT force publication"
         );
     }
 

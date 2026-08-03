@@ -62,9 +62,9 @@ fn load_migrated_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the real 4p gameState must deserialize into the current GameState");
-    PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("the real 4p gameState restores through the persisted ingress")
+        .into_game_state()
 }
 
 /// The acting player for the current beat (choice prompts carry their own `player`; a priority beat
@@ -294,18 +294,25 @@ fn kilo_reinjected_pinless_history_suppresses_offer() {
     );
 }
 
-/// Drive the APNAP accept of the ∞ offer through the PUBLIC `apply()` boundary: P0 (the
-/// proposer) declares `Fixed(1)`, then every prompted opponent accepts in turn order until the
-/// protocol closes back to ordinary priority (CR 800.4a). `template: None` skips declare-time
-/// pin validation; the materialize re-derives from the intact `last_loop_action_sequence`.
+/// Drive the APNAP accept of the ∞ offer through the PUBLIC `apply()` boundary at the harness
+/// default of one cycle. CR 732.2c makes the accepted count BINDING on the boundary collapse
+/// prompt, so a caller that later collapses to N must use [`drive_all_accept_n`].
 fn drive_all_accept(state: &mut GameState) {
+    drive_all_accept_n(state, 1);
+}
+
+/// Drive the APNAP accept at `n`: P0 (the proposer) declares `Fixed(n)`, then every prompted
+/// opponent accepts in turn order until the protocol closes back to ordinary priority (CR
+/// 800.4a). `template: None` skips declare-time pin validation; the materialize re-derives from
+/// the intact `last_loop_action_sequence`. CR 732.2c: `n` bounds the CR 500.5 collapse prompt.
+fn drive_all_accept_n(state: &mut GameState, n: u32) {
     use engine::analysis::decision_template::IterationCount;
     use engine::analysis::loop_check::ShortcutResponse;
     apply(
         state,
         P0,
         GameAction::DeclareShortcut {
-            count: IterationCount::Fixed(1),
+            count: IterationCount::Fixed(n),
             template: None,
         },
     )
@@ -409,9 +416,40 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
         "display-only: Pentad's REAL charge count is unchanged by the ∞ mark (CR 701.34a)"
     );
 
-    // (3) DERIVED VIEW (FLIPS on revert): the projection surfaces Pentad's charge as ∞ for the
-    // FE, filtered to battlefield objects.
-    let views = derive_views(&state, None);
+    // (3a) R6a (CR 732.2c) — THE PER-SURFACE COUNTER-PILL GATE, on a REAL production fixture.
+    // This accept registers an observed-growth `DriveSequence` naming the charge-counter axis,
+    // so the collapse is already bounded at the accepted N and the pill must stop rendering ∞
+    // in lockstep with its resource badge — a HUD that hides one and shows the other is
+    // internally inconsistent. Filter the PROJECTION, never the store: (2) above (the store
+    // write) is unchanged and still passes.
+    //
+    // REVERT-PROBE: delete the `collapse_scheduled(..)` guard in `derive_views`' counter-pill
+    // loop ⇒ the pill re-renders ⇒ THIS assertion FAILS while the pile and badge gates stay
+    // green (so a one-surface regression is visible).
+    assert!(
+        derive_views(&state, None).unbounded_counters.is_empty(),
+        "CR 732.2c: a scheduled finite collapse hides the ∞ charge pill (the store keeps it)"
+    );
+
+    // (3b) DERIVED VIEW (FLIPS on revert): with nothing scheduled the projection surfaces
+    // Pentad's charge as ∞ for the FE, filtered to battlefield objects.
+    //
+    // NOT A SYNTHETIC STATE — "counter targets present, stash absent" is engine-reachable,
+    // and this is the production sequence (cited so the next auditor need not re-derive it):
+    // a CR 732.2b DECLINE of the batched counter axis. A counter OBSERVER drifts onto the
+    // board inside the accept→boundary window, so at `SubmitPayAmount` the handler's
+    // `take_pending_materialization` empties the stash FIRST, then the `Counters` arm hits
+    // `if counter_observed_now { continue; }` (`game::engine_resolution_choices`) and never
+    // pushes that item into `collapsed`. `clear_collapsed_materializations`' `surviving_
+    // targets` filter (`types::game_state`) therefore filters nothing ⇒ `unbounded_counter_
+    // targets` is preserved with the stash already gone.
+    // The shared "display channel survives a stash the submit already emptied" half is ASSERTED
+    // (not merely argued) by the sibling `combo_infinite_pile::med_tokens_boundary_mint_pause_
+    // preserves_replacement_choice`, whose closing two assertions measure exactly that shape on
+    // the pile channel after a real `SubmitPayAmount`.
+    let mut unscheduled = state.clone();
+    unscheduled.pending_unbounded_materialization.clear();
+    let views = derive_views(&unscheduled, None);
     assert_eq!(
         views.unbounded_counters.get(&PENTAD),
         Some(&vec![charge.clone()]),
@@ -492,7 +530,8 @@ fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
     // `materialize_object_growth_shortcut`, where `counter_growth_is_observed` is true for the
     // real proliferate loop, so a DriveSequence stash is REGISTERED (not grafted). Accept is
     // display-only: the real count is deferred to the boundary.
-    drive_all_accept(&mut state);
+    // CR 732.2c: the accepted count binds the boundary collapse, so accept at exactly N.
+    drive_all_accept_n(&mut state, N);
     assert_eq!(
         state.objects[&PENTAD].counters.get(&charge).copied(),
         Some(baseline),

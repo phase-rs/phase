@@ -156,6 +156,25 @@ fn rebound_journals_an_exact_resolved_delayed_trigger_install() {
         1,
         "a rejected install must leave the collection untouched"
     );
+
+    // A one-shot leaves the live queue once it fires, but its installation is
+    // still a durable journal root. Replaying it after consumption must not
+    // reuse its token/instance merely because the live queue is empty.
+    let mut consumed = state.clone();
+    consumed.delayed_triggers.clear();
+    assert_eq!(
+        engine::game::triggers::apply_resolved_delayed_trigger(&mut consumed, install),
+        Err(
+            ResolvedDelayedTriggerReplayInvariantError::DuplicateProvenanceToken {
+                token: install.token,
+            }
+        ),
+        "a consumed delayed trigger must retain its journaled install identity"
+    );
+    assert!(
+        consumed.delayed_triggers.is_empty(),
+        "a duplicate historical replay must not reinstall a consumed one-shot"
+    );
 }
 
 /// CR 611.2a + CR 613.7b: a "gets +3/+3 until end of turn" spell creates a

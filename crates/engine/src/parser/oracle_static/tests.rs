@@ -25866,6 +25866,82 @@ fn combat_tax_sphere_of_safety_defended_player_or_planeswalker() {
     }
 }
 
+/// CR 506.3 + CR 508.1b-c + CR 508.1h: Onakke Oathkeeper — a planeswalker-only
+/// combat tax must preserve both the typed `Planeswalker` scope and the
+/// per-attacker scaling from its relative clause.
+#[test]
+fn combat_tax_onakke_oathkeeper_defended_planeswalker_only() {
+    let def = parse_static_line(
+        "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.",
+    )
+    .expect("Onakke Oathkeeper should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let (cost, scaling) = extract_unless_pay(&def);
+    assert_eq!(cost.mana_value(), 1);
+    assert!(matches!(scaling, UnlessPayScaling::PerAffectedCreature));
+    let Some(StaticCondition::UnlessPay { defended, .. }) = def.condition.as_ref() else {
+        panic!(
+            "expected Onakke Oathkeeper combat-tax payload, got {:?}",
+            def.condition
+        );
+    };
+    assert_eq!(
+        defended.as_ref(),
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker),
+        "Onakke Oathkeeper must defend only planeswalkers controlled by its controller",
+    );
+}
+
+/// CR 508.1c: all static consumers of the shared defended-scope grammar must
+/// retain the planeswalker-only variant. These are deliberately different
+/// sentence envelopes, so a regression in a downstream consumer cannot hide
+/// behind the combat-tax parser's direct use of the same combinator.
+#[test]
+fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
+    let subject = parse_static_line("Creatures can't attack planeswalkers you control.")
+        .expect("subject combat rule should parse");
+    assert_eq!(
+        subject.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+    );
+
+    let split = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't attack planeswalkers you control.",
+    );
+    assert!(split.iter().any(|def| {
+        def.mode == StaticMode::CantAttack
+            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+    }));
+
+    let combined = parse_static_line_multi(
+        "Creatures can't attack planeswalkers you control or block creatures you control.",
+    );
+    assert!(combined.iter().any(|def| {
+        def.mode == StaticMode::CantAttack
+            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+    }));
+}
+
+/// CR 508.1h + CR 118.12a: mixed casing must follow the same nom grammar and
+/// retain both the planeswalker-only defender and relative per-attacker tax.
+#[test]
+fn mixed_case_planeswalker_only_combat_tax_preserves_scaling() {
+    let def = parse_static_line(
+        "cReAtUrEs CaN't AtTaCk PlAnEsWaLkErS yOu CoNtRoL uNlEsS tHeIr CoNtRoLlEr PaYs {2} fOr EaCh CrEaTuRe ThEy CoNtRoL tHaT's AtTaCkInG a PlAnEsWaLkEr YoU cOnTrOl.",
+    )
+    .expect("mixed-case combat tax should parse");
+    let (cost, scaling) = extract_unless_pay(&def);
+    assert_eq!(cost.mana_value(), 2);
+    assert_eq!(scaling, UnlessPayScaling::PerAffectedCreature);
+    let Some(StaticCondition::UnlessPay { defended, .. }) = def.condition.as_ref() else {
+        panic!("expected combat-tax condition, got {:?}", def.condition);
+    };
+    assert_eq!(
+        defended.as_ref(),
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker)
+    );
+}
+
 /// CR 509.1c: Block-side restriction — `defended` is `None` because the
 /// "defender" of a block restriction is implicit (the static's controller).
 #[test]

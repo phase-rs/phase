@@ -410,21 +410,35 @@ def bfs_reachable(adjacency: dict[str, set[str]], root_names: set[str]) -> set[s
 # step 4 -- GameState field list + write sites.
 # ---------------------------------------------------------------------------
 def parse_gamestate_fields(lines: list[str]) -> list[str]:
-    """Parse the `pub struct GameState { .. }` field names by brace-depth span.
+    """Parse the single-source `GameState` field list by brace-depth span.
 
-    Keys on `^\\s+pub NAME:` at brace depth 1 (directly inside the struct), so doc
+    The declaration is either the literal `pub struct GameState { .. }` or the
+    `declare_game_state! { .. }` invocation that emits both the runtime struct
+    and its serde mirror. Keys on `^\\s+pub NAME:` at brace depth 1, so doc
     comments, `#[serde(..)]` / `#[cfg(..)]` attrs, and nested generic field types
-    (`Vec<Foo<Bar>>`) never register as fields. The span ends when the struct's
-    own brace closes, tracked by depth rather than a fixed line so it survives
-    field churn. No minimum is enforced here -- callers that census the REAL
-    struct apply `MIN_GAMESTATE_FIELDS`; the parser stays pure for tests.
+    (`Vec<Foo<Bar>>`) never register as fields. The span ends when the owning
+    brace closes, tracked by depth rather than a fixed line so it survives field
+    churn. No minimum is enforced here -- callers that census the REAL field
+    list apply `MIN_GAMESTATE_FIELDS`; the parser stays pure for tests.
     """
     field = re.compile(r"^\s+pub\s+(\w+)\s*:")
-    start: int | None = None
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*pub struct GameState\s*\{", line):
-            start = i
-            break
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(r"^\s*declare_game_state!\s*\{", line)
+        ),
+        None,
+    )
+    if start is None:
+        start = next(
+            (
+                i
+                for i, line in enumerate(lines)
+                if re.match(r"^\s*pub struct GameState\s*\{", line)
+            ),
+            None,
+        )
     if start is None:
         return []
     fields: list[str] = []

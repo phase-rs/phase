@@ -4305,6 +4305,17 @@ fn detect_duration_next_turn(
     }) {
         return;
     }
+    // CR 603.7b: "until your next turn" on a multi-fire delayed trigger is carried
+    // by `WheneverEventExpiry::UntilControllersNextTurn`, not a `Duration` slot
+    // (Kang Dynasty). Discharge the expectation off that typed carrier too.
+    if evidence.any_whenever_event_expiry(|e| {
+        matches!(
+            e,
+            crate::types::ability::WheneverEventExpiry::UntilControllersNextTurn { .. }
+        )
+    }) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DurationNextTurn.detector_label(),
         truncate(original, 140),
