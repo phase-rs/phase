@@ -107,22 +107,13 @@ fn populated_state() -> GameState {
             die_result: None,
         },
     });
-    state.pending_trigger = Some(Box::new(PendingTrigger {
-        source_id: SOURCE,
-        controller: P0,
-        condition: None,
-        ability: Box::new(damage_ability()),
-        timestamp: 9,
-        target_constraints: Vec::new(),
-        distribute: None,
-        trigger_event: None,
-        modal: None,
-        mode_abilities: Vec::new(),
-        description: None,
-        may_trigger_origin: None,
-        subject_match_count: None,
-        die_result: None,
-    }));
+    state.pending_trigger = Some(Box::new(PendingTrigger::ordinary(
+        SOURCE,
+        P0,
+        None,
+        Box::new(damage_ability()),
+        9,
+    )));
     // Populated so the `#[serde(skip)]` assertion in
     // `boxing_introduces_no_wrapper_level_in_the_wire_shape` discriminates. With
     // this field left `None`, that assertion could only distinguish `skip` from
@@ -150,7 +141,10 @@ fn populated_state() -> GameState {
 
 #[test]
 fn boxed_abilities_round_trip_through_serde() {
-    let state = populated_state();
+    let mut value = serde_json::to_value(populated_state()).expect("populated state serializes");
+    value["stack_trigger_firings"] = serde_json::json!({ "703": "Ordinary" });
+    value["pending_trigger_firing"] = serde_json::json!("Ordinary");
+    let state: GameState = serde_json::from_value(value).expect("canonical state deserializes");
 
     // Reach-guard: the fixture really does populate every retyped field, so a
     // later refactor cannot quietly degenerate this back into the default-state
@@ -165,7 +159,7 @@ fn boxed_abilities_round_trip_through_serde() {
         "reach-guard: pending_trigger is populated"
     );
 
-    let json = serde_json::to_string(&state).expect("populated state serializes");
+    let json = serde_json::to_string(&state).expect("canonical state serializes");
     let mut restored: GameState = serde_json::from_str(&json).expect("and deserializes");
     restored.rng = state.rng.clone(); // skipped by serde; not under test here
 

@@ -514,7 +514,24 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                             }
                         }
                 }
-                OptionalAdditionalCostPath::Flow { repeatability: _ } => true,
+                OptionalAdditionalCostPath::Flow { repeatability } => {
+                    let matches_flow = |pending: &PendingCast| {
+                        matches!(
+                            &pending.additional_cost_flow,
+                            Some(AdditionalCost::Optional {
+                                cost,
+                                repeatability: flow_repeatability,
+                            }) if flow_repeatability == repeatability && cost == materialized_cost
+                        )
+                    };
+                    matches_flow(pending_before)
+                        && if repeatability.is_once() {
+                            pending_after.additional_cost_flow.is_none()
+                                && pending_after.additional_cost_decided
+                        } else {
+                            matches_flow(pending_after)
+                        }
+                }
                 OptionalAdditionalCostPath::Direct => {
                     pending_before.additional_cost_queue.is_empty()
                         && pending_before.additional_cost_flow.is_none()
@@ -681,6 +698,76 @@ mod tests {
             false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn once_only_optional_life_cost_keeps_its_receipt_authority_after_target_deferral() {
+        let player = PlayerId(0);
+        let life_cost = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        let additional_cost = AdditionalCost::Optional {
+            cost: life_cost.clone(),
+            repeatability: AdditionalCostRepeatability::Once,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(91),
+            player,
+        );
+        let mut pending_before =
+            PendingCast::new(ObjectId(91), CardId(91), ability, ManaCost::zero());
+        pending_before.additional_cost_flow = Some(additional_cost.clone());
+        pending_before.deferred_target_selection = true;
+
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::OptionalCostChoice {
+            player,
+            cost: additional_cost.clone(),
+            times_kicked: 0,
+            origin: AdditionalCostOrigin::Other,
+            gift_kind: None,
+            pending_cast: Box::new(pending_before.clone()),
+        };
+        let candidate = crate::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::DecideOptionalCost { pay: true }
+                )
+            })
+            .expect("the optional-life prompt must emit its accepted decision");
+        let root = extract_life_cost_root(&state, &candidate)
+            .expect("the generated optional-life decision must have a receipt root");
+        state.life_safety_probe.arm(root);
+
+        let mut pending_after = pending_before.clone();
+        pending_after.additional_cost_flow = None;
+        pending_after.additional_cost_decided = true;
+        begin_optional_additional_cost_attempt(
+            &mut state,
+            player,
+            &pending_before,
+            &additional_cost,
+            true,
+            &life_cost,
+            &pending_after,
+        );
+
+        assert!(matches!(
+            state.life_safety_probe.attempt,
+            Some(AttemptState::Active {
+                payer: PlayerId(0),
+                ..
+            })
+        ));
     }
 
     #[test]

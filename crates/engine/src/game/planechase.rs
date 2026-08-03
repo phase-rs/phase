@@ -27,8 +27,9 @@ use std::collections::HashSet;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::game::engine::{EngineError, PriorityPrincipal};
 use crate::game::game_object::GameObject;
-use crate::game::{engine::EngineError, turn_control};
+use crate::game::turn_control;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
@@ -40,6 +41,19 @@ use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
 
 pub use crate::types::proposed_event::PlaneswalkCause;
+
+/// An engine-authored planar-die special-action announcement for Priority
+/// preflight. The private field prevents sibling modules from manufacturing a
+/// unit-like announcement without the Planechase legality authority.
+pub(in crate::game) struct PriorityPlanarDieAnnouncement {
+    _private: (),
+}
+
+impl PriorityPlanarDieAnnouncement {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// CR 901.9d / CR 706.7: The face the planar die landed on. The planar die is
 /// symbolic (CR 901.3a: one Planeswalker face, one chaos face, four blank
@@ -387,6 +401,15 @@ pub fn can_roll_planar_die(state: &GameState, player: PlayerId) -> bool {
         &cost,
         crate::types::mana::SpecialAction::RollPlanarDie,
     )
+}
+
+/// Returns the finite planar-die special action for the current Priority holder
+/// when the existing Planechase legality and payment authority admits it.
+pub(in crate::game) fn priority_planar_die_announcement(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Option<PriorityPlanarDieAnnouncement> {
+    can_roll_planar_die(state, principal.semantic_holder()).then(PriorityPlanarDieAnnouncement::new)
 }
 
 pub fn take_paid_planar_die_action(

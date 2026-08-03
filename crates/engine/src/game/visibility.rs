@@ -124,7 +124,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.stack_trigger_firings.clear();
     filtered.resolving_trigger_firing = None;
     for trigger in &mut filtered.delayed_triggers {
-        trigger.provenance = None;
+        trigger.provenance = crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed;
     }
     for context in &mut filtered.deferred_triggers {
         context.firing = crate::types::identifiers::TriggerFiring::UnknownLegacy;

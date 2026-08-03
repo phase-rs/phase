@@ -306,8 +306,9 @@ pub fn resolve(
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot,
-            provenance: None,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
+        events,
     );
 
     events.push(GameEvent::EffectResolved {

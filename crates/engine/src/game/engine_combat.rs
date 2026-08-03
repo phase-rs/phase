@@ -355,15 +355,7 @@ pub(super) fn finish_declare_attackers(
     }
 
     if attacks_empty {
-        state.phase = Phase::EndCombat;
-        events.push(GameEvent::PhaseChanged {
-            phase: Phase::EndCombat,
-        });
-        state.combat = None;
-        super::layers::prune_end_of_combat_effects(state);
-        super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-        turns::advance_phase(state, events);
-        Ok(turns::auto_advance(state, events))
+        Ok(turns::advance_after_empty_attackers(state, events))
     } else {
         priority::reset_priority(state);
         Ok(WaitingFor::Priority {
@@ -850,15 +842,7 @@ pub(super) fn handle_empty_attackers(
         return Ok(waiting_for);
     }
 
-    state.phase = Phase::EndCombat;
-    events.push(GameEvent::PhaseChanged {
-        phase: Phase::EndCombat,
-    });
-    state.combat = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    turns::advance_phase(state, events);
-    Ok(turns::auto_advance(state, events))
+    Ok(turns::advance_after_empty_attackers(state, events))
 }
 
 pub(super) fn handle_empty_blockers(
