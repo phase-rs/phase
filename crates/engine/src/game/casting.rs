@@ -2241,17 +2241,13 @@ fn transient_granted_spell_keywords_for(
         if id != caster {
             continue;
         }
-        // CR 603.4 + CR 608.2h: mirror `transient_grants_static_mode_to_player`'s
-        // dual-condition gating exactly.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !super::layers::transient_gate_conditions(tce).all(|condition| {
+            super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+        }) {
+            continue;
         }
         for modification in &tce.modifications {
             let ContinuousModification::GrantStaticAbility { definition } = modification else {

@@ -1698,7 +1698,7 @@ fn viewer_may_look_at_face_down(
     obj_id: ObjectId,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
-    use crate::types::ability::{ContinuousModification, Duration};
+    use crate::types::ability::ContinuousModification;
     use crate::types::statics::{StaticMode, StaticModeKind};
     // CR 708.5: O(1) presence gate covers ONLY the battlefield-static authority. The
     // duration-bound `transient_continuous_effects` scan below is a separate authority
@@ -1741,18 +1741,14 @@ fn viewer_may_look_at_face_down(
         if !grants_look {
             continue;
         }
-        // Honor the same duration/condition gates the static-mode TCE queries in
-        // `static_abilities.rs` apply (a `ForAsLongAs` duration or explicit
-        // `condition` must still hold this look).
-        if let Duration::ForAsLongAs { condition } = &tce.duration {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(condition) = &tce.condition {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are, shared with the static-mode TCE queries in
+        // `static_abilities.rs`.
+        if !super::layers::transient_gate_conditions(tce).all(|condition| {
+            super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+        }) {
+            continue;
         }
         // CR 608.2c: "you" is latched to the player who controlled the ability at
         // resolution (the stored `tce.controller`), NOT the source's current
