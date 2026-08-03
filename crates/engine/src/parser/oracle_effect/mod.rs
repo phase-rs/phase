@@ -22014,9 +22014,12 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
 ///
 /// Returns `None` when the clause names no card type — "cast a spell from among
 /// them" (Aetherworks Marvel, Svella, Apex of Power) grants an unrestricted
-/// permission, and synthesizing a gate there would silently narrow it.
-/// `TypeFilter::Card` / `TypeFilter::Any` are head nouns rather than
-/// restrictions, so they also yield `None`.
+/// permission, and synthesizing a gate there would silently narrow it. Only the
+/// *type* axis gates: `TypeFilter::Card` / `TypeFilter::Any` are head nouns
+/// rather than restrictions, and non-type restrictions carried as properties
+/// (Chandra's "red spells", Meeting of the Five's "spells with exactly three
+/// colors", Perception Bobblehead's mana-value bound) also yield `None` so this
+/// helper never invents a type gate the Oracle text did not state.
 fn parse_cast_type_gate(rest: &str) -> Option<TypedFilter> {
     let typed =
         parse_cast_type_disjunction(rest).or_else(

@@ -9,8 +9,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, Comparator, Effect,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+    AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
+    Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
@@ -30,6 +31,8 @@ const APEX: &str = "Exile the top seven cards of your library. Until end of turn
 const TALENT: &str = "Target opponent reveals the top seven cards of their library. You may cast an instant or sorcery spell from among them without paying its mana cost. Then that player puts the rest into their graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you may cast up to two instant and/or sorcery spells from among the revealed cards instead of one.";
 const JACE: &str = "Flying\nWhen Jace's Mindseeker enters, target opponent mills five cards. You may cast an instant or sorcery spell from among them without paying its mana cost.";
 const SILENT_BLADE: &str = "Ninjutsu {4}{U}{B} ({4}{U}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, look at that player's hand. You may cast a spell from among those cards without paying its mana cost.";
+const MINDCLAW_SHAMAN: &str = "When this creature enters, target opponent reveals their hand. You may cast an instant or sorcery spell from among those cards without paying its mana cost.";
+const MINDLEECH_MASS: &str = "Trample\nWhenever this creature deals combat damage to a player, you may look at that player's hand. If you do, you may cast a spell from among those cards without paying its mana cost.";
 const EPIC_EXPERIMENT: &str = "Exile the top X cards of your library. You may cast instant and sorcery spells with mana value X or less from among them without paying their mana costs. Then put all cards exiled this way that weren't cast into your graveyard.";
 const COLLECTED_CONJURING: &str = "Exile the top six cards of your library. You may cast up to two sorcery spells with mana value 3 or less from among them without paying their mana costs. Put the exiled cards not cast this way on the bottom of your library in a random order.";
 const HAZORET: &str = "Shuffle your library, then exile the top four cards. You may cast any number of spells with mana value 5 or less from among them without paying their mana costs. Lands you control don't untap during your next untap step.";
@@ -788,6 +791,103 @@ fn untyped_from_among_them_cast_stays_a_bare_exile_anaphor() {
             cast_target_of(oracle, name, types),
             TargetFilter::ExiledBySource,
             "{name} names no card type, so its cast permission must stay unrestricted"
+        );
+    }
+}
+
+/// Extracts the three legs of a hand-bound cast permission.
+///
+/// The hand-bound branch composes its filter from two independent sources: the
+/// prior `Effect::RevealHand` clause supplies the zone and the revealed player,
+/// and the cast clause supplies the card type. A test that read only one leg
+/// would pass while the branch silently dropped another, so every assertion
+/// below reads all three.
+fn hand_bound_cast_filter(oracle: &str, name: &str, types: &[&str]) -> TypedFilter {
+    match cast_target_of(oracle, name, types) {
+        TargetFilter::Typed(tf) => tf,
+        other => panic!(
+            "{name}: a hand-reveal chain must bind the cast to the revealed hand \
+             as a single typed filter, got {other:?}"
+        ),
+    }
+}
+
+/// The hand-bound half of issue #6880, which the exile-bound tests above do not
+/// reach: `chain_prior_hand_reveal_target` is set (no exile producer ever ran),
+/// so the anaphor resolves against the revealed player's hand rather than
+/// `ExiledBySource`, and the type gate has to be grafted onto that filter
+/// instead of AND-ed with an exile anaphor.
+///
+/// Mindclaw Shaman is the only type-gated card in that family. Pre-fix the
+/// branch emitted a bare `TypeFilter::Card`, so "an instant or sorcery spell"
+/// reached every card in the revealed hand — a creature or land was castable
+/// for free, contrary to CR 601.3.
+///
+/// The branch OVERWRITES `type_filters` rather than appending, so the bare
+/// `Card` head noun must be gone, not merely accompanied. Asserting equality on
+/// the whole vector (not `contains`) is what pins that.
+#[test]
+fn hand_bound_cast_retains_the_instant_or_sorcery_gate() {
+    let typed = hand_bound_cast_filter(MINDCLAW_SHAMAN, "Mindclaw Shaman", &["Creature"]);
+
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery
+        ])],
+        "the clause restricts the cast to instant or sorcery spells, and replaces \
+         the bare `Card` head noun rather than joining it"
+    );
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::Opponent),
+        "the candidate cards belong to the opponent who revealed, not the caster"
+    );
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }),
+        "the cards never left the revealed hand, so the zone leg must survive the \
+         type graft, got {:?}",
+        typed.properties
+    );
+}
+
+/// Sibling guard for the untyped majority of the hand-bound family.
+///
+/// Silent-Blade Oni and Mindleech Mass say "cast a spell from among those
+/// cards" — no card type is named, so the permission is unrestricted and the
+/// filter must keep its bare `Card` head noun. Synthesizing a type gate here
+/// would silently narrow both cards.
+///
+/// Their zone and controller legs are asserted for the same reason as above:
+/// this test also has to fail if the type graft is generalized in a way that
+/// clobbers the hand binding.
+#[test]
+fn untyped_hand_bound_cast_keeps_a_bare_card_filter() {
+    for (name, oracle) in [
+        ("Silent-Blade Oni", SILENT_BLADE),
+        ("Mindleech Mass", MINDLEECH_MASS),
+    ] {
+        let typed = hand_bound_cast_filter(oracle, name, &["Creature"]);
+
+        assert_eq!(
+            typed.type_filters,
+            vec![TypeFilter::Card],
+            "{name} names no card type, so its cast permission must stay unrestricted"
+        );
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::TriggeringPlayer),
+            "{name} looks at the hand of the player it damaged"
+        );
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Hand }),
+            "{name}: the cards stay in the looked-at hand, got {:?}",
+            typed.properties
         );
     }
 }
