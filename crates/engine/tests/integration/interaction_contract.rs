@@ -14,8 +14,8 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::game::DeckEntry;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, ChosenAttribute,
-    CounterCostSelection, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter, ZoneOwner,
+    CounterCostSelection, Effect, ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility,
+    SacrificeCost, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card::CardFace;
@@ -3403,5 +3403,155 @@ fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
         sorted_labelled_symbols(&labels, "Pit of Offerings"),
         ["C", "R"],
         "the exiled red card's color is labelled alongside the colorless sibling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling coverage: `ActivateManaSource`.
+//
+// The two mana surfaces now share `push_produced_mana_surfaces`, each passing
+// its own reducer's resolver. The tests above pin the `TapLandForMana` arm; this
+// one pins the `ActivateManaSource` arm so the shared helper cannot be changed
+// to satisfy one caller while silently dropping the other's labels.
+//
+// `ActivateManaSource` is only ever projected from the
+// `WaitingFor::ManaSourceSelection` arm of `direct_choice_projection` — no
+// priority arm mints it — so the fixture must drive the real cast pipeline into
+// that window. `CastPaymentMode::AutoExceptSacrificialMana` does exactly that:
+// the automatic planner refuses to spend an irreversible sacrifice row without
+// explicit consent and hands the choice back as `ManaSourceSelection`.
+// ---------------------------------------------------------------------------
+
+fn sacrificial_mana_source(produced: ManaProduction) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
+}
+
+/// Produced-mana symbols projected for the `ActivateManaSource` candidates whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_mana_source_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = viewer_interaction(state, P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the mana-source prompt is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::ActivateManaSource,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Mana Source Label Witness", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    // Both rows must be sacrifice-only: a non-sacrificial row on either source
+    // would let the automatic planner pay without ever opening the prompt.
+    let fixed = scenario
+        .add_creature(P0, "Fixed Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let flexible = scenario
+        .add_creature(P0, "Flexible Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 2 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+        })
+        .expect("the production cast path should stop for sacrificial-mana consent");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaSourceSelection { .. }
+        ),
+        "ActivateManaSource is projected only from this window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let fixed_labels = projected_mana_source_labels(runner.state_mut(), fixed, "fixed-mana-source");
+    assert_eq!(
+        fixed_labels,
+        vec![vec!["B".to_string()]],
+        "a fixed sacrificial source projects its one concrete produced unit"
+    );
+
+    let flexible_labels =
+        projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
+    assert_eq!(
+        flexible_labels,
+        vec![vec!["R".to_string(), "R".to_string()]],
+        "a flexible source is offered as ONE deferred-color candidate whose label \
+         still carries both produced units; `manual_selection_for_option` collapses \
+         it to Colorless + DeferredColorChoice, so resolving it through the land \
+         authority (the #6944 bug) would drop this label entirely"
     );
 }
