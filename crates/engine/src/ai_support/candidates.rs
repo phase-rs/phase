@@ -1229,21 +1229,35 @@ pub fn candidate_actions_broad_with_probe(
                 } else {
                     vec![*count]
                 };
-            // Engine-side beam cap. Required (not optional) because every candidate
-            // returned here flows into `PlannerServices::validate_candidates`, which
-            // clones state + applies the action per candidate. Without a cap, a
-            // count=4 search against an 80-card library produces ~C(80,4) ≈ 1.6M
-            // combinations and stalls validation for hours. The cap is constraint-
-            // aware so distinct-name searches collapse duplicate-named entries
-            // before combinatorial explosion (Gifts Ungiven against an 80-card pool
-            // with 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
+            // Engine-side beam cap for *combinatorial* enumerations only. Every
+            // candidate returned here flows into
+            // `PlannerServices::validate_candidates`, which clones state +
+            // applies the action per candidate, so a count=4 search against an
+            // 80-card library would produce ~C(80,4) ≈ 1.6M combinations and
+            // stall validation for hours. The cap is constraint-aware so
+            // distinct-name searches collapse duplicate-named entries before
+            // combinatorial explosion (Gifts Ungiven against an 80-card pool with
+            // 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
             //
-            // Correctness note: the cap may exclude legal moves the AI could
-            // theoretically prefer, so it is a perf-bounded approximation, not a
-            // legality filter. Player-driven SearchChoice flows through the
-            // engine's submission guard regardless of what this list contains.
+            // A search that selects at most one card is NOT combinatorial:
+            // `C(n,0) + C(n,1) = n + 1` is linear, so the full pool is issued.
+            // Capping a linear enumeration is what let the AI's own argmax fall
+            // outside the domain this list defines — `choose_action` then refused
+            // its own pick and returned `None`, which the AI controller cannot
+            // distinguish from "no decision owed" (Praetor's Grasp against an
+            // 88-card library: the AI scored all 88 and picked outside the 12).
+            //
+            // Correctness note: where the cap does apply it may exclude legal
+            // moves the AI could theoretically prefer, so it is a perf-bounded
+            // approximation, not a legality filter. Player-driven SearchChoice
+            // flows through the engine's submission guard regardless of what this
+            // list contains.
             const ENGINE_CANDIDATE_CAP: usize = 12;
-            let beam_cards = cap_search_choice_pool(state, cards, constraint, ENGINE_CANDIDATE_CAP);
+            let beam_cards = if sizes.iter().copied().max().unwrap_or(0) >= 2 {
+                cap_search_choice_pool(state, cards, constraint, ENGINE_CANDIDATE_CAP)
+            } else {
+                cards.clone()
+            };
             sizes
                 .into_iter()
                 .flat_map(|size| combinations(&beam_cards, size))
@@ -7181,6 +7195,227 @@ mod tests {
             actions.len(),
             163,
             "cap must collapse 80 ids → 8 unique names → 163 candidates"
+        );
+    }
+
+    /// CR 701.23a: A search that selects at most one card is NOT combinatorial
+    /// — `C(n,0) + C(n,1) = n + 1` is linear — so the engine issues the whole
+    /// pool rather than a prefix of it.
+    ///
+    /// This list is the domain `AiDecisionContract` gates submissions against,
+    /// while the AI's tutor scorer ranks every id in `cards`. Truncating it to
+    /// an arbitrary 12-card prefix made the AI's own argmax unsubmittable, so
+    /// `choose_action` returned `None` — which the AI controller cannot
+    /// distinguish from "no decision owed" and halts on (Praetor's Grasp
+    /// against an 88-card library). The pools below are deliberately wider
+    /// than the combinatorial cap, so restoring an unconditional cap turns
+    /// both assertions red.
+    #[test]
+    fn search_choice_single_card_search_issues_the_whole_pool() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::identifiers::ObjectId;
+
+        const POOL: usize = 40;
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<ObjectId> = (0..POOL)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(2_000 + i as u64),
+                    PlayerId(0),
+                    format!("Card-{i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+
+        let mut search = |up_to: bool| {
+            state.waiting_for = WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                library_owner: None,
+                cards: ids.clone(),
+                count: 1,
+                reveal: false,
+                up_to,
+                allows_partial_find: false,
+                constraint: SearchSelectionConstraint::None,
+                split: None,
+            };
+            candidate_actions_broad(&state).len()
+        };
+
+        // Exact-count: C(40,1) = 40, one candidate per card in the library.
+        assert_eq!(
+            search(false),
+            POOL,
+            "an exact one-card search must issue every card, not a prefix"
+        );
+        // CR 701.23d: "up to one" additionally admits the fail-to-find pick,
+        // C(40,0) + C(40,1) = 41. Pairs with the row above so a cap that
+        // happened to preserve the empty selection still fails.
+        assert_eq!(
+            search(true),
+            POOL + 1,
+            "an up-to-one search must issue every card plus the empty pick"
+        );
+    }
+
+    /// Builds a 20-card exact-one search. Shared by the two structural-filter
+    /// rows so they agree on the prompt they are reasoning about.
+    fn single_card_search_state() -> (GameState, Vec<crate::types::identifiers::ObjectId>) {
+        use crate::types::ability::SearchSelectionConstraint;
+
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<_> = (0..20)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(3_000 + i as u64),
+                    PlayerId(0),
+                    format!("Card-{i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: None,
+            cards: ids.clone(),
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        (state, ids)
+    }
+
+    /// CR 701.23a + CR 608.2c: `SimulationFilter` skips its clone-and-apply probe
+    /// for search selections, so the structural test replacing it must accept
+    /// everything the enumerator issues. A gap would silently drop legal
+    /// candidates back onto the slow path this exists to avoid.
+    #[test]
+    fn every_issued_search_selection_is_structurally_valid() {
+        let (state, ids) = single_card_search_state();
+
+        let issued = candidate_actions_broad(&state);
+        assert_eq!(
+            issued.len(),
+            ids.len(),
+            "premise: an exact-one search issues one candidate per card"
+        );
+        for candidate in &issued {
+            assert!(
+                crate::ai_support::structurally_valid_search_selection(&state, &candidate.action),
+                "the enumerator issued {:?}, which the structural filter refuses",
+                candidate.action
+            );
+        }
+    }
+
+    /// The dangerous direction. A structural test that drifts toward `true`
+    /// admits a selection the submission guard rejects — a contract-passing,
+    /// engine-rejected pick, which is a worse failure than the ~217 ms of
+    /// clone-and-apply it saves. Each row here is one condition
+    /// `engine_resolution_choices.rs`'s `SearchChoice` arm enforces.
+    #[test]
+    fn structural_search_selection_refuses_what_the_submission_guard_refuses() {
+        use crate::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
+        };
+        use crate::types::game_state::{PendingScopedLibrarySearch, ScopedLibrarySearchPhase};
+
+        let (mut state, ids) = single_card_search_state();
+        let legal = GameAction::SelectCards {
+            cards: vec![ids[0]],
+        };
+        assert!(
+            crate::ai_support::structurally_valid_search_selection(&state, &legal),
+            "premise: this pick is structurally legal, so every refusal below is \
+             attributable to the condition that row changes"
+        );
+
+        // Cardinality: an exact-count search admits neither fewer nor more.
+        for wrong in [vec![], vec![ids[0], ids[1]]] {
+            assert!(
+                !crate::ai_support::structurally_valid_search_selection(
+                    &state,
+                    &GameAction::SelectCards {
+                        cards: wrong.clone()
+                    }
+                ),
+                "exact-count search must refuse a {}-card pick",
+                wrong.len()
+            );
+        }
+
+        // Membership: an id that was never in the searched pool.
+        let outsider = create_object(
+            &mut state,
+            CardId(3_900),
+            PlayerId(0),
+            "Outsider".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            !crate::ai_support::structurally_valid_search_selection(
+                &state,
+                &GameAction::SelectCards {
+                    cards: vec![outsider]
+                }
+            ),
+            "a card outside the searched pool must be refused"
+        );
+
+        // Distinctness: the same card twice passes a membership-only check.
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: None,
+            cards: ids.clone(),
+            count: 2,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        assert!(
+            !crate::ai_support::structurally_valid_search_selection(
+                &state,
+                &GameAction::SelectCards {
+                    cards: vec![ids[0], ids[0]]
+                }
+            ),
+            "the same card selected twice must be refused"
+        );
+
+        // Scoped searches add a prepared exact-candidate set plus a liveness
+        // check that this structural test does not model, so it must defer to
+        // the simulation. Same `legal` action as the premise above — only the
+        // scoped flag differs, so a green here cannot come from anything else.
+        let (mut scoped, ids) = single_card_search_state();
+        scoped.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ids[0],
+                PlayerId(0),
+            )),
+            phase: ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players: Vec::new(),
+                accepted_players: Vec::new(),
+                acceptance_authorities: Vec::new(),
+                current_player: None,
+            },
+            after_scope: None,
+        });
+        assert!(
+            !crate::ai_support::structurally_valid_search_selection(&scoped, &legal),
+            "a scoped search must defer to the simulation"
         );
     }
 

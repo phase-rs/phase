@@ -75,31 +75,14 @@ impl TacticalPolicy for TutorPolicy {
     }
 }
 
-pub(crate) fn score_search_choice_cards(
-    state: &GameState,
-    ai_player: PlayerId,
-    cards: &[ObjectId],
-) -> Vec<(ObjectId, f64)> {
-    let available_mana = crate::zone_eval::available_mana(state, ai_player);
-    let intent = crate::eval::strategic_intent(state, ai_player);
-    let mana_constrained = materially_mana_constrained_state(state, ai_player);
-    let combo_targets = combo_missing_piece_names(state, ai_player);
-
-    cards
-        .iter()
-        .filter_map(|&card_id| {
-            let object = state.objects.get(&card_id)?;
-            let base = tutor_object_score(object, available_mana, intent, mana_constrained);
-            let combo_bonus = if combo_targets.contains(&object.name.as_str()) {
-                COMBO_PIECE_TUTOR_BONUS
-            } else {
-                0.0
-            };
-            Some((card_id, base + combo_bonus))
-        })
-        .collect()
-}
-
+/// Score one whole `SelectCards` selection the engine issued for a search.
+///
+/// Whole-selection rather than per-card, because a multi-card search is
+/// combinatorial: an opponent may pick the worst card of the chosen set (Gifts
+/// Ungiven), and redundant names are worth less together than apart. A
+/// single-card selection is just the degenerate case — index 0 takes neither
+/// the duplicate-name discount nor the positional decay, so it scores exactly
+/// its card's intrinsic tutor value.
 pub(crate) fn score_search_choice_selection(
     state: &GameState,
     ai_player: PlayerId,
@@ -537,17 +520,10 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let scored = score_search_choice_cards(&state, PlayerId(0), &[titan, land]);
-        let titan_score = scored
-            .iter()
-            .find(|(id, _)| *id == titan)
-            .map(|(_, score)| *score)
-            .expect("titan score");
-        let land_score = scored
-            .iter()
-            .find(|(id, _)| *id == land)
-            .map(|(_, score)| *score)
-            .expect("land score");
+        // Single-card selections are what the enumerator issues for a count-1
+        // search, so score them the same way the AI ranks them.
+        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
+        let land_score = score_search_choice_selection(&state, PlayerId(0), &[land]);
 
         assert!(titan_score > land_score);
     }
@@ -654,17 +630,8 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        let scored = score_search_choice_cards(&state, PlayerId(0), &[titan, ballista]);
-        let titan_score = scored
-            .iter()
-            .find(|(id, _)| *id == titan)
-            .map(|(_, s)| *s)
-            .expect("titan score");
-        let ballista_score = scored
-            .iter()
-            .find(|(id, _)| *id == ballista)
-            .map(|(_, s)| *s)
-            .expect("ballista score");
+        let titan_score = score_search_choice_selection(&state, PlayerId(0), &[titan]);
+        let ballista_score = score_search_choice_selection(&state, PlayerId(0), &[ballista]);
 
         assert!(
             ballista_score > titan_score,

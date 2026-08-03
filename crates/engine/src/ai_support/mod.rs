@@ -114,6 +114,71 @@ pub fn validated_candidate_actions_with_probe(
     actions
 }
 
+/// CR 701.23a + CR 608.2c: A `SelectCards` answering a library search is legal
+/// exactly when it meets the three conditions the submission guard checks —
+/// cardinality, membership in the searched pool, and the printed-text selection
+/// constraint (`engine_resolution_choices.rs`, the `SearchChoice` arm). All
+/// three are decidable from the prompt without mutating the game, so
+/// `SimulationFilter` can skip its clone-and-apply probe. Mirrors
+/// [`structurally_valid_tap_for_convoke_payment`].
+///
+/// This is load-bearing for a single-card search, where the enumerator issues
+/// one candidate per card: against an 88-card library the simulated probe
+/// measured ~2.5 ms per candidate — ~217 ms to validate a list whose every
+/// entry is legal by construction.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_search_selection(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::SearchChoice {
+            cards,
+            count,
+            up_to,
+            allows_partial_find,
+            constraint,
+            ..
+        },
+        GameAction::SelectCards { cards: chosen },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // A scoped search (Wheel-of-Fate-class "each player searches") routes through
+    // `scoped_library_search::submit_selection`, which additionally requires the
+    // pick to be in that player's prepared exact-candidate set AND still live.
+    // Neither is modeled here, so defer to the simulation.
+    if state.pending_scoped_library_search.is_some() {
+        return false;
+    }
+
+    // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, and explicit
+    // stated-quality constraints accept a short or empty pick; a pure quantity
+    // search needs exactly `count`.
+    let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
+    let cardinality_ok = if lower_bounded {
+        chosen.len() <= *count
+    } else {
+        chosen.len() == *count
+    };
+    if !cardinality_ok {
+        return false;
+    }
+
+    // Membership plus distinctness: a repeated id would select one card twice,
+    // which pool membership alone would not catch.
+    let mut seen = std::collections::HashSet::with_capacity(chosen.len());
+    if !chosen
+        .iter()
+        .all(|id| cards.contains(id) && seen.insert(*id))
+    {
+        return false;
+    }
+
+    crate::game::effects::search_library::selection_satisfies_constraint(state, chosen, constraint)
+}
+
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
 /// valid `TapForConvoke` candidate is accepted by `apply_as_current` — skip the
 /// full-state clone in `SimulationFilter` (issue #3663 Treasure Cruise / Delve).
