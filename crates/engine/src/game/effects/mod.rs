@@ -6857,6 +6857,27 @@ fn previous_effect_amount_from_events(
         // event slice that may contain result-table branch effects or nested
         // rolls interleaved with the outer dice.
         Effect::RollDie { .. } => return state.die_result_this_resolution,
+        // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
+        // single authority for how many cards a draw instruction delivered — it
+        // commits the whole instruction's post-replacement total to
+        // `state.last_effect_count` once the sequence completes (a unit replaced
+        // by something else contributes 0; one doubled by a count modifier
+        // contributes its post-replacement count). Read that committed total
+        // instead of re-summing draw events, exactly as the `RollDie` arm above
+        // defers to `die_result_this_resolution`, so "draw N cards, then discard
+        // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
+        // Laquatus's Creativity; Last Stand) reads the true total rather than a
+        // per-unit or pre-replacement count. The same stamp feeds the condition
+        // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
+        // "if you draw one or more cards this way, discard two cards".
+        //
+        // Returns early rather than falling through the `> 0` filter below: a
+        // draw that delivered zero cards is a real zero result and must stamp
+        // `Some(0)`. "Draw a card for each Island you control, then discard that
+        // many cards" (Last Stand) controlling no Islands has to discard 0, not
+        // inherit the life-gain amount its preceding chain step left behind in
+        // `last_effect_amount`.
+        Effect::Draw { .. } => return state.last_effect_count,
         _ => 0,
     };
 
