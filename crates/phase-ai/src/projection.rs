@@ -716,13 +716,15 @@ pub fn threat_velocity(
 /// ran rather than the short-circuit.
 ///
 /// Lives beside `project_to` because the invariant these states encode ("this
-/// state traverses the loop to `OpponentAttackersDeclared`") is a property of
+/// state traverses the loop to its requested horizon") is a property of
 /// `project_to`'s own resolution policy, not of any consumer.
 #[cfg(test)]
 pub(crate) mod projection_fixtures {
     use super::*;
+    use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
     use engine::types::identifiers::CardId;
+    use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
 
     /// A battlefield creature that can attack on the turn after it was placed:
@@ -934,6 +936,137 @@ pub(crate) mod projection_fixtures {
                  waiting_for/priority_player triple is incoherent."
             ),
         }
+    }
+
+    /// Oracle text of the permanent that makes
+    /// `ProjectionHorizon::OpponentBeginCombat` reachable BY TRAVERSAL.
+    ///
+    /// Load-bearing, for a structural reason. The engine never RESTS at
+    /// `Phase::BeginCombat` holding `WaitingFor::Priority` unless a begin-combat
+    /// trigger fires: `auto_advance_once`'s `Phase::BeginCombat` arm
+    /// (`crates/engine/src/game/turns.rs`) opens a priority window only when
+    /// `process_phase_triggers` reports `triggers_fired`. With no trigger it
+    /// either advances straight to `DeclareAttackers` (when
+    /// `combat::has_potential_attackers`) or, per CR 508.8, enters
+    /// `PostCombatMain` — and neither path stops on `reached_horizon`'s
+    /// `OpponentBeginCombat` predicate (active player is the target opponent +
+    /// `Phase::BeginCombat` + empty stack + `Priority` held by the target
+    /// opponent). Measured, not assumed: with this permanent replaced by a
+    /// vanilla creature the traversal never stops at the horizon — it runs on
+    /// past the opponent's combat until a library empties and returns
+    /// `BailReason::GameOverDuringProjection`.
+    ///
+    /// With the trigger the traversal ends this way: the trigger fires and goes
+    /// on the stack, so the opponent's first `Priority` window fails the
+    /// empty-stack conjunct; both players pass; the trigger resolves; CR 117.3b
+    /// returns priority to the active player with an empty stack, which is the
+    /// horizon.
+    ///
+    /// The growth clause is not decoration either. It is exactly the
+    /// `threat_velocity` signal `policies::evasion_removal_priority::
+    /// velocity_score` exists to read, so the projected board differs from the
+    /// base board the way a production Ouroboroid-class board does.
+    const BEGIN_COMBAT_GROWTH_ORACLE: &str =
+        "At the beginning of combat on your turn, put a +1/+1 counter on this creature.";
+
+    /// Seed `scenario` so that a state built from it TRAVERSES `project_to`'s
+    /// loop to `ProjectionHorizon::OpponentBeginCombat` for
+    /// `(ai_player, target_opponent)`. Returns the growing permanent's id, which
+    /// doubles as a removal target whose threat genuinely grows before the
+    /// projected combat.
+    ///
+    /// Unlike Fixtures A and B this is a seeder rather than a whole `GameState`,
+    /// because its only consumer needs a state that ALSO satisfies a tactical
+    /// policy's own gates (a real pending cast at `WaitingFor::TargetSelection`).
+    /// Card-specific setup stays with the policy test; the projection-reachability
+    /// knowledge stays here.
+    ///
+    /// Preconditions the CALLER owns — the ordinary `GameScenario::at_phase`
+    /// recipe, not extra ceremony:
+    ///   * `ai_player` is the active player and holds priority, and
+    ///   * the scenario sits at `Phase::PreCombatMain` on `ai_player`'s turn,
+    ///     which is where the production evasion policy scores removal targets.
+    ///
+    /// What this adds, and why each piece is required:
+    ///   * `target_opponent`'s begin-combat trigger permanent — see
+    ///     [`BEGIN_COMBAT_GROWTH_ORACLE`]; without it the horizon is unreachable
+    ///     from any state at all, not merely awkward to reach.
+    ///   * an untapped, non-summoning-sick attacker for `ai_player`, so the
+    ///     traversal necessarily dispatches one `WaitingFor::DeclareAttackers`
+    ///     choice — `pick_empty_attackers`, since `acting != target_opponent`.
+    ///     That action is not `PassPriority`, so `choice_count >= 1` and the
+    ///     result is `Confidence::Approximated`: the typed witness
+    ///     [`assert_traverses_to`] checks, and the one the already-at-horizon
+    ///     short-circuit structurally cannot emit.
+    ///   * five cards in each library. The traversal crosses into
+    ///     `target_opponent`'s turn, and CR 504.1 has its active player draw a
+    ///     card in the draw step, which precedes the combat phase (CR 500.1
+    ///     phase order). An empty library there loses the game (CR 704.5b) and
+    ///     the projection returns `BailReason::GameOverDuringProjection` instead
+    ///     of reaching the horizon.
+    pub(crate) fn seed_opponent_begin_combat_horizon(
+        scenario: &mut GameScenario,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+    ) -> ObjectId {
+        let grower = scenario
+            .add_creature_from_oracle(
+                target_opponent,
+                "Projection Grower",
+                2,
+                2,
+                BEGIN_COMBAT_GROWTH_ORACLE,
+            )
+            .id();
+        scenario.add_creature(ai_player, "Projection Bear", 2, 2);
+        scenario.with_library_top(
+            ai_player,
+            &[
+                "AI Filler 0",
+                "AI Filler 1",
+                "AI Filler 2",
+                "AI Filler 3",
+                "AI Filler 4",
+            ],
+        );
+        scenario.with_library_top(
+            target_opponent,
+            &[
+                "Opp Filler 0",
+                "Opp Filler 1",
+                "Opp Filler 2",
+                "Opp Filler 3",
+                "Opp Filler 4",
+            ],
+        );
+        grower
+    }
+
+    /// Fail loudly if `permanent` no longer carries the parsed begin-combat
+    /// trigger that [`seed_opponent_begin_combat_horizon`]'s traversal depends
+    /// on.
+    ///
+    /// Cheaper and far more specific than waiting for the traversal to fail:
+    /// parser drift on [`BEGIN_COMBAT_GROWTH_ORACLE`] would otherwise surface
+    /// several hundred dispatches later as a
+    /// `BailReason::GameOverDuringProjection`, which reads like an unrelated
+    /// library-stocking defect.
+    pub(crate) fn assert_begin_combat_trigger_parsed(state: &GameState, permanent: ObjectId) {
+        let object = state
+            .objects
+            .get(&permanent)
+            .expect("FIXTURE DEFECT: the seeded begin-combat permanent no longer exists");
+        assert!(
+            object.base_trigger_definitions.iter().any(|trigger| {
+                matches!(trigger.mode, TriggerMode::Phase)
+                    && trigger.phase == Some(Phase::BeginCombat)
+            }),
+            "FIXTURE DEFECT, not a wiring defect: {} no longer parses a TriggerMode::Phase \
+             trigger on Phase::BeginCombat, so auto_advance_once's BeginCombat arm will not \
+             open the priority window the OpponentBeginCombat horizon needs and the traversal \
+             cannot reach it. Re-derive the fixture's Oracle text; do not weaken the guard.",
+            object.name
+        );
     }
 
     /// The already-at-horizon counterpart: assert the state short-circuits, so
