@@ -64,7 +64,56 @@ pub fn resolve(
         bind_tracked_set_to_condition(&mut condition, real_id);
     }
 
+    // CR 608.2c + CR 603.7c + CR 601.2c: An anaphoric plural-set reference
+    // ("those creatures" / "any of those creatures", parsed to a pre-bind
+    // `ParentTarget`) back-references the parent ability's chosen/declared object
+    // set. When that set is empty — a legal outcome for an "up to N target"
+    // parent that chose zero (Kang Dynasty taps no creatures, CR 601.2c) — the
+    // reference can match nothing, so the delayed trigger can never fire and must
+    // NOT be installed. Skipping here is required: letting a bare `ParentTarget`
+    // fall through to `bind_contextual_filter_to_condition`, whose empty-parent
+    // rewrite resolves `ParentTarget` → `TargetFilter::Any`
+    // (`parent_targets_filter(&[])`), would OVER-FIRE on every creature's combat
+    // damage. The contextual bind rewrites all three `WheneverEvent` filter slots
+    // (`valid_card`, `valid_source`, `valid_target`), so a bare `ParentTarget` in
+    // ANY of them is over-fire prone and must gate installation — not just
+    // `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
+    // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
+    // installs.
+    if let DelayedTriggerCondition::WheneverEvent { trigger, .. } = &condition {
+        let references_empty_parent = ability.targets.is_empty()
+            && [
+                &trigger.valid_source,
+                &trigger.valid_card,
+                &trigger.valid_target,
+            ]
+            .iter()
+            .any(|filter| matches!(filter, Some(TargetFilter::ParentTarget)));
+        if references_empty_parent {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CreateDelayedTrigger,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+    }
+
     bind_contextual_filter_to_condition(&mut condition, &ability.targets);
+
+    // CR 603.7b: "until your next turn" is fixed at CREATION. The parser emits the
+    // symbolic `AfterCreationTurn` floor (compile-time AST has no runtime turn
+    // number); stamp it to the actual creation turn here, mirroring the
+    // `AtNextPhaseForPlayer` gate rewrite below.
+    if let DelayedTriggerCondition::WheneverEvent {
+        expiry: crate::types::ability::WheneverEventExpiry::UntilControllersNextTurn { after },
+        ..
+    } = &mut condition
+    {
+        if matches!(after, crate::types::ability::TurnGate::AfterCreationTurn) {
+            *after = crate::types::ability::TurnGate::After(state.turn_number);
+        }
+    }
 
     // CR 505.1 + CR 603.7a: "your next <phase>" binds the trigger to the
     // ability's controller. The parser emits a placeholder `PlayerId(0)` in
@@ -126,7 +175,27 @@ pub fn resolve(
     // creation, and the final fallback correctly returns [dying_creature].
     //
     // CR 603.7c: See separate branch for LastCreated snapshots.
-    let snapshot_targets = if super::ability_refs_triggering_source(&delayed_ability) {
+    //
+    // CR 603.7b: A MULTI-FIRE WheneverEvent must NOT snapshot TriggeringSource at
+    // creation — each firing has its own triggering source (Love on the
+    // Battlefield: "put a +1/+1 counter on it" resolves `it` = the creature that
+    // dealt combat damage THIS firing, re-resolved from the per-firing damage
+    // event). Snapshotting here would freeze it to the creation event
+    // (AttackersDeclared), which carries no per-firing source, dropping the
+    // counter. The snapshot exists for ONE-SHOT delayed triggers whose end-step
+    // firing event lacks the source (Grave Betrayal, Liliana emblem); those keep
+    // it. `!one_shot` (a WheneverEvent) forces per-firing event-context
+    // resolution instead.
+    //
+    // CR 603.7c: Computed ONCE here and reused for the creation-snapshot gate, the
+    // TriggeringSource origin-stamp gate, and the `DelayedTrigger.one_shot` field,
+    // so the three sites can never silently diverge. `condition`'s variant is not
+    // reassigned between them.
+    let one_shot = !matches!(
+        condition,
+        crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
+    );
+    let snapshot_targets = if one_shot && super::ability_refs_triggering_source(&delayed_ability) {
         // CR 603.7c: TriggeringSource always reads the event context (the dying
         // creature from the ZoneChanged event), not the parent ability's chosen
         // targets. Bypasses parent_target_snapshot's ability.targets early-return,
@@ -152,7 +221,14 @@ pub fn resolve(
         vec![]
     };
 
-    if super::ability_refs_triggering_source(&delayed_ability) {
+    // CR 603.7c: Stamp `ChangeZone.origin` from the CREATION event's
+    // TriggeringSource destination zone only for ONE-SHOT delayed triggers, whose
+    // later firing event (an end step / phase change) carries no source and so
+    // relies on the creation-time snapshot. A MULTI-FIRE WheneverEvent re-resolves
+    // TriggeringSource from EACH firing event, so freezing the origin to the
+    // creation event's zone would make a later firing from a different zone skip
+    // the zone move. Gated on the same `one_shot` flag as `snapshot_targets` above.
+    if one_shot && super::ability_refs_triggering_source(&delayed_ability) {
         if let Some(zone) = triggering_source_destination_zone(state) {
             stamp_triggering_source_origins_in_ability_chain(&mut delayed_ability, zone);
         }
@@ -221,10 +297,7 @@ pub fn resolve(
 
     // CR 603.7c: Most delayed triggers fire once and are removed.
     // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
-    let one_shot = !matches!(
-        condition,
-        crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
-    );
+    // `one_shot` was computed once above (single source of truth) and is reused here.
     crate::game::triggers::install_delayed_trigger(
         state,
         DelayedTrigger {
@@ -434,7 +507,7 @@ fn bind_contextual_filter_to_condition(
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
             bind_parent_target_filter(filter, parent_targets);
         }
-        DelayedTriggerCondition::WheneverEvent { trigger } => {
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
             for filter in [
                 &mut trigger.valid_card,
                 &mut trigger.valid_source,
@@ -1391,6 +1464,7 @@ mod tests {
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WheneverEvent {
                     trigger: Box::new(trigger),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -1403,7 +1477,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let DelayedTriggerCondition::WheneverEvent { trigger } =
+        let DelayedTriggerCondition::WheneverEvent { trigger, .. } =
             &state.delayed_triggers[0].condition
         else {
             panic!(
@@ -1414,6 +1488,172 @@ mod tests {
         assert_eq!(
             trigger.valid_source,
             Some(TargetFilter::SpecificObject { id: target })
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: an anaphoric `ParentTarget` source whose parent set
+    /// is EMPTY (an "up to N target" parent that chose zero — Kang Dynasty tapping
+    /// no creatures) must NOT install the delayed trigger. Reverting the empty-set
+    /// guard binds `valid_source` to `TargetFilter::Any` (over-fire on every
+    /// source), which this test rejects.
+    #[test]
+    fn whenever_event_empty_parent_target_set_skips_install() {
+        let mut state = GameState::new_two_player(42);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_source = Some(TargetFilter::ParentTarget);
+        trigger.valid_target = Some(TargetFilter::Player);
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            // Empty parent-target set — the "up to N target" parent chose zero.
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "an empty anaphoric ParentTarget source must not install a delayed trigger \
+             (else it would bind to Any and over-fire)"
+        );
+    }
+
+    /// Build a `WheneverEvent` delayed trigger whose `TriggerDefinition` is shaped
+    /// by `set_slot`, resolve it with an EMPTY parent-target set, and assert it did
+    /// NOT install. Shared by the `valid_card` / `valid_target` sibling fixtures.
+    fn empty_parent_target_in_slot_skips_install(set_slot: impl FnOnce(&mut TriggerDefinition)) {
+        let mut state = GameState::new_two_player(42);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        set_slot(&mut trigger);
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            // Empty parent-target set — the "up to N target" parent chose zero.
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "an empty anaphoric ParentTarget in ANY WheneverEvent slot must not install \
+             (else it binds to Any and over-fires)"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c (PR #6884 blocker 2): `bind_contextual_filter_to_condition`
+    /// rewrites all three `WheneverEvent` filter slots, so an empty parent set turns a
+    /// bare `ParentTarget` in `valid_card` — not only `valid_source` — into
+    /// `TargetFilter::Any`. The install guard must inspect `valid_card` too.
+    #[test]
+    fn whenever_event_empty_parent_target_in_valid_card_skips_install() {
+        empty_parent_target_in_slot_skips_install(|trigger| {
+            trigger.valid_card = Some(TargetFilter::ParentTarget);
+            trigger.valid_target = Some(TargetFilter::Player);
+        });
+    }
+
+    /// CR 601.2c + CR 608.2c (PR #6884 blocker 2): sibling of the `valid_card` fixture
+    /// — an empty bare `ParentTarget` in `valid_target` must likewise gate installation.
+    #[test]
+    fn whenever_event_empty_parent_target_in_valid_target_skips_install() {
+        empty_parent_target_in_slot_skips_install(|trigger| {
+            trigger.valid_target = Some(TargetFilter::ParentTarget);
+        });
+    }
+
+    /// CR 603.7b: an "until your next turn" `WheneverEvent` is a multi-fire trigger
+    /// (`one_shot == false`) whose symbolic `AfterCreationTurn` expiry floor is
+    /// stamped to the concrete creation turn at resolution (Kang Dynasty). Reverting
+    /// the resolve-time stamp leaves the symbolic gate, and reverting the field
+    /// drops the expiry entirely.
+    #[test]
+    fn whenever_event_until_controllers_next_turn_stamps_creation_turn() {
+        use crate::types::ability::{TurnGate, WheneverEventExpiry};
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 7;
+        let target = ObjectId(10);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_source = Some(TargetFilter::ParentTarget);
+        trigger.valid_target = Some(TargetFilter::Player);
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger),
+                    expiry: WheneverEventExpiry::UntilControllersNextTurn {
+                        after: TurnGate::AfterCreationTurn,
+                    },
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let installed = &state.delayed_triggers[0];
+        assert!(!installed.one_shot, "WheneverEvent is multi-fire");
+        let DelayedTriggerCondition::WheneverEvent { expiry, .. } = &installed.condition else {
+            panic!("expected WheneverEvent, got {:?}", installed.condition);
+        };
+        assert_eq!(
+            *expiry,
+            WheneverEventExpiry::UntilControllersNextTurn {
+                after: TurnGate::After(7),
+            },
+            "AfterCreationTurn must be stamped to After(creation turn = 7)"
         );
     }
 

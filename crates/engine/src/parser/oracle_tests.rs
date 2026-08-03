@@ -10732,13 +10732,20 @@ fn spell_temporal_whenever_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::SpellCast);
     assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     assert!(trigger.valid_card.is_some());
+    // CR 514.2: "this turn" ends the WheneverEvent at the creating turn's cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
     assert!(r.parse_warnings.is_empty());
 }
 
@@ -11145,12 +11152,19 @@ fn spell_temporal_phase_line_builds_delayed_trigger() {
     let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::Phase);
     assert_eq!(trigger.phase, Some(Phase::BeginCombat));
+    // CR 514.2: "this turn" ends the phase-based WheneverEvent at cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
 }
 
 #[test]
@@ -11170,13 +11184,20 @@ fn spell_temporal_enters_line_builds_delayed_trigger() {
     else {
         panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
     };
-    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+    let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger, expiry } =
+        condition
     else {
         panic!("expected WheneverEvent, got {condition:?}");
     };
     assert_eq!(trigger.mode, TriggerMode::ChangesZone);
     assert_eq!(trigger.destination, Some(Zone::Battlefield));
     assert!(trigger.valid_card.is_some());
+    // CR 514.2: "this turn" ends the zone-change WheneverEvent at cleanup.
+    assert_eq!(
+        *expiry,
+        crate::types::ability::WheneverEventExpiry::EndOfTurn,
+        "\"this turn\" must lower to an EndOfTurn expiry"
+    );
     assert!(effect.optional);
     assert!(r.parse_warnings.is_empty());
 }

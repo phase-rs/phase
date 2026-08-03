@@ -11535,6 +11535,7 @@ mod tests {
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WheneverEvent {
                     trigger: Box::new(TriggerDefinition::new(TriggerMode::YouAttack)),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
                 },
                 effect: Box::new(token_creator),
                 uses_tracked_set: false,

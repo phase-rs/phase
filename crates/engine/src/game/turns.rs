@@ -1431,6 +1431,43 @@ pub fn execute_untap_with_choices(
 
     // CR 514.2: Prune "until your next turn" transient effects for the active player.
     super::layers::prune_until_next_turn_effects(state, active);
+    // CR 603.7b: A `WheneverEvent` delayed trigger with a stated "until your next
+    // turn" duration ends at the START of its controller's next turn (the untap
+    // step, CR 502.4 — before priority), not at cleanup (CR 514.2). This boundary
+    // coincides with the goad window it was designed around (CR 701.15a: "until the
+    // next turn of the controller"). It survived the creating turn's cleanup via
+    // the retain disjunct in `execute_cleanup`; remove it now that the controller's
+    // next turn has begun (`turn_number` strictly past the stamped creation floor).
+    {
+        use crate::types::ability::{
+            DelayedTriggerCondition as Cond, TurnGate, WheneverEventExpiry,
+        };
+        let turn_number = state.turn_number;
+        let mut survivors = Vec::new();
+        let mut expired = Vec::new();
+        for trigger in std::mem::take(&mut state.delayed_triggers) {
+            if matches!(
+                &trigger.condition,
+                Cond::WheneverEvent {
+                    expiry: WheneverEventExpiry::UntilControllersNextTurn {
+                        after: TurnGate::After(floor),
+                    },
+                    ..
+                } if trigger.controller == active && turn_number > *floor
+            ) {
+                expired.push(trigger);
+            } else {
+                survivors.push(trigger);
+            }
+        }
+        state.delayed_triggers = survivors;
+        for trigger in expired {
+            super::lifecycle::record_delayed_terminal(
+                trigger.provenance.firing(),
+                super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
+            );
+        }
+    }
     // CR 514.2 + CR 611.2a/b: Expire `PlayFromExile` permissions granted to
     // the active player with `UntilYourNextTurn` duration (impulse draws that
     // last "until your next turn").
@@ -2230,15 +2267,32 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     let mut survivors = Vec::new();
     let mut expired = Vec::new();
     for trigger in std::mem::take(&mut state.delayed_triggers) {
+        use crate::types::ability::{
+            DelayedTriggerCondition as Cond, DelayedTriggerLifetime as Life, WheneverEventExpiry,
+        };
+        // CR 514.2: a default (`EndOfTurn`) `WheneverEvent` and a lingering
+        // one-shot end at this cleanup — caught below by the `one_shot == false`
+        // leg (a `WheneverEvent` has `one_shot == false`) and the `WhenNextEvent`
+        // `matches!` respectively.
         let retain = trigger.one_shot
             && !matches!(
-                trigger.condition,
-                crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+                &trigger.condition,
+                Cond::WhenNextEvent {
                     // CR 603.7b + CR 603.12: both a stated-"this turn" one-shot and
                     // any reflexive that (defensively) escaped its creation-batch
                     // discard are bounded to the creating turn — prune at cleanup.
-                    lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn
-                        | crate::types::ability::DelayedTriggerLifetime::Reflexive,
+                    lifetime: Life::ThisTurn | Life::Reflexive,
+                    ..
+                }
+            )
+            // CR 603.7b: a `WheneverEvent` with a stated "until your next turn"
+            // duration must survive the CREATING turn's cleanup — it fires on the
+            // intervening (opponents') turns and is instead purged at the
+            // controller's next turn start (see `execute_untap_with_choices`).
+            || matches!(
+                &trigger.condition,
+                Cond::WheneverEvent {
+                    expiry: WheneverEventExpiry::UntilControllersNextTurn { .. },
                     ..
                 }
             );
