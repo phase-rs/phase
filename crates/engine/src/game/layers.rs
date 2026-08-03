@@ -3743,6 +3743,12 @@ struct LiveCharacteristicReads {
 /// | [`gather_transient_continuous_effects`] | recipient-context `tce.condition` only | `e.condition`, plus the transient walk for what it drops |
 /// | `stickers.rs` (two P/T sites) | `None` | nothing to see |
 ///
+/// One alternate ENTRY into row 2 is out of this census by scope:
+/// [`active_continuous_effects_from_base_static_source`] re-enters
+/// [`active_continuous_effects_from_static_definitions`] for off-zone keyword
+/// queries (sole caller `off_zone_characteristics.rs`) and never feeds
+/// [`evaluate_layers`], so no flush channel needs to see its conditions.
+///
 /// Two consequences a reader must not get backwards:
 ///
 /// * a GRANTED-INNER static's condition lives in `inner.condition`, nested in
@@ -5661,8 +5667,8 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// are outside this iterator and outside [`live_characteristic_reads`]: a zone
 /// or identity change is not something layers 1-7 can write.
 ///
-/// Every consumer that asks "what could turn this effect on or off" walks this
-/// pair through here: [`transient_effect_is_live`] (via
+/// Every consumer that EVALUATES whether this effect is live walks the pair
+/// through here: [`transient_effect_is_live`] (via
 /// [`transient_duration_holds`] and its own `tce.condition` arm),
 /// [`live_characteristic_reads`] and
 /// [`any_active_static_condition_perturbed_by_entry`] in this module, six
@@ -5674,15 +5680,29 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// authority is over WHICH conditions gate the effect, not over how a given
 /// caller evaluates them.
 ///
-/// That claim is grep-checkable rather than enumerated, because an enumeration
-/// silently goes stale: outside this file, `Duration::ForAsLongAs` appears only
-/// in constructors (`add_transient_continuous_effect` call sites), in the
-/// `ability_rw` / `ability_scan` / `coverage` walkers that classify a duration
-/// without evaluating it, and in the non-consumer below. A new site that
-/// destructures the pair by hand instead of calling this is the regression to
-/// look for.
+/// Two classes sit deliberately outside that claim.
 ///
-/// One deliberate non-consumer: the lapsed-attachment sweep in
+/// Walkers that CLASSIFY a duration without evaluating it are not consumers:
+/// `analysis::resource` (two hand-destructuring sibling-mutability scans),
+/// plus the `ability_rw` / `ability_scan` / `coverage` walkers. They ask what a
+/// duration reads, never whether it holds, and they stay variant-safe through
+/// `ability_scan`'s exhaustive matches rather than through this authority.
+///
+/// Gate-blind consumers are a tracked pre-existing gap, not an exemption:
+/// `casting::apply_static_activated_ability_cost_reduction` and
+/// `effects::attach::protection_blocks_attachment` apply a transient effect
+/// without consulting either gate, so a lapsed condition still reduces a cost
+/// or blocks an attachment. Routing them through here changes behavior and
+/// needs its own CR analysis and tests, so it is out of scope here.
+///
+/// The grep that surfaces a new offender is `for tce in
+/// &state.transient_continuous_effects` — the iteration site, not
+/// `Duration::ForAsLongAs`. The latter only matches sites that already
+/// destructure the duration, so it cannot see the gate-blind pair above. A new
+/// iteration site that decides liveness by hand instead of calling this is the
+/// regression to look for.
+///
+/// One deliberate non-consumer inside this file: the lapsed-attachment sweep in
 /// [`evaluate_layers`] destructures the exact `ForAsLongAs {
 /// RecipientMatchesFilter { AttachedTo } }` shape (CR 301.5) to decide
 /// permanent EXPIRY, not liveness. It needs the structural match, not the
