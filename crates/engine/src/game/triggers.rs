@@ -17752,8 +17752,9 @@ pub mod tests {
             controller,
             source_id: rider_source,
             one_shot: false,
-            // CR 603.7c: a normal (legacy) delayed trigger — no command receipt.
-            // (#6933 canonicalized `provenance` from Option to DelayedInstallIdentity.)
+            // A normal (legacy) delayed trigger with no command receipt — engine
+            // test scaffolding, not a rule implementation, so no CR citation. (#6933
+            // canonicalized `provenance` from Option to the DelayedInstallIdentity enum.)
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         });
 
