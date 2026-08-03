@@ -22,8 +22,11 @@ use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
+use engine::util::Deadline;
 
 use web_time::{Duration, Instant};
+
+use crate::config::ExecutionMode;
 
 /// How far into the opponent's upcoming turn to project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,21 +108,61 @@ pub struct ProjectionKey {
 /// Outer dispatch cap. Each dispatch may trigger up to 500 engine-internal
 /// auto-pass iterations.
 const STEP_CAP: u32 = 256;
-/// Wall-clock guard for projection. The combat path is a heuristic and must
-/// fail closed to the pre-projection behavior rather than monopolize the AI
-/// turn when the engine path is unusually expensive.
-const TIME_CAP: Duration = Duration::from_millis(15);
+/// Wall-clock guard for projection, in milliseconds. The combat path is a
+/// heuristic and must fail closed to the pre-projection behavior rather than
+/// monopolize the AI turn when the engine path is unusually expensive.
+///
+/// Interactive callers only. Measurement mode receives a non-expiring budget
+/// from [`projection_deadline`] and is bounded by `STEP_CAP` alone, so `cargo
+/// ai-gate` verdicts cannot depend on host speed.
+///
+/// Deliberately PRIVATE: `projection_deadline` is the only producer of a
+/// projection budget, so no other module can construct one from this value.
+const TIME_CAP_MS: u32 = 15;
+
+/// The wall-clock budget one `project_to` call runs under.
+///
+/// **Single source of truth** — no caller writes `TIME_CAP_MS` (it is private)
+/// and no caller constructs a projection `Deadline` itself.
+///
+/// Measurement mode is bounded by `STEP_CAP` only — never wall clock. A bail
+/// scores 0.0 where a completed projection scores up to +3.0
+/// (`policies::evasion_removal_priority::velocity_score`), and that term selects
+/// the removal target, so a clock-dependent bail would make host speed an input
+/// to `cargo ai-gate` verdicts. Mirrors
+/// `planner::PlannerServices::with_deadline`.
+///
+/// Call this at the point of consumption — the returned `Deadline` snapshots an
+/// absolute instant, so binding it to a `let` that outlives one `project_to`
+/// call silently shortens (and eventually zeroes) the budget.
+pub fn projection_deadline(execution_mode: ExecutionMode) -> Deadline {
+    if execution_mode.is_measurement() {
+        Deadline::none()
+    } else {
+        Deadline::after(TIME_CAP_MS)
+    }
+}
 
 /// Advance from `base` forward until `horizon` is reached on
 /// `target_opponent`'s next turn. `base` is cloned; never mutated.
-/// Deterministic given `(base_fingerprint, ai_player, target_opponent, horizon)`.
+/// Deterministic given `(base_fingerprint, ai_player, target_opponent, horizon)`
+/// **and** a non-expiring `deadline`, which [`projection_deadline`] supplies in
+/// measurement mode.
 pub fn project_to(
     base: &GameState,
     ai_player: PlayerId,
     target_opponent: PlayerId,
     horizon: ProjectionHorizon,
+    deadline: Deadline,
 ) -> Result<Projection, BailReason> {
     let started_turn = base.turn_number;
+    // Diagnostic only: feeds BailReason::TimeCapExceeded's `elapsed`. Never
+    // compared, never affects a decision. NOTE: it measures time spent INSIDE
+    // project_to, while the budget is anchored a few microseconds earlier at the
+    // caller's `projection_deadline(..)` call — so on a bail it under-reports the
+    // budget actually consumed by (caller-side hash + lock probe). Bounded by
+    // that, and it is a log field only. Unreachable in measurement mode, where
+    // `Deadline::none()` never expires.
     let started_at = Instant::now();
     let mut state = base.clone();
     let mut snapshots: Vec<(ProjectionHorizon, GameState)> = Vec::new();
@@ -137,9 +180,10 @@ pub fn project_to(
     }
 
     for step in 0..STEP_CAP {
-        let elapsed = started_at.elapsed();
-        if elapsed >= TIME_CAP {
-            return Err(BailReason::TimeCapExceeded { elapsed });
+        if deadline.expired() {
+            return Err(BailReason::TimeCapExceeded {
+                elapsed: started_at.elapsed(),
+            });
         }
 
         capture_snapshots(&state, target_opponent, started_turn, &mut snapshots);
@@ -661,6 +705,255 @@ pub fn threat_velocity(
     samples
 }
 
+/// Shared full-loop projection fixtures.
+///
+/// Every pre-existing projection fixture in this crate is *already at its
+/// horizon*, so `project_to` short-circuits at the `Confidence::Exact` branch
+/// above and never enters its loop. The states built here are deliberately the
+/// opposite class: they are NOT at a horizon on entry, so the loop runs real
+/// `apply_for_simulation` dispatches and returns
+/// `Confidence::Approximated { choice_count >= 1 }` — the witness that the loop
+/// ran rather than the short-circuit.
+///
+/// Lives beside `project_to` because the invariant these states encode ("this
+/// state traverses the loop to `OpponentAttackersDeclared`") is a property of
+/// `project_to`'s own resolution policy, not of any consumer.
+#[cfg(test)]
+pub(crate) mod projection_fixtures {
+    use super::*;
+    use engine::game::zones::create_object;
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+
+    /// A battlefield creature that can attack on the turn after it was placed:
+    /// untapped, not summoning-sick, `entered_battlefield_turn = 1`.
+    ///
+    /// Mirrors `GameScenario::add_creature` (`scenario.rs:355-391`), which is
+    /// the builder recipe for a "pre-existing" (therefore not sick) creature.
+    fn spawn_vanilla_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = false;
+        id
+    }
+
+    /// A state that is NOT at any horizon on entry and that `project_to`
+    /// traverses to `ProjectionHorizon::OpponentAttackersDeclared` in a handful
+    /// of dispatches, with `ai_player = P0` and `target_opponent = P1`.
+    ///
+    /// Placed at the OPPONENT's own precombat main phase, which is what makes it
+    /// cheap and robust:
+    ///   * `active_player == P1 == target_opponent`, so no turn boundary is
+    ///     crossed — `turns.rs`'s turn-advance never clears
+    ///     `creatures_attacked_this_turn` during the traversal.
+    ///   * `Phase::PreCombatMain` is AFTER the draw step (CR 500.1 phase order),
+    ///     so no library is ever read and both libraries may stay empty. A
+    ///     projected draw from an empty library would end the game (CR 704.5b)
+    ///     and return `BailReason::GameOverDuringProjection` — a red positive
+    ///     arm for the wrong reason.
+    ///   * No untap step runs, so tapped/untapped state is exactly as built.
+    ///
+    /// Traversal, all deterministic:
+    ///   0. `Priority { P1 }`  → `pick_pass_or_first` picks `PassPriority`
+    ///   1. `Priority { P0 }`  → `PassPriority`; both passed with an empty stack,
+    ///      so the engine advances the phase. `auto_advance_once`'s BeginCombat
+    ///      arm sees `has_potential_attackers(state) == true` and continues to
+    ///      `DeclareAttackers` WITHOUT opening a priority window.
+    ///   2. `WaitingFor::DeclareAttackers` with `acting == target_opponent`, so
+    ///      `resolve_choice` uses `pick_max_attackers_against(&actions, P0)` and
+    ///      declares the bear against P0. `finish_declare_attackers` returns
+    ///      `Priority { P1 }` with `creatures_attacked_this_turn` populated and
+    ///      an empty stack (CR 508.1 turn-based action).
+    ///   3. Loop head: `reached_horizon` is true → `Ok(Projection { .. })`.
+    ///
+    /// `choice_count >= 1` because the DeclareAttackers dispatch is not a
+    /// `PassPriority`, so the result is `Confidence::Approximated` — the witness
+    /// that the LOOP ran rather than the already-at-horizon short-circuit, which
+    /// hardcodes `Confidence::Exact`.
+    pub(crate) fn opponent_turn_precombat_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+        // The coherent triple `GameScenario::at_phase` maintains
+        // (`scenario.rs:212-222`): phase + waiting_for + priority_player.
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.stack.clear();
+        // creatures_attacked_this_turn stays EMPTY — this is what makes the
+        // fixture NOT already-at-horizon.
+        state.creatures_attacked_this_turn.clear();
+
+        // P1's attacker. `has_potential_attackers` (`combat.rs`) requires
+        // controller == active, Creature, !tapped, no Defender/can't-attack, and
+        // `entered_battlefield_turn < turn_number` (or Haste). 1 < 2 holds.
+        spawn_vanilla_creature(&mut state, PlayerId(1), "Projection Bear", 2, 2);
+        state
+    }
+
+    /// A state at P0's declare-attackers step from which BOTH of the following
+    /// hold:
+    ///   (i)  `search::deterministic_choice` routes to the combat branch and
+    ///        `combat_ai` reaches its crackback projection block, and
+    ///   (ii) `project_to(.., P0, P1, OpponentAttackersDeclared, ..)` traverses
+    ///        to its horizon.
+    ///
+    /// The tension the construction resolves: (i) needs P1 to have NO untapped
+    /// blocker, or `combat_ai`'s `if is_unblockable || opponent_blockers
+    /// .is_empty()` short-circuit does not fire and the value heuristic may
+    /// decline the attack, emptying `attacking_ids` and skipping the crackback
+    /// block. But (ii) needs P1 to HAVE an attack-capable creature on its own
+    /// next turn, or `has_potential_attackers` is false at P1's BeginCombat, the
+    /// declare-blockers and combat-damage steps are skipped (CR 508.8) and the
+    /// horizon is unreachable.
+    ///
+    /// Resolution: give P1 a **tapped** creature. `opponent_blockers` in
+    /// `combat_ai` filters on `!obj.tapped`, so it is invisible to (i); the
+    /// projected P1 untap step untaps it, so it satisfies (ii).
+    ///
+    /// Both libraries are stocked because the traversal crosses into P1's turn
+    /// and P1's draw step reads one card (CR 500.1 phase order; `should_skip_draw`
+    /// skips only on turn 1 in a 2-player game, and this fixture is on turn 2).
+    /// An empty library there ends the game (CR 704.5b) and returns
+    /// `BailReason::GameOverDuringProjection`. P0's library is stocked as cheap
+    /// insurance; the traversal is not expected to reach a P0 draw.
+    ///
+    /// Life totals are 20/20 and the lone attacker is 2 power, so neither
+    /// `determine_attack_objective` returns `PushLethal` nor
+    /// `adversarial_swarm_witness` (gated 2-player in `combat_ai`) certifies a
+    /// lethal, declaration-binding attack that would return before the crackback
+    /// block. **If either the attacker's power or P1's life is changed, both of
+    /// those reach conditions can silently flip.**
+    pub(crate) fn ai_turn_declare_attackers_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        state.stack.clear();
+        state.creatures_attacked_this_turn.clear();
+
+        // P0's attacker: untapped, not sick.
+        let attacker = spawn_vanilla_creature(&mut state, PlayerId(0), "AI Bear", 2, 2);
+        debug_assert!(!state.objects[&attacker].tapped);
+
+        // P1's FUTURE attacker: tapped now (so it is not an `opponent_blocker`),
+        // untaps during the projected P1 untap step.
+        let crackback = spawn_vanilla_creature(&mut state, PlayerId(1), "Crackback Bear", 2, 2);
+        state.objects.get_mut(&crackback).unwrap().tapped = true;
+
+        // CR 704.5b insurance for the projected P1 draw step.
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(950 + i),
+                PlayerId(1),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+
+        // The engine owns the DeclareAttackers payload shape — do not hand-write
+        // its five fields. `build_declare_attackers_waiting_for` derives every
+        // one of them from `state` via the single `AttackDeclarationConstraints`
+        // authority.
+        state.combat = Some(engine::game::combat::CombatState::default());
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        state
+    }
+
+    /// Fail loudly, with the engine's own bail reason in the message, if `state`
+    /// is ALREADY at `horizon` — which would make `project_to` short-circuit and
+    /// silently turn every "the loop ran" assertion vacuous.
+    ///
+    /// Implemented against the public primitive rather than the private
+    /// `reached_horizon`: a `Confidence::Exact` result from a fixture that is
+    /// supposed to traverse IS the short-circuit, so this is a direct
+    /// observation, not a proxy.
+    pub(crate) fn assert_traverses_to(
+        state: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) {
+        let result = project_to(state, ai_player, target_opponent, horizon, Deadline::none());
+        match &result {
+            Ok(projection) => {
+                assert_eq!(
+                    projection.horizon_reached, horizon,
+                    "fixture reached the wrong horizon"
+                );
+                assert!(
+                    matches!(
+                        projection.confidence,
+                        Confidence::Approximated { choice_count } if choice_count >= 1
+                    ),
+                    "FIXTURE DEFECT, not a wiring defect: this fixture must TRAVERSE \
+                     project_to's loop, but it returned Confidence::Exact — which the \
+                     already-at-horizon short-circuit hardcodes and a real traversal \
+                     through a DeclareAttackers dispatch cannot produce. Re-derive the \
+                     fixture; do not weaken this assertion."
+                );
+            }
+            Err(reason) => panic!(
+                "FIXTURE DEFECT, not a wiring defect: project_to could not reach \
+                 {horizon:?} under a non-expiring deadline. Bail reason: {reason:?}. \
+                 GameOverDuringProjection ⇒ stock the libraries; StepCapExceeded ⇒ the \
+                 horizon is not reachable from this state at all; NoLegalAction ⇒ the \
+                 waiting_for/priority_player triple is incoherent."
+            ),
+        }
+    }
+
+    /// The already-at-horizon counterpart: assert the state short-circuits, so
+    /// the determinism claim of a fixture in that class is checked rather than
+    /// assumed.
+    pub(crate) fn assert_already_at_horizon(
+        state: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) {
+        let result = project_to(state, ai_player, target_opponent, horizon, Deadline::none());
+        assert!(
+            matches!(&result, Ok(p) if p.horizon_reached == horizon
+                && matches!(p.confidence, Confidence::Exact)),
+            "fixture must be already-at-horizon (Confidence::Exact, no simulation); got {result:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +964,108 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::zones::Zone;
+
+    /// T1. Both directions in one test: measurement maps to a non-expiring
+    /// budget, interactive maps to a finite one no larger than the 15 ms cap.
+    ///
+    /// A stub returning `none()` for both modes fails the interactive half; a
+    /// stub returning `after(15)` for both fails the measurement half; deleting
+    /// the `is_measurement()` branch fails the measurement half.
+    ///
+    /// No strict lower bound on the interactive budget: `remaining()` uses
+    /// `saturating_duration_since`, so a >15 ms scheduling stall between
+    /// construction and assertion would yield `Some(0)` and a spurious red.
+    /// `is_some()` + `<= 15ms` still discriminates both stubs without the flake.
+    #[test]
+    fn projection_deadline_nulls_wall_clock_only_in_measurement() {
+        let measurement = projection_deadline(ExecutionMode::Measurement { seed: 7 });
+        assert!(
+            measurement.remaining().is_none(),
+            "measurement mode must receive a non-expiring budget, bounded by STEP_CAP alone"
+        );
+        assert!(
+            !measurement.expired(),
+            "a non-expiring budget must never report expiry"
+        );
+
+        let interactive = projection_deadline(ExecutionMode::Interactive);
+        let remaining = interactive
+            .remaining()
+            .expect("interactive mode must receive a finite wall-clock budget");
+        assert!(
+            remaining <= Duration::from_millis(15),
+            "the interactive budget must not exceed the 15 ms cap; got {remaining:?}"
+        );
+    }
+
+    /// T2a + T2b + T2c on one fixture: the full-loop state completes under a
+    /// non-expiring deadline and bails with the SPECIFIC `TimeCapExceeded`
+    /// reason under a pre-expired one.
+    ///
+    /// Pairing both directions on the identical fixture is what makes the
+    /// negative non-vacuous: a bare `is_err()` on a fixture that bails anyway
+    /// (`NoLegalAction`, `StepCapExceeded`, `GameOverDuringProjection`) would
+    /// pass without the deadline being read at all.
+    #[test]
+    fn project_to_completes_under_none_and_bails_under_expired() {
+        // T2c — instrument witness, asserted first so a broken injection fails
+        // here rather than silently downstream.
+        assert!(
+            Deadline::after(0).expired(),
+            "instrument: Deadline::after(0) must be expired on the next read"
+        );
+        assert!(
+            !Deadline::none().expired(),
+            "instrument: Deadline::none() must never expire"
+        );
+
+        let state = projection_fixtures::opponent_turn_precombat_fixture();
+
+        // Reach guard: this state must TRAVERSE the loop, not short-circuit.
+        projection_fixtures::assert_traverses_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+
+        // T2a — positive: with no wall clock the loop runs to the horizon.
+        let completed = project_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::none(),
+        )
+        .expect("a non-expiring deadline must let the projection complete");
+        assert_eq!(
+            completed.horizon_reached,
+            ProjectionHorizon::OpponentAttackersDeclared
+        );
+        assert!(
+            matches!(
+                completed.confidence,
+                Confidence::Approximated { choice_count } if choice_count >= 1
+            ),
+            "the loop must have run: the already-at-horizon short-circuit hardcodes \
+             Confidence::Exact and cannot produce Approximated"
+        );
+
+        // T2b — negative: a pre-expired deadline bails at the loop head with the
+        // specific wall-clock reason, on the SAME fixture proven completable above.
+        let bailed = project_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::after(0),
+        );
+        assert!(
+            matches!(bailed, Err(BailReason::TimeCapExceeded { .. })),
+            "a pre-expired deadline must bail with TimeCapExceeded specifically, \
+             not merely with some error; got {bailed:?}"
+        );
+    }
 
     #[test]
     fn projection_declines_optional_loop_shortcut_from_legal_actions() {

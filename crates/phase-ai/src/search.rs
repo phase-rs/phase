@@ -27,7 +27,9 @@ use engine::types::zones::Zone;
 
 use crate::card_value::{cmp_keep, intrinsic_value, keep_key};
 use crate::cast_facts::cast_facts_for_action;
-use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
+use crate::combat_ai::{
+    choose_attackers_with_targets_with_profile, choose_blockers_with_profile, CombatLookahead,
+};
 use crate::config::{AiConfig, PlannerMode, ThreatAwareness};
 use crate::context::AiContext;
 use crate::features::DeckFeatures;
@@ -3690,7 +3692,7 @@ pub(crate) fn deterministic_choice(
             state,
             ai_player,
             &config.profile,
-            config.combat_lookahead,
+            CombatLookahead::from_config(config),
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             context.map(|c| c.session.as_ref()),
@@ -3755,7 +3757,7 @@ fn deterministic_combat_choice(
             state,
             ai_player,
             profile,
-            false,
+            CombatLookahead::Disabled,
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
             session,
@@ -4392,6 +4394,91 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    /// T8 — the combat production wiring at `deterministic_choice`'s combat
+    /// branch derives its lookahead from the config via `from_config`, rather
+    /// than passing a literal variant.
+    ///
+    /// This is the ONLY probe that turns red if that argument is written as the
+    /// disabled variant. The 15 `combat_ai.rs` call-site tests
+    /// structurally cannot see the mistake — they call
+    /// `choose_attackers_with_targets_with_profile` directly and never traverse
+    /// `deterministic_choice`.
+    ///
+    /// Both arms share one `state` deliberately. If any of the three combat
+    /// reach conditions fails, the positive arm fails loudly but the negative
+    /// sibling would pass VACUOUSLY (empty cache because the crackback block was
+    /// never reached, not because lookahead was off), so the negative is only
+    /// meaningful while the positive is green on the same fixture. Guard 2
+    /// converts "the projection never completed" from a silent vacuity into a
+    /// named panic before either arm runs.
+    #[test]
+    fn deterministic_choice_routes_cedh_combat_lookahead_through_config() {
+        let state = crate::projection::projection_fixtures::ai_turn_declare_attackers_fixture();
+
+        // Guard 1 — the combat branch has something to work with.
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => {
+                assert!(
+                    !valid_attacker_ids.is_empty(),
+                    "T8 guard 1: the engine's own constraints model found no legal attacker, so \
+                     combat_ai's candidate list is empty and the crackback block is unreachable. \
+                     Fixture defect."
+                );
+                assert!(
+                    !valid_attack_targets.is_empty(),
+                    "T8 guard 1: no legal attack target"
+                );
+            }
+            other => panic!("T8 guard 1: fixture must be at DeclareAttackers, got {other:?}"),
+        }
+
+        // Guard 2 — the projection the crackback block will take completes.
+        crate::projection::projection_fixtures::assert_traverses_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentAttackersDeclared,
+        );
+
+        // Positive arm — CEDH is the only preset enabling combat lookahead.
+        let cedh = create_config(AiDifficulty::CEDH, Platform::Native).into_measurement(7);
+        assert!(
+            cedh.combat_lookahead,
+            "T8: the CEDH preset must enable combat lookahead"
+        );
+        let ctx = crate::context::AiContext::empty(&cedh.weights);
+        let _ = deterministic_choice(&state, PlayerId(0), &cedh, &[], Some(&ctx));
+        assert_eq!(
+            ctx.session.projection_cache.read().unwrap().len(),
+            1,
+            "deterministic_choice must derive the combat lookahead from the config \
+             (revert-failing: passing the disabled variant there leaves this cache empty, and \
+             the combat_ai.rs call-site tests structurally cannot see that mistake)"
+        );
+
+        // Negative sibling, on the SAME state.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        assert!(
+            !medium.combat_lookahead,
+            "T8 negative: Medium must NOT enable combat lookahead"
+        );
+        let medium_ctx = crate::context::AiContext::empty(&medium.weights);
+        let _ = deterministic_choice(&state, PlayerId(0), &medium, &[], Some(&medium_ctx));
+        assert!(
+            medium_ctx
+                .session
+                .projection_cache
+                .read()
+                .unwrap()
+                .is_empty(),
+            "with combat_lookahead off, no projection is taken and the cache stays empty"
+        );
     }
 
     #[test]
