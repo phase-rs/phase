@@ -9254,6 +9254,54 @@ fn trigger_trailing_subtype_conditional_is_not_intervening_if() {
     );
 }
 
+/// CR 603.4 + CR 603.10: A recognized "if it's [not] a <subtype>" intervening-if
+/// must lower to the evaluator whose authority matches the TRIGGER KIND. For a
+/// zone-change trigger (dies/leaves — Otherworldly Escort: "when this dies, if
+/// it's not a Spirit") the subject "it" must be judged from the EVENT SNAPSHOT via
+/// `ZoneChangeObjectMatchesFilter`; for a non-zone event (Captain Marvel's
+/// `CounterAdded` "if it's not a Kree") it is judged live via
+/// `EventObjectMatchesFilter`. Routing a zone-change subject through the live
+/// matcher would judge a same-ID re-entrant, not the object that left.
+#[test]
+fn subtype_intervening_if_dispatches_by_trigger_kind() {
+    use crate::types::zones::Zone;
+
+    // Non-zone event (no trigger_zone_change): live `EventObjectMatchesFilter`.
+    let (_, non_zone) = extract_if_condition("if it's not a kree, draw a card");
+    let Some(TriggerCondition::Not { condition }) = non_zone else {
+        panic!("expected negated condition, got {non_zone:?}");
+    };
+    assert!(
+        matches!(
+            *condition,
+            TriggerCondition::EventObjectMatchesFilter { .. }
+        ),
+        "non-zone event must use the live EventObjectMatchesFilter, got {condition:?}",
+    );
+
+    // Zone-change trigger (dies): event-snapshot `ZoneChangeObjectMatchesFilter`.
+    let (_, zone_change) = extract_if_condition_with_card_name(
+        "if it's not a spirit, draw a card",
+        "",
+        None,
+        Some((Zone::Battlefield, Zone::Graveyard)),
+    );
+    let Some(TriggerCondition::Not { condition }) = zone_change else {
+        panic!("expected negated condition, got {zone_change:?}");
+    };
+    assert!(
+        matches!(
+            *condition,
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                destination: Zone::Graveyard,
+                ..
+            }
+        ),
+        "zone-change trigger must use the event-snapshot ZoneChangeObjectMatchesFilter, \
+         got {condition:?}",
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players

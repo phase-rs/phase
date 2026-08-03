@@ -5591,12 +5591,15 @@ fn extract_if_condition_with_card_name(
     // trigger condition, changing whether the ability goes on the stack. Restrict
     // to the leading position (`before` empty, modulo whitespace) so trailing
     // conditionals fall through to the effect-level ChangeZone gate as before.
-    if let Some((before, condition, rest)) =
+    if let Some((before, (filter, negated), rest)) =
         scan_preceded(&lower, parse_event_object_subtype_intervening_if)
             .filter(|(before, _, _)| before.trim_start().is_empty())
     {
         let pos = before.len();
         let clause_len = lower.len() - before.len() - rest.len();
+        // CR 603.4 + CR 603.10: route zone-change triggers (dies/leaves) through
+        // the event-snapshot evaluator; non-zone events (CounterAdded) stay live.
+        let condition = build_event_object_subtype_condition(filter, negated, trigger_zone_change);
         return (
             strip_condition_clause(text, pos, clause_len),
             Some(condition),
@@ -5824,11 +5827,12 @@ fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
     first
 }
 
-/// CR 603.4 + CR 205.3: "if it's [not] a <subtype>" — intervening-if on the
-/// triggering event's subject object (Captain Marvel, Apex Avenger: "if it's not
-/// a Kree"). Emits `EventObjectMatchesFilter` (wrapped in `Not` when negated),
-/// which resolves "it" via `extract_source_from_event` (the CounterAdded
-/// recipient) at both fire and resolution time (CR 603.4).
+/// CR 603.4 + CR 205.3: parse "if it's [not] a <subtype>" and return the typed
+/// subject filter plus whether it is negated. The CALLER
+/// (`build_event_object_subtype_condition`) chooses the evaluator authority,
+/// because the correct "it" resolution depends on the TRIGGER KIND, not on this
+/// phrase: a zone-change trigger judges the event snapshot, a non-zone event
+/// judges the live event object.
 ///
 /// The core type is derived from the subtype itself via the shared
 /// `typed_filter_for_subtype` authority (CR 205.3 subtype→card-type pools), NOT
@@ -5845,7 +5849,9 @@ fn parse_event_damage_source_chain(phrase: &str) -> TargetFilter {
 /// declines here and falls through to
 /// `parse_zone_change_object_token_contraction_intervening_if` (CR 111.1),
 /// keeping the zone-change token condition intact.
-fn parse_event_object_subtype_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+fn parse_event_object_subtype_intervening_if(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool)> {
     let (rest, _) = tag("if it").parse(input)?;
     // Longest-match: the negated forms ("'s not"/" is not"/" isn't") share a
     // prefix with the plain forms ("'s"/" is"), so they must be tried first.
@@ -5857,17 +5863,41 @@ fn parse_event_object_subtype_intervening_if(input: &str) -> OracleResult<'_, Tr
     let (rest, _) = alt((tag("an "), tag("a "))).parse(rest)?;
     let (subtype, consumed) = parse_subtype(rest).ok_or_else(|| oracle_err(rest))?;
     let rest = &rest[consumed..];
-    let condition = TriggerCondition::EventObjectMatchesFilter {
-        filter: TargetFilter::Typed(typed_filter_for_subtype(&subtype)),
+    let filter = TargetFilter::Typed(typed_filter_for_subtype(&subtype));
+    Ok((rest, (filter, negated)))
+}
+
+/// CR 603.4 + CR 603.10: Build the trigger condition for a recognized "if it's
+/// [not] a <subtype>" intervening-if, choosing the evaluator authority by trigger
+/// kind. For a ZONE-CHANGE trigger (Otherworldly Escort: "when this creature
+/// dies, if it's not a Spirit") the subject "it" is the object AS IT EXISTED in
+/// the zone-change event, so it must be judged from the event snapshot via
+/// `ZoneChangeObjectMatchesFilter` (backed by `matches_zone_change_event_object_
+/// filter`). The live-first `EventObjectMatchesFilter` matcher would otherwise
+/// judge a same-ID incarnation that re-entered before the recheck, not the object
+/// that left. For a non-zone event (Captain Marvel's `CounterAdded` "if it's not
+/// a Kree") there is no zone snapshot and the event object is resolved live via
+/// `EventObjectMatchesFilter`.
+fn build_event_object_subtype_condition(
+    filter: TargetFilter,
+    negated: bool,
+    trigger_zone_change: Option<(Zone, Zone)>,
+) -> TriggerCondition {
+    let condition = match trigger_zone_change {
+        Some((origin, destination)) => TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(origin),
+            destination,
+            filter,
+        },
+        None => TriggerCondition::EventObjectMatchesFilter { filter },
     };
-    let condition = if negated {
+    if negated {
         TriggerCondition::Not {
             condition: Box::new(condition),
         }
     } else {
         condition
-    };
-    Ok((rest, condition))
+    }
 }
 
 /// CR 603.4 + CR 111.1: Token intervening-if with `'s not` contraction
