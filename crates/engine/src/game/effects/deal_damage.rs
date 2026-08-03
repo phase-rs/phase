@@ -959,7 +959,10 @@ fn stash_remaining_post_replacement_damage(
         .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+            append_to_pending_continuation(
+                state,
+                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+            );
         }
         return;
     };
@@ -968,7 +971,7 @@ fn stash_remaining_post_replacement_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, sub.as_ref().clone());
+        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -990,7 +993,10 @@ fn stash_remaining_damage_chain(
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+            append_to_pending_continuation(
+                state,
+                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+            );
         }
         return;
     };
@@ -1002,9 +1008,32 @@ fn stash_remaining_damage_chain(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, sub.as_ref().clone());
+        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
+/// paused-continuation stash (shared by every `stash_*` pause helper in this
+/// module), carrying the parent's object referent (e.g. Lady Loki's injected
+/// exile-until hit) into the re-parented tail — but ONLY when the non-pause path
+/// would have propagated it. Gating by the exact same
+/// `should_propagate_parent_targets` predicate `resolve_ability_chain` uses
+/// makes every pause path CONVERGE with the non-pause path: for a plain
+/// multi-target `DealDamage` whose sub is `Resolution`-timed or
+/// `ExiledBySource`-scoped (or that carries its own targets), the guard returns
+/// false and no object target leaks; for Lady Loki's `CastFromZone
+/// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
+/// returns true and the hit is preserved so the free cast still addresses it.
+fn cast_tail_with_parent_targets(
+    sub: &ResolvedAbility,
+    ability: &ResolvedAbility,
+) -> ResolvedAbility {
+    let mut tail = sub.clone();
+    if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+        tail.targets = ability.targets.clone();
+    }
+    tail
 }
 
 /// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
@@ -1048,10 +1077,13 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+                append_to_pending_continuation(
+                    state,
+                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+                );
                 return;
             }
-            Some(h) => append_to_sub_chain(h, sub.as_ref().clone()),
+            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
         }
     }
 
@@ -1079,7 +1111,10 @@ fn stash_remaining_each_source_damage(
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+            append_to_pending_continuation(
+                state,
+                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+            );
         }
         return;
     };
@@ -1091,7 +1126,7 @@ fn stash_remaining_each_source_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, sub.as_ref().clone());
+        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -2178,12 +2213,16 @@ pub fn resolve_each_player(
         .collect();
 
     for (i, pid) in player_ids.iter().enumerate() {
-        // CR 120.3: Resolve quantity scoped to this player.
-        let dmg = crate::game::quantity::resolve_quantity_scoped(
+        // CR 120.3: Resolve quantity scoped to this player. Thread the ability's
+        // object targets so an `ObjectManaValue { scope: Target }` leaf (Lady
+        // Loki's "that nonland card's mana value" — the injected exile-until hit)
+        // resolves against the hit rather than to 0.
+        let dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
             state,
             amount_expr,
             ability.source_id,
             *pid,
+            &ability.targets,
         )
         .max(0) as u32;
         if dmg > 0 {
@@ -2197,13 +2236,19 @@ pub fn resolve_each_player(
                     let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
                         .iter()
                         .filter_map(|&next_pid| {
-                            let next_dmg = crate::game::quantity::resolve_quantity_scoped(
-                                state,
-                                amount_expr,
-                                ability.source_id,
-                                next_pid,
-                            )
-                            .max(0) as u32;
+                            // Thread `ability.targets` here too — otherwise every
+                            // opponent AFTER the first (once a replacement pause
+                            // occurs) would pre-resolve an `ObjectManaValue
+                            // { scope: Target }` leaf to 0.
+                            let next_dmg =
+                                crate::game::quantity::resolve_quantity_scoped_with_targets(
+                                    state,
+                                    amount_expr,
+                                    ability.source_id,
+                                    next_pid,
+                                    &ability.targets,
+                                )
+                                .max(0) as u32;
                             (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
                         })
                         .collect();
@@ -2545,13 +2590,16 @@ fn stash_remaining_each_deals_chain(
     match head {
         Some(mut h) => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_sub_chain(&mut h, sub.as_ref().clone());
+                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(sub, ability));
             }
             append_to_pending_continuation(state, Some(Box::new(h)));
         }
         None => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+                append_to_pending_continuation(
+                    state,
+                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
+                );
             }
         }
     }
@@ -2898,6 +2946,162 @@ mod tests {
         assert!(
             parent_event_seen,
             "pause-and-resume path must emit the parent effect resolution event"
+        );
+    }
+
+    /// CR 120.3 + CR 616.1e + CR 202.3e: Lady Loki, Agent of Chaos — when a
+    /// `DamageEachPlayer` whose amount references BOTH the triggering spell
+    /// (`ObjectManaValue{EventSource}`) and the exile-until hit
+    /// (`ObjectManaValue{Target}`, injected into `ability.targets`) pauses on the
+    /// FIRST opponent's damage replacement, two things must survive the pause:
+    ///   * Finding 1 (site 2200): the REMAINING opponent's pre-resolved amount
+    ///     must thread `ability.targets`, so it is |MV(spell) − MV(hit)| = |4−1| =
+    ///     3, not the target-dropped |4−0| = 4.
+    ///   * Finding 2: the re-parented free-cast tail (`CastFromZone{ParentTarget}`)
+    ///     must carry the parent's object referent (the hit), so "you may cast that
+    ///     card" still addresses it after the pause.
+    #[test]
+    fn damage_each_player_replacement_pause_threads_targets_and_cast_tail() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver, PlayerFilter};
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lady Loki".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The exiled triggering spell — EventSource, mana value 4 ({3}{R}).
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Chaos Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(11),
+            controller: PlayerId(0),
+            object_id: spell,
+        });
+
+        // The exile-until hit — Target, mana value 1.
+        let hit = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Nonland Hit".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&hit).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+
+        // Force the first opponent (P1) to pause on an optional damage replacement.
+        install_optional_damage_replacement(&mut state);
+
+        // The free-cast tail: CastFromZone { ParentTarget }, empty own targets so
+        // the parent-target propagation guard applies.
+        let cast_tail = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                },
+                player_filter: PlayerFilter::Opponent,
+            },
+            vec![TargetRef::Object(hit)],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cast_tail));
+
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+
+        // The first opponent paused on the optional replacement.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "first opponent must pause on the optional damage replacement, got {:?}",
+            state.waiting_for
+        );
+
+        let cont = state
+            .active_ability_continuation()
+            .expect("the remaining opponent + cast tail must be stashed while P1 waits");
+
+        // Finding 1 (site 2200): the remaining opponent (P2) pre-resolved to the
+        // FULL difference |4 − 1| = 3. Reverting the targets-threading at site 2200
+        // drops the hit and yields |4 − 0| = 4.
+        let summary = collect_chain_summary(&cont.chain);
+        assert!(
+            summary.iter().any(
+                |(_, target, amount)| *target == TargetRef::Player(PlayerId(2)) && *amount == 3
+            ),
+            "remaining opponent must be stashed with |MV(spell) − MV(hit)| = 3 (a \
+             target-dropped pre-resolve gives 4): {summary:?}"
+        );
+
+        // Finding 2: the re-parented free-cast tail carries the injected hit.
+        let mut cursor = Some(cont.chain.as_ref());
+        let mut cast_tail_targets = None;
+        while let Some(node) = cursor {
+            if matches!(node.effect, Effect::CastFromZone { .. }) {
+                cast_tail_targets = Some(node.targets.clone());
+                break;
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        assert_eq!(
+            cast_tail_targets,
+            Some(vec![TargetRef::Object(hit)]),
+            "the stashed CastFromZone tail must carry the exile-until hit as its \
+             ParentTarget referent (reverting the guarded pre-bind leaves it empty)"
         );
     }
 

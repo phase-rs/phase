@@ -1791,11 +1791,48 @@ pub fn resolve_quantity_with_targets_slice(
 /// `scope_player` binds `ControllerRef::ScopedPlayer` during the per-player
 /// iteration; the ability controller (from the source object) is used for
 /// `ControllerRef::You` ("creatures you control").
+///
+/// This is the no-target case of [`resolve_quantity_scoped_with_targets`]: it
+/// delegates with an empty `targets` slice so there is a single authoritative
+/// scoped resolver. Callers with no ability target(s) (the condition/restriction
+/// paths in `restrictions.rs`) use this wrapper.
 pub(crate) fn resolve_quantity_scoped(
     state: &GameState,
     expr: &QuantityExpr,
     source_id: ObjectId,
     scope_player: PlayerId,
+) -> i32 {
+    resolve_quantity_scoped_with_targets(state, expr, source_id, scope_player, &[])
+}
+
+/// Resolve a per-player `DamageEachPlayer` quantity that also references the
+/// resolving ability's object target(s) — e.g. Lady Loki, Agent of Chaos:
+/// "deals damage to each opponent equal to the difference between that spell's
+/// mana value and that nonland card's mana value", where "that nonland card"
+/// (`ObjectManaValue { scope: Target }`) is the exile-until hit injected into
+/// `ability.targets`.
+///
+/// This is the authoritative scoped resolver; [`resolve_quantity_scoped`] is the
+/// no-target wrapper that delegates here with an empty `targets` slice. It binds
+/// `scope_player` for `ControllerRef::ScopedPlayer` (per-recipient scope) and
+/// passes `targets` so the `ObjectManaValue { scope: Target }` leaf (and any
+/// other `Target`-scoped ref nested inside a `Difference`/`Sum`) reads the
+/// injected hit instead of resolving to 0.
+///
+/// CR 120.3: per-player damage scope. CR 202.3e: mana value of an object off the
+/// stack (X = 0). CR 608.2c: object referents follow the instruction order.
+///
+/// `ability` is intentionally kept `None` in the `resolve_ref` call: the
+/// `ObjectScope::Target` arm reads ONLY `targets`, never `ability`, and passing
+/// `Some(ability)` would take `resolve_ref`'s `Some(_)` branch, which never
+/// assigns `scoped_iteration_player` — silently regressing every
+/// `ControllerRef::ScopedPlayer`-relative `DamageEachPlayer` (Acidic Soil et al.).
+pub(crate) fn resolve_quantity_scoped_with_targets(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source_id: ObjectId,
+    scope_player: PlayerId,
+    targets: &[TargetRef],
 ) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
@@ -1818,12 +1855,14 @@ pub(crate) fn resolve_quantity_scoped(
                 recipient: None,
                 scoped_player: Some(scope_player),
             },
-            &[],
+            targets,
             None,
             None,
         ),
+        // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
+        // inside a composite (e.g. the `right` operand of `Difference`).
         other => fold_compose(other, |inner| {
-            resolve_quantity_scoped(state, inner, source_id, scope_player)
+            resolve_quantity_scoped_with_targets(state, inner, source_id, scope_player, targets)
         }),
     }
 }

@@ -2498,7 +2498,10 @@ fn apply_parent_chain_context(
 /// bottom alongside the misses.
 /// Every other sub keeps today's behavior: parent targets propagate when the
 /// sub declares none of its own.
-fn should_propagate_parent_targets(ability: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+pub(crate) fn should_propagate_parent_targets(
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> bool {
     sub.targets.is_empty()
         && !ability.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
