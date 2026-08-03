@@ -9,7 +9,7 @@ use crate::game::functioning_abilities::{
 use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -928,22 +928,12 @@ pub(crate) fn transient_grants_static_mode_to_object(
 /// deliberately skips); (2) any filter-scoped transient grant; and (3) a printed
 /// static (parity with the `CantUntap` intrinsic path, future-proofing).
 pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: ObjectId) -> bool {
-    let condition_holds = |duration: &Duration,
-                           condition: &Option<crate::types::ability::StaticCondition>,
-                           controller: PlayerId,
-                           source_id: ObjectId|
-     -> bool {
-        if let Duration::ForAsLongAs { condition } = duration {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        if let Some(condition) = condition {
-            if !evaluate_condition(state, condition, controller, source_id) {
-                return false;
-            }
-        }
-        true
+    // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+    // hold for it to apply; `transient_gate_conditions` is the authority over
+    // which those are.
+    let condition_holds = |tce: &crate::types::game_state::TransientContinuousEffect| {
+        crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
     };
 
     // (1) SpecificObject-pinned transient grant — the Pandorica lock.
@@ -957,7 +947,7 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
                     }
                 )
             })
-            && condition_holds(&tce.duration, &tce.condition, tce.controller, tce.source_id)
+            && condition_holds(tce)
     });
     if pinned {
         return true;

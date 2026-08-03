@@ -3728,12 +3728,15 @@ struct LiveCharacteristicReads {
 /// WHAT CONVERGES WHERE. The `e.condition` channel below is NOT a single
 /// authority over every gate on the board, and must not be documented as one.
 /// The full producer census of `ActiveContinuousEffect::condition`, and which
-/// channel can see each one:
+/// channel can see each one. One row per construction site — the eight
+/// `ActiveContinuousEffect { .. }` literals in the engine, six here and two in
+/// `stickers.rs`, all reached through
+/// [`collect_shared_active_continuous_effects`]:
 ///
 /// | producer | `condition` it writes | seen by |
 /// |---|---|---|
 /// | The Ring emblem (CR 701.54c) | `None` | nothing to see |
-/// | [`collect_shared_active_continuous_effects`] (printed statics) | `def.condition` | `e.condition` AND the source walk |
+/// | [`active_continuous_effects_from_static_definitions`] (printed statics) | `def.condition` | `e.condition` AND the source walk |
 /// | [`expand_granted_static_effects`] | `inner.condition` | `e.condition` ONLY |
 /// | `expand_granted_activated_abilities` | `None` | nothing to see |
 /// | `expand_granted_triggered_abilities` | `None` | nothing to see |
@@ -5661,12 +5664,23 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// Every consumer that asks "what could turn this effect on or off" walks this
 /// pair through here: [`transient_effect_is_live`] (via
 /// [`transient_duration_holds`] and its own `tce.condition` arm),
-/// [`live_characteristic_reads`], [`any_active_static_condition_perturbed_by_entry`],
-/// `casting::transient_granted_spell_keywords_for` and
-/// `static_abilities::transient_grants_static_mode_to_player`. The last two
-/// evaluate with `evaluate_condition` rather than `source_condition_gate_passes`
-/// — the authority is over WHICH conditions gate the effect, not over how a
-/// given caller evaluates them.
+/// [`live_characteristic_reads`] and
+/// [`any_active_static_condition_perturbed_by_entry`] in this module, six
+/// static-mode/protection queries in `static_abilities`, plus
+/// `casting::transient_granted_spell_keywords_for`,
+/// `turns::scan_step_end_mana_handlers` and
+/// `visibility::viewer_may_look_at_face_down`. All but the first evaluate with
+/// `evaluate_condition` rather than `source_condition_gate_passes` — the
+/// authority is over WHICH conditions gate the effect, not over how a given
+/// caller evaluates them.
+///
+/// That claim is grep-checkable rather than enumerated, because an enumeration
+/// silently goes stale: outside this file, `Duration::ForAsLongAs` appears only
+/// in constructors (`add_transient_continuous_effect` call sites), in the
+/// `ability_rw` / `ability_scan` / `coverage` walkers that classify a duration
+/// without evaluating it, and in the non-consumer below. A new site that
+/// destructures the pair by hand instead of calling this is the regression to
+/// look for.
 ///
 /// One deliberate non-consumer: the lapsed-attachment sweep in
 /// [`evaluate_layers`] destructures the exact `ForAsLongAs {
