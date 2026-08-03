@@ -30,8 +30,8 @@
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    ControllerRef, Effect, EffectKind, EventCounterReproductionCount, TargetFilter,
-    TriggerCondition,
+    ControllerRef, Effect, EffectKind, EventCounterReproductionCount, MultiTargetSpec,
+    QuantityExpr, TargetFilter, TriggerCondition,
 };
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -724,6 +724,50 @@ fn aragorn_reproduction_shape_is_per_kind_to_target() {
         }
         other => panic!("expected ReproduceEventCounters, got {other:?}"),
     }
+}
+
+/// PARSE (CR 115.1d + CR 601.2c): Aragorn's "on up to one other target creature"
+/// must stamp `MultiTargetSpec::up_to(1)` on the reproduction ability so the
+/// target slot is genuinely optional (min=0, max=1). Without this the target is
+/// mandatory and the controller cannot decline it. Asserting the parsed
+/// cardinality directly (not just runtime behavior with an undeclared target,
+/// which passes vacuously) is what proves the `MultiTargetSpec` survives lowering.
+#[test]
+fn aragorn_reproduction_target_is_optional_up_to_one() {
+    let parsed = parse_oracle_text(
+        ARAGORN,
+        "Aragorn, Company Leader",
+        &[],
+        &["Creature".to_string()],
+        &[
+            "Human".to_string(),
+            "Noble".to_string(),
+            "Ranger".to_string(),
+        ],
+    );
+    let trig = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::CounterAdded)
+        .expect("Aragorn has a CounterAdded reproduction trigger");
+    let execute = trig
+        .execute
+        .as_deref()
+        .expect("trigger has an execute ability");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ReproduceEventCounters { .. }
+        ),
+        "reach guard: the reproduction effect must be present, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "\"up to one other target creature\" must stamp MultiTargetSpec::up_to(1) \
+         so the reproduction target is optional (min=0, max=1)",
+    );
 }
 
 /// RUNTIME: a multi-kind, count>1 placement on Aragorn reproduces exactly ONE of
