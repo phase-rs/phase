@@ -15551,6 +15551,7 @@ mod stage2_injector_tests {
         state.push_optional_effect_frame(crate::types::resolution::OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
