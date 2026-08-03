@@ -12444,10 +12444,9 @@ mod tests {
                  the gathered effect, so only the transient walk can put NameText in \
                  ReadKinds — a layer-1 name override reaching the entrant must escalate"
             );
-            // Non-vacuity: the gate really is the board-wide count — no
-            // `FilterProp::Another`, nothing else recipient-relative — so it is
-            // source-level and every gather strips it before the `e.condition`
-            // channel could ever see it.
+            // Non-vacuity, fixture side: the installed gate really is the
+            // board-wide count — no `FilterProp::Another`, nothing else
+            // recipient-relative — so it is source-level.
             assert!(
                 !forced.transient_continuous_effects.is_empty()
                     && forced.transient_continuous_effects.iter().all(|tce| {
@@ -12456,6 +12455,18 @@ mod tests {
                     }),
                 "the fixture must install SpecificObject-bound transients whose gate is \
                  source-level, or the `e.condition` channel would cover this board"
+            );
+            // Non-vacuity, GATHERED side: asserting the fixture only proves what
+            // was installed. Run the real gather and confirm the condition is
+            // gone from every effect it produces — that strip is the whole
+            // premise of this test, so it is asserted, not inferred.
+            let mut gathered = Vec::new();
+            crate::game::layers::gather_transient_continuous_effects(&forced, &mut gathered);
+            assert!(
+                !gathered.is_empty() && gathered.iter().all(|e| e.condition.is_none()),
+                "the gather must strip this source-level condition; if it retained it, \
+                 `e.condition` would cover the board and the transient walk would be \
+                 untested here"
             );
             let mut pre = transient_source_level_condition_read_board();
             flush_layers(&mut pre);

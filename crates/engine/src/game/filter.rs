@@ -13823,6 +13823,16 @@ mod characteristic_read_classification_tests {
     /// it is added — and `carries_controller_ref` then forces the sample to be
     /// classified, and the CONTROLLER assertion forces the classifier to be
     /// right about it.
+    ///
+    /// CEILING: the scan is TEXTUAL, so it only sees `ControllerRef` named
+    /// directly in a variant's own field list. A future `NewProp { spec:
+    /// Box<AttackSpec> }` whose `AttackSpec` holds a `ControllerRef` stays
+    /// invisible here — the roster does not grow, no sample is forced, and this
+    /// test stays green while the classifier goes unverified for it. The
+    /// `!carriers.is_empty()` tripwire below only catches total scan failure
+    /// (declaration moved or reformatted), not an indirect carrier. Reaching
+    /// through a nested type needs a real type walk, which is not available
+    /// without a reflection dependency; classify such a variant by hand.
     fn declared_controller_ref_carriers() -> Vec<String> {
         let src = include_str!("../types/ability.rs");
         let decl = "pub enum FilterProp {";

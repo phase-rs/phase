@@ -3726,20 +3726,36 @@ struct LiveCharacteristicReads {
 /// admit no such exclusion.
 ///
 /// WHAT CONVERGES WHERE. The `e.condition` channel below is NOT a single
-/// authority over every gate on the board, and must not be documented as one:
+/// authority over every gate on the board, and must not be documented as one.
+/// The full producer census of `ActiveContinuousEffect::condition`, and which
+/// channel can see each one:
 ///
-/// * printed and granted-inner Continuous statics reach it (gathered with
-///   their condition intact), and are ALSO covered by the source walk below,
-///   which is what sees a static whose gate is currently OFF;
-/// * a transient reaches it only when its gate is currently ON *and* the
-///   condition is recipient-context, because
-///   [`gather_transient_continuous_effects`] skips a transient that is not
-///   live and strips a source-level condition from the effect it pushes. Both
+/// | producer | `condition` it writes | seen by |
+/// |---|---|---|
+/// | The Ring emblem (CR 701.54c) | `None` | nothing to see |
+/// | [`collect_shared_active_continuous_effects`] (printed statics) | `def.condition` | `e.condition` AND the source walk |
+/// | [`expand_granted_static_effects`] | `inner.condition` | `e.condition` ONLY |
+/// | `expand_granted_activated_abilities` | `None` | nothing to see |
+/// | `expand_granted_triggered_abilities` | `None` | nothing to see |
+/// | [`gather_transient_continuous_effects`] | recipient-context `tce.condition` only | `e.condition`, plus the transient walk for what it drops |
+/// | `stickers.rs` (two P/T sites) | `None` | nothing to see |
+///
+/// Two consequences a reader must not get backwards:
+///
+/// * a GRANTED-INNER static's condition lives in `inner.condition`, nested in
+///   `ContinuousModification::GrantStaticAbility`. The source walk below reads
+///   `obj.static_definitions.iter_all()`, i.e. OUTER definitions, so it sees
+///   that condition only once a previous pass has materialized the granted
+///   definition onto the recipient. On a never-yet-evaluated state — hand-built
+///   or freshly deserialized — `e.condition` is the ONLY channel that sees it.
+///   That is what the `e.condition` union is load-bearing for; it is not
+///   redundant with the source walk.
+/// * a TRANSIENT reaches `e.condition` only when its gate is currently ON *and*
+///   the condition is recipient-context, because
+///   [`gather_transient_continuous_effects`] skips a transient that is not live
+///   and strips a source-level condition from the effect it pushes. Both
 ///   discarded shapes are exactly the ones an entry can flip, hence the
-///   separate walk over `state.transient_continuous_effects`;
-/// * the ring/emblem/sticker producers (`stickers.rs`, and the two `condition:
-///   None` sites in this file) carry no condition at all today, so they
-///   contribute nothing through any channel.
+///   separate walk over `state.transient_continuous_effects`.
 ///
 /// `active_combat_assignment_rule_effects_from_static_definitions` /
 /// `collect_transient_combat_assignment_rule_effects` duplicate the same
@@ -5636,9 +5652,28 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 ///   own CR 611.3a gate riding along on the transient
 ///   (`effects/counter.rs::apply_source_static`).
 ///
-/// [`transient_effect_is_live`] consults exactly this pair, so any channel that
-/// must see "what could turn this effect on or off" walks the same pair.
-fn transient_gate_conditions(
+/// [`transient_effect_is_live`] consults this pair plus two gates that read no
+/// layer-writable characteristic at all — the CR 400.7 recipient-incarnation
+/// check and the `UntilHostLeavesPlay` source-zone check — which is why they
+/// are outside this iterator and outside [`live_characteristic_reads`]: a zone
+/// or identity change is not something layers 1-7 can write.
+///
+/// Every consumer that asks "what could turn this effect on or off" walks this
+/// pair through here: [`transient_effect_is_live`] (via
+/// [`transient_duration_holds`] and its own `tce.condition` arm),
+/// [`live_characteristic_reads`], [`any_active_static_condition_perturbed_by_entry`],
+/// `casting::transient_granted_spell_keywords_for` and
+/// `static_abilities::transient_grants_static_mode_to_player`. The last two
+/// evaluate with `evaluate_condition` rather than `source_condition_gate_passes`
+/// — the authority is over WHICH conditions gate the effect, not over how a
+/// given caller evaluates them.
+///
+/// One deliberate non-consumer: the lapsed-attachment sweep in
+/// [`evaluate_layers`] destructures the exact `ForAsLongAs {
+/// RecipientMatchesFilter { AttachedTo } }` shape (CR 301.5) to decide
+/// permanent EXPIRY, not liveness. It needs the structural match, not the
+/// condition list, so routing it through here would lose the thing it matches on.
+pub(crate) fn transient_gate_conditions(
     tce: &TransientContinuousEffect,
 ) -> impl Iterator<Item = &StaticCondition> {
     transient_duration_condition(tce)
