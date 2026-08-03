@@ -30955,6 +30955,367 @@ fn cant_be_activated_aura_blocks_enchanted_creature_not_others() {
     );
 }
 
+#[test]
+fn karn_blocks_liquimetal_coated_opponent_land() {
+    // Issue #6469: Karn's `TargetFilter::Typed(Artifact)` filter must apply to
+    // a permanent that becomes an artifact via a continuous type-changing
+    // effect (Liquimetal Coating's "becomes an artifact in addition to its
+    // other types until end of turn"), not just to permanents that are
+    // printed artifacts. Exercises the real GenericEffect -> transient
+    // continuous effect -> layer-4 AddType pipeline rather than hand-setting
+    // `card_types`, so a regression in that pipeline would be caught here too.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    let coating = create_object(
+        &mut state,
+        CardId(0x1157),
+        PlayerId(0),
+        "Liquimetal Coating".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&coating)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    let land = create_object(
+        &mut state,
+        CardId(0x1a2d),
+        PlayerId(1),
+        "Utility Land".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+        Arc::make_mut(&mut obj.abilities).push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+    let land_ability = state.objects[&land].abilities[0].clone();
+
+    assert!(
+        !is_blocked_by_cant_be_activated(&state, PlayerId(1), land, &land_ability),
+        "reach-guard: an uncoated land must not be blocked by Karn"
+    );
+
+    let ability = ResolvedAbility::new(
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::AddType {
+                    core_type: CoreType::Artifact,
+                }])],
+            duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
+            end_cost: None,
+        },
+        vec![TargetRef::Object(land)],
+        coating,
+        PlayerId(0),
+    );
+
+    let mut events = Vec::new();
+    crate::game::effects::effect::resolve(&mut state, &ability, &mut events).unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert!(
+        state.objects[&land]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact),
+        "Liquimetal Coating must make the land an artifact; core_types = {:?}",
+        state.objects[&land].card_types.core_types
+    );
+    assert!(
+        is_blocked_by_cant_be_activated(&state, PlayerId(1), land, &land_ability),
+        "Karn must block a Coating-turned-artifact land controlled by an opponent"
+    );
+}
+
+#[test]
+fn karn_blocks_liquimetal_coated_forest_from_legal_mana_actions() {
+    // Issue #6469: the ROOT CAUSE — `land_mana_options`'s basic-land-subtype
+    // fallback (`mana_sources.rs`) fired whenever `scan_mana_abilities` came
+    // back empty, without checking WHY it was empty. Karn correctly filters
+    // the coated Forest's real {T}: Add {G} ability out of `scan_mana_abilities`
+    // (confirmed by the reach-guard below), but the fallback then mistook that
+    // legitimate filtering for "no mana ability exists" and re-added an
+    // unconditional `ability_index: None` option for it, letting the opponent
+    // tap the Karn-blocked land for mana anyway. Exercises
+    // `activatable_mana_actions_for_player`, the real legal-action surface
+    // behind both the manual "tap for mana" UI and AI candidate generation.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    // A real Forest: Land + "Forest" subtype + an explicit {T}: Add {G} ability
+    // (mirrors card-data.json's actual parsed Forest, not a bare subtype).
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0125),
+        PlayerId(1),
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.card_types.core_types.push(CoreType::Artifact); // Liquimetal Coating
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+        Arc::make_mut(&mut obj.abilities).push(
+            crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+    }
+    let forest_ability = state.objects[&forest].abilities[0].clone();
+
+    assert!(
+        is_blocked_by_cant_be_activated(&state, PlayerId(1), forest, &forest_ability),
+        "reach-guard: Karn must block the coated Forest's own {{T}}: Add {{G}} ability"
+    );
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "Karn must remove the coated Forest from P1's legal mana actions, got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn karn_blocks_bare_subtype_artifact_land_from_legal_mana_actions() {
+    // Issue #6469 follow-up: the fix above only closed the gap for a land
+    // that carries an explicit `Effect::Mana` ability. A land with NO
+    // explicit ability at all — just a basic land subtype, the genuine
+    // Urborg/Blood-Moon-class case `land_mana_options`'s fallback exists for
+    // (CR 305.6: the "{T}: Add [mana symbol]" ability is intrinsic even with
+    // no text box) — hits `land_mana_options`'s bare-subtype fallback
+    // directly, bypassing `scan_mana_abilities` entirely. That intrinsic
+    // ability is still an activated mana ability (CR 305.6 + CR 605), so
+    // CR 602.5 activation prohibitions must block it exactly like a printed
+    // one. Companion to `karn_blocks_liquimetal_coated_forest_from_legal_mana_actions`,
+    // which covers the explicit-ability half of the same fallback.
+    let mut state = setup_game_at_main_phase();
+
+    add_cant_be_activated_source(
+        &mut state,
+        PlayerId(0),
+        ProhibitionScope::AllPlayers,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        ),
+    );
+
+    // A bare-subtype Forest: Land + "Forest" subtype, no `abilities` entry at
+    // all — the intrinsic CR 305.6 ability, made an artifact by Liquimetal
+    // Coating and controlled by Karn's opponent.
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0126),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.card_types.core_types.push(CoreType::Artifact); // Liquimetal Coating
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+    assert!(
+        state.objects[&forest].abilities.is_empty(),
+        "reach-guard: this land must have no explicit AbilityDefinition, so the \
+         bare-subtype fallback (not scan_mana_abilities) is the branch under test"
+    );
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "Karn must block the coated bare-subtype Forest's intrinsic mana ability too, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_still_offers_mana_without_a_prohibition() {
+    // Positive companion to the regression above: with no CantBeActivated
+    // static in play, the bare-subtype fallback this whole family guards
+    // must still work — an ordinary basic land (no explicit ability) is a
+    // legal mana source via its CR 305.6 intrinsic ability.
+    let mut state = setup_game_at_main_phase();
+
+    let forest = create_object(
+        &mut state,
+        CardId(0xF0127),
+        PlayerId(1),
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&forest).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Forest".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(0);
+    }
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "an unprohibited bare-subtype land must still offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+/// Build a bare-subtype Forest (Land + "Forest" subtype, no explicit
+/// `abilities` entry) under `controller`, so `land_mana_options`'s
+/// bare-subtype fallback — not `scan_mana_abilities` — is the branch under
+/// test. Shared by the three sibling-gate regressions below.
+fn add_bare_subtype_forest(state: &mut GameState, controller: PlayerId, card_id: u64) -> ObjectId {
+    let forest = create_object(
+        state,
+        CardId(card_id),
+        controller,
+        "Bare Forest".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&forest).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj.card_types.subtypes.push("Forest".to_string());
+    obj.base_card_types = obj.card_types.clone();
+    obj.entered_battlefield_turn = Some(0);
+    forest
+}
+
+#[test]
+fn bare_subtype_land_detained_excluded_from_legal_mana_actions() {
+    // CR 701.35a + CR 305.6: a detained permanent's activated abilities can't
+    // be activated — including a bare-subtype land's intrinsic mana ability,
+    // which `intrinsic_land_mana_ability_blocked` must route through the same
+    // `mana_ability_ready_without_simulation_gated` readiness authority a
+    // printed mana ability uses, not just the two activation-prohibition
+    // statics (issue #6469 follow-up).
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF0128);
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .detained_by
+        .insert(PlayerId(0));
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a detained bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_phased_out_excluded_from_legal_mana_actions() {
+    // CR 702.26b + CR 305.6: a phased-out permanent is treated as though it
+    // doesn't exist and can't activate abilities — including a bare-subtype
+    // land's intrinsic mana ability.
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF0129);
+    state.objects.get_mut(&forest).unwrap().phase_status =
+        crate::game::game_object::PhaseStatus::PhasedOut {
+            cause: crate::game::game_object::PhaseOutCause::Directly,
+        };
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a phased-out bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
+#[test]
+fn bare_subtype_land_cant_tap_excluded_from_legal_mana_actions() {
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b + CR 305.6: a permanent that
+    // can't become tapped can't pay a {T} activation cost — including a bare-subtype land's
+    // intrinsic {T}: Add mana ability.
+    let mut state = setup_game_at_main_phase();
+    let forest = add_bare_subtype_forest(&mut state, PlayerId(1), 0xF012A);
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef));
+
+    let legal_actions =
+        crate::game::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(1));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action.source_object() == Some(forest)),
+        "a can't-tap bare-subtype land must not offer its intrinsic mana ability, \
+         got {legal_actions:?}"
+    );
+}
+
 // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
 
 /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).
@@ -42506,7 +42867,7 @@ fn add_impulse_exiled_card(
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: Some(source_id),
             invalidation: None,
-            exiled_by_ability_controller: Some(player),
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::AnyOf(vec![
@@ -42773,6 +43134,73 @@ fn add_exiled_land(state: &mut GameState, player: PlayerId, name: &str) -> Objec
     object_id
 }
 
+fn grant_object_exile_land_play_permission(
+    state: &mut GameState,
+    land: ObjectId,
+    player: PlayerId,
+    source: ObjectId,
+    frequency: CastFrequency,
+) {
+    state
+        .objects
+        .get_mut(&land)
+        .unwrap()
+        .casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            },
+            granted_to: player,
+            frequency,
+            source_id: Some(source),
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        });
+}
+
+fn add_extra_land_drop_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let source = create_object(
+        state,
+        CardId(state.next_object_id),
+        player,
+        "Exploration Stand-In".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::MayPlayAdditionalLand));
+    source
+}
+
+fn add_exiled_land_with_oracle(
+    state: &mut GameState,
+    player: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> ObjectId {
+    let land = add_exiled_land(state, player, name);
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle_text,
+        name,
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let obj = state.objects.get_mut(&land).unwrap();
+    obj.replacement_definitions = parsed.replacements.clone().into();
+    obj.base_replacement_definitions = Arc::new(parsed.replacements);
+    land
+}
+
 /// Link `exiled_id` to `source_id` in the persistent `exile_links` pool
 /// (CR 406.6 / CR 607.2a) — the lifetime tracker the `Persistent` pool
 /// scope reads, independent of the per-turn rolling list.
@@ -43031,6 +43459,358 @@ fn persistent_exile_play_permission_plays_linked_land_through_action() {
     let obj = state.objects.get(&land).unwrap();
     assert_eq!(obj.zone, Zone::Battlefield);
     assert_eq!(obj.played_from_zone, Some(Zone::Exile));
+}
+
+/// CR 305.2 + CR 400.7i: Unlimited object-attached permissions authorize each
+/// exiled land independently. An additional land drop makes both public
+/// `PlayLand` actions legal, and neither may consume a once-per-turn ledger.
+#[test]
+fn unlimited_object_exile_land_permissions_do_not_consume_a_ledger_slot() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    add_extra_land_drop_source(&mut state, player);
+    let source = ObjectId(99_001);
+    let first = add_exiled_land(&mut state, player, "First Exiled Forest");
+    let second = add_exiled_land(&mut state, player, "Second Exiled Forest");
+    grant_object_exile_land_play_permission(
+        &mut state,
+        first,
+        player,
+        source,
+        CastFrequency::Unlimited,
+    );
+    grant_object_exile_land_play_permission(
+        &mut state,
+        second,
+        player,
+        source,
+        CastFrequency::Unlimited,
+    );
+
+    for land in [first, second] {
+        let card_id = state.objects[&land].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            },
+        )
+        .expect("an unlimited object-attached exile permission must remain usable");
+    }
+
+    assert!(state.exile_play_permissions_used.is_empty());
+    assert!(state.exile_cast_permissions_used.is_empty());
+}
+
+/// CR 305.2 + CR 400.7i: Object-attached `OncePerTurn` permissions sharing a
+/// source use the object-play ledger. The second public action is rejected
+/// after the first consumes that exact source's slot.
+#[test]
+fn bounded_object_exile_land_permissions_share_the_exile_play_ledger() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    add_extra_land_drop_source(&mut state, player);
+    let source = ObjectId(99_002);
+    let first = add_exiled_land(&mut state, player, "First Bounded Exiled Forest");
+    let second = add_exiled_land(&mut state, player, "Second Bounded Exiled Forest");
+    for land in [first, second] {
+        grant_object_exile_land_play_permission(
+            &mut state,
+            land,
+            player,
+            source,
+            CastFrequency::OncePerTurn,
+        );
+    }
+
+    let first_card_id = state.objects[&first].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: first,
+            card_id: first_card_id,
+        },
+    )
+    .expect("the first bounded object-attached land play must succeed");
+    assert!(state.exile_play_permissions_used.contains(&source));
+    assert!(!state.exile_cast_permissions_used.contains(&source));
+
+    let second_card_id = state.objects[&second].card_id;
+    assert!(
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: second,
+                card_id: second_card_id,
+            },
+        )
+        .is_err(),
+        "the shared once-per-turn object permission must reject a second land"
+    );
+}
+
+/// CR 305.1 + CR 601.2a + CR 113.6b: A bounded static Play permission uses
+/// its `ExileCast` ledger for both land plays and later spell casts from its
+/// linked exile pool.
+#[test]
+fn bounded_static_exile_land_play_locks_the_linked_spell_permission() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Matrix of Time",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land(&mut state, player, "Bounded Exiled Island");
+    let spell = add_exiled_card(&mut state, player, "Bounded Exiled Bear");
+    link_exiled_to_source(&mut state, land, source);
+    link_exiled_to_source(&mut state, spell, source);
+
+    let card_id = state.objects[&land].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the static permission must authorize its first linked land play");
+
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(!state.exile_play_permissions_used.contains(&source));
+    assert!(
+        !spell_objects_available_to_cast(&state, player).contains(&spell),
+        "a land play must consume the same bounded static authority as a spell cast"
+    );
+}
+
+/// CR 305.1 + CR 614.12a: A bounded static permission is consumed when the
+/// land-entry path drains an as-enters choice after delivery (Thriving Grove),
+/// before returning its `NamedChoice` prompt.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_in_post_replacement_drain() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Thriving Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land_with_oracle(
+        &mut state,
+        player,
+        "Thriving Grove",
+        "This land enters tapped. As it enters, choose a color other than green.",
+    );
+    link_exiled_to_source(&mut state, land, source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the Thriving Grove replacement drain must leave a named choice");
+
+    assert!(matches!(result.waiting_for, WaitingFor::NamedChoice { .. }));
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 305.1 + CR 614.1c: A bounded static permission is consumed before the
+/// immediate shock-land replacement choice is returned. This specifically
+/// covers `ReplacementResult::NeedsChoice`, not the nested delivery pause.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_before_replacement_choice() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Shockland Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land_with_oracle(
+        &mut state,
+        player,
+        "Watery Grave",
+        "As this land enters, you may pay 2 life. If you don't, it enters tapped.",
+    );
+    link_exiled_to_source(&mut state, land, source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the shock-land replacement must return a replacement choice");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state.exile_cast_permissions_used.contains(&source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 305.1 + CR 614.1a + CR 614.1c: A land that has already entered may
+/// pause in the delivery tail while choosing an order for counter replacements.
+/// The bounded static exile authority is consumed at that committed-play seam,
+/// not deferred to the tail continuation that does not retain it.
+#[test]
+fn bounded_static_exile_land_play_records_exile_cast_before_delivery_tail_choice() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let permission_source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Delivery-Pause Permission",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let counter_source_card_id = CardId(state.next_object_id);
+    let counter_source = create_object(
+        &mut state,
+        counter_source_card_id,
+        player,
+        "Entry Counter Source".to_string(),
+        Zone::Battlefield,
+    );
+    let entry_counter = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+        counter_type: CounterType::Plus1Plus1,
+        count: 1,
+    })
+    .affected(TargetFilter::Typed(
+        TypedFilter::permanent()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::Another]),
+    ));
+    {
+        let source = state.objects.get_mut(&counter_source).unwrap();
+        source.static_definitions.push(entry_counter.clone());
+        Arc::make_mut(&mut source.base_static_definitions).push(entry_counter);
+    }
+    for (name, quantity_modification) in [
+        (
+            "Counter Doubler",
+            crate::types::ability::QuantityModification::DOUBLE,
+        ),
+        (
+            "Counter Incrementer",
+            crate::types::ability::QuantityModification::Plus { value: 1 },
+        ),
+    ] {
+        let source_card_id = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(quantity_modification),
+            );
+    }
+    let land = add_exiled_land(&mut state, player, "Delivery-Paused Exiled Land");
+    link_exiled_to_source(&mut state, land, permission_source);
+
+    let card_id = state.objects[&land].card_id;
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("counter replacement ordering must pause after the land enters");
+
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+    assert_eq!(state.exile_cast_permissions_used.len(), 1);
+    assert!(state
+        .exile_cast_permissions_used
+        .contains(&permission_source));
+    assert!(state.exile_play_permissions_used.is_empty());
+}
+
+/// CR 601.2a + CR 305.1: When both authorization classes apply, the elected
+/// object-attached permission wins. Its unlimited frequency must not consume
+/// the bounded static fallback's `ExileCast` slot.
+#[test]
+fn object_exile_land_authorization_precedes_static_fallback() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let static_source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Bounded Static Fallback",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    let land = add_exiled_land(&mut state, player, "Overlapping Exiled Island");
+    link_exiled_to_source(&mut state, land, static_source);
+    grant_object_exile_land_play_permission(
+        &mut state,
+        land,
+        player,
+        ObjectId(99_003),
+        CastFrequency::Unlimited,
+    );
+
+    let card_id = state.objects[&land].card_id;
+    apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        },
+    )
+    .expect("the elected unlimited object permission must authorize the land");
+
+    assert!(!state.exile_cast_permissions_used.contains(&static_source));
 }
 
 /// Build a persistent, your-turn-only, Cast-mode `ExileCastPermission`

@@ -9,6 +9,7 @@ use crate::types::zones::Zone;
 /// end-phase process began but have not been put onto the stack cease to exist.
 pub(super) fn clear_preexisting_unstacked_triggers(state: &mut GameState) {
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
     state.pending_trigger_entry = None;
     state.pending_trigger_order = None;
     state.pending_trigger_event_batch.clear();

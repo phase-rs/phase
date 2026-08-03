@@ -30,6 +30,7 @@ pub mod reanimator;
 pub mod spellslinger_prowess;
 pub mod tokens_wide;
 pub mod tribal;
+pub mod vehicles;
 
 #[cfg(test)]
 pub mod tests;
@@ -57,6 +58,7 @@ pub use reanimator::ReanimatorFeature;
 pub use spellslinger_prowess::SpellslingerProwessFeature;
 pub use tokens_wide::TokensWideFeature;
 pub use tribal::TribalFeature;
+pub use vehicles::VehiclesFeature;
 
 use engine::game::bracket_estimate::CommanderBracketTier;
 
@@ -103,6 +105,9 @@ pub struct DeckFeatures {
     /// CR 701.9: "whenever you discard" payoff density (self-discard outlets +
     /// engines). Disjoint from `hand_disruption`, which scores OPPONENT discard.
     pub discard_matters: DiscardMattersFeature,
+    /// CR 702.122: crewed-Vehicle density paired with the creature bench needed
+    /// to tap for it. Gives `CrewTimingPolicy` the deck signal it lacked.
+    pub vehicles: VehiclesFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -153,6 +158,7 @@ impl DeckFeatures {
             graveyard_types: graveyard_types::detect(deck),
             draw_matters: draw_matters::detect(deck),
             discard_matters: discard_matters::detect(deck),
+            vehicles: vehicles::detect(deck),
             bracket_tier: tier,
         }
     }

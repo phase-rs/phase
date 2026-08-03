@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AbilityBlockKind, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
@@ -213,6 +213,8 @@ function selectedBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
       return "ring-2 ring-red-400 shadow-[0_0_14px_4px_rgba(248,113,113,0.55),inset_0_0_18px_5px_rgba(248,113,113,0.3)]";
     case "tap":
       return "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55),inset_0_0_18px_5px_rgba(52,211,153,0.3)]";
+    case "untap":
+      return "ring-2 ring-cyan-300 shadow-[0_0_14px_4px_rgba(103,232,249,0.55),inset_0_0_18px_5px_rgba(103,232,249,0.3)]";
     case "blight":
       return "ring-2 ring-purple-400 shadow-[0_0_14px_4px_rgba(192,132,252,0.55),inset_0_0_18px_5px_rgba(192,132,252,0.3)]";
     case "ringBearer":
@@ -233,6 +235,8 @@ function availableBoardChoiceGlowClass(intent: BoardChoiceIntent): string {
       return "ring-2 ring-red-300/80 shadow-[0_0_10px_3px_rgba(248,113,113,0.35)]";
     case "tap":
       return "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
+    case "untap":
+      return "ring-2 ring-cyan-300/80 shadow-[0_0_10px_3px_rgba(103,232,249,0.4)]";
     case "blight":
       return "ring-2 ring-purple-300/80 shadow-[0_0_10px_3px_rgba(216,180,254,0.35)]";
     case "ringBearer":
@@ -253,6 +257,8 @@ function boardChoiceBadgeClass(intent: BoardChoiceIntent): string {
       return "bg-red-500 text-white";
     case "tap":
       return "bg-emerald-500 text-emerald-950";
+    case "untap":
+      return "bg-cyan-400 text-cyan-950";
     case "blight":
       return "bg-purple-500 text-white";
     case "ringBearer":
@@ -277,6 +283,7 @@ export const PermanentCard = memo(function PermanentCard({
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
+  const canActForWaitingState = useCanActForWaitingState();
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const battlefieldKeywordBadges = useGameStore(
@@ -392,8 +399,8 @@ export const PermanentCard = memo(function PermanentCard({
   const waitingFor = useGameStore((s) => s.waitingFor);
   const boardChoice = useMemo(() => {
     const choice = getBoardChoiceView(waitingFor, gameObjects);
-    return choice?.player === playerId ? choice : null;
-  }, [gameObjects, playerId, waitingFor]);
+    return canActForWaitingState ? choice : null;
+  }, [canActForWaitingState, gameObjects, waitingFor]);
   const equipTargetChoice = useGameStore((s) =>
     s.waitingFor?.type === "EquipTarget" && s.waitingFor.data.player === playerId
       ? s.waitingFor.data

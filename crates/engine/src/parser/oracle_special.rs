@@ -8,8 +8,8 @@ use nom::sequence::delimited;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect,
-    SolveCondition, StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, Effect, SolveCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::{EscapeCost, Keyword};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -17,9 +17,7 @@ use crate::types::statics::StaticMode;
 
 use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
 use super::oracle_effect::imperative::try_parse_die_result_line;
-use super::oracle_effect::{
-    capitalize, lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain,
-};
+use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};
 use super::oracle_nom::bridge::nom_on_lower;
@@ -211,62 +209,25 @@ pub(crate) fn normalize_self_refs_for_static(text: &str, card_name: &str) -> Str
     normalize_card_name_refs(text, card_name)
 }
 
-/// CR 706: Walk the sub_ability chain of a parsed trigger/ability to find the
-/// terminal `RollDie { results: [] }` node and attach die result branches
-/// from subsequent oracle text lines.
-pub(super) fn attach_die_result_branches_to_chain(
-    def: &mut AbilityDefinition,
-    lines: &[&str],
-    start_line: usize,
-) -> usize {
-    let roll_die = find_terminal_roll_die(def);
-    let roll_die = match roll_die {
-        Some(roll_die) => roll_die,
-        None => return start_line,
-    };
-
-    let mut branches = Vec::new();
-    let mut j = start_line;
-    while j < lines.len() {
-        let table_line = strip_reminder_text(lines[j].trim());
-        if table_line.is_empty() {
-            j += 1;
-            continue;
-        }
-        if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
-            let effect_text = strip_die_table_flavor_label(effect_text);
-            let branch_def = parse_effect_chain(effect_text, AbilityKind::Spell);
-            branches.push(DieResultBranch {
-                min,
-                max,
-                effect: Box::new(branch_def),
-            });
-            j += 1;
-        } else {
-            break;
-        }
-    }
-
-    if !branches.is_empty() {
-        if let Effect::RollDie {
-            ref mut results, ..
-        } = roll_die
-        {
-            *results = branches;
-        }
-    }
-
-    j
-}
-
 pub(crate) fn find_terminal_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
-    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
-        return Some(&mut *def.effect);
-    }
     if let Some(ref mut sub) = def.sub_ability {
         return find_terminal_roll_die(sub);
     }
+    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut *def.effect);
+    }
     None
+}
+
+/// CR 706.3b: A results table belongs to the first die-roll instruction in its
+/// paragraph even when later instructions remain in that ability's chain.
+pub(crate) fn find_result_table_roll_die(def: &mut AbilityDefinition) -> Option<&mut Effect> {
+    if matches!(&*def.effect, Effect::RollDie { results, .. } if results.is_empty()) {
+        return Some(&mut *def.effect);
+    }
+    def.sub_ability
+        .as_deref_mut()
+        .and_then(find_result_table_roll_die)
 }
 
 /// CR 706.3b: Parse contiguous result-table rows into typed branch IR.
@@ -340,6 +301,8 @@ pub(super) fn try_parse_die_roll_table(
             ..AbilityShellIr::default()
         },
         die_results: branches,
+        modal: None,
+        root_transforms: vec![],
     };
     Some((lower_ability_ir(&ir), next_line))
 }

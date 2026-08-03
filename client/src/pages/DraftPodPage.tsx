@@ -564,6 +564,11 @@ function BetweenGamesView() {
         <p className="text-sm text-white/60">
           {t("betweenGames.waitingSideboard")}
         </p>
+        {submittedDeck.length > 0 && (
+          <p className="text-sm text-white/50">
+            {submittedDeck.join(", ")}
+          </p>
+        )}
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
       </div>
     );

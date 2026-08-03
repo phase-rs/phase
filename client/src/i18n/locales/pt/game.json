@@ -5,6 +5,7 @@
     "cantActivateDuring": "Não pode ser ativada agora",
     "prohibited": "Ativar esta habilidade é proibido"
   },
+  "manaSourceSelection": { "title": "Escolha uma fonte de mana", "description": "Esta habilidade de mana exige sacrificar uma permanente.", "sacrifice": "Sacrificar", "back": "Voltar ao pagamento de mana", "unknownSource": "Fonte de mana" },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -268,6 +269,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Desvirar",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -2187,6 +2189,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Desvirar",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",

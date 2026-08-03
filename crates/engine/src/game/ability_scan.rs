@@ -1018,12 +1018,19 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
                 let mut acc = scan_mana_production(produced, mode);
-                if let Some(t) = target {
-                    acc = acc.or(scan_target_filter(
-                        t,
-                        FilterReadContext::SnapshotOrEvent,
-                        mode,
-                    ));
+                // CR 601.2c: a mana target is role-tagged (recipient / count
+                // source). Scan EVERY declared role filter, mirroring the D5
+                // legacy scan (`ability_rw`) and the AI POISON scan
+                // (`ai_support::filter`) — a partial view here would let the
+                // loop firewall miss a target-derived axis.
+                if let Some(role) = target {
+                    for (_, filter) in role.declared_filters() {
+                        acc = acc.or(scan_target_filter(
+                            filter,
+                            FilterReadContext::SnapshotOrEvent,
+                            mode,
+                        ));
+                    }
                 }
                 acc
             }
@@ -1249,7 +1256,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count: _,
             max_total_mv: _,
             zones: _,
-            exile_instead_of_graveyard: _,
+            graveyard_replacement: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(filter, target_ctx, mode));
@@ -1541,9 +1548,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
-        Effect::PutOnTopOrBottom { target } => {
+        Effect::PutOnTopOrBottom { target, chooser } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_target_filter(chooser, target_ctx, mode));
             acc
         }
         Effect::GiftDelivery { kind: _ } => Axes::NONE,
@@ -3563,6 +3571,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::UnlessPay { .. } => Axes::CONSERVATIVE,
         StaticCondition::Unrecognized { text: _ } => Axes::NONE,
         StaticCondition::DuringYourTurn => Axes::NONE,
+        StaticCondition::DuringOpponentsTurn => Axes::NONE,
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => Axes::NONE,
         StaticCondition::SourceEnteredThisTurn => Axes {
             event: false,
@@ -7927,6 +7936,66 @@ mod tests {
                 player: PlayerScope::Controller,
             }
         )));
+    }
+
+    /// CR 400.7d + CR 601.2h: the Adamant ability rider ("if at least three red
+    /// mana was spent to cast this spell, it deals 4 damage instead") now parses
+    /// to the generic `QuantityCheck { ManaSpentToCast { .., OfColor } }` shape
+    /// instead of the legacy `AbilityCondition::ManaColorSpent`. That moves it
+    /// from the `Axes::NONE` arm (`:2572`) onto the `Axes::CONSERVATIVE` arm
+    /// (`:2452`, reached via `QuantityCheck` → `scan_quantity_expr`), flipping
+    /// ALL THREE scan axes false→true for the 11 affected cards.
+    ///
+    /// RULING — the flip is accepted, and is the intended direction:
+    /// - `event`: CORRECT, not merely conservative. CR 400.7d makes the paid-mana
+    ///   record a cost-paid-object characteristic, which is precisely what the
+    ///   `event` axis names; the legacy `Axes::NONE` under-read it.
+    /// - `sibling` / `projected`: over-inclusive but fail-SAFE. The payment record
+    ///   is stamped once at CR 601.2h and is neither sibling-mutable nor a
+    ///   player-level projected resource, so `true` can only make the analysis
+    ///   reject an auto-order cover (prompt) — never auto-resolve something it
+    ///   should have prompted on.
+    ///
+    /// Neither `ordering_parity_sweep` (which imports `ability_rw` only) nor
+    /// `coverage-data.json` observes this axis, hence this direct assertion.
+    #[test]
+    fn adamant_rider_generic_shape_reads_all_scan_axes() {
+        let generic = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::OfColor {
+                        color: ManaColor::Red,
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        };
+        // SCOPE OF THIS TEST: it pins the scan-axis CLASSIFICATION of both
+        // shapes. It constructs the conditions directly and never invokes the
+        // parser, so it does NOT detect a revert of the `OfColor` lowering —
+        // that is guarded by `leading_word_mana_spent_condition_parses_adamant`
+        // in `parser/oracle_effect/conditions.rs`. The legacy pin below is what
+        // keeps the delta explicit.
+        let generic_axes = scan_ability_condition(&generic, ScanMode::Conservative);
+        assert!(generic_axes.event);
+        assert!(generic_axes.sibling);
+        assert!(generic_axes.projected);
+        // The public projection consumed by `analysis::resource` agrees.
+        assert!(ability_condition_reads_projected_resource(&generic));
+
+        // Pin the legacy shape's classification so the delta is explicit and a
+        // future retirement of `ManaColorSpent` cannot silently change it.
+        let legacy = AbilityCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+        let legacy_axes = scan_ability_condition(&legacy, ScanMode::Conservative);
+        assert!(!legacy_axes.event);
+        assert!(!legacy_axes.sibling);
+        assert!(!legacy_axes.projected);
+        assert!(!ability_condition_reads_projected_resource(&legacy));
     }
 
     // ---- BLOCKER 1 regression: multi_target bounds are traversed ----

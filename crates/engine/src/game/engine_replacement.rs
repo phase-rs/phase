@@ -1719,10 +1719,11 @@ pub(super) fn handle_copy_target_choice(
         else {
             unreachable!("meld resume returned above")
         };
-        let entry_events = state
-            .liminal_entries
-            .get(&source_id)
-            .map(|entry| (entry.name.clone(), entry.source_id));
+        // The entry's `name` / `source_id` now ride the parked
+        // `GameState::pending_token_battlefield_entry` that the `Suppress` commit installs, so
+        // only the liminal entry's PRESENCE matters here: it is what says this commit will park
+        // an entry that later needs realizing.
+        let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
@@ -1774,11 +1775,36 @@ pub(super) fn handle_copy_target_choice(
                 }));
             }
         }
-        if !super::effects::token::commit_liminal_token_entry_with_event_emission(
+        // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
+        // PAUSE on a CR 616.1 ordering choice between two AddCounter replacements. On that pause
+        // the only stashed post-action is the entry finalization, and its `Suppress` emission mode
+        // PARKS the whole entry (record + events) on `GameState` instead of realizing it. Hand the
+        // realization down as a post-finalize action so the paused path performs the same CR 400.7
+        // record and CR 603.6a emit the unpaused one performs below.
+        //
+        // Realizing it INSIDE the counter drain (rather than leaving it to the action-boundary
+        // convergence) keeps the emitted pair ahead of this action's `run_post_action_pipeline`
+        // trigger scan AND ahead of its CR 704.3 SBA pass. The boundary now converges the trigger
+        // half for handlers that never reach that pipeline, so this hand-down is retained for the
+        // SBA ordering and for a drain that does not settle in its own action.
+        //
+        // On a pause this function returns at the `commit_liminal_token_entry_*` call below, so
+        // the unpaused tail's CR 614.12a `BecomeCopy` chain, `finish_copy_target_choice_entry`,
+        // and the copy continuation do not run on that route. THAT abandonment — of the copy
+        // chain and continuation, not of the entry lifecycle — is pre-existing and is not what
+        // this hand-down addresses. Dropped unused when the commit does not pause.
+        let paused_entry_emit: Vec<PendingCounterPostAction> = has_liminal_entry
+            .then_some(PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+                object_id: source_id,
+            })
+            .into_iter()
+            .collect();
+        if !super::effects::token::commit_liminal_token_entry_with_post_actions(
             state,
             resume_event,
             events,
             TokenEntryEventEmission::Suppress,
+            paused_entry_emit,
         ) {
             return Ok(state.waiting_for.clone());
         }
@@ -1788,12 +1814,10 @@ pub(super) fn handle_copy_target_choice(
         // exceptions (CR 707.9b).
         let _ = effects::resolve_ability_chain(state, &ability, events, 0);
         let mut counter_pause_post_actions = Vec::new();
-        if let Some((name, event_source_id)) = entry_events.clone() {
+        if has_liminal_entry {
             counter_pause_post_actions.push(
                 PendingCounterPostAction::EmitCommittedCopyTokenEntry {
                     object_id: source_id,
-                    name,
-                    source_id: event_source_id,
                 },
             );
         }
@@ -1816,15 +1840,6 @@ pub(super) fn handle_copy_target_choice(
             true,
         )? {
             return Ok(waiting_for);
-        }
-        if let Some((name, event_source_id)) = entry_events {
-            super::effects::token::push_committed_token_entry_events(
-                state,
-                source_id,
-                name,
-                event_source_id,
-                events,
-            );
         }
         if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation
@@ -1942,6 +1957,12 @@ fn finish_copy_target_choice_entry(
             return Ok(Some(waiting_for));
         }
     }
+    // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
+    // choice is answered — the first instant the token IS the thing that entered. Placed before
+    // the replay/batch-drain/aura blocks so their pause returns cannot strand a parked entry.
+    // `false` here means an earlier convergence point already realized it (structurally
+    // idempotent, `Option::take_if`), which is not an error.
+    let _ = super::effects::token::flush_pending_token_battlefield_entry(state, source_id, events);
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was

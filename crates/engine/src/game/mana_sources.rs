@@ -26,8 +26,8 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
-    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceSelection, ManaType,
-    PaymentContext, TapsForManaSelection,
+    ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceSelection,
+    ManaType, PaymentContext, TapsForManaSelection,
 };
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -203,6 +203,7 @@ impl ManaSourceOption {
             source: crate::types::identifiers::ObjectIncarnationRef::from_object(source),
             ability_index: self.ability_index,
             mana_type: self.mana_type,
+            output: ManaSourceOutput::Concrete(self.mana_type),
             atomic_combination: self.atomic_combination.clone(),
             restrictions: self.restrictions.clone(),
             penalty: self.penalty,
@@ -297,6 +298,10 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
                     &mana_activation_gates,
                 )
             {
+                // Interactive costs (for example, "Sacrifice an artifact")
+                // deliberately remain the ordinary activation action during a
+                // normal ManaPayment window. Its established cost resolver is
+                // the authority for the subsequent PayCost choice.
                 actions.push(GameAction::ActivateAbility {
                     source_id: object_id,
                     ability_index,
@@ -305,6 +310,181 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
         }
     }
     actions
+}
+
+/// CR 605.3a: Complete semantic capabilities for mana activation, across lands
+/// and nonlands. This is intentionally separate from `GameAction` generation:
+/// callers can freeze these engine-authored candidates in an interaction and
+/// later require an exact fresh match before activation.
+pub fn activatable_mana_source_selections(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<ManaSourceSelection> {
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut selections = Vec::new();
+
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != player {
+            continue;
+        }
+
+        let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
+        for option in options {
+            let Some(selection) = manual_selection_for_option(state, &option) else {
+                continue;
+            };
+            if !selections.contains(&selection) {
+                selections.push(selection);
+            }
+        }
+    }
+    selections.sort_by(|left, right| left.cmp_stable(right));
+    selections
+}
+
+/// CR 605.3a: Return the source rows a frozen, explicit mana selection may
+/// name. Auto-tap rows stay the base because they preserve land fallback and
+/// tap-trigger metadata; then append every other currently legal activated
+/// mana ability. Unlike the automatic planner, this includes interactive costs
+/// such as "Sacrifice an artifact", because the selection is explicit and the
+/// normal `PayCost` flow still resolves that cost after activation.
+fn current_mana_source_options(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    aura_sources: &[ObjectId],
+    gates: &mana_abilities::ManaActivationGates,
+) -> Vec<ManaSourceOption> {
+    let Some(object) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    if object.zone != Zone::Battlefield || object.controller != player {
+        return Vec::new();
+    }
+
+    let mut options = if object.card_types.core_types.contains(&CoreType::Land) {
+        activatable_land_mana_options_indexed_gated(state, object_id, player, aura_sources, gates)
+    } else {
+        auto_tap_mana_options(state, object_id, player)
+    };
+
+    for (ability_index, ability) in object.abilities.iter().enumerate() {
+        if options
+            .iter()
+            .any(|option| option.ability_index == Some(ability_index))
+            || ability.kind != AbilityKind::Activated
+            || !mana_abilities::is_mana_ability(ability)
+            || !mana_abilities::can_activate_mana_ability_now_gated(
+                state,
+                player,
+                object_id,
+                ability_index,
+                ability,
+                gates,
+            )
+            || !activation_condition_satisfied(state, player, object_id, ability_index, ability)
+        {
+            continue;
+        }
+
+        let penalty = object_mana_ability_penalty(state, object_id, ability);
+        let source_could_produce_two_or_more_colors =
+            source_could_produce_two_or_more_colors(state, object_id, player);
+        for row in emit_source_rows(state, player, object_id, ability_index, ability, true) {
+            let option = ManaSourceOption {
+                object_id,
+                ability_index: Some(ability_index),
+                mana_type: row.mana_type,
+                source_could_produce_two_or_more_colors,
+                penalty,
+                atomic_combination: row.atomic_combination,
+                restrictions: row.restrictions,
+                taps_for_mana_overrides: Vec::new(),
+            };
+            if !options.contains(&option) {
+                options.push(option);
+            }
+        }
+    }
+
+    options
+}
+
+fn manual_selection_for_option(
+    state: &GameState,
+    option: &ManaSourceOption,
+) -> Option<ManaSourceSelection> {
+    let mut selection = option.semantic_selection(state)?;
+    let flexible_output = option.ability_index.is_some_and(|ability_index| {
+        state
+            .objects
+            .get(&option.object_id)
+            .and_then(|object| object.abilities.get(ability_index))
+            .is_some_and(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor { .. }
+                            | ManaProduction::AnyCombination { .. }
+                            | ManaProduction::ChoiceAmongExiledColors { .. }
+                            | ManaProduction::AnyOneColorAmongPermanents { .. }
+                            | ManaProduction::OpponentLandColors { .. }
+                            | ManaProduction::AnyTypeProduceableBy { .. }
+                            | ManaProduction::AnyCombinationOfObjectColors { .. }
+                            | ManaProduction::AnyInCommandersColorIdentity { .. },
+                        ..
+                    }
+                )
+            })
+    });
+    if flexible_output {
+        // The planner emits one concrete row per color, but a manual activation
+        // must retain the source capability and let the normal mana-choice
+        // resolver ask for its color. The colorless marker is intentionally
+        // inert while `output` is deferred and canonicalizes all planner rows.
+        selection.mana_type = ManaType::Colorless;
+        selection.output = ManaSourceOutput::DeferredColorChoice;
+    }
+    Some(selection)
+}
+
+/// Resolve an exact generic semantic source selection from fresh candidates.
+/// A deferred flexible output legitimately corresponds to several concrete
+/// planner rows; they all name the same object/ability capability and therefore
+/// collapse to one canonical manual selection above.
+pub(crate) fn live_mana_source_option_for_selection(
+    state: &GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+) -> Result<ManaSourceOption, EngineError> {
+    if !activatable_mana_source_selections(state, player).contains(selection) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        ));
+    }
+
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let object_id = selection.source.object_id;
+    let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
+    let mut matches = options
+        .into_iter()
+        .filter(|option| manual_selection_for_option(state, option).as_ref() == Some(selection));
+    let option = matches.next().ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Mana source selection is stale or no longer legal".to_string(),
+        )
+    })?;
+    if matches.any(|other| other.ability_index != option.ability_index) {
+        return Err(EngineError::InvalidAction(
+            "Mana source selection ambiguously matches multiple live capabilities".to_string(),
+        ));
+    }
+    Ok(option)
 }
 
 /// Re-enumerate the live land-mana rows and resolve one exact semantic
@@ -552,6 +732,27 @@ pub(crate) fn activate_mana_source_option(
     events: &mut Vec<GameEvent>,
     resume: ManaAbilityResume,
 ) -> Result<WaitingFor, EngineError> {
+    activate_mana_source_option_with_output(
+        state,
+        player,
+        option,
+        ManaSourceOutput::Concrete(option.mana_type),
+        events,
+        resume,
+    )
+}
+
+/// Activate a live source using the preserved output provenance. Deferred
+/// flexible outputs deliberately pass no production override, so the existing
+/// ManaChoice flow remains the single authority for the eventual color choice.
+pub(crate) fn activate_mana_source_option_with_output(
+    state: &mut GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+    output: ManaSourceOutput,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
     for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
         state
             .pending_taps_for_mana_overrides
@@ -569,8 +770,12 @@ pub(crate) fn activate_mana_source_option(
                     "Selected mana ability is no longer available".to_string(),
                 )
             })?;
-        let production_override =
-            super::casting_costs::production_override_for_option(&ability, option);
+        let production_override = match output {
+            ManaSourceOutput::Concrete(_) => {
+                super::casting_costs::production_override_for_option(&ability, option)
+            }
+            ManaSourceOutput::DeferredColorChoice => None,
+        };
         mana_abilities::activate_mana_ability(
             state,
             option.object_id,
@@ -628,6 +833,28 @@ pub(crate) fn activate_mana_source_option(
             .push(option.object_id);
     }
     Ok(waiting_for)
+}
+
+/// CR 605.3a-b: Revalidate and activate a generic mana capability. The caller
+/// supplies its resume because this entry point is shared by priority and a
+/// spell's mana-payment interaction; it never translates back into
+/// `ActivateAbility`, preserving the frozen selection identity.
+pub(crate) fn activate_mana_source_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
+    let option = live_mana_source_option_for_selection(state, player, selection)?;
+    activate_mana_source_option_with_output(
+        state,
+        player,
+        &option,
+        selection.output,
+        events,
+        resume,
+    )
 }
 
 /// CR 107.6 + CR 302.6: True when the cost includes the untap symbol ({Q}).
@@ -2121,26 +2348,62 @@ fn land_mana_options(
         gates,
     );
 
-    // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
-    if options.is_empty() {
+    // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
+    // type by Urborg/Blood Moon-class effects with no accompanying
+    // `Effect::Mana` grant). This must NOT fire merely because
+    // `scan_mana_abilities` came back empty — it can be empty because a REAL
+    // `Effect::Mana` ability exists but was just filtered out by a legality
+    // gate (CantBeActivated, CantActivateDuring, an unsatisfied activation
+    // condition). Falling back to unconditional subtype-inferred production
+    // in that case would silently defeat the gate that filtered it (issue
+    // #6469: Karn, the Great Creator's "activated abilities of artifacts your
+    // opponents control can't be activated" stopped blocking a Liquimetal-
+    // Coating-turned-artifact land's own {T}: Add mana ability, because the
+    // ability's legitimate absence from `options` was mistaken for "no
+    // ability exists").
+    let has_explicit_mana_ability = obj
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    if options.is_empty() && !has_explicit_mana_ability {
         if let Some(mana_type) = obj
             .card_types
             .subtypes
             .iter()
             .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         {
-            options.push(ManaSourceOption {
-                object_id,
-                ability_index: None,
-                mana_type,
-                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
-                    state, object_id, controller,
-                ),
-                penalty: ManaSourcePenalty::None,
-                atomic_combination: None,
-                restrictions: Vec::new(),
-                taps_for_mana_overrides: Vec::new(),
-            });
+            // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
+            // ability this fallback synthesizes is still an activated (mana)
+            // ability — every readiness gate a printed one is checked against
+            // (phased-out, detained, tapped/can't-tap, summoning sickness,
+            // CantBeActivated/CantActivateDuring, static activation
+            // restrictions) must apply to it too, not just the two activation-
+            // prohibition statics. Mirrors the `require_current_payability`
+            // gating `is_active_tap_mana_ability` applies to a real ability: the
+            // auto-tap PLANNING pass (`require_current_payability == false`)
+            // does not consult per-source legality gates for ANY mana source,
+            // real or intrinsic, so this only fires on the interactive/
+            // legal-action path.
+            let blocked = require_current_payability
+                && mana_type_to_color(mana_type).is_some_and(|color| {
+                    mana_abilities::intrinsic_land_mana_ability_blocked(
+                        state, controller, object_id, color, gates,
+                    )
+                });
+            if !blocked {
+                options.push(ManaSourceOption {
+                    object_id,
+                    ability_index: None,
+                    mana_type,
+                    source_could_produce_two_or_more_colors:
+                        source_could_produce_two_or_more_colors(state, object_id, controller),
+                    penalty: ManaSourcePenalty::None,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    taps_for_mana_overrides: Vec::new(),
+                });
+            }
         }
     }
 

@@ -73,7 +73,7 @@ use super::run::{drive_game, resolve_matchup};
 /// the report shape or the counter field set changes (a changed field set is
 /// self-flagged by [`PerfCounters::from_snapshot`]'s struct destructure — the
 /// `Removed`/`New` classifications also warn to bump this).
-pub const PERF_SCHEMA_VERSION: u32 = 3; // was 2: added SBA snapshot counters
+pub const PERF_SCHEMA_VERSION: u32 = 4; // was 3: added spell_keyword_grant_scans counter
 
 /// Number of INDEPENDENT cold-process trajectory samples the gate aggregates by
 /// per-counter median. Independence is why each sample must be its own process

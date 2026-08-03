@@ -71,6 +71,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
         source_id: exiled_id,
         // CR 603.7b: one-shot — removed after it fires.
         one_shot: true,
+        provenance: None,
     };
     crate::game::triggers::install_delayed_trigger(state, rebound_cast);
     true

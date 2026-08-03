@@ -1322,8 +1322,6 @@ pub(crate) fn build_ability_from_actions(
                 allow_repeat_modes,
                 constraints,
                 mode_costs: Vec::new(),
-                // Mechanical compile-keep-alive for the shared engine ModalChoice
-                // field add; mtgish does not (yet) author pawprint modals.
                 mode_pawprints: Vec::new(),
                 entwine_cost,
                 // CR 700.2a: mtgish modal blocks are controller-chosen.

@@ -16,3 +16,4 @@ pub mod mill;
 pub mod no_name_matching;
 pub mod poison;
 pub mod reanimator;
+pub mod vehicles;

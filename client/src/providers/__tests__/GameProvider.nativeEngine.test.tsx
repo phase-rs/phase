@@ -428,7 +428,7 @@ describe("GameProvider native AI routing", () => {
       id: "native-resume-read",
       mode: "ai",
       difficulty: "Medium",
-      nativeSession: { gameCode: "GAME-XYZ", playerId: 0, playerToken: "tok-xyz" },
+      nativeSession: { gameCode: "GAME-XYZ", playerId: 0, playerToken: "tok-xyz", fullKey: { game_code: "GAME-XYZ", generation: 1 } },
     });
 
     render(
@@ -464,7 +464,7 @@ describe("GameProvider native AI routing", () => {
       id: "native-resume-fail",
       mode: "ai",
       difficulty: "Medium",
-      nativeSession: { gameCode: "GONE", playerId: 0, playerToken: "tok" },
+      nativeSession: { gameCode: "GONE", playerId: 0, playerToken: "tok", fullKey: { game_code: "GONE", generation: 1 } },
     });
     // The reconnect handshake fails (e.g. the server no longer holds the game).
     nativeAdapterInitialize.mockRejectedValue(new Error("Reconnect grace period expired"));

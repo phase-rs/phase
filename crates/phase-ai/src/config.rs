@@ -533,6 +533,10 @@ pub struct PolicyPenalties {
     /// draw" engine (preference band, per engine).
     #[serde(default = "default_draw_payoff_bonus")]
     pub draw_payoff_bonus: f64,
+    /// CR 702.122a: card-equivalent value of casting a Vehicle the board can
+    /// already crew, scaled by surplus crew power.
+    #[serde(default = "default_vehicle_deployment_bonus")]
+    pub vehicle_deployment_bonus: f64,
     /// CR 601.2f: card-equivalent value of ONE generic mana saved by deploying a
     /// cost reducer, multiplied by the capped saved-mana total.
     #[serde(default = "default_cost_reduction_deploy_bonus")]
@@ -620,6 +624,7 @@ impl Default for PolicyPenalties {
             devotion_pip_progress: default_devotion_pip_progress(),
             devotion_god_activation: default_devotion_god_activation(),
             draw_payoff_bonus: default_draw_payoff_bonus(),
+            vehicle_deployment_bonus: default_vehicle_deployment_bonus(),
             cost_reduction_deploy_bonus: default_cost_reduction_deploy_bonus(),
             cost_reduction_defer_penalty: default_cost_reduction_defer_penalty(),
             discard_payoff_bonus: default_discard_payoff_bonus(),
@@ -750,6 +755,9 @@ fn default_devotion_god_activation() -> f64 {
 }
 fn default_draw_payoff_bonus() -> f64 {
     0.6
+}
+fn default_vehicle_deployment_bonus() -> f64 {
+    0.5
 }
 fn default_cost_reduction_deploy_bonus() -> f64 {
     0.2
@@ -907,6 +915,11 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "draw_payoff_bonus",
         "CR 121.1 per-engine draw-payoff weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "vehicle_deployment_bonus",
+        "CR 702.122a crewable-Vehicle deployment weight — awaiting a paired-seed \
+         ai-gate calibration.",
     ),
     (
         "cost_reduction_deploy_bonus",

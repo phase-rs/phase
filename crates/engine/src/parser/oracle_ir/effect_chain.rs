@@ -117,6 +117,33 @@ impl EffectChainIr {
     }
 }
 
+impl AbilityIr {
+    /// CR 706.3b: Whether the raw body contains an unassigned die roll that can
+    /// own an immediately following results table. This collection gate scans
+    /// source-ordered direct clauses and their pre-lowered sequential
+    /// sub-ability chains. The P4/P9 roll producers emit ordinary clauses;
+    /// duplicating full `ClauseDisposition` assembly here would create a second
+    /// reachability authority. Post-assembly attachment remains authoritative.
+    pub(crate) fn has_result_table_roll_die(&self) -> bool {
+        self.body.clauses.iter().any(|clause| {
+            matches!(&clause.parsed.effect, crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+                || clause
+                    .parsed
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(ability_definition_has_result_table_roll_die)
+        })
+    }
+}
+
+fn ability_definition_has_result_table_roll_die(def: &AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), crate::types::ability::Effect::RollDie { results, .. } if results.is_empty())
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_has_result_table_roll_die)
+}
+
 /// Root-level `AbilityDefinition` metadata that no `ClauseIr` can express.
 ///
 /// The shell is the typed replacement for the `AbilityDefinition` escape hatch:
@@ -407,6 +434,64 @@ pub(crate) struct AbilityIr {
     ///
     /// Empty is the default for every ordinary ability IR and is a lowering no-op.
     pub(crate) die_results: Vec<DieResultBranchIr>,
+    /// Ordered root transforms applied after whole-ability lowering.
+    ///
+    /// This is intentionally separate from [`AbilityShellIr`]. The shell carries
+    /// the activation envelope; these transforms compose post-chain resolution
+    /// metadata whose order depends on the root that chain assembly selected.
+    /// An empty list is a lowering no-op.
+    pub(crate) root_transforms: Vec<AbilityRootTransform>,
+    /// Modal metadata attached to this ability root and lowered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) modal: Option<ModalPayloadIr>,
+}
+
+/// Native modal payload. Its modes retain parser provenance until their
+/// ordinary `AbilityIr` lowering runs at the owning root's lowering seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModalPayloadIr {
+    pub(crate) choice: crate::types::ability::ModalChoice,
+    pub(crate) modes: Vec<ModalModeIr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ModalModeIr {
+    pub(crate) source_text: String,
+    pub(crate) source_line: Option<usize>,
+    pub(crate) ability: Box<AbilityIr>,
+}
+
+/// A root-level transform applied only after an [`AbilityIr`] has been fully
+/// lowered.
+///
+/// CR 608.2c: chain assembly may change which parsed clause becomes the root,
+/// so a whole-ability condition cannot be assigned to the first clause. These
+/// transforms operate on the finalized root in their stored order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum AbilityRootTransform {
+    /// CR 601.2b: stamp the announced-X floor from this printed ability.
+    SetMinXValue(u32),
+    /// Preserve the complete printed source text for this multi-line ability.
+    SetDescription(String),
+    /// CR 614.6 + CR 614.15: replace an unbindable self-replacement's final
+    /// lowered root with the explicit honest-failure floor.
+    InsteadOverrideResidual {
+        fragment: String,
+        condition_policy: ResidualConditionPolicy,
+    },
+    /// CR 608.2c: prepend a condition (ability word) before the chain-derived
+    /// root condition.
+    PrependCondition(AbilityCondition),
+    /// CR 608.2c: append a condition extracted from a line-level `instead`.
+    AppendCondition(AbilityCondition),
+}
+
+/// Whether an honest unbindable override floor retains the condition the legacy
+/// parser had already lowered, or clears it for a partial replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ResidualConditionPolicy {
+    Preserve,
+    Clear,
 }
 
 /// CR 608.2c + CR 601.2c: Subject of a "does the same / does so" effect-replication

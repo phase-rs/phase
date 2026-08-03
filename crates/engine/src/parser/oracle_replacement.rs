@@ -3963,6 +3963,15 @@ fn parse_enters_with_counters(
     // the bug class being fixed (Hotheaded Giant / Steel Exemplar).
     let (work_text, unless_outcome) = extract_enters_with_unless_suffix(work_text);
 
+    // CR 614.1c + CR 207.2c: Peel a SENTENCE-INITIAL "[<ability word> — ]if
+    // <game-state condition>, " gate (Adamant / Spell mastery / bare leading
+    // conditional). Before this, no leading-position gate was recognized at all
+    // and the whole clause was swallowed, making the replacement unconditional.
+    // Runs AFTER `extract_kicker_enters_condition`, which already consumes and
+    // strips its own "if ~ was kicked, " prefix, so kicker lines arrive here as
+    // "it enters with …" → `NoLeadingIf`.
+    let (work_text, leading_if_outcome) = extract_enters_with_leading_if_gate(work_text);
+
     // CR 702.138c: "escapes with" / plural-subject "escape with" is
     // semantically "enters with" gated on escape.
     let is_escape = nom_primitives::scan_contains(work_text, "escapes with")
@@ -4051,7 +4060,8 @@ fn parse_enters_with_counters(
             // one condition slot — so their co-occurrence fails closed.
             let other_suffix =
                 enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
-            match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+            match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix)
+            {
                 None => return None,
                 Some(Some(cond)) => def = def.condition(cond),
                 Some(None) => {}
@@ -4239,7 +4249,7 @@ fn parse_enters_with_counters(
     // condition slot, so their co-occurrence fails closed (→ unimplemented)
     // rather than silently dropping one gate.
     let other_suffix = enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
-    match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+    match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix) {
         None => return None,
         Some(Some(cond)) => def = def.condition(cond),
         Some(None) => {}
@@ -4281,22 +4291,51 @@ fn enters_with_condition_suffix(
     }
 }
 
-/// CR 614.1c: Reconcile the up-front " unless " gate with the trailing
-/// conditional-suffix gate. `None` = fail closed (the caller returns `None` so
-/// the line falls through to `Effect::unimplemented`): either the unless clause
-/// was present-but-unparsed, or both gates co-occur and there is only one
-/// condition slot. `Some(None)` = no gate. `Some(Some(cond))` = the single
-/// applicable gate.
+/// CR 614.1c: Reconcile the three mutually exclusive gate positions an
+/// "enters with" clause can carry — the up-front " unless " gate, the
+/// sentence-initial "if <cond>, " gate, and the trailing conditional suffix.
+/// `ReplacementDefinition` has exactly ONE condition slot, so any co-occurrence
+/// fails closed rather than silently dropping a gate.
+///
+/// `None` = fail closed (the caller returns `None` so the line falls through to
+/// `Effect::unimplemented`): a gate was present-but-unparsed, or two gates
+/// co-occur. `Some(None)` = no gate. `Some(Some(cond))` = the single applicable
+/// gate.
 fn resolve_enters_with_condition(
     unless_outcome: &EntersWithUnlessOutcome,
+    leading_if_outcome: &EntersWithLeadingIfOutcome,
     other_suffix: Option<ReplacementCondition>,
 ) -> Option<Option<ReplacementCondition>> {
-    match (unless_outcome, other_suffix) {
-        (EntersWithUnlessOutcome::Unparsed, _) => None,
-        (EntersWithUnlessOutcome::Parsed(_), Some(_)) => None,
-        (EntersWithUnlessOutcome::Parsed(cond), None) => Some(Some(cond.clone())),
-        (EntersWithUnlessOutcome::NoUnlessClause, Some(other)) => Some(Some(other)),
-        (EntersWithUnlessOutcome::NoUnlessClause, None) => Some(None),
+    match (unless_outcome, leading_if_outcome, other_suffix) {
+        // Present-but-unparsed on either gate axis: fail closed.
+        (EntersWithUnlessOutcome::Unparsed, _, _)
+        | (_, EntersWithLeadingIfOutcome::Unparsed, _) => None,
+        // The " unless " gate, alone.
+        (EntersWithUnlessOutcome::Parsed(cond), EntersWithLeadingIfOutcome::NoLeadingIf, None) => {
+            Some(Some(cond.clone()))
+        }
+        // Any two gates at once: one slot, fail closed.
+        (EntersWithUnlessOutcome::Parsed(_), _, Some(_))
+        | (EntersWithUnlessOutcome::Parsed(_), EntersWithLeadingIfOutcome::Parsed(_), _)
+        | (_, EntersWithLeadingIfOutcome::Parsed(_), Some(_)) => None,
+        // The sentence-initial "if <cond>, " gate, alone.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::Parsed(cond),
+            None,
+        ) => Some(Some(cond.clone())),
+        // The trailing conditional suffix, alone.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::NoLeadingIf,
+            Some(other),
+        ) => Some(Some(other)),
+        // No gate at all.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::NoLeadingIf,
+            None,
+        ) => Some(None),
     }
 }
 
@@ -4426,6 +4465,89 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithUnlessOutco
     }
 
     (head, EntersWithUnlessOutcome::Unparsed)
+}
+
+/// Outcome of scanning an "enters with [counters]" clause for a SENTENCE-INITIAL
+/// "if <condition>, " gate (CR 614.1c).
+///
+/// The presence axis is decided independently of the parse axis: once `"if "`
+/// matches at position 0 the clause IS a gate, so an unrecognized condition
+/// yields `Unparsed` (caller fails closed) and never `NoLeadingIf`. Silently
+/// dropping the gate — which would make the replacement unconditional — is the
+/// bug class this fixes.
+#[derive(Debug, Clone)]
+enum EntersWithLeadingIfOutcome {
+    /// No sentence-initial "if " — the payload text is returned byte-identical,
+    /// ability-word label included.
+    NoLeadingIf,
+    /// A recognized game-state condition; the replacement applies only while it
+    /// holds (only-if polarity).
+    Parsed(ReplacementCondition),
+    /// A sentence-initial "if " gate is present but unrecognized — the caller
+    /// MUST fail closed so the line falls through to `Effect::unimplemented`.
+    ///
+    /// Note the fall-through is a SHARED `None` signal: `parse_enters_with_counters`
+    /// returns `None` both for "not my shape" and for "my shape, gate unparseable",
+    /// so nothing structurally stops a LATER replacement parser from claiming the
+    /// same line as an UNCONDITIONAL replacement and reintroducing the bug class.
+    /// That it does not happen is a corpus fact pinned card-level by
+    /// `unparseable_leading_if_gate_fails_closed` (Henge Walker), not a type-level
+    /// guarantee — a new sibling shape with a leading gate needs its own pin.
+    Unparsed,
+}
+
+/// CR 614.1c: Split a SENTENCE-INITIAL "if <game-state condition>, " gate off an
+/// "enters with [counter payload]" clause and classify the condition. Returns
+/// the gate-free body plus the outcome.
+///
+/// This is the leading-position mirror of `extract_enters_with_only_if_suffix`
+/// (which scans for a TRAILING " if "). Adamant (Ardenvale Paladin), Spell
+/// mastery (Necromantic Summons) and bare-conditional cards (Dust Animus) all
+/// write the gate first: "[<ability word> — ]If <condition>, ~ enters with …".
+///
+/// CR 207.2c: the optional em-dash label is an ability word, which has no rules
+/// meaning and must be peeled before the `"if "` test.
+///
+/// The peel uses `parse_known_ability_word_name`, i.e. the CURATED list in
+/// `oracle_modal::ABILITY_WORD_NAMES` — the CR 207.2c ability words PLUS a small
+/// number of curated CR 207.2d flavor markers ("protector", "proclamator hailer",
+/// "increment"). It is deliberately NOT the loose 4-word `strip_ability_word`
+/// heuristic, which would peel ANY short em-dash label: that would strip Scarlet
+/// Spider, Ben Reilly's "Sensational Save" (a CR 207.2d flavor word, absent from
+/// the curated list), exposing its `"if ~ was cast using web-slinging, …"` body
+/// to the `"if "` test. `parse_inner_condition` consumes only `"~ was cast"`
+/// there, the `", "` check then fails, and the card would regress from its
+/// working `CastVariantPaid` routing to `Unparsed`.
+///
+/// The three curated flavor markers ARE peelable, so this is a bounded widening
+/// rather than a strict CR 207.2c gate. That is accepted, not overlooked: no card
+/// in the corpus writes `"<one of those three> — If …, … enters with …"`, and a
+/// future one would fail closed to `Effect::unimplemented` (honest gap), never
+/// silently drop its gate. Pinned by `flavor_word_label_is_not_peelable_as_an_ability_word`.
+fn extract_enters_with_leading_if_gate(text: &str) -> (&str, EntersWithLeadingIfOutcome) {
+    let after_label = opt(terminated(
+        super::oracle_modal::parse_known_ability_word_name,
+        alt((tag(" — "), tag(" – "), tag(" - "))),
+    ))
+    .parse(text)
+    .map_or(text, |(rest, _)| rest);
+
+    let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(after_label) else {
+        return (text, EntersWithLeadingIfOutcome::NoLeadingIf);
+    };
+
+    // `parse_inner_condition` is self-delimiting (not `all_consuming`), so it
+    // stops at the comma that separates the gate from the payload.
+    let Ok((rest, condition)) = parse_inner_condition(condition_text) else {
+        return (text, EntersWithLeadingIfOutcome::Unparsed);
+    };
+    let Ok((body, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) else {
+        return (text, EntersWithLeadingIfOutcome::Unparsed);
+    };
+    match replacement_condition_from_static(condition) {
+        Some(cond) => (body, EntersWithLeadingIfOutcome::Parsed(cond)),
+        None => (text, EntersWithLeadingIfOutcome::Unparsed),
+    }
 }
 
 /// CR 614.1c + CR 614.1d: Map a parsed `StaticCondition` to the `unless`-polarity
@@ -5158,50 +5280,30 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                     )
                 })
         })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
+        .or_else(|| parse_external_entry_plain_suffix(stripped))
+}
+
+/// CR 614.1c: Parse the external-entry tap-state grammar. The type-phrase
+/// subject is arbitrary, while verb number, battlefield wording, and tap state
+/// vary independently; parse those axes once rather than adding suffix arms.
+fn parse_external_entry_plain_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
+    type VE<'a> = OracleError<'a>;
+    let (_, (subject, (_, enters_tapped))) = terminated(
+        pair(
+            take_until::<_, _, VE>(" enter"),
+            preceded(
+                pair(tag(" enter"), opt(tag("s"))),
+                pair(
+                    opt(tag(" the battlefield")),
+                    alt((value(true, tag(" tapped")), value(false, tag(" untapped")))),
+                ),
+            ),
+        ),
+        eof::<&str, VE<'_>>,
+    )
+    .parse(input)
+    .ok()?;
+    Some((subject, ExternalEntryKind::Plain { enters_tapped }))
 }
 
 fn build_external_entry_replacement(
@@ -11326,8 +11428,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementCondition, ShieldKind, ZoneRef,
+        AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementCondition, ShieldKind, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -16916,6 +17018,55 @@ mod tests {
         }
     }
 
+    // CR 614.1c: the untapped-entry counterpart of the tapped-entry short-vs-long
+    // templating gap (see `frozen_aether_enters_the_battlefield_tapped_long_form`
+    // above) — Vigorous Farming prints "Lands you control enter the battlefield
+    // untapped." where the `spelunking_lands_you_control_enter_untapped` test
+    // above uses the short "enter untapped" simplification.
+    #[test]
+    fn vigorous_farming_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Lands you control enter the battlefield untapped.",
+            "Vigorous Farming",
+        )
+        .expect("long-form 'enter the battlefield untapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // The controller-scoped Or-filter shape (mirroring
+    // `frozen_aether_enters_the_battlefield_tapped_long_form`) must also parse
+    // for the untapped long form.
+    #[test]
+    fn opponents_control_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter the battlefield untapped.",
+            "Untapped Aether",
+        )
+        .expect("long-form 'enter the battlefield untapped' with Or-filter subject must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => assert_eq!(filters.len(), 3),
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
+
     #[test]
     fn archelos_untapped_other_permanents_enter_untapped() {
         let def = parse_replacement_line(
@@ -20344,6 +20495,64 @@ mod tests {
         );
     }
 
+    /// Issue #5653 + CR 608.2c: the full Chains of Mephistopheles / Magus of
+    /// the Chains text carries two trailing sentences after the "discards a
+    /// card instead" antecedent — "If the player discards a card this way,
+    /// they draw a card. If the player doesn't discard a card this way, they
+    /// mill a card." Both must attach as typed `EffectOutcome` gates on the
+    /// execute chain's Draw/Mill sub-abilities, not run unconditionally.
+    #[test]
+    fn parses_chains_full_text_gates_draw_and_mill_on_discard_outcome() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement must parse");
+
+        let discard = def.execute.as_deref().expect("execute chain present");
+        assert!(
+            matches!(&*discard.effect, Effect::Discard { .. }),
+            "the antecedent effect must be Discard, got {:?}",
+            discard.effect
+        );
+
+        let draw = discard
+            .sub_ability
+            .as_deref()
+            .expect("Draw sub-ability must be present");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "the first follow-on effect must be Draw, got {:?}",
+            draw.effect
+        );
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::effect_performed()),
+            "\"if the player discards a card this way\" must gate Draw on \
+             whether the discard actually happened, got {:?}",
+            draw.condition
+        );
+
+        let mill = draw
+            .sub_ability
+            .as_deref()
+            .expect("Mill sub-ability must be present");
+        assert!(
+            matches!(&*mill.effect, Effect::Mill { .. }),
+            "the second follow-on effect must be Mill, got {:?}",
+            mill.effect
+        );
+        assert_eq!(
+            mill.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "\"if the player doesn't discard a card this way\" must gate Mill \
+             on the discard having failed, got {:?}",
+            mill.condition
+        );
+    }
+
     #[test]
     fn parses_opponent_mill_replacement_with_multiplier() {
         let text =
@@ -21306,6 +21515,207 @@ mod tests {
                 "target nonland permanent becomes a copy of another target creature."
             ),
             "copy-effect must not match the modal as-enters recognizer"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 614.1c + CR 207.2c: the sentence-initial "if <cond>, " enters-with gate.
+    // -----------------------------------------------------------------------
+
+    /// POSITIVE reach-guard for every negative below: Ardenvale Paladin's
+    /// Adamant gate is peeled off the ability-word label and attached as an
+    /// only-if `ReplacementCondition`. Revert the peel and `condition` is
+    /// `None` — the counter would apply unconditionally.
+    #[test]
+    fn adamant_leading_if_gate_attaches_only_if_quantity() {
+        let def = parse_replacement_line(
+            "Adamant — If at least three white mana was spent to cast this spell, this creature \
+             enters with a +1/+1 counter on it.",
+            "Ardenvale Paladin",
+        )
+        .expect("Adamant enters-with must still parse to a replacement");
+
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                        metric: crate::types::ability::CastManaSpentMetric::OfColor {
+                            color: ManaColor::White,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                active_player_req: None,
+            }),
+            "the Adamant gate must be attached, not swallowed"
+        );
+        // Payload untouched by the peel: still one +1/+1 counter on itself.
+        let execute = def.execute.as_deref().expect("execute present");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// U5 — hostile co-occurrence rows. `ReplacementDefinition` has exactly one
+    /// condition slot, so a leading "if" gate that co-occurs with either of the
+    /// other two gate positions MUST fail closed (`None`), never silently drop
+    /// one. Both rows are dead on the current corpus; this pins them.
+    /// Reach-guard: the two single-gate rows immediately below return `Some`.
+    #[test]
+    fn resolve_enters_with_condition_fails_closed_on_gate_co_occurrence() {
+        let gate = || ReplacementCondition::CastViaEscape;
+        let other = || ReplacementCondition::YouAttackedThisTurn;
+
+        // (NoUnlessClause, Parsed, Some) — leading gate + trailing suffix.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::NoUnlessClause,
+            &EntersWithLeadingIfOutcome::Parsed(gate()),
+            Some(other()),
+        )
+        .is_none());
+        // (Parsed, Parsed, None) — unless gate + leading gate.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::Parsed(other()),
+            &EntersWithLeadingIfOutcome::Parsed(gate()),
+            None,
+        )
+        .is_none());
+        // Present-but-unparsed leading gate fails closed regardless of the rest.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::NoUnlessClause,
+            &EntersWithLeadingIfOutcome::Unparsed,
+            None,
+        )
+        .is_none());
+
+        // POSITIVE reach-guards: each gate ALONE still resolves.
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::Parsed(gate()),
+                None,
+            ),
+            Some(Some(gate()))
+        );
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::NoLeadingIf,
+                Some(other()),
+            ),
+            Some(Some(other()))
+        );
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::NoLeadingIf,
+                None,
+            ),
+            Some(None)
+        );
+    }
+
+    /// U6 — LOAD-BEARING: the peel uses `parse_known_ability_word_name` (the
+    /// curated `ABILITY_WORD_NAMES` list — the CR 207.2c ability words plus
+    /// three curated CR 207.2d flavor markers; see the contract on
+    /// `extract_enters_with_leading_if_gate`), NOT the loose 4-word
+    /// `strip_ability_word` heuristic. What matters here is that
+    /// "Sensational Save" is absent from that curated list; it is NOT the case
+    /// that every CR 207.2d flavor word is absent.
+    /// If "Sensational Save" were peelable, Scarlet Spider's body would
+    /// reach `tag("if ")`, `parse_inner_condition` would consume only
+    /// "~ was cast", the following `tag(", ")` would fail, and the card would
+    /// regress from green to `Unparsed` → `Effect::unimplemented`.
+    #[test]
+    fn flavor_word_label_is_not_peelable_as_an_ability_word() {
+        assert!(
+            super::super::oracle_modal::parse_known_ability_word_name(
+                "sensational save — if ~ was cast using web-slinging, he enters with x +1/+1 \
+                 counters on him."
+            )
+            .is_err(),
+            "\"Sensational Save\" is absent from the curated ABILITY_WORD_NAMES list and must \
+             stay unpeelable — peeling it regresses Scarlet Spider, Ben Reilly to Unparsed. \
+             (Note the list DOES contain three curated CR 207.2d markers, so this is the \
+             specific case, not a universal 'no flavor word is peelable' invariant.)"
+        );
+        // Positive reach-guard: a real CR 207.2c ability word IS peeled, so the
+        // negative above is not vacuous.
+        assert_eq!(
+            super::super::oracle_modal::parse_known_ability_word_name(
+                "adamant — if at least three white mana was spent to cast this spell, ~ enters \
+                 with a +1/+1 counter on it."
+            )
+            .map(|(_, name)| name),
+            Ok("adamant")
+        );
+    }
+
+    /// U7 — positive card-level pin for F1: Scarlet Spider's gate is still the
+    /// web-slinging suffix condition, reached by the scan-anywhere route the
+    /// peel deliberately does not intercept.
+    #[test]
+    fn flavor_word_card_keeps_its_scan_anywhere_gate() {
+        let def = parse_replacement_line(
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, he enters with X \
+             +1/+1 counters on him, where X is the mana value of the returned creature.",
+            "Scarlet Spider, Ben Reilly",
+        )
+        .expect("Scarlet Spider's enters-with must still parse");
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            })
+        );
+    }
+
+    /// U9 — honest failure, both polarities. Henge Walker's max-over-colors
+    /// ("mana of the same color") has no grammar and Red and Black Legac chains
+    /// three sentence-initial "if"s into one condition slot; both are explicitly
+    /// out of scope and MUST fail closed rather than parse to an unconditional
+    /// replacement. Reach-guard: the parseable sibling
+    /// `adamant_leading_if_gate_attaches_only_if_quantity` proves the peel is
+    /// live, so `None` here is not a dead-code pass.
+    #[test]
+    fn unparseable_leading_if_gate_fails_closed() {
+        assert!(
+            parse_replacement_line(
+                "Adamant — If at least three mana of the same color was spent to cast this spell, \
+                 this creature enters with a +1/+1 counter on it.",
+                "Henge Walker",
+            )
+            .is_none(),
+            "an unrecognized leading gate must fail closed, not become unconditional"
+        );
+        // Card level: the line falls through to `Effect::unimplemented` — the
+        // engine reports the gap instead of silently mis-resolving.
+        let card = parse_oracle_text(
+            "Adamant — If at least three mana of the same color was spent to cast this spell, \
+             this creature enters with a +1/+1 counter on it.",
+            "Henge Walker",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Golem".to_string()],
+        );
+        assert!(
+            card.replacements.is_empty(),
+            "no replacement may be published for the fail-closed line"
+        );
+        assert!(
+            card.abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "the fail-closed line must surface as Effect::Unimplemented, got {:?}",
+            card.abilities
         );
     }
 }

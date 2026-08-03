@@ -23,6 +23,7 @@ use super::{
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
+use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
@@ -1890,12 +1891,13 @@ pub(super) fn parse_targeted_action_ast(
             rest
         };
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (trailing_target_text, trailing_dest) = super::strip_return_destination_ext(rest);
+        let (trailing_target_text, trailing_dest, trailing_dest_remainder) =
+            super::strip_return_destination_ext_with_remainder(rest);
         let (leading_target_text, leading_dest) = super::strip_leading_return_destination_ext(rest);
-        let (target_text, dest) = if leading_dest.is_some() {
-            (leading_target_text, leading_dest)
+        let (target_text, dest, dest_remainder) = if leading_dest.is_some() {
+            (leading_target_text, leading_dest, "")
         } else {
-            (trailing_target_text, trailing_dest)
+            (trailing_target_text, trailing_dest, trailing_dest_remainder)
         };
         let (is_mass, target_text) = if let Some((_, rest)) =
             nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
@@ -2005,25 +2007,39 @@ pub(super) fn parse_targeted_action_ast(
                 // from your graveyard to the battlefield. They enter with a
                 // finality counter" (Shilgengar) applies the finality counter
                 // (CR 122.1h) to every returned object, not just one.
+                // CR 110.2a (docs/MagicCompRules.txt:618) + CR 608.2c (:2793):
+                // bind the raw control clause BEFORE either struct literal —
+                // the `target,` field shorthand MOVES `target`, so a `&target`
+                // borrow inside the literal would not compile. `d.control` is
+                // `Copy`, so reading it here does not disturb `d`.
+                let enters_under = bind_control_clause(
+                    d.control,
+                    name_entry_control_antecedent(Some(&target), ctx),
+                );
                 if is_mass {
                     Some(TargetedImperativeAst::ReturnAllToZone {
                         target,
                         origin,
                         destination: Zone::Battlefield,
-                        enters_under: d.enters_under,
+                        enters_under,
                         enter_tapped: d.enter_tapped,
                         enter_with_counters: d.enter_with_counters,
                     })
                 } else {
+                    // CR 701.3a + CR 303.4f: "return … to the battlefield attached
+                    // to <host>" (Gift of Immortality, Next of Kin, Lynde).
+                    let attach_host =
+                        super::sequence::parse_search_attach_host(dest_remainder).map(|(h, _)| h);
                     Some(TargetedImperativeAst::ReturnToBattlefield {
                         target,
                         origin,
                         enter_transformed: d.transformed,
-                        enters_under: d.enters_under,
+                        enters_under,
                         enter_tapped: d.enter_tapped,
                         enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
                         face_down: d.face_down,
+                        attach_host,
                     })
                 }
             }
@@ -2039,7 +2055,9 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
-                        enters_under: None,
+                        // CR 110.2 (docs/MagicCompRules.txt:616): controller
+                        // semantics apply only while an object is a permanent.
+                        enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
                     })
@@ -2065,7 +2083,9 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
-                        enters_under: None,
+                        // CR 110.2 (docs/MagicCompRules.txt:616): controller
+                        // semantics apply only while an object is a permanent.
+                        enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
                     })
@@ -2299,6 +2319,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             count,
         },
         // CR 400.7: Return to battlefield is a zone change, not a bounce.
+        // CR 701.3a: `attach_host` is an ability-level sub_ability (Attach under
+        // ChangeZone with forward_result), recovered in `lower_imperative_family_ast`.
         TargetedImperativeAst::ReturnToBattlefield {
             target,
             origin,
@@ -2308,24 +2330,40 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             enter_with_counters,
             face_down,
-        } => Effect::ChangeZone {
-            origin,
-            destination: Zone::Battlefield,
-            target,
-            owner_library: false,
-            enter_transformed,
-            enters_under,
-            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-            enters_attacking,
-            up_to: false,
-            enter_with_counters,
-            conditional_enter_with_counters: vec![],
-            // CR 708.2a + CR 708.3: a "face down" return seeds the default
-            // vanilla-2/2 face-down profile; a trailing "It's a <type>" sentence
-            // (Yedora's "It's a Forest land.") refines it via FaceDownProfileSpec.
-            face_down_profile: face_down.then(crate::types::ability::FaceDownProfile::vanilla_2_2),
-            enters_modified_if: None,
-        },
+            attach_host: _,
+        } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. A printed
+            // control clause whose antecedent could not be named must NOT
+            // collapse into the existing no-override carrier — that loses the
+            // explicitly printed controller while the card reports as fully
+            // supported.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking,
+                up_to: false,
+                enter_with_counters,
+                conditional_enter_with_counters: vec![],
+                // CR 708.2a + CR 708.3: a "face down" return seeds the default
+                // vanilla-2/2 face-down profile; a trailing "It's a <type>"
+                // sentence (Yedora's "It's a Forest land.") refines it via
+                // FaceDownProfileSpec.
+                face_down_profile: face_down
+                    .then(crate::types::ability::FaceDownProfile::vanilla_2_2),
+                enters_modified_if: None,
+            }
+        }
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         // CR 115.1d + CR 601.2c: `multi_target` (the bounded "up to N" count)
         // is an ability-level field (`ParsedEffectClause.multi_target`), not
@@ -2361,6 +2399,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enter_with_counters,
         } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed on an
+            // unbindable control clause rather than silently defaulting the
+            // controller for the whole moved population.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
             let origin = match &target {
                 TargetFilter::ExiledBySource => Some(Zone::Exile),
                 TargetFilter::TrackedSetFiltered {
@@ -2373,7 +2420,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 origin,
                 destination,
                 target,
-                enters_under,
+                enters_under: enters_under.as_controller_ref(),
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 // CR 122.1 + CR 122.1h: each returned object enters with these
                 // counters (e.g. a finality counter on Shilgengar's mass return).
@@ -5506,23 +5553,45 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::SwitchPT { target });
         }
     }
-    // CR 400.7j + CR 608.2h: Zack Fair — "attach an Equipment that was attached
-    // to ~ to that creature". The attachment is battlefield Equipment whose
-    // host was the ability source (including LKI after self-sacrifice).
+    // CR 400.7j + CR 608.2h: Zack Fair / Cass — "attach [an / any number of]
+    // Equipment that was/were attached to ~/it to that creature". The attachment
+    // is battlefield Equipment whose host was the ability source or the
+    // triggering object (AttachedToSource + trigger_source LKI). "to that
+    // creature" after a chosen attach-host is ParentTarget (Cass), not the
+    // dies-trigger TriggeringSource demonstrative.
     if let Some((multi_target, recipient_text)) = nom_on_lower(text, lower, |input| {
         let (input, _) = tag("attach ").parse(input)?;
-        let (input, _) = opt(tag("an ")).parse(input)?;
-        let (input, multi_target) = opt(value(
-            MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }),
-            tag("up to one "),
+        let (input, multi_target) = alt((
+            value(Some(MultiTargetSpec::unlimited(0)), tag("any number of ")),
+            value(
+                Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+                tag("up to one "),
+            ),
+            map(opt(tag("an ")), |_| None),
         ))
         .parse(input)?;
-        let (input, _) = tag("equipment that was attached to ").parse(input)?;
-        let (input, _) = alt((tag("~"), tag("this equipment"))).parse(input)?;
+        let (input, _) = tag("equipment that ").parse(input)?;
+        let (input, _) = alt((tag("was "), tag("were "))).parse(input)?;
+        let (input, _) = tag("attached to ").parse(input)?;
+        let (input, _) = alt((tag("~"), tag("it"), tag("this equipment"))).parse(input)?;
         let (input, _) = tag(" to ").parse(input)?;
         Ok((input, multi_target))
     }) {
-        let (target, _target_rem) = parse_attach_recipient(recipient_text, ctx);
+        // CR 608.2c: "to that creature" names the chosen Aura host from the prior
+        // return/attach clause (Cass), not the dying creature. Force ParentTarget
+        // for that demonstrative; other recipients keep attach-recipient dispatch.
+        let (target, _target_rem) = {
+            let recipient_lower = recipient_text.trim().to_ascii_lowercase();
+            if tag::<_, _, OracleError<'_>>("that creature")
+                .parse(recipient_lower.as_str())
+                .ok()
+                .is_some_and(|(rest, _)| rest.trim().is_empty())
+            {
+                (TargetFilter::ParentTarget, "")
+            } else {
+                parse_attach_recipient(recipient_text, ctx)
+            }
+        };
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_target_rem, text);
         if _target_rem.trim().is_empty() {
@@ -5909,6 +5978,53 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
     }
 }
 
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): Resolve a prevent-damage
+/// recipient phrase — the text immediately following "dealt to " or "dealt to
+/// and dealt by " — to a `TargetFilter`. Shared by [`parse_prevent_effect`]
+/// and `lower::try_parse_bidirectional_prevent` (Energy Arc's "dealt to and
+/// dealt by those creatures") so both prevent-recipient parsers agree.
+///
+/// Tries, in priority order:
+/// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
+///    gated on `parent_target_available` (CR 608.2c, issue #1094).
+/// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
+///    mass typed recipients ("creatures"/"players"/"creatures you control" —
+///    Blinding Fog, Defend the Hearth) AND "those permanents"/"those
+///    creatures", which `parse_target` already maps to a `TrackedSet`
+///    sentinel. The sentinel is resolved to a concrete, FROZEN set id at
+///    shield-creation time by `prevent_damage::resolve` — never left as a
+///    live filter — because the antecedent population must be locked in at
+///    resolution regardless of whether it came from a chosen-target clause
+///    (Energy Arc's untapped creatures) or a Continuous-mode static grant
+///    (Mutational Advantage's countered permanents: the resolution-time
+///    population is enumerated once by the widened `GenericEffect` arm in
+///    `game::effects::affected_objects_from_events`). Mutational Advantage's
+///    official ruling: "The set of permanents affected by Mutational
+///    Advantage is determined at the time Mutational Advantage resolves."
+///
+/// Returns `None` only when neither tier recognizes the phrase — the caller
+/// then falls back to the pre-existing `Any` default.
+pub(super) fn resolve_prevent_recipient(
+    recipient: TextPair<'_>,
+    parent_target_available: bool,
+) -> Option<TargetFilter> {
+    if let Some((filter, _)) =
+        parse_anaphoric_target_ref(recipient.original, parent_target_available)
+    {
+        return Some(filter);
+    }
+    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
+    // are inherited-reference filters naming a specific already-established
+    // object — exclusively tier 1's gated domain (`parent_target_available`).
+    // `parse_target` resolves these unconditionally, with no such gate, so
+    // this tier must reject them explicitly — otherwise a standalone recipient
+    // anaphor with `parent_target_available == false` would leak through here
+    // as an ungated `ParentTarget` binding to a nonexistent chosen target.
+    let (filter, _) = parse_target(recipient.original);
+    (!matches!(filter, TargetFilter::Any) && super::is_broadcast_population_filter(&filter))
+        .then_some(filter)
+}
+
 /// CR 615: Parse "prevent" damage effects into `Effect::PreventDamage`.
 ///
 /// Handles patterns like:
@@ -5999,16 +6115,16 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         || nom_primitives::scan_contains(rest, "to its controller")
     {
         TargetFilter::Controller
-    } else if let Some(anaphor_filter) = TextPair::new(text, &lower)
+    } else if let Some(filter) = TextPair::new(text, &lower)
         .strip_after("dealt to ")
-        .and_then(|tp| parse_anaphoric_target_ref(tp.original, parent_target_available))
-        .map(|(filter, _)| filter)
+        .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
     {
-        // CR 608.2c: "prevent [amount] damage that would be dealt to that
-        // creature/it/the creature this turn" — a single-direction anaphor
-        // bound to a target an earlier clause selected. Strict superset of the
-        // prior `Any` fallback (only reached when `parent_target_available`).
-        anaphor_filter
+        // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): see
+        // `resolve_prevent_recipient` — a chosen-target anaphor or any other
+        // recipient phrase `parse_target` recognizes. Strict superset of the
+        // prior `Any` fallback: a recipient phrase that no tier recognizes
+        // still falls through to `Any` below.
+        filter
     } else {
         // Default: "that would be dealt" with no specific target → Any
         TargetFilter::Any
@@ -6559,13 +6675,19 @@ pub(super) fn parse_put_ast(
         }
     }
 
-    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text, ctx) {
+    if let Some((effect, choice_count, enters_under)) =
+        super::try_parse_put_zone_change_parts(lower, text, ctx)
+    {
+        // CR 110.2a (docs/MagicCompRules.txt:618): the control clause is bound
+        // by the seam that owns the destination text and returned alongside the
+        // `Effect`, so the AST carries the full three-state spec (including the
+        // fail-closed `UnboundAnaphor`) rather than the `Effect`'s already
+        // collapsed `Option<ControllerRef>`.
         return match effect {
             Effect::ChangeZoneAll {
                 origin,
                 destination,
                 target,
-                enters_under,
                 enter_tapped,
                 library_position,
                 random_order,
@@ -6608,7 +6730,6 @@ pub(super) fn parse_put_ast(
                 origin,
                 destination,
                 target,
-                enters_under,
                 enter_tapped,
                 enter_transformed,
                 enters_attacking,
@@ -6711,17 +6832,29 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // complement move, which `lower_imperative_family_ast` emits; the
             // bare (non-partition) lowering never carries it.
             rest_library_position: _,
-        } => Effect::ChangeZoneAll {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-            enter_with_counters: vec![],
-            face_down_profile: None,
-            library_position,
-            random_order,
-        },
+        } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. This
+            // lowering receives NO text, which is exactly why
+            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
+            // printed clause is recoverable here without a text slice.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position,
+                random_order,
+            }
+        }
         PutImperativeAst::ZoneChange {
             origin,
             destination,
@@ -6734,6 +6867,17 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             choice_count: _,
             enter_with_counters,
         } => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed. This
+            // lowering receives NO text, which is exactly why
+            // `EntersUnderSpec::UnboundAnaphor` carries the possessor — the
+            // printed clause is recoverable here without a text slice.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                );
+            }
+            let enters_under = enters_under.as_controller_ref();
             // CR 610.3: Mass filters (ExiledBySource, TrackedSet,
             // TrackedSetFiltered) act on all matching objects without individual
             // targeting — use ChangeZoneAll. Bounded "up to N" picks from the
@@ -11563,6 +11707,16 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             rest_destination: Some(rest_destination),
             rest_library_position,
         }) => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed before the
+            // partition is materialized — a wrong controller on the primary
+            // pile would otherwise ship silently.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return parsed_clause(Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                ));
+            }
+            let enters_under = enters_under.as_controller_ref();
             // CR 401.4: "in a random order" (and the bottom/top position)
             // describes whichever pile returns to the library. Exactly one pile
             // does in the printed partition class (the other goes to a
@@ -12045,6 +12199,57 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             };
             let mut clause = parsed_clause(lower_zone_counter_ast(ast));
             clause.multi_target = multi_target;
+            clause
+        }
+        // CR 701.3a + CR 303.4f: "return … to the battlefield attached to <host>"
+        // (Gift of Immortality, Next of Kin, Lynde). Bare Effect lowering cannot
+        // carry the Attach sub-chain — nest it here (Cloak / SearchLibrary pattern)
+        // so assembly can wrap a single ChangeZone[+Attach] unit in CreateDelayedTrigger.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::ReturnToBattlefield {
+                target,
+                origin,
+                enter_transformed,
+                enters_under,
+                enter_tapped,
+                enters_attacking,
+                enter_with_counters,
+                face_down,
+                attach_host: Some(host),
+            },
+        )) => {
+            // CR 110.2a (docs/MagicCompRules.txt:618): fail closed before the
+            // attachment is installed. An unbound control clause lowers to an
+            // honest gap; leaving an executable Attach beneath it would attach
+            // a permanent that never entered the battlefield.
+            if let Some(p) = enters_under.unbound_possessor() {
+                return parsed_clause(Effect::unimplemented(
+                    "change_zone_enters_under_anaphor",
+                    p.printed_clause(),
+                ));
+            }
+            let mut clause = parsed_clause(lower_targeted_action_ast(
+                TargetedImperativeAst::ReturnToBattlefield {
+                    target,
+                    origin,
+                    enter_transformed,
+                    enters_under,
+                    enter_tapped,
+                    enters_attacking,
+                    enter_with_counters,
+                    face_down,
+                    attach_host: None,
+                },
+            ));
+            // CR 701.3a: the returning Aura/permanent is SelfRef; the host is the
+            // anaphor captured on the IR (`that creature` / `you`).
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: host,
+                },
+            )));
             clause
         }
         // All other arms produce a bare Effect with no sub_ability chain.
@@ -13339,6 +13544,56 @@ mod tests {
     use super::*;
     use crate::types::ability::ParitySource;
 
+    /// Matrix row 18 — the mana ROLE must survive the cost-resource AST
+    /// round-trip byte-for-byte.
+    ///
+    /// `CostResourceImperativeAst::Mana` is a TRANSPORT shape across the
+    /// parse→lower boundary. If its `target` field were flattened back to
+    /// `Option<TargetFilter>` to silence the compiler — the obvious way to
+    /// "fix" the destructure below — the cost-resource mana path would silently
+    /// drop the count-source half of every `Both` role with no test failing.
+    #[test]
+    fn cost_resource_mana_ast_round_trips_the_role() {
+        use crate::types::ability::{
+            ControllerRef, ManaProduction, ManaTargetRole, QuantityExpr, TypedFilter,
+        };
+
+        let role = ManaTargetRole::Both {
+            recipient: TargetFilter::ScopedPlayer,
+            count_source: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ),
+        };
+        let produced = ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+
+        let ast = CostResourceImperativeAst::Mana {
+            produced: produced.clone(),
+            restrictions: vec![],
+            target: Some(role.clone()),
+        };
+        let Effect::Mana { target, .. } = lower_cost_resource_ast(ast) else {
+            panic!("lowering a Mana AST must produce Effect::Mana");
+        };
+        assert_eq!(
+            target,
+            Some(role),
+            "the role must cross the parse→lower boundary unchanged"
+        );
+
+        // Negative sibling: an unqualified mana round-trips to `None`.
+        let ast = CostResourceImperativeAst::Mana {
+            produced,
+            restrictions: vec![],
+            target: None,
+        };
+        let Effect::Mana { target, .. } = lower_cost_resource_ast(ast) else {
+            panic!("lowering a Mana AST must produce Effect::Mana");
+        };
+        assert_eq!(target, None);
+    }
+
     fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
         match filter {
             TargetFilter::Typed(tf) => Some(tf),
@@ -14602,6 +14857,42 @@ mod tests {
         }
         assert!(matches!(target, TargetFilter::ParentTarget));
         assert_eq!(multi_target, None);
+    }
+
+    #[test]
+    fn parse_attach_any_number_equipment_were_attached_to_it_to_parent_target() {
+        // Cass, Hand of Vengeance — dies-trigger "that creature" is the chosen
+        // Aura host (ParentTarget), not TriggeringSource.
+        let input = "attach any number of Equipment that were attached to it to that creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach {
+            attachment,
+            target,
+            multi_target,
+        }) = result
+        else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        match attachment {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Equipment")));
+                assert!(tf.properties.contains(&FilterProp::AttachedToSource));
+            }
+            other => panic!("expected typed Equipment filter, got {other:?}"),
+        }
+        assert!(
+            matches!(target, TargetFilter::ParentTarget),
+            "Cass Equipment host must be ParentTarget, got {target:?}"
+        );
+        assert_eq!(multi_target, Some(MultiTargetSpec::unlimited(0)));
     }
 
     #[test]
@@ -20579,6 +20870,80 @@ mod tests {
         assert!(
             tf.type_filters.is_empty(),
             "\"sources\" carries no type restriction"
+        );
+    }
+
+    /// CR 615.1 (issue #6682 regression guard): a prevent clause with NO
+    /// recipient phrase at all ("prevent all damage that would be dealt this
+    /// turn" — a plain Fog effect) must still resolve to `Any`. Only a
+    /// clause that carries an explicit "dealt to <recipient>" phrase should
+    /// ever be scoped away from the blanket shield — the fix must not turn a
+    /// genuinely unscoped prevent into a falsely-narrowed one.
+    #[test]
+    fn fog_with_no_recipient_phrase_stays_any() {
+        let effect =
+            parse_prevent_effect("Prevent all damage that would be dealt this turn.", false);
+        let Effect::PreventDamage { target, .. } = effect else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(target, TargetFilter::Any);
+    }
+
+    /// CR 608.2c + CR 615.11 (issue #6682): `resolve_prevent_recipient` tries a
+    /// chosen-target anaphor, then any other `parse_target`-recognized
+    /// recipient, in that priority order, and returns `None` (not `Any`) only
+    /// when neither tier recognizes the phrase.
+    #[test]
+    fn resolve_prevent_recipient_tries_tiers_in_priority_order() {
+        // Tier 1: a singular chosen-target anaphor.
+        let text = "that creature this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, true),
+            Some(TargetFilter::ParentTarget),
+            "a chosen-target anaphor must resolve to ParentTarget"
+        );
+
+        // Tier 2: a bare mass typed recipient with no antecedent at all.
+        let text = "creatures this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let resolved =
+            resolve_prevent_recipient(tp, false).expect("bare \"creatures\" must resolve");
+        assert!(
+            matches!(&resolved, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
+            "bare \"creatures\" must resolve to a Typed(Creature) filter, got {resolved:?}"
+        );
+
+        // Tier 2 also recognizes "those permanents"/"those creatures" via
+        // `parse_target`'s own tracked-set dispatch — covers BOTH the
+        // target-derived antecedent class (Energy Arc's "those creatures"
+        // referring to earlier-chosen targets) and the clause-derived
+        // antecedent class (Mutational Advantage's "those permanents"
+        // referring to a preceding Continuous-mode grant's population),
+        // since the runtime freezes the tracked set from whichever producer
+        // clause precedes it (see `game::effects::affected_objects_from_events`).
+        let text = "those creatures this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            Some(TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            }),
+            "\"those creatures\" must bind via parse_target's tracked-set dispatch"
+        );
+
+        // Neither tier recognizes a genuinely unclassified recipient phrase —
+        // `resolve_prevent_recipient` returns `None`, not `Any`.
+        let text = "xyzzy this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            None,
+            "an unclassified recipient phrase must fall through, not silently guess"
         );
     }
 

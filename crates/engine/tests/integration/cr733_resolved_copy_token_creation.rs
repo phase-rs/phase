@@ -24,6 +24,146 @@ use engine::types::zones::Zone;
 /// exceptions, so it takes the liminal seam and its body is complete at entry.
 const REPLICATE_ORACLE: &str = "Create a token that's a copy of target creature you control.";
 
+/// Citanul Woodreaders — verbatim Scryfall Oracle text. Its Kicker keyword and
+/// its kicked-gated entry trigger are the live-only mutation this fixture
+/// measures. CR 707.2: a copy acquires cast-time choices ("whether it was
+/// kicked") only "for an object on the stack" — a token copy of a permanent is
+/// not one, so it never acquires the kicked-ness. CR 702.33a: the Kicker
+/// keyword itself IS acquired with the rules text, but it "functions while the
+/// spell with kicker is on the stack", so it is inert on a permanent — which is
+/// why the seam strips it rather than leaving it. CR 603.4: the entry trigger's
+/// intervening "if it was kicked" is therefore checked against a condition that
+/// can never hold.
+const CITANUL_WOODREADERS_ORACLE: &str =
+    "Kicker {2}{G} (You may pay an additional {2}{G} as you cast this spell.)\n\
+     When this creature enters, if it was kicked, draw two cards.";
+
+/// CR 707.2 + CR 603.4: the copy seam's post-birth finalize
+/// (`finalize_copied_token`) strips spell-casting-only keywords and
+/// cast-payment-gated triggers off the token. That runs AFTER the birth is
+/// journaled, and the journaled `CopyTokenSpec` still carries the unstripped
+/// copiable values — so a replay that only materializes the body installs a
+/// token holding a Kicker keyword and an "if it was kicked" trigger the live
+/// token does not have.
+///
+/// This is the Copy-body half of the injection dispatch in
+/// `apply_resolved_token_creation`. It is a separate arm from the ordinary
+/// spec-body one on purpose: the Copy arm must NOT call
+/// `inject_resolved_token_abilities` (that would grant catalog text the copy is
+/// not entitled to), so the two arms cannot be collapsed and each needs its own
+/// production-path test.
+///
+/// REVERT-PROBE (discriminating, RUN): delete the `ResolvedTokenBody::Copy` arm
+/// of that dispatch ⇒ the replayed token keeps `Keyword::Kicker` and the
+/// cast-gated trigger, and both assertions below fail.
+#[test]
+fn copy_token_birth_replays_the_cast_only_strip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let original = scenario
+        .add_creature_from_oracle(P0, "Citanul Woodreaders", 1, 4, CITANUL_WOODREADERS_ORACLE)
+        .id();
+    let spell_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Replicate", true, REPLICATE_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    // Reach guard on the SOURCE: the fixture only measures a strip if there is
+    // something to strip. A parser change that stopped producing either of these
+    // would otherwise turn the parity assertions below into empty == empty.
+    let source = &runner.state().objects[&original];
+    assert!(
+        source
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, engine::types::keywords::Keyword::Kicker(_))),
+        "reach guard: the copy source must carry a spell-casting-only keyword, got {:?}",
+        source.keywords
+    );
+    assert!(
+        !source.trigger_definitions.is_empty(),
+        "reach guard: the copy source must carry the kicked-gated entry trigger"
+    );
+
+    let committed = runner.cast(spell_id).target_object(original).commit();
+    let pre_state = committed.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+
+    let outcome = committed.resolve();
+    let state = outcome.state();
+
+    let token_id = *state
+        .last_created_token_ids
+        .first()
+        .expect("CR 707.2: the resolved effect must create a copy token");
+    let live = &state.objects[&token_id];
+    assert_eq!(
+        live.name, "Citanul Woodreaders",
+        "CR 707.2 reach guard: the copy acquired the source's copiable name"
+    );
+    // CR 707.2 reach guard: the live strip actually happened, so "replayed ==
+    // live" below is a real constraint rather than a tautology on two
+    // identically-unstripped objects.
+    assert!(
+        !live
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, engine::types::keywords::Keyword::Kicker(_))),
+        "CR 707.2 + CR 702.33a: the live copy token must not keep Kicker, got {:?}",
+        live.keywords
+    );
+
+    let birth = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::TokenCreation(command)
+                if command.object.object_id == token_id =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("the copy birth is journaled");
+    // The journaled body is the UNSTRIPPED one — this is what makes the replay
+    // arm load-bearing rather than a redundant re-application.
+    let recorded_keywords = match &birth.body {
+        ResolvedTokenBody::Copy { copy, .. } => copy.values.keywords.clone(),
+        ResolvedTokenBody::Spec { .. } => panic!("a copy token must journal a Copy body"),
+    };
+    assert!(
+        recorded_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, engine::types::keywords::Keyword::Kicker(_))),
+        "the recorded copiable values predate the CR 707.2 strip, got {recorded_keywords:?}"
+    );
+
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &birth)
+        .expect("the recorded copy birth must replay against its captured predecessor");
+    let replayed = &replay.objects[&token_id];
+
+    // THE DISCRIMINATORS. Body-only materialization keeps both.
+    assert_eq!(
+        replayed.keywords, live.keywords,
+        "CR 707.2 + CR 702.33a: replay must apply the same cast-only keyword strip \
+         the live copy seam did"
+    );
+    assert_eq!(
+        replayed.trigger_definitions.len(),
+        live.trigger_definitions.len(),
+        "CR 603.4: replay must strip the same cast-payment-gated trigger — live {:?} vs \
+         replayed {:?}",
+        live.trigger_definitions,
+        replayed.trigger_definitions
+    );
+}
+
 #[test]
 fn copy_token_birth_journals_and_replays_exactly() {
     let mut scenario = GameScenario::new();

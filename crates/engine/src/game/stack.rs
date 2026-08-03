@@ -12,7 +12,7 @@ use crate::types::game_state::{
     MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
     StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
@@ -30,8 +30,41 @@ use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// Clears the resolving entry and its coupled trigger classification together.
+/// A firing map row exists only while the triggered entry is on the stack; once
+/// popped, this pair is the sole resolution-time carrier of that identity.
+pub(crate) fn clear_resolving_stack_entry(state: &mut GameState) {
+    state.resolving_stack_entry = None;
+    state.resolving_trigger_firing = None;
+}
+
 /// CR 405.1: Add an object to the stack.
-pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
+    let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        .then_some(TriggerFiring::Ordinary);
+    push_to_stack_with_firing(state, entry, trigger_firing, events);
+}
+
+/// Push a scheduler-owned triggered ability with its exact firing class.
+pub(crate) fn push_triggered_to_stack(
+    state: &mut GameState,
+    entry: StackEntry,
+    firing: TriggerFiring,
+    events: &mut Vec<GameEvent>,
+) {
+    debug_assert!(matches!(
+        entry.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    push_to_stack_with_firing(state, entry, Some(firing), events);
+}
+
+fn push_to_stack_with_firing(
+    state: &mut GameState,
+    mut entry: StackEntry,
+    trigger_firing: Option<TriggerFiring>,
+    events: &mut Vec<GameEvent>,
+) {
     let source_ref = state
         .objects
         .get(&entry.source_id)
@@ -75,7 +108,10 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
     // CR 733: journal the settled push after every source-referential stamp
     // above has been written into the entry, so the record carries the stamped
     // values themselves rather than the state they were derived from.
-    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Put);
+    journal_stack_push(state, &entry, trigger_firing, ResolvedStackPushOrigin::Put);
+    if let Some(firing) = trigger_firing {
+        state.stack_trigger_firings.insert(entry.id, firing);
+    }
     state.stack.push_back(entry);
 }
 
@@ -106,6 +142,7 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
 pub(crate) fn push_copy_to_stack(
     state: &mut GameState,
     mut entry: StackEntry,
+    copied_trigger_firing: Option<TriggerFiring>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 701.27f: an activated or triggered ability of a permanent may transform
@@ -134,7 +171,12 @@ pub(crate) fn push_copy_to_stack(
     // CR 733: same journal point as [`push_to_stack`]. The copy's deliberately
     // different stamping is already baked into `entry`, so this records the same
     // operand set under a different origin rather than a sibling command.
-    journal_stack_push(state, &entry, ResolvedStackPushOrigin::Copy);
+    let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        .then_some(copied_trigger_firing.unwrap_or(TriggerFiring::Ordinary));
+    journal_stack_push(state, &entry, trigger_firing, ResolvedStackPushOrigin::Copy);
+    if let Some(firing) = trigger_firing {
+        state.stack_trigger_firings.insert(entry.id, firing);
+    }
     state.stack.push_back(entry);
 }
 
@@ -144,11 +186,17 @@ pub(crate) fn push_copy_to_stack(
 /// index it will occupy is the current depth. Reading that here — before either
 /// caller's `push_back` — is the one piece of shared logic the two authorities
 /// could otherwise get out of step on.
-fn journal_stack_push(state: &mut GameState, entry: &StackEntry, origin: ResolvedStackPushOrigin) {
+fn journal_stack_push(
+    state: &mut GameState,
+    entry: &StackEntry,
+    trigger_firing: Option<TriggerFiring>,
+    origin: ResolvedStackPushOrigin,
+) {
     let resulting_position = state.stack.len();
     let cause = state.current_or_begin_rules_execution_node();
     let command = ResolvedStackPushCommand {
         entry: Box::new(entry.clone()),
+        trigger_firing,
         origin,
         resulting_position,
         cause,
@@ -184,6 +232,11 @@ pub fn apply_resolved_stack_push(
     state: &mut GameState,
     command: &ResolvedStackPushCommand,
 ) -> Result<(), ResolvedStackPushReplayInvariantError> {
+    if matches!(command.entry.kind, StackEntryKind::TriggeredAbility { .. })
+        != command.trigger_firing.is_some()
+    {
+        return Err(ResolvedStackPushReplayInvariantError::TriggerFiringShapeMismatch);
+    }
     if state.stack.len() != command.resulting_position {
         return Err(ResolvedStackPushReplayInvariantError::StackDepthMismatch {
             expected: command.resulting_position,
@@ -206,6 +259,9 @@ pub fn apply_resolved_stack_push(
     }
 
     state.stack.push_back(command.entry.as_ref().clone());
+    if let Some(firing) = command.trigger_firing {
+        state.stack_trigger_firings.insert(command.entry.id, firing);
+    }
     Ok(())
 }
 
@@ -281,6 +337,7 @@ pub(crate) struct PoppedStackEntry {
     pub entry: StackEntry,
     pub paid_facts: Option<StackPaidSnapshot>,
     pub trigger_event_batch: Option<Vec<GameEvent>>,
+    pub trigger_firing: Option<TriggerFiring>,
 }
 
 /// CR 405.2: removes one object from the stack at a known index.
@@ -315,6 +372,7 @@ pub(crate) fn remove_stack_entry_at(
     let entry = state.stack.remove(index);
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+    let trigger_firing = state.stack_trigger_firings.remove(&entry.id);
 
     // CR 733: journal once ALL THREE removals have settled, so the record
     // describes a stack the entry has already left. An out-of-range index is the
@@ -335,6 +393,7 @@ pub(crate) fn remove_stack_entry_at(
         entry,
         paid_facts,
         trigger_event_batch,
+        trigger_firing,
     })
 }
 
@@ -384,6 +443,7 @@ pub fn apply_resolved_stack_removal(
     let entry = state.stack.remove(command.index);
     state.stack_paid_facts.remove(&entry.id);
     state.stack_trigger_event_batches.remove(&entry.id);
+    state.stack_trigger_firings.remove(&entry.id);
     Ok(())
 }
 
@@ -422,6 +482,7 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
             let entry = state.stack.pop_back().expect("the entry was just observed");
             state.stack_paid_facts.remove(&entry_id);
             state.stack_trigger_event_batches.remove(&entry_id);
+            state.stack_trigger_firings.remove(&entry_id);
             entry
         })
         .map(Box::new);
@@ -508,6 +569,9 @@ pub fn apply_resolved_uncommitted_trigger_removal(
         state.stack_paid_facts.remove(&command.consumed_entry_id);
         state
             .stack_trigger_event_batches
+            .remove(&command.consumed_entry_id);
+        state
+            .stack_trigger_firings
             .remove(&command.consumed_entry_id);
     }
     Ok(())
@@ -765,6 +829,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // suspended forever.
             state.pending_trigger_entry = None;
             state.pending_trigger = None;
+            state.pending_trigger_firing = None;
             state.pending_trigger_event_batch.clear();
         }
     }
@@ -775,7 +840,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // this spell" defers the copy past a player decision, by which point the
     // spell has left the stack) — so it is cleared here at the start of the
     // *next* resolution rather than at the end of this one.
-    state.resolving_stack_entry = None;
+    clear_resolving_stack_entry(state);
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -789,6 +854,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         entry,
         paid_facts: paid_snapshot,
         trigger_event_batch,
+        trigger_firing,
     }) = pop_top_stack_entry(state)
     else {
         return;
@@ -1089,6 +1155,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    state.resolving_trigger_firing = trigger_firing;
     // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
     // the duration of its own resolution, so a triggered ability of the SAME object that
     // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
@@ -3257,7 +3324,7 @@ fn resolve_batched(
 ) -> u32 {
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
-    state.resolving_stack_entry = None;
+    clear_resolving_stack_entry(state);
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
@@ -3269,7 +3336,7 @@ fn resolve_batched(
         let Some(removed) = pop_top_stack_entry(state) else {
             break;
         };
-        popped.push(removed.entry);
+        popped.push(removed);
     }
 
     // CR 603.7c: Set the trigger event context once from the (identical) top
@@ -3281,7 +3348,7 @@ fn resolve_batched(
             subject_match_count,
             die_result,
             ..
-        } = &top.kind
+        } = &top.entry.kind
         {
             state.current_trigger_event = Some(te.clone());
             state.current_trigger_events = vec![te.clone()];
@@ -3292,6 +3359,9 @@ fn resolve_batched(
             state.die_result_this_resolution = *die_result;
         }
     }
+
+    state.resolving_stack_entry = popped.first().map(|popped| popped.entry.clone());
+    state.resolving_trigger_firing = popped.first().and_then(|popped| popped.trigger_firing);
 
     // CR 608.2: Apply the effect N times through the existing per-resolution body.
     plan.execute(state, ability, events);
@@ -3305,9 +3375,9 @@ fn resolve_batched(
     state.die_result_this_resolution = None;
 
     // §5.4: one StackResolved per consumed entry.
-    for entry in &popped {
+    for popped in &popped {
         events.push(GameEvent::StackResolved {
-            object_id: entry.id,
+            object_id: popped.entry.id,
         });
     }
 
@@ -3591,7 +3661,7 @@ fn resolve_inert_noop_batch(
     consumed: u32,
     events: &mut Vec<GameEvent>,
 ) -> u32 {
-    state.resolving_stack_entry = None;
+    clear_resolving_stack_entry(state);
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
@@ -3673,6 +3743,7 @@ struct BatchRunKey<'a> {
     description: Option<&'a str>,
     paid: Option<&'a StackPaidSnapshot>,
     trigger_event: Option<&'a GameEvent>,
+    trigger_firing: Option<TriggerFiring>,
 }
 
 /// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
@@ -3690,6 +3761,7 @@ impl PartialEq for BatchRunKey<'_> {
             || self.description != other.description
             || self.paid != other.paid
             || self.trigger_event != other.trigger_event
+            || self.trigger_firing != other.trigger_firing
         {
             return false;
         }
@@ -3983,6 +4055,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         description: description.as_deref(),
         paid: state.stack_paid_facts.get(&entry.id),
         trigger_event: trigger_event.as_ref(),
+        trigger_firing: state.stack_trigger_firings.get(&entry.id).copied(),
     })
 }
 
@@ -4266,6 +4339,7 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
             source_id: object_id,
             one_shot: true,
+            provenance: None,
         },
     );
 }

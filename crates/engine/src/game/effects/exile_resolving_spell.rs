@@ -212,6 +212,7 @@ fn arm_return_to(
             source_id,
             // CR 603.7b: one-shot — removed after it fires.
             one_shot: true,
+            provenance: None,
         },
     );
 }

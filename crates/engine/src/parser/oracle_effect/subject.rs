@@ -2836,13 +2836,24 @@ pub(super) fn parse_subject_application(
     // In trigger effects: "they" refers to the triggering player (for player-type
     // subjects like "an opponent") or the triggering source (for object subjects).
     // Outside trigger context: anaphoric reference to previously mentioned objects.
-    if lower == "they" {
+    // CR 608.2d: an optional "may" modal parallels the "that player may " /
+    // "the player may " forms above — "they may pay {2}" (Wandering Archaic,
+    // Umbilicus) is the pronoun-subject counterpart of "that player may pay
+    // {2}" (Smothering Tithe, Mind Whip); both must set `is_optional` so
+    // `lower_subject_predicate_ast` marks the lowered ability optional and
+    // `resolve_they_pronoun`'s existing player/object dispatch is unchanged.
+    if let Ok((_, is_optional)) = all_consuming(alt((
+        value(true, tag::<_, _, OracleError<'_>>("they may")),
+        value(false, tag("they")),
+    )))
+    .parse(lower.as_str())
+    {
         return Some(SubjectApplication {
             affected: resolve_they_pronoun(ctx),
             target: None,
             multi_target: None,
             inherits_parent: false,
-            is_optional: false,
+            is_optional,
         });
     }
 
@@ -3142,6 +3153,20 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
         Some(ControllerRef::ParentTargetOwner)
     ) {
         return TargetFilter::ParentTargetOwner;
+    }
+    // CR 506.2 + CR 508.5: An attack-trigger intervening-if that names
+    // "defending player" (`condition_introduces_defending_player`) stamps
+    // `relative_player_scope = DefendingPlayer` — the nonactive player being
+    // attacked, not a chosen or previously-targeted player. "They" inside
+    // such an effect ("they may reveal their hand" — Smart Ass) refers to
+    // that combat-relative player. Without this arm, "they" fell through to
+    // the generic `ParentTarget` default, which has no defending-player
+    // referent to inherit and left the effect unbound.
+    if matches!(
+        ctx.relative_player_scope,
+        Some(ControllerRef::DefendingPlayer)
+    ) {
+        return TargetFilter::DefendingPlayer;
     }
     // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
     // "attacks a player" trigger introduces the damaged/attacked player as the

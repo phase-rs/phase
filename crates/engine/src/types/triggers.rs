@@ -196,6 +196,14 @@ pub enum AttackTargetFilter {
     /// `PlayerOrPlaneswalker`, which excludes battles. Control of the defended
     /// planeswalker/battle is compared per CR 109.4.
     PlayerOrPermanents,
+    /// CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type attack whose
+    /// defending player must currently hold the monarch designation
+    /// (`state.monarch`). The monarch is a single dynamic player identity, so
+    /// unlike the other scope variants this cannot be evaluated by the pure type
+    /// matcher — it is resolved in the stateful `attack_target_matches` against
+    /// `state.monarch` (The Spear of Bashenga). If there is no monarch
+    /// (CR 725.1 — no monarch until an effect creates one), it never matches.
+    Monarch,
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the

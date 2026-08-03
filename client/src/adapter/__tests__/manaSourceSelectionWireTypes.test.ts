@@ -59,6 +59,7 @@ describe("mana-source selection wire types", () => {
           source: { object_id: 17, incarnation: 3 },
           ability_index: 0,
           mana_type: "Blue",
+          output: { type: "Concrete", data: "Blue" },
           atomic_combination: null,
           restrictions,
           penalty: "None",

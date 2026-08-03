@@ -239,7 +239,7 @@ expression: "&ir"
                       "SearchDestination": {
                         "destination": "Hand",
                         "enter_tapped": false,
-                        "enters_under": null,
+                        "enters_under": "Default",
                         "reveal": false,
                         "attach_host": null
                       }
@@ -378,7 +378,8 @@ expression: "&ir"
             ],
             "description": "Solved — {1}{B}, Sacrifice this ~: Search your library for a card, put it into your hand, then shuffle. Activate only as a sorcery."
           },
-          "die_results": []
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

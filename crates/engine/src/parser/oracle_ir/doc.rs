@@ -31,8 +31,8 @@ use super::static_ir::StaticIr;
 use super::trigger::TriggerNodeIr;
 use crate::types::ability::{
     AbilityDefinition, AdditionalCost, CastingPermission, CastingRestriction,
-    ContinuousModification, Effect, ModalChoice, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerDefinition, VoteSubject,
+    ContinuousModification, Effect, ModalChoice, SolveCondition, SpellCastingOption,
+    StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -355,6 +355,19 @@ pub(crate) struct OracleItemIr {
     pub(crate) node: OracleNodeIr,
 }
 
+/// A relation-proven replacement synthesized onto the source item that raised
+/// the linked-choice fact. The item retains its original id, source span,
+/// fragment, and printed ability slot; only its parsed payload changes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RelationSynthesisIr {
+    pub(crate) filter: TargetFilter,
+    pub(crate) description: String,
+    /// The exact static consumer selected during document relation discovery.
+    /// Kept even though lowering needs only the chooser item, so provenance is
+    /// inspectable and a future consumer cannot rescan for a lookalike static.
+    pub(crate) copy_static: OracleItemId,
+}
+
 /// The typed payload of a document item. Identity and provenance live on
 /// `OracleItemIr`; this enum carries only the parsed category.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -435,6 +448,12 @@ pub(crate) enum OracleNodeIr {
         min_x_value: u32,
     },
 
+    /// A closed relation-derived payload, installed in place of an already
+    /// emitted source item during document finalization. Fresh emission is
+    /// rejected by `OracleDocBuilder::emit` so it cannot mint a source-less
+    /// item or consume a new printed ability slot.
+    RelationSynthesis(RelationSynthesisIr),
+
     // -----------------------------------------------------------------------
     // PLAN-05 DEBT — pre-lowered escape hatches.
     //
@@ -452,10 +471,6 @@ pub(crate) enum OracleNodeIr {
     // -----------------------------------------------------------------------
     /// Pre-lowered trigger from a preprocessor. UNIT-4 DEBT.
     PreLoweredTrigger(TriggerDefinition),
-    /// Pre-lowered static from a preprocessor. UNIT-4 DEBT.
-    PreLoweredStatic(StaticDefinition),
-    /// Pre-lowered replacement from a preprocessor. UNIT-4 DEBT.
-    PreLoweredReplacement(ReplacementDefinition),
     /// Pre-lowered spell/activated ability from a preprocessor or dispatch path
     /// that constructs an `AbilityDefinition` directly. UNIT-4 DEBT.
     PreLoweredSpell(AbilityDefinition),
@@ -500,9 +515,8 @@ impl OracleNodeIr {
             | OracleNodeIr::CastingOption(_)
             | OracleNodeIr::SolveCondition(_)
             | OracleNodeIr::StriveCost(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => None,
+            | OracleNodeIr::RelationSynthesis(_)
+            | OracleNodeIr::PreLoweredTrigger(_) => None,
         }
     }
 
@@ -548,9 +562,8 @@ impl OracleNodeIr {
             | OracleNodeIr::CastingOption(_)
             | OracleNodeIr::SolveCondition(_)
             | OracleNodeIr::StriveCost(_)
-            | OracleNodeIr::PreLoweredTrigger(_)
-            | OracleNodeIr::PreLoweredStatic(_)
-            | OracleNodeIr::PreLoweredReplacement(_) => None,
+            | OracleNodeIr::RelationSynthesis(_)
+            | OracleNodeIr::PreLoweredTrigger(_) => None,
         }
     }
 }
@@ -692,6 +705,9 @@ impl OracleDocIr {
 /// violations in the parser, not Oracle-text problems.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DocBuilderError {
+    /// Relation synthesis is finalization-only: it replaces an existing,
+    /// already-accounted source item and must never be emitted fresh.
+    RelationSynthesisRequiresExistingItem,
     DuplicateItemPosition {
         span: OracleSourceSpan,
     },
@@ -984,6 +1000,9 @@ impl OracleDocBuilder {
         slot: ItemSlot,
         node: OracleNodeIr,
     ) -> Result<OracleItemId, DocBuilderError> {
+        if matches!(&node, OracleNodeIr::RelationSynthesis(_)) {
+            return Err(DocBuilderError::RelationSynthesisRequiresExistingItem);
+        }
         slot.source.check_fragment_precision()?;
         let span = slot.source.span.clone();
         let key = (span.first_line, span.start_byte, span.ordinal_within_span);
@@ -1021,9 +1040,7 @@ impl OracleDocBuilder {
                 self.trigger_index += 1
             }
             OracleNodeIr::Static(_)
-            | OracleNodeIr::PreLoweredStatic(_)
             | OracleNodeIr::Replacement(_)
-            | OracleNodeIr::PreLoweredReplacement(_)
             | OracleNodeIr::Keyword(_)
             | OracleNodeIr::Modal(_)
             | OracleNodeIr::AdditionalCost(_)
@@ -1031,6 +1048,10 @@ impl OracleDocBuilder {
             | OracleNodeIr::CastingOption(_)
             | OracleNodeIr::SolveCondition(_)
             | OracleNodeIr::StriveCost(_) => {}
+            // Rejected above before validation, insertion, or slot accounting.
+            OracleNodeIr::RelationSynthesis(_) => {
+                unreachable!("relation synthesis is installed only by document finalization")
+            }
         }
         let id = slot.id;
         self.items.insert(
@@ -1677,6 +1698,34 @@ mod tests {
             lines,
             vec![0, 2],
             "items must be ordered by source position"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_fresh_relation_synthesis_without_slot_or_item_side_effects() {
+        let mut builder = OracleDocBuilder::new();
+        let slot = builder.begin_item(span(0, 0, 6, 0), Some("choose"));
+        let error = builder.emit(
+            slot,
+            OracleNodeIr::RelationSynthesis(RelationSynthesisIr {
+                filter: TargetFilter::Any,
+                description: "As this enters, choose a permanent.".to_string(),
+                copy_static: OracleItemId(99),
+            }),
+        );
+
+        assert_eq!(
+            error,
+            Err(DocBuilderError::RelationSynthesisRequiresExistingItem)
+        );
+        assert_eq!(
+            builder.ability_index().get(),
+            0,
+            "a rejected relation synthesis must not reserve a printed ability slot"
+        );
+        assert!(
+            builder.finish("choose", "Probe", vec![]).items.is_empty(),
+            "a rejected relation synthesis must not insert a source-less item"
         );
     }
 

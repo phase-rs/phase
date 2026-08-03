@@ -565,7 +565,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             bound_list("SetPhaseStops.stops", stops.len())?;
         }
         GameAction::SetPriorityPassingMode { .. } => {}
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             guard_mana_source_selection_payload(selection)?;
         }
         GameAction::DistributeAmong { distribution, .. } => {
@@ -618,6 +618,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseAssistPlayer { .. }
         | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }

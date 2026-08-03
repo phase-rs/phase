@@ -22,8 +22,11 @@ use super::super::oracle_target::{parse_target, parse_type_phrase, parse_zone_wo
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::sequence::parse_dig_from_among;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::ContinuationAst;
+use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_ir::effect_chain::{
+    AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope,
@@ -3870,6 +3873,23 @@ fn parse_symbolic_mana_color_spent_condition(
     Ok((rest, condition))
 }
 
+/// CR 106.3 + CR 601.2h: legacy leading-word form, "at least N <color> mana was
+/// spent to cast <self>" → `AbilityCondition::ManaColorSpent`.
+///
+/// SHADOWED, kept as a fallback only. `parse_mana_color_spent_condition_text`
+/// has exactly one caller (`parse_condition_text`), and every non-test caller of
+/// that reaches it only through `.or_else(..)` AFTER
+/// `try_nom_condition_as_ability_condition`, whose `parse_inner_condition`
+/// fall-through now recognizes this exact phrase via
+/// `parse_color_mana_spent_threshold` and bridges it to the canonical
+/// `AbilityCondition::QuantityCheck { ManaSpentToCast { scope, OfColor } }`.
+/// So on the production path this arm no longer fires for any real input; the
+/// generic form carries an explicit `CastManaObjectScope` (CR 400.7d) that
+/// `ManaColorSpent` cannot express.
+///
+/// `parse_symbolic_mana_color_spent_condition` above is NOT shadowed — the
+/// `{W}{W}` symbolic form has no `parse_inner_condition` grammar and stays live
+/// for 22 cards.
 fn parse_word_mana_color_spent_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
@@ -4167,8 +4187,8 @@ fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
 ///    you may instead reveal two creature and/or land cards from among them and put
 ///    them into your hand."
 ///
-/// Returns a new AbilityDefinition carrying the alternative Dig plus condition; the
-/// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
+/// Returns native IR carrying the alternative Dig plus condition; the caller wraps
+/// the preceding Dig as `else_ability`. Class coverage: any card of form
 /// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
 /// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
 pub(crate) fn try_parse_dig_instead_alternative(
@@ -4176,7 +4196,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<AbilityIr> {
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
@@ -4301,9 +4321,21 @@ pub(crate) fn try_parse_dig_instead_alternative(
         source: DigSource::Library,
     };
 
-    let mut result = AbilityDefinition::new(kind, alt_effect);
-    result.condition = Some(condition);
-    Some(result)
+    Some(AbilityIr {
+        source_text: text.to_string(),
+        body: EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(alt_effect),
+            None,
+            None,
+            false,
+        ),
+        shell: AbilityShellIr::default(),
+        die_results: vec![],
+        root_transforms: vec![AbilityRootTransform::AppendCondition(condition)],
+        modal: None,
+    })
 }
 
 pub(crate) fn parse_additional_cost_instead_condition_fragment(
@@ -4784,6 +4816,10 @@ pub(crate) fn static_condition_to_ability_condition(
         // predicate (Layer 6 / duration `ForAsLongAs`); no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
+        // CR 102.3 + CR 805.4a: the team-aware opponent-turn predicate has
+        // no `AbilityCondition` counterpart yet. Return `None` rather than
+        // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::None => None,
     }
 }
@@ -8839,6 +8875,13 @@ mod tests {
         );
     }
 
+    /// CR 106.3 + CR 601.2h + CR 400.7d: the leading-word Adamant rider now
+    /// bridges through `parse_inner_condition` →
+    /// `parse_color_mana_spent_threshold` to the canonical generic shape, which
+    /// (unlike the legacy `ManaColorSpent`) records the subject anaphora as an
+    /// explicit `CastManaObjectScope`. Runtime reading is unchanged:
+    /// `QuantityCheck` resolves `ManaSpentToCast { SelfObject, .. }` against the
+    /// ability's own source object, exactly as the `ManaColorSpent` arm did.
     #[test]
     fn leading_word_mana_spent_condition_parses_adamant() {
         let (condition, body) = strip_leading_general_conditional(
@@ -8848,11 +8891,82 @@ mod tests {
         assert_eq!(body, "it deals 4 damage instead.");
         assert_eq!(
             condition,
-            Some(AbilityCondition::ManaColorSpent {
-                color: ManaColor::Red,
-                minimum: 3,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::OfColor {
+                            color: ManaColor::Red
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
             })
         );
+    }
+
+    /// CR 400.7d: the "that spell" anaphora on the PRODUCTION path.
+    ///
+    /// `parse_condition_text`'s leading-word arm
+    /// (`parse_word_mana_color_spent_condition`) only ever accepted the
+    /// `{this spell, it, them, ~}` subject set and flattened the anaphora away
+    /// into a scope-less `ManaColorSpent`. That arm is now shadowed: every
+    /// non-test caller reaches `try_nom_condition_as_ability_condition` first,
+    /// and its `parse_inner_condition` fall-through recognizes "that spell" and
+    /// records it as `CastManaObjectScope::TriggeringSpell`.
+    ///
+    /// RULING — this is acceptable and strictly more faithful. CR 400.7d
+    /// distinguishes reading the payment record of the object the ability is on
+    /// from reading that of a referenced spell; the generic shape carries the
+    /// distinction, the legacy shape could not. Zero live cards use "that
+    /// spell" in this rider today (all 11 leading-word Adamant cards say "this
+    /// spell"), so this is a latent capability, not a behavior change. The
+    /// runtime `QuantityCheck` reader resolves `TriggeringSpell` through the
+    /// trigger event context rather than `ability.source_id`, which is the
+    /// correct reading for that phrasing.
+    #[test]
+    fn leading_word_mana_spent_condition_records_that_spell_anaphora() {
+        let condition = try_nom_condition_as_ability_condition(
+            "at least three white mana was spent to cast that spell",
+            &mut ParseContext::default(),
+        )
+        .expect("the generic grammar must recognize the 'that spell' anaphora");
+        assert_eq!(
+            condition,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::OfColor {
+                            color: ManaColor::White
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        // Reach-guard + contrast: "this spell" stays `SelfObject`, so the scope
+        // axis is genuinely threaded rather than hardcoded.
+        let self_scoped = try_nom_condition_as_ability_condition(
+            "at least three white mana was spent to cast this spell",
+            &mut ParseContext::default(),
+        )
+        .expect("the 'this spell' anaphora must still parse");
+        assert!(matches!(
+            self_scoped,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        ..
+                    },
+                },
+                ..
+            }
+        ));
     }
 
     /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through

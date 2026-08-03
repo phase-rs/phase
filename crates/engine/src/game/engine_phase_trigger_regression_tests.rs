@@ -4963,6 +4963,7 @@ fn rewind_to_next_p0_upkeep(state: &mut GameState) {
     state.priority_player = PlayerId(0);
     state.stack.clear();
     state.pending_trigger = None;
+    state.pending_trigger_firing = None;
     // CR 603.3c + CR 603.3d: clear the in-construction cursor too —
     // symmetric with `pending_trigger`. Without this, a trigger pushed
     // earlier in the test could leave `pending_trigger_entry` pointing

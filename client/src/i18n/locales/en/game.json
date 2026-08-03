@@ -5,6 +5,13 @@
     "cantActivateDuring": "Can't be activated right now",
     "prohibited": "Activating this ability is prohibited"
   },
+  "manaSourceSelection": {
+    "title": "Choose a mana source",
+    "description": "This mana ability requires sacrificing a permanent.",
+    "sacrifice": "Sacrifice",
+    "back": "Back to mana payment",
+    "unknownSource": "Mana source"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -268,6 +275,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Untap",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -282,6 +290,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Untap",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",

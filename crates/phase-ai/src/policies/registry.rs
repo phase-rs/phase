@@ -159,6 +159,8 @@ pub enum PolicyId {
     /// CR 701.9: reward discarding into an on-battlefield "whenever you discard"
     /// engine — disjoint from `HandDisruption`, which scores OPPONENT discard.
     DiscardPayoff,
+    /// CR 702.122a: cast a Vehicle when the board can actually crew it.
+    VehicleDeployment,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -418,6 +420,7 @@ impl Default for PolicyRegistry {
             Box::new(super::cost_reduction::CostReductionPolicy),
             Box::new(super::draw_payoff::DrawPayoffPolicy),
             Box::new(super::discard_payoff::DiscardPayoffPolicy),
+            Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
         ];
         Self::from_policies(policies)
     }

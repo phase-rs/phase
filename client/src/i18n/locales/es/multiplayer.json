@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "¿Conceder la partida?",
-    "message": "Tu oponente será declarado ganador.",
-    "concede": "Conceder"
+    "game": {
+      "label": "Conceder esta partida",
+      "ordinaryMessage": "Tu oponente gana esta partida.",
+      "matchMessage": "Concedes solo la partida actual. Si el match no está decidido, seguirá el banquillo o la siguiente partida."
+    },
+    "match": {
+      "label": "Conceder todo el match",
+      "message": "Concedes el match. Tu oponente gana el match y no se jugarán más partidas."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} solicita una repetición",

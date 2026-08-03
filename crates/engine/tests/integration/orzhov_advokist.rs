@@ -24,6 +24,7 @@ use engine::types::triggers::AttackTargetFilter;
 use engine::types::zones::Zone;
 
 const ORZHOV_ADVOKIST_ORACLE: &str = "At the beginning of your upkeep, each player may put two +1/+1 counters on a creature they control. If a player does, creatures that player controls can't attack you or planeswalkers you control until your next turn.";
+const PLANESWALKER_ONLY_ADVOKIST_ORACLE: &str = "At the beginning of your upkeep, each player may put two +1/+1 counters on a creature they control. If a player does, creatures that player controls can't attack planeswalkers you control until your next turn.";
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -327,4 +328,92 @@ fn orzhov_advokist_restriction_tracks_acceptance_controller_changes_and_expiry()
         p1_creature_a,
         AttackTarget::Player(P0)
     ));
+}
+
+/// CR 608.2c + CR 611.2c: the scoped AddRestriction route snapshots the
+/// accepting player, protected player, and controller-next-turn expiry when it
+/// resolves. The planeswalker-only template makes player and unrelated-walker
+/// attacks positive sibling cases rather than vacuous negatives.
+#[test]
+fn scoped_advokist_planeswalker_only_restriction_snapshots_controller_provenance() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Upkeep);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Scoped Advokist Fixture",
+            1,
+            4,
+            PLANESWALKER_ONLY_ADVOKIST_ORACLE,
+        )
+        .id();
+    let p1_a = scenario.add_creature(P1, "P1 Bear A", 2, 2).id();
+    let p1_b = scenario.add_creature(P1, "P1 Bear B", 2, 2).id();
+    let p0_walker = scenario
+        .add_creature(P0, "Protected Jace", 0, 0)
+        .as_planeswalker_with_loyalty("Jace", 4)
+        .id();
+    let p2_walker = scenario
+        .add_creature(P2, "Other Chandra", 0, 0)
+        .as_planeswalker_with_loyalty("Chandra", 4)
+        .id();
+    let mut runner = scenario.build();
+    for object in [p1_a, p1_b] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .summoning_sick = false;
+    }
+    resolve_advokist_upkeep(&mut runner, source, p1_a, p1_b);
+
+    assert!(matches!(
+        runner.state().restrictions.as_slice(),
+        [GameRestriction::ProhibitActivity {
+            source: stored_source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(P1),
+            expiry: RestrictionExpiry::UntilPlayerNextTurn { player: P0 },
+            activity: ProhibitedActivity::Attack {
+                defended: AttackTargetFilter::Planeswalker,
+                protected_player: Some(P0),
+            },
+        }] if *stored_source == source
+    ));
+    assert!(!attack_is_legal(
+        runner.state(),
+        P1,
+        p1_a,
+        AttackTarget::Planeswalker(p0_walker)
+    ));
+    assert!(attack_is_legal(
+        runner.state(),
+        P1,
+        p1_a,
+        AttackTarget::Player(P0)
+    ));
+    assert!(attack_is_legal(
+        runner.state(),
+        P1,
+        p1_a,
+        AttackTarget::Planeswalker(p2_walker)
+    ));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .controller = P2;
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+    assert!(
+        !attack_is_legal(
+            runner.state(),
+            P1,
+            p1_a,
+            AttackTarget::Planeswalker(p0_walker)
+        ),
+        "changing or removing the source cannot mutate the resolved snapshot"
+    );
 }

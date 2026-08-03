@@ -7,9 +7,12 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::enters_under::{
+    bind_control_clause, fold_control_clauses, name_entry_control_antecedent,
+};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
-use super::super::oracle_target::{parse_target, parse_target_with_ctx};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -117,7 +120,13 @@ fn parse_search_attach_host_phrase(input: &str) -> OracleResult<'_, TargetFilter
     .parse(input)
 }
 
-fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
+/// CR 701.3a + CR 303.4f: Parse an "attached to <host>" rider from return /
+/// search destination remainders (Gift of Immortality, Next of Kin, Lynde).
+///
+/// Returns `(host, unconsumed_remainder)` so rules-bearing suffixes after the
+/// host phrase (`, then attach …`, `. Exile those Auras …`) stay available for
+/// normal continuation parsing (Cass, Hand of Vengeance; Storm Herald).
+pub(crate) fn parse_search_attach_host(text: &str) -> Option<(TargetFilter, &str)> {
     let lower = text.to_ascii_lowercase();
     nom_on_lower(text, &lower, |input| {
         let (input, _) = take_until("attached to").parse(input)?;
@@ -125,7 +134,6 @@ fn parse_search_attach_host(text: &str) -> Option<TargetFilter> {
         let (input, filter) = parse_search_attach_host_phrase(input)?;
         Ok((input, filter))
     })
-    .map(|(filter, _)| filter)
 }
 
 /// CR 608.2c + CR 701.23i: Strip a leading player-subject from a search-result
@@ -1726,6 +1734,29 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
+        // CR 608.2c: "..., then do the same for <type> cards" continues the
+        // antecedent action for a sibling card type (Estrid, the Masked: "Return
+        // all non-Aura enchantment cards ... to the battlefield, then do the same
+        // for Aura cards."). The "do the same" verb is not in the imperative-verb
+        // table `starts_clause_text_or_conjugated` checks, so — exactly like the
+        // villainous-choice guard above — without this the continuation is glued
+        // into the prior clause and silently dropped (#4779: Auras never return).
+        //
+        // Gate the split on the SAME recognizer the chunk loop uses
+        // (`try_parse_do_the_same_for_type`), so ONLY a clean pure-type
+        // substitution is split off. Richer forms this PR does not model —
+        // Gruesome Menagerie's "creature cards with mana value 2 and 3"
+        // (`FilterProp` predicate) and Grim Captain's Call's "Vampire, Dinosaur,
+        // and Merfolk" (type list) — fail the recognizer and stay glued exactly
+        // as before, keeping this change's blast radius to the handled class.
+        // The complete recognizer covers a terminal continuation. A following
+        // comma-"then" clause (Glimpse of Tomorrow) is segmented by the same
+        // grammar, so we do not weaken the pure-type whole-consumption rule.
+        if try_parse_do_the_same_for_type(trimmed).is_some()
+            || starts_do_the_same_for_type_before_then(after_then)
+        {
+            return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
+        }
         if starts_clause_text_or_conjugated(after_then)
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
@@ -2213,6 +2244,11 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("gain control ")),
     ))
     .or(alt((
+        // CR 701.46a: "adapt N" is an imperative keyword action, so it can start
+        // a chained clause ("Convert Jetfire, then adapt 3.", Jetfire Air
+        // Guardian). Placed in this 20-arm group to stay within nom's 21-tuple
+        // limit.
+        value((), tag("adapt ")),
         value((), tag("gain ")),
         value((), tag("get ")),
         value((), tag("have ")),
@@ -3705,6 +3741,36 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_host,
         } => {
+            // CR 110.2a: fail closed before touching either representation of
+            // the put step. Search lowering may already have installed a
+            // library-to-battlefield ChangeZone in the preceding definition;
+            // patching that node and merely appending an Unimplemented sibling
+            // would leave the default-controller move executable. Replacing
+            // the whole search assembly also prevents an attachment rider from
+            // surviving without the controller clause it depends on. The arena
+            // keys this existing clause by its boxed-effect allocation, so mutate
+            // that effect in place and clear both chain links rather than assigning
+            // a new AbilityDefinition behind the arena's back.
+            if let Some(possessor) = enters_under.unbound_possessor() {
+                if let Some(previous) = defs.last_mut() {
+                    *previous.effect = Effect::unimplemented(
+                        "change_zone_enters_under_anaphor",
+                        possessor.printed_clause(),
+                    );
+                    previous.sub_ability = None;
+                    previous.else_ability = None;
+                    previous.forward_result = false;
+                } else {
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::unimplemented(
+                            "change_zone_enters_under_anaphor",
+                            possessor.printed_clause(),
+                        ),
+                    ));
+                }
+                return;
+            }
             // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
             // finds the card in any searched zone, so the put-step must move it
             // from wherever it actually is (`origin: None`). A library-only
@@ -3725,7 +3791,7 @@ pub(super) fn apply_clause_continuation(
                     previous,
                     destination,
                     enter_tapped,
-                    enters_under.clone(),
+                    enters_under.as_controller_ref(),
                 );
             }
             let put_origin = if multi_zone_search {
@@ -3733,24 +3799,22 @@ pub(super) fn apply_clause_continuation(
             } else {
                 Some(Zone::Library)
             };
-            let mut change_zone = AbilityDefinition::new(
-                kind,
-                Effect::ChangeZone {
-                    origin: put_origin,
-                    destination,
-                    target: TargetFilter::Any,
-                    owner_library: false,
-                    enter_transformed: false,
-                    enters_under,
-                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-                    enters_attacking: false,
-                    up_to: false,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    face_down_profile: None,
-                    enters_modified_if: None,
-                },
-            );
+            let put_effect = Effect::ChangeZone {
+                origin: put_origin,
+                destination,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: enters_under.as_controller_ref(),
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            };
+            let mut change_zone = AbilityDefinition::new(kind, put_effect);
             if let Some(host) = attach_host {
                 change_zone.forward_result = true;
                 change_zone.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -5188,6 +5252,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
     text: &str,
     effect: &Effect,
     full_text: &str,
+    ctx: &ParseContext,
 ) -> Option<ContinuationAst> {
     match effect {
         Effect::SearchLibrary { split, .. } => {
@@ -5242,7 +5307,9 @@ pub(super) fn parse_intrinsic_continuation_ast(
             let attach_host = if nom_primitives::scan_contains(&full_lower, "attached to")
                 || nom_primitives::scan_contains(&lower, "attached to")
             {
-                parse_search_attach_host(&full_lower).or(Some(TargetFilter::Any))
+                parse_search_attach_host(&full_lower)
+                    .map(|(host, _)| host)
+                    .or(Some(TargetFilter::Any))
             } else {
                 None
             };
@@ -5287,9 +5354,22 @@ pub(super) fn parse_intrinsic_continuation_ast(
             Some(ContinuationAst::SearchDestination {
                 destination: super::parse_search_destination(&full_lower),
                 enter_tapped,
-                // CR 110.2a: "... under your control" routes the found card to the ability controller.
-                enters_under: nom_primitives::scan_contains(&full_lower, "under your control")
-                    .then_some(ControllerRef::You),
+                // CR 110.2a (docs/MagicCompRules.txt:618): the SAME span
+                // (`full_lower`) as the single-literal `scan_contains` this
+                // replaces — no widening. `You`-wins makes the fold
+                // byte-for-byte non-regressive. This seam has no object filter
+                // of its own (the found card is not a parsed `TargetFilter`
+                // here), so the CR 108.3 moved-object-owner source can never
+                // fire: only a mapped, `ParseContext`-declared referent binds.
+                // The one dangerous scope value at this seam (`TargetPlayer`,
+                // which `filter.rs` resolves to the FIRST player target of an
+                // unrelated slot) is refused inside
+                // `map_relative_player_scope`, so the seam needs no
+                // special-casing of its own.
+                enters_under: bind_control_clause(
+                    fold_control_clauses(&full_lower),
+                    name_entry_control_antecedent(None, ctx),
+                ),
                 reveal,
                 attach_host,
             })
@@ -7876,6 +7956,83 @@ pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Ke
     }
 }
 
+/// CR 608.2c: Parse "[then] do the same for <type> cards/permanents." — an
+/// effect-replication directive that repeats the immediately-preceding sibling
+/// action for a DIFFERENT card type (Estrid, the Masked: "Return all non-Aura
+/// enchantment cards from your graveyard to the battlefield, then do the same
+/// for Aura cards."). Returns the replacement type filters; the chunk loop clones the
+/// antecedent effect and swaps its `type_filters` for these — the same
+/// antecedent-clone mechanic `try_parse_scoped_does_the_same` uses for the
+/// player-scoped fanout, so no new disposition, effect variant, or resolver is
+/// needed (both produce an ordinary sibling `Effect`).
+///
+/// Distinct from the two sibling forms: the keyword-list form
+/// (`try_parse_repeat_process_for_keywords`, tried first, replicates per
+/// keyword) and the target-opponent form (`try_parse_does_the_same_clause`,
+/// deferred — the opponent acts on their OWN objects via a mid-chain target
+/// slot). This form is the SAME action on the SAME zones for a sibling type, so
+/// a straight clone-and-retype is rules-correct (CR 608.2c: the antecedent
+/// action is replicated verbatim modulo the stated substitution). Covers the
+/// class ("do the same for <type>"), not Estrid alone.
+///
+/// Combinators only: `opt`/`tag`/`alt` for the prefix, then the shared
+/// `parse_type_phrase` for the filter. Requires the phrase to be fully consumed
+/// (modulo a trailing period) by a non-empty typed filter, so unrelated
+/// "do/repeat …" tails fall through to normal dispatch rather than being
+/// swallowed.
+pub(super) fn try_parse_do_the_same_for_type(text: &str) -> Option<Vec<TypeFilter>> {
+    let lower = text.to_lowercase();
+    let ((), rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = opt(tag("then ")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("do the same for ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    let (filter, remainder) = parse_type_phrase(rest.trim().trim_end_matches('.').trim());
+    if !remainder.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    // Only a PURE card-type substitution is modeled: the continuation swaps the
+    // antecedent's `type_filters` wholesale (Estrid: non-Aura enchantment → Aura).
+    // Reject any filter that also carries `FilterProp` predicates (Gruesome
+    // Menagerie's "creature cards with mana value 2 and 3") or a `controller`
+    // scope — those need a full replacement-filter/cardinality grammar and must
+    // stay strict-failing until it lands (CR #1: a flagged gap beats a misparse).
+    // The multi-type list form (Grim Captain's Call's "Vampire, Dinosaur, and
+    // Merfolk") is already rejected by the non-empty `remainder` guard above.
+    pure_type_substitution(filter)
+}
+
+/// Recognize a pure type-substitution segment when it is immediately followed
+/// by another comma-"then" clause in the same sentence. The separator is parsed
+/// as grammar, rather than manually slicing the sentence, so the terminal
+/// recognizer remains strict about its complete input.
+fn starts_do_the_same_for_type_before_then(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let Ok((_, type_text)) = preceded(
+        tag::<_, _, OracleError<'_>>("do the same for "),
+        terminated(take_until(", then "), tag(", then ")),
+    )
+    .parse(lower.as_str()) else {
+        return false;
+    };
+    let (filter, remainder) = parse_type_phrase(type_text.trim());
+    remainder.trim().is_empty() && pure_type_substitution(filter).is_some()
+}
+
+/// The modeled continuation replaces exactly one card-type predicate. Richer
+/// target predicates remain strict failures until their replacement grammar is
+/// modeled end-to-end.
+fn pure_type_substitution(filter: TargetFilter) -> Option<Vec<TypeFilter>> {
+    match filter {
+        TargetFilter::Typed(t)
+            if !t.type_filters.is_empty() && t.properties.is_empty() && t.controller.is_none() =>
+        {
+            Some(t.type_filters)
+        }
+        _ => None,
+    }
+}
+
 /// CR 608.2c + CR 601.2c: Parse "[then] target opponent does the same / does so."
 /// — an effect-replication directive (The Wedding of River Song). The clause has
 /// no effect of its own; it *would* replicate the immediately-preceding sibling
@@ -8159,6 +8316,63 @@ mod tests {
                 "should reject {phrasing:?}"
             );
         }
+    }
+
+    // CR 608.2c: the "do the same for <type>" continuation recognizer accepts
+    // ONLY a clean, whole card-type substitution (Estrid's "Aura cards") — the
+    // chunk loop clones the antecedent effect and swaps just its `type_filters`.
+    #[test]
+    fn do_the_same_for_type_accepts_clean_type_substitution() {
+        let type_filters = try_parse_do_the_same_for_type("then do the same for Aura cards.")
+            .expect("expected a clean Aura type substitution");
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Aura")),
+            "expected an Aura type substitution, got {type_filters:?}"
+        );
+        assert!(
+            try_parse_do_the_same_for_type("do the same for creature cards").is_some(),
+            "a bare creature-card substitution is also clean"
+        );
+    }
+
+    // Guard: continuations carrying a `FilterProp` predicate, a multi-type list,
+    // or the broader "repeat this process for" family are NOT modeled by the
+    // type-substitution path and must be rejected, so they stay strict-failing
+    // until the full replacement-filter/cardinality grammar lands (Gruesome
+    // Menagerie, Grim Captain's Call, Firemind's Foresight) — CR #1: a flagged
+    // gap beats a silent misparse.
+    #[test]
+    fn do_the_same_for_type_rejects_unmodeled_continuations() {
+        for phrasing in [
+            "do the same for creature cards with mana value 2 and 3",
+            "do the same for Vampire, Dinosaur, and Merfolk",
+            "do the same for creature cards with flying",
+            "repeat this process for instant cards",
+        ] {
+            assert_eq!(
+                try_parse_do_the_same_for_type(phrasing),
+                None,
+                "must reject the unmodeled continuation {phrasing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn do_the_same_for_type_segment_before_following_then_is_strict() {
+        assert!(
+            starts_do_the_same_for_type_before_then(
+                "do the same for Aura cards, then put the rest on the bottom of your library"
+            ),
+            "a pure Aura continuation may be followed by another then-clause"
+        );
+        assert!(
+            !starts_do_the_same_for_type_before_then(
+                "do the same for creature cards with mana value 2 and 3, then shuffle"
+            ),
+            "richer continuation must not gain support merely because another clause follows"
+        );
     }
 
     // Guard: the recognizer must NOT swallow unrelated "same" phrases or a
@@ -12929,26 +13143,64 @@ mod tests {
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to that creature, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::ParentTarget)
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to target creature. if you search your library this way, shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::Typed(TypedFilter::creature()))
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put it onto the battlefield attached to target player, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::Player)
         );
         assert_eq!(
             super::parse_search_attach_host(
                 "put that card onto the battlefield attached to ~, then shuffle"
-            ),
+            )
+            .map(|(host, _)| host),
             Some(TargetFilter::SelfRef)
+        );
+    }
+
+    #[test]
+    fn search_attach_host_preserves_continuation_remainder() {
+        // Cass, Hand of Vengeance: host phrase ends at the comma; ", then attach …"
+        // must remain for continuation parsing.
+        let (host, rem) = super::parse_search_attach_host(
+            "attached to target creature, then attach any number of Equipment that were attached to it to that creature",
+        )
+        .expect("attach host");
+        assert_eq!(
+            host,
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature())
+        );
+        assert_eq!(
+            rem.trim(),
+            "then attach any number of Equipment that were attached to it to that creature",
+            "Cass continuation must survive attach-host parse"
+        );
+
+        // Storm Herald: host phrase ends at the period; exile delayed clause must remain.
+        let (host, rem) = super::parse_search_attach_host(
+            "attached to creatures you control. Exile those Auras at the beginning of your next end step.",
+        )
+        .expect("attach host");
+        assert!(
+            matches!(host, TargetFilter::Typed(_)),
+            "Storm Herald host must parse as typed filter, got {host:?}"
+        );
+        assert_eq!(
+            rem.trim(),
+            "Exile those Auras at the beginning of your next end step.",
+            "Storm Herald exile clause must survive attach-host parse"
         );
     }
 

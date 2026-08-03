@@ -976,19 +976,66 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        // "target opponent"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
-            return (
+        // CR 115.1: A coordinated target noun phrase may elide "target" after
+        // its first player leg: "target opponent, creature an opponent
+        // controls, or planeswalker an opponent controls." All coordinated
+        // nouns still describe one target slot, whose legal domain is the
+        // union of the player and object legs. Parse the player head and the
+        // separator compositionally, then delegate the complete object tail to
+        // the shared type-phrase grammar so controller/type qualifiers retain
+        // their ordinary semantics.
+        if let Ok((after_player, player_filter)) = alt((
+            value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
-        }
-        // "target player"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
+                tag::<_, _, OracleError<'_>>("opponent"),
+            ),
+            value(TargetFilter::Player, tag("player")),
+        ))
+        .parse(after_target)
+        {
+            if let Ok((object_tail, _)) = alt((
+                tag::<_, _, OracleError<'_>>(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(", "),
+            ))
+            .parse(after_player)
+            {
+                if starts_with_type_word(object_tail) {
+                    let mut combined = player_filter.clone();
+                    let mut leg_text = &text[lower.len() - object_tail.len()..];
+                    let mut merged_any = false;
+                    loop {
+                        let (leg, rest) = parse_type_phrase_with_ctx(leg_text, ctx);
+                        if matches!(leg, TargetFilter::Any) {
+                            if merged_any {
+                                return (combined, leg_text, syntax);
+                            }
+                            break;
+                        }
+                        combined = merge_or_filters(combined, leg);
+                        merged_any = true;
+
+                        let rest_lower = rest.to_lowercase();
+                        let Ok((next_leg, _)) = alt((
+                            tag::<_, _, OracleError<'_>>(", and/or "),
+                            tag(", and "),
+                            tag(", or "),
+                            tag(", "),
+                        ))
+                        .parse(rest_lower.as_str()) else {
+                            return (combined, rest, syntax);
+                        };
+                        if !starts_with_type_word(next_leg) {
+                            return (combined, rest, syntax);
+                        }
+                        leg_text = &rest[rest_lower.len() - next_leg.len()..];
+                    }
+                }
+            }
             return (
-                TargetFilter::Player,
-                &text[lower.len() - rest.len()..],
+                player_filter,
+                &text[lower.len() - after_player.len()..],
                 syntax,
             );
         }
@@ -1627,6 +1674,18 @@ pub fn parse_target_with_syntax<'a>(
     // "you" — the controller (not a targeted player), with word boundary
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "you")) {
         return (TargetFilter::Controller, rest, syntax);
+    }
+
+    // CR 615.1 + CR 615.1a: Bare "players" — a mass, untargeted player
+    // recipient with no "target" keyword (Defend the Hearth: "prevent all
+    // combat damage that would be dealt to players this turn"). `Player` has
+    // no `TypeFilter` representation (it is not a card type), so the
+    // `parse_type_filter_word`-based fallback below never recognizes it; this
+    // needs its own bare-noun arm, mirroring the "target player" arm above.
+    if let Some((_, rest)) =
+        nom_on_lower(text, &lower, |input| parse_word_bounded(input, "players"))
+    {
+        return (TargetFilter::Player, rest, syntax);
     }
 
     // "the top/bottom [N] [type] card[s] of [possessive] library/graveyard"
@@ -9561,6 +9620,64 @@ mod tests {
     }
 
     #[test]
+    fn target_opponent_with_elided_coordinated_object_alternatives() {
+        let (filter, rest) = parse_target(
+            "target opponent, creature an opponent controls, or planeswalker an opponent controls",
+        );
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .controller(ControllerRef::Opponent)
+                    ),
+                ],
+            },
+            "the player and both opponent-controlled object alternatives share one target slot"
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_preserves_plain_player_behavior() {
+        let (filter, rest) = parse_target("target player, creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_accepts_and_connector() {
+        let (filter, rest) = parse_target("target player, and creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            },
+            "the ordinary `, and` connector must retain the object alternative"
+        );
+    }
+
+    #[test]
     fn or_type_distributes_controller() {
         // "creature or artifact you control" → both branches get You controller
         let (f, _) = parse_target("target creature or artifact you control");
@@ -11757,6 +11874,24 @@ mod tests {
             matches!(&f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)),
             "bare \"creatures\" must be a Typed creature filter, got {f:?}"
         );
+    }
+
+    /// CR 615.1 (issue #6682, Defend the Hearth class): bare "players" with no
+    /// "target" keyword must resolve to a mass player recipient, not the
+    /// unclassified `Any` fallback.
+    #[test]
+    fn bare_players_resolves_to_player_filter() {
+        let (f, rest) = parse_target("players");
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::Player);
+    }
+
+    /// Negative: "players" must still require a word boundary — "playerskip"
+    /// (a hypothetical longer word) must not spuriously match the bare noun.
+    #[test]
+    fn bare_players_requires_word_boundary() {
+        let (f, _rest) = parse_target("playersXYZ");
+        assert_ne!(f, TargetFilter::Player);
     }
 
     /// Recursively check whether any leaf of the filter is `HasChosenName`.

@@ -1527,13 +1527,17 @@ fn world_acquisition_timestamp(
         .filter(|effect| {
             // Mirror apply_continuous_effect_filtered (layers.rs:4314-4332):
             // recipient must match affected_filter AND the effect's condition.
-            let ctx = crate::game::filter::FilterContext::from_source(state, effect.source_id);
+            let condition_controller = layers::active_effect_condition_controller(state, effect);
+            let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                effect.source_id,
+                condition_controller,
+            );
             crate::game::filter::matches_target_filter(state, obj.id, &effect.affected_filter, &ctx)
                 && effect.condition.as_ref().is_none_or(|condition| {
                     layers::evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        condition_controller,
                         effect.source_id,
                         obj.id,
                     )

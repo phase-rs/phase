@@ -101,7 +101,8 @@ expression: "&ir"
               "ExtractManaSpendTrigger"
             ]
           },
-          "die_results": []
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -234,7 +235,7 @@ expression: "&ir"
                       "SearchDestination": {
                         "destination": "Battlefield",
                         "enter_tapped": false,
-                        "enters_under": null,
+                        "enters_under": "Default",
                         "reveal": false,
                         "attach_host": null
                       }
@@ -501,7 +502,8 @@ expression: "&ir"
               "ExtractManaSpendTrigger"
             ]
           },
-          "die_results": []
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

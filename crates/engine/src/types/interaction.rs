@@ -500,6 +500,8 @@ pub enum InteractionActionCode {
     MulliganDecision,
     ReorderHand,
     TapLandForMana,
+    ActivateManaSource,
+    BackToManaPayment,
     UntapLandForMana,
     SpendPoolMana,
     UnspendPoolMana,

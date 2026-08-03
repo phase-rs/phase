@@ -100,10 +100,6 @@ export class ReplayAdapter implements EngineAdapter {
     );
   }
 
-  getAiAction(): Promise<GameAction | null> {
-    return Promise.resolve(null);
-  }
-
   restoreState(): void {
     // No-op — replay state is driven exclusively by seek(), never restored.
   }

@@ -128,6 +128,7 @@ pub fn resolve(
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,
+                provenance: None,
             },
         );
     }

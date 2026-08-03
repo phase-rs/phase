@@ -1,6 +1,35 @@
 {
   "entries": [
     {
+      "id": 184,
+      "date": "2026-08-01",
+      "title": "Sacrificial mana gets a choice",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Mana sources that sacrifice themselves now pause for your confirmation, so you stay in control of how a spell is paid for\n\n🛠️ Cards That Now Work Right\n• Gemstone Mine and similar depletion lands now sacrifice themselves after their last counter is removed; Gift of Immortality returns to the saved creature at the next end step\n• Wandering Archaic correctly lets the casting opponent choose whether to pay, while the same pronoun handling now fixes related cards including Smart Ass, Siege Dragon, and Elder Brain\n• Diluvian Primordial preserves its free-cast sequence, and Riptide Gearhulk now puts each chosen opponent’s permanent into that owner’s library\n• Counterspell effects that replace an event retain their intended target\n\n⚔️ Combat & Gameplay\n• Basic-land mana and land mana granted by land types now obey activation restrictions, including effects that stop abilities, detain, phasing, and can’t-tap effects\n• Best-of-three games now offer clear options to concede the current game or the entire match; reconnecting after a timeout reliably records the resulting forfeit\n\n🖥️ Interface\n• Mana-payment prompts make self-sacrificing sources explicit instead of spending them automatically\n\n🤖 AI\n• AI avoids spending a colored mana source as colorless convoke or improvise mana when that would strand a required colored cost, and makes more reliable damage and fight decisions\n\n🌐 Multiplayer\n• Multiplayer servers preserve a single, correct forfeit result when multiple disconnected seats expire together",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1533139853225623742"
+    },
+    {
+      "id": 183,
+      "date": "2026-07-29",
+      "title": "Repeated payments resolve correctly",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Deathbringer Regent joins the supported pool, while Ozai’s conditional mana ability and Runadi, Behemoth Caller’s counter-and-haste package now work as printed\n\n🛠️ Cards That Now Work Right\n• Repeated optional payments now happen one at a time, with each resulting trigger appearing only after the payment succeeds\n• Elenda and Azor’s X payment now charges its colored mana as well as X; Mosswort Bridge correctly lets you play its hidden card\n• Fight Rigging and Collector’s Cage keep their counter target separate from their hidden card, while Culling Scales correctly finds the lowest-mana-value nonland permanent\n• Captain America’s Shield and similar Equipment attack triggers can affect creatures the defending player controls; Mockingbird correctly uses the mana spent to cast it for its copy limit\n• Activated abilities now choose targets before paying their costs, correctly handle independent repeated player choices, and keep required player targets distinct\n\n⚔️ Combat & Gameplay\n• Damage prevention now applies to the intended recipient instead of broadening to every possible target\n• Turn-control effects no longer lose queued payment choices, so controlled players can pay costs such as Lava Dart’s flashback sacrifice\n\n🖥️ Interface\n• Attachments can now be selected reliably from their interaction fan\n\n🤖 AI\n• AI better recognizes Vehicle, discard-matters, and cost-reduction decks, and makes more reliable land, mana-payment, and sacrifice decisions",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1532224460164301061"
+    },
+    {
       "id": 182,
       "date": "2026-07-28",
       "title": "Yurlok brings mana burn back",

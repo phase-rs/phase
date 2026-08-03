@@ -1,0 +1,51 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 960
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Attach",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "You",
+          "properties": []
+        }
+      },
+      "cost": {
+        "type": "Mana",
+        "cost": {
+          "type": "Cost",
+          "shards": [],
+          "generic": 3
+        }
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "Equip {3}",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "ability_tag": {
+        "type": "Equip"
+      },
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

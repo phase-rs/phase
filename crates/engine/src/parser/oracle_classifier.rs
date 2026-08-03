@@ -733,6 +733,8 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters the battlefield tapped",
     "enters tapped",
     "enters untapped",
+    "enter the battlefield untapped",
+    "enters the battlefield untapped",
     "enters prepared",
     "enter as a copy of",
     "enter tapped as a copy of",

@@ -63,11 +63,29 @@ fn resolve_forward_result_search_attach_host(
     let targets = forward_result_attach_host_targets(ability);
     match target {
         TargetFilter::SelfRef => Some(AttachTarget::Object(ability.source_id)),
+        // CR 303.4b + CR 109.4: "attached to you" (Lynde, Cheerful Tormentor)
+        // binds the Aura host to the resolving ability's controller.
+        TargetFilter::Controller => Some(AttachTarget::Player(ability.controller)),
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
                 TargetRef::Object(id) => AttachTarget::Object(*id),
                 TargetRef::Player(id) => AttachTarget::Player(*id),
+            })
+            .or_else(|| {
+                // CR 603.2 + CR 608.2c + CR 701.3a: Event-subject return Auras
+                // ("return this … attached to that creature" — Dragon Breath,
+                // Smoke Shroud) bind ParentTarget to the trigger-event referent
+                // (entering creature), not the Aura's prior host.
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::ParentTarget,
+                    ability.source_id,
+                )
+                .map(|target| match target {
+                    TargetRef::Object(id) => AttachTarget::Object(id),
+                    TargetRef::Player(id) => AttachTarget::Player(id),
+                })
             })
             .or_else(|| {
                 // CR 303.4b + CR 608.2c: Aura search-put "attached to that/enchanted

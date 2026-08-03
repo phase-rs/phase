@@ -79,6 +79,11 @@ jobs:
         id: gate
         continue-on-error: true
         run: |
+          # bash opens the redirect before cargo runs, so `target/` has to exist
+          # first. On a cardgen cache hit the `Generate card data` step above is
+          # skipped, and nothing else has invoked cargo yet — the redirect then
+          # dies with "No such file or directory" and the gate never executes.
+          mkdir -p target
           cargo ai-gate --full-suite --games 100 > target/ai-gate-report.md
 
       - name: Open or update drift issue
@@ -87,6 +92,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly AI gate drift"
+          if [ ! -s target/ai-gate-report.md ]; then
+            echo "AI gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-gate-report.md)"
           existing="$(gh issue list --label ai-gate-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then
@@ -162,6 +171,11 @@ jobs:
         id: gate
         continue-on-error: true
         run: |
+          # bash opens the redirect before cargo runs, so `target/` has to exist
+          # first. On a cardgen cache hit the `Generate card data` step above is
+          # skipped, and nothing else has invoked cargo yet — the redirect then
+          # dies with "No such file or directory" and the gate never executes.
+          mkdir -p target
           cargo ai-perf-gate > target/ai-perf-gate-report.md
 
       - name: Open or update drift issue
@@ -170,6 +184,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly decision-cost perf drift"
+          if [ ! -s target/ai-perf-gate-report.md ]; then
+            echo "Decision-cost perf gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-perf-gate-report.md)"
           existing="$(gh issue list --label ai-perf-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then

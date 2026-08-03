@@ -141,6 +141,7 @@ pub fn eliminate_players_simultaneously(
         state.pending_trigger_order = None;
         state.deferred_triggers.clear();
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         state.pending_trigger_entry = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
@@ -762,6 +763,7 @@ fn do_eliminate(
     {
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         state.pending_trigger_event_batch.clear();
     }
 
@@ -1065,9 +1067,17 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::clear_resolving_stack_entry(state);
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
+    // The prompt and its ability continuation are abandoned, so no realization point will ever be
+    // reached for a token battlefield entry parked by this resolution. Leaving the `Option` live
+    // would let a later token's park trip the fail-loud overwrite assert, and would let the
+    // action-boundary convergence write a CR 400.7 row and run a CR 603.6a trigger pass for a
+    // resolution that no longer exists. If the token itself survives the abandonment its entry row
+    // is lost — the same loss the `deferred_entry_events.clear()` above already accepts for that
+    // entry's trigger replay.
+    state.pending_token_battlefield_entry = None;
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
     };
@@ -1095,9 +1105,12 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::clear_resolving_stack_entry(state);
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
+    // Same reasoning as `abandon_source_bound_resolution_prompt`: the owning resolution is gone,
+    // so a parked token battlefield entry has no realization point left.
+    state.pending_token_battlefield_entry = None;
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
     };

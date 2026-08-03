@@ -12,17 +12,13 @@
 //! shapes on the `AbilityCost` tree, (2) prices the self-inflicted cost, and
 //! (3) decides whether the ability's immediate payoff is trivial, and prices
 //! the payoffs it can price confidently (draws, out-of-pressure lifegain) for
-//! the net-value comparison — a draw **the AI itself takes**
-//! (`Draw{Controller}`) is priced at ZERO when the engine certifies that no card
-//! will arrive at all (a `CantDraw`/draw-limit static, the replacement pipeline,
-//! or an empty library), and at its nominal count otherwise. Two scope limits
-//! that this sentence must not be read past: it is a
-//! deliverable/not-deliverable gate, NOT a count-accurate one (see the
-//! disclosure on `effect_benefit_value`'s `Draw` arm for the two legs that still
-//! over-price a partially-delivered draw), and it reaches `Controller` draws
-//! ONLY — every other draw target falls to the `_ => None` arm and is
-//! `Unpriced`, so a payoff like "each player draws a card" is stood down rather
-//! than gated.
+//! the net-value comparison — a draw the policy can classify as **AI-only**
+//! is priced only when the engine can complete an exact present-state
+//! draw-delivery preview. An exact partial or zero delivery is priced exactly;
+//! a replacement order, optional replacement, or continuation-owned choice is
+//! `Unpriced` and therefore leaves the comparison neutral. Only AI-only
+//! recipients are previewed — mixed-recipient draws are `Unpriced`, while
+//! opponent-only draws are trivial churn.
 //!
 //! It is deliberately conservative: anything whose
 //! payoff scales or is ambiguous — mana production, land search, large or
@@ -32,9 +28,10 @@
 //! both a non-trivial effect with no confident price and an unmodeled rider
 //! sitting beside a priced effect — in either case no directional conclusion
 //! about the trade is sound, so the comparison stands down. Off-ability
-//! synergy (an aristocrats board that turns each death into value, a
-//! lifegain/reanimator shell that wants the resource spent) stands the gate
-//! down entirely.
+//! synergy for a resource that is actually spent (a lifegain/reanimator shell)
+//! stands the gate down entirely. A sacrifice is never a generic discount:
+//! death-trigger value must be represented by the activated ability's real
+//! payoff before it can outweigh that cost.
 //!
 //! Cost-vs-benefit for a self-cost activation is answered **here and only
 //! here**: `FreeOutletActivationPolicy` scores aristocrats death-trigger
@@ -44,14 +41,15 @@
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
-use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
-use engine::game::effects::draw::can_draw_at_least_one;
+use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
-use engine::types::ability::{AbilityCost, AbilityDefinition, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::GameState;
@@ -66,7 +64,10 @@ use crate::features::landfall::ability_searches_library_for_land;
 use crate::features::mana_ramp::target_filter_references_land;
 use crate::features::DeckFeatures;
 
-use super::effect_classify::lethal_to_creature;
+use super::effect_classify::{
+    aggregate_player_impact_in, extract_target_filter, lethal_to_creature,
+    targeted_player_impact_in, PLAYER_IMPACT_PREFERENCE_BAND,
+};
 use super::self_protection_classify::{
     any_immediate_threat, is_self_protection_effect, self_protection_effect_payoff,
 };
@@ -322,17 +323,44 @@ pub(crate) enum BenefitAppraisal {
     Unpriced,
 }
 
-/// Three-valued classification of a single chain effect — the typed form of
-/// the old `effect_is_trivial` bool, splitting its `_ => true` catch-all out
-/// as its own answer.
+/// Four-valued classification of a single chain effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EffectTriviality {
     /// An explicit classifier arm judged it: no meaningful immediate advantage.
     Trivial,
     /// An explicit classifier arm judged it: a real payoff.
     NonTrivial,
+    /// An explicit classifier arm judged it: a priced cost incurred while
+    /// receiving another effect's payoff.
+    Drawback,
     /// No classifier arm models this effect at all (the old catch-all).
     Unmodeled,
+}
+
+/// AI's prediction of which player receives one effect in the chain.
+///
+/// This is intentionally private policy state: engine target matching remains
+/// authoritative for actual resolution, while the policy only predicts its
+/// own target chooser's preference before targets are bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecipientClass {
+    AiOnly,
+    OpponentOnly,
+    Mixed,
+}
+
+/// Ordered state shared by the classifier while it walks one payoff chain.
+/// Opponent draws can only make later mandatory parent-target discards trivial
+/// up to the cards they supplied.
+#[derive(Default)]
+struct BenefitClassificationContext {
+    remaining_opponent_draw_churn: u32,
+}
+
+/// Ordered state shared by pricing while it walks one classified payoff chain.
+#[derive(Default)]
+struct BenefitPricingContext {
+    ai_draws_so_far: u32,
 }
 
 impl EffectTriviality {
@@ -360,16 +388,41 @@ pub(crate) fn appraise_benefit(
     ability: &AbilityDefinition,
     penalties: &PolicyPenalties,
 ) -> BenefitAppraisal {
+    let effects = collect_chain_effects(ability);
+    let classified = classify_effects(state, ai_player, source_id, ability, &effects);
     let mut total = 0.0;
     let mut any_nontrivial = false;
     let mut any_unmodeled = false;
-    for effect in collect_chain_effects(ability) {
-        match effect_triviality(state, ai_player, source_id, ability, effect) {
+    let mut pricing = BenefitPricingContext::default();
+    for (effect, recipient, triviality) in classified {
+        match triviality {
             EffectTriviality::Trivial => continue,
             EffectTriviality::Unmodeled => any_unmodeled = true,
             EffectTriviality::NonTrivial => {
                 any_nontrivial = true;
-                match effect_benefit_value(state, ai_player, source_id, effect, penalties) {
+                match effect_benefit_value(
+                    state,
+                    ai_player,
+                    source_id,
+                    effect,
+                    recipient,
+                    &mut pricing,
+                    penalties,
+                ) {
+                    Some(value) => total += value,
+                    None => return BenefitAppraisal::Unpriced,
+                }
+            }
+            EffectTriviality::Drawback => {
+                match effect_benefit_value(
+                    state,
+                    ai_player,
+                    source_id,
+                    effect,
+                    recipient,
+                    &mut pricing,
+                    penalties,
+                ) {
                     Some(value) => total += value,
                     None => return BenefitAppraisal::Unpriced,
                 }
@@ -401,59 +454,50 @@ fn effect_benefit_value(
     ai_player: PlayerId,
     source_id: ObjectId,
     effect: &Effect,
+    recipient: RecipientClass,
+    pricing: &mut BenefitPricingContext,
     penalties: &PolicyPenalties,
 ) -> Option<f64> {
     match effect {
-        // CR 121.1: "A player draws a card by putting the top card of their
-        // library into their hand. ... It may also be done as part of a cost or
-        // effect of a spell or ability." One drawn card is exactly one unit of
-        // the registry's score contract (`registry.rs`: delta 1.0 == one card).
+        // CR 121.1 + CR 121.2: one delivered card is one registry score unit,
+        // but a multi-card instruction may deliver only a partial count. The
+        // engine-owned preview runs that exact cloned instruction rather than
+        // duplicating draw or replacement logic here.
         //
-        // CR 614.6 + CR 614.11: a draw the live pipeline REMOVES — mandatorily
-        // prevented, substituted away by a non-Draw chain (Notion Thief,
-        // Hullbreacher, Chains of Mephistopheles), or count-modified to zero —
-        // "never happens"; a `CantDraw` static, an exhausted `PerTurnDrawLimit`,
-        // or an empty library (CR 704.5b, where a mere zero is if anything an
-        // UNDER-penalty) likewise delivers no card. Such a draw buys exactly
-        // nothing, so it is priced 0.0 — priced, NOT `None`: `None` is
-        // `BenefitAppraisal::Unpriced`, which stands the whole comparison down
-        // and ALLOWS the activation, the opposite of what the engine has just
-        // certified. The zero is not a heuristic: `can_draw_at_least_one`
-        // delegates every leg to the authority the live pipeline itself uses
-        // (`proposed_draw_survives_replacement`), and an OPTIONAL replacement is
-        // never assumed to apply, so a deliverable draw is never under-priced.
-        //
-        // Deliberately binary, not count-aware. `can_draw_at_least_one` asks
-        // only whether ONE card arrives, so two legs still price the full
-        // nominal count of a draw the engine will only partially deliver:
-        //   1. Draw-limit headroom shorter than the count: with a
-        //      `PerTurnDrawLimit` headroom of 1 a `draw(3)` still prices 3.0
-        //      (CR 121.2 performs it as three individual draws, only one of
-        //      which is permitted).
-        //   2. LIBRARY shorter than the count — strictly the worse leg. The
-        //      preflight probes with count 1, so a 1-card library against a
-        //      `draw(3)` reports deliverable and prices 3.0; one card arrives
-        //      and the two failed draw attempts LOSE the game at the next SBA
-        //      check (CR 704.5b). `select_cards_to_draw` is explicit that a
-        //      partial draw (`count > library.len()`) yields only what is
-        //      available, so this is a certified loss the net comparison cannot
-        //      see — not merely an over-price.
-        // Both legs are PRE-EXISTING (this arm priced 3.0 before the
-        // deliverability gate existed) and are DISCLOSED, not fixed, here.
-        // Over-pricing is the conservative direction for this module's charter
-        // — it can let a marginal crack through, never forbid a paying one —
-        // but note that over-pricing a benefit is under-vetoing, so neither leg
-        // should be read as harmless. Pricing them correctly needs a new `pub`
-        // engine authority ("how many of N will actually arrive"), which is
-        // tracked as its own unit rather than built for one consumer here.
-        Effect::Draw {
+        // CR 614.6 + CR 614.11a: prevention and fully settled non-draw
+        // substitutions are exact zeroes. A choice required to order or accept
+        // a replacement—or raised by its continuation—is not a zero; the policy
+        // returns `None` so `BenefitAppraisal::Unpriced` fails open.
+        Effect::Draw { count, .. } if recipient == RecipientClass::AiOnly => {
+            // `preview_draw_delivery` starts from its input state. A later
+            // chained draw therefore cannot be priced independently without
+            // replaying the earlier delivery; stand down rather than double-count.
+            if pricing.ai_draws_so_far > 0 {
+                return None;
+            }
+            let requested = resolve_quantity(state, count, ai_player, source_id).max(0) as u32;
+            match preview_draw_delivery(state, ai_player, requested) {
+                DrawDeliveryPreview::Exact { delivered } => {
+                    pricing.ai_draws_so_far = pricing.ai_draws_so_far.saturating_add(delivered);
+                    Some(f64::from(delivered) * SINGLE_CARD_VALUE)
+                }
+                DrawDeliveryPreview::Unknown => None,
+            }
+        }
+        Effect::Discard {
             count,
-            target: TargetFilter::Controller,
-        } => Some(if can_draw_at_least_one(state, ai_player) {
-            resolve_quantity(state, count, ai_player, source_id).max(0) as f64 * SINGLE_CARD_VALUE
-        } else {
-            0.0
-        }),
+            target: TargetFilter::ParentTarget,
+            ..
+        } if recipient == RecipientClass::AiOnly => {
+            let requested = resolve_quantity(state, count, ai_player, source_id).max(0) as usize;
+            let hand_size = state.players[ai_player.0 as usize].hand.len();
+            // CR 609.3 + CR 701.9a: a mandatory discard does only as much as
+            // possible, so cap the hand-to-graveyard discards at cards held
+            // after earlier AI draws in this resolving chain.
+            let discarded =
+                requested.min(hand_size.saturating_add(pricing.ai_draws_so_far as usize));
+            Some(-(discarded as f64) * penalties.self_cost_discard_per_card)
+        }
         // Lifegain to the controller, life not a pressured resource: priced on
         // the same per-point axis as paying life. Under life pressure the value
         // is genuinely larger and hard to bound — stand down (`None`),
@@ -469,38 +513,260 @@ fn effect_benefit_value(
     }
 }
 
-/// Bool view of [`effect_triviality`] for the X-cast no-op gate
-/// (`x_cast_gate.rs`): unmodeled and trivial both read as "trivial", exactly as
-/// the old catch-all did.
-pub(crate) fn effect_is_trivial(
+/// Classify a chain's effects in order, preserving the per-effect recipient
+/// prediction and opponent-draw churn budget.
+fn classify_effects<'a>(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
-    effect: &Effect,
-) -> bool {
-    !matches!(
-        effect_triviality(state, ai_player, source_id, ability, effect),
-        EffectTriviality::NonTrivial
+    effects: &[&'a Effect],
+) -> Vec<(&'a Effect, RecipientClass, EffectTriviality)> {
+    let recipients = recipient_classes(state, ai_player, source_id, ability, effects);
+    let mut context = BenefitClassificationContext::default();
+    effects
+        .iter()
+        .copied()
+        .zip(recipients)
+        .map(|(effect, recipient)| {
+            let triviality = effect_triviality(
+                state,
+                ai_player,
+                source_id,
+                ability,
+                effect,
+                recipient,
+                &mut context,
+            );
+            (effect, recipient, triviality)
+        })
+        .collect()
+}
+
+/// Classification view used by policy tests for ordered chain behavior.
+#[cfg(test)]
+pub(crate) fn chain_effect_trivialities(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Vec<EffectTriviality> {
+    let effects = collect_chain_effects(ability);
+    classify_effects(state, ai_player, source_id, ability, &effects)
+        .into_iter()
+        .map(|(_, _, triviality)| triviality)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidualVerdict {
+    TrivialAtXZero,
+    MeaningfulAtXZero,
+    Unknown,
+}
+
+/// Classifies residual effects at X=0. The caller removes X-scaled effects
+/// before calling, so an omitted X draw cannot contribute opponent-discard churn.
+pub(crate) fn residual_effects_at_x_zero(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+    effects: &[&Effect],
+) -> ResidualVerdict {
+    let mut verdict = ResidualVerdict::TrivialAtXZero;
+    for (_, _, triviality) in classify_effects(state, ai_player, source_id, ability, effects) {
+        match triviality {
+            EffectTriviality::Trivial => {}
+            EffectTriviality::Unmodeled => return ResidualVerdict::Unknown,
+            EffectTriviality::NonTrivial | EffectTriviality::Drawback => {
+                verdict = ResidualVerdict::MeaningfulAtXZero;
+            }
+        }
+    }
+    verdict
+}
+
+fn recipient_classes(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+    effects: &[&Effect],
+) -> Vec<RecipientClass> {
+    let root_player_recipient = matches!(
+        recipient_filter(&ability.effect),
+        Some(TargetFilter::Player)
     )
+    .then(|| predicted_root_player_recipient(state, ai_player, source_id, effects));
+
+    effects
+        .iter()
+        .map(|effect| match recipient_filter(effect) {
+            Some(TargetFilter::Controller) => RecipientClass::AiOnly,
+            Some(TargetFilter::ParentTarget) => {
+                root_player_recipient.unwrap_or(RecipientClass::Mixed)
+            }
+            Some(TargetFilter::Player) if std::ptr::eq(*effect, &*ability.effect) => {
+                root_player_recipient.unwrap_or(RecipientClass::Mixed)
+            }
+            Some(filter) => recipient_class_for_filter(state, ai_player, source_id, filter),
+            None => RecipientClass::Mixed,
+        })
+        .collect()
+}
+
+fn recipient_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Draw { target, .. } | Effect::Discard { target, .. } => Some(target),
+        _ => extract_target_filter(effect),
+    }
+}
+
+fn predicted_root_player_recipient(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    effects: &[&Effect],
+) -> RecipientClass {
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|object| object.controller);
+    let aggregate = aggregate_player_impact_in(effects);
+    let mut ai_candidate = false;
+    let mut ai_accepted = false;
+    let mut opponent_candidate = false;
+    let mut opponent_accepted = false;
+
+    for player in state.players.iter().filter(|player| !player.is_eliminated) {
+        let impact = targeted_player_impact_in(state, source_controller, effects, player.id)
+            .unwrap_or(aggregate);
+        let prefers_self = if impact > PLAYER_IMPACT_PREFERENCE_BAND {
+            true
+        } else if impact < -PLAYER_IMPACT_PREFERENCE_BAND {
+            false
+        } else {
+            return RecipientClass::Mixed;
+        };
+        let accepted = prefers_self == (player.id == ai_player);
+
+        if player.id == ai_player {
+            ai_candidate = true;
+            ai_accepted = accepted;
+        } else if players::is_opponent(state, ai_player, player.id) {
+            opponent_candidate = true;
+            opponent_accepted |= accepted;
+        } else {
+            return RecipientClass::Mixed;
+        }
+    }
+
+    if !ai_candidate || !opponent_candidate {
+        return RecipientClass::Mixed;
+    }
+    match (ai_accepted, opponent_accepted) {
+        (true, false) => RecipientClass::AiOnly,
+        (false, true) => RecipientClass::OpponentOnly,
+        (true, true) | (false, false) => RecipientClass::Mixed,
+    }
+}
+
+fn recipient_class_for_filter(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    filter: &TargetFilter,
+) -> RecipientClass {
+    let source_controller = state
+        .objects
+        .get(&source_id)
+        .map(|object| object.controller);
+    let ai_matches = engine::game::filter::player_matches_target_filter_in_state(
+        state,
+        filter,
+        ai_player,
+        source_controller,
+    );
+    let mut opponent_matches = false;
+    for player in state.players.iter().filter(|player| !player.is_eliminated) {
+        if player.id == ai_player {
+            continue;
+        }
+        if !engine::game::filter::player_matches_target_filter_in_state(
+            state,
+            filter,
+            player.id,
+            source_controller,
+        ) {
+            continue;
+        }
+        if players::is_opponent(state, ai_player, player.id) {
+            opponent_matches = true;
+        } else {
+            return RecipientClass::Mixed;
+        }
+    }
+    match (ai_matches, opponent_matches) {
+        (true, false) => RecipientClass::AiOnly,
+        (false, true) => RecipientClass::OpponentOnly,
+        (true, true) | (false, false) => RecipientClass::Mixed,
+    }
 }
 
 /// Whether a single effect carries a meaningful immediate advantage, and
-/// whether this module models it at all. Shared with the X-cast no-op gate
-/// (`x_cast_gate.rs`, via [`effect_is_trivial`]) for pricing the *non-X*
-/// residual effects of an {X}-cost payoff whose only affordable X is 0.
+/// whether this module models it at all.
 fn effect_triviality(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
     effect: &Effect,
+    recipient: RecipientClass,
+    context: &mut BenefitClassificationContext,
 ) -> EffectTriviality {
     match effect {
-        // Drawing a card is real card advantage.
-        Effect::Draw { count, .. } => EffectTriviality::from_is_trivial(
-            resolve_quantity(state, count, ai_player, source_id) < 1,
-        ),
+        Effect::Draw { count, .. } => match recipient {
+            RecipientClass::OpponentOnly => {
+                if count.is_up_to() {
+                    return EffectTriviality::Trivial;
+                }
+                let count = resolve_quantity(state, count, ai_player, source_id).max(0) as u32;
+                context.remaining_opponent_draw_churn =
+                    context.remaining_opponent_draw_churn.saturating_add(count);
+                EffectTriviality::Trivial
+            }
+            RecipientClass::AiOnly => EffectTriviality::from_is_trivial(
+                resolve_quantity(state, count, ai_player, source_id) < 1,
+            ),
+            RecipientClass::Mixed => EffectTriviality::NonTrivial,
+        },
+        Effect::Discard {
+            count: count_expr,
+            target: TargetFilter::ParentTarget,
+            ..
+        } => match recipient {
+            RecipientClass::AiOnly => {
+                let count = resolve_quantity(state, count_expr, ai_player, source_id);
+                if count_expr.is_up_to() || count <= 0 {
+                    EffectTriviality::Trivial
+                } else {
+                    EffectTriviality::Drawback
+                }
+            }
+            RecipientClass::OpponentOnly => {
+                let count = resolve_quantity(state, count_expr, ai_player, source_id);
+                if count_expr.is_up_to() || count < 0 {
+                    return EffectTriviality::NonTrivial;
+                }
+                let count = count as u32;
+                let trivial = count <= context.remaining_opponent_draw_churn;
+                context.remaining_opponent_draw_churn =
+                    context.remaining_opponent_draw_churn.saturating_sub(count);
+                EffectTriviality::from_is_trivial(trivial)
+            }
+            RecipientClass::Mixed => EffectTriviality::NonTrivial,
+        },
         // Damage is non-trivial if it is dynamic (power-derived, e.g. Fling),
         // lethal to a player, kills a real creature, or exceeds the face-ping
         // ceiling.
@@ -766,45 +1032,31 @@ fn pay_life_criticality_mult(state: &GameState, ai_player: PlayerId) -> f64 {
 
 /// Whether off-ability deck synergy justifies paying this self-cost even though
 /// the ability's own effect is trivial. Complements the intrinsic-payoff check
-/// in [`appraise_benefit`] — it covers value that lands elsewhere (aristocrats
-/// death triggers, a lifegain/reanimator engine fed by the resource spent).
+/// in [`appraise_benefit`] — it covers value that lands elsewhere in a
+/// lifegain/reanimator engine fed by the resource spent.
 pub(crate) fn synergy_justifies_self_cost(
     features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
     ability: &AbilityDefinition,
 ) -> bool {
-    // cEDH lists run tight combo/engine lines where routine self-costs are the
-    // intended fuel; never veto self-costs for a Cedh-bracket deck.
-    if features.bracket_tier == CommanderBracketTier::Cedh {
-        return true;
-    }
-    ability
-        .cost
-        .as_ref()
-        .is_some_and(|cost| synergy_justifies_cost(features, state, ai_player, cost))
+    ability.cost.as_ref().is_some_and(|cost| {
+        !contains_sacrifice_cost(cost) && synergy_justifies_cost(features, cost)
+    })
 }
 
-fn synergy_justifies_cost(
-    features: &DeckFeatures,
-    state: &GameState,
-    ai_player: PlayerId,
-    cost: &AbilityCost,
-) -> bool {
+/// A sacrifice leaf remains a real cost even when nested in a composite or a
+/// choice of costs.  Treating a sibling lifegain/reanimator cost as a reason to
+/// waive the whole tree would reintroduce the aristocrats exception indirectly.
+fn contains_sacrifice_cost(cost: &AbilityCost) -> bool {
+    cost.categories()
+        .contains(&CostCategory::SacrificesPermanent)
+}
+
+fn synergy_justifies_cost(features: &DeckFeatures, cost: &AbilityCost) -> bool {
     match cost {
-        // Board-gated aristocrats payoff only. NO landfall stand-down: landfall
-        // triggers when a land ENTERS the battlefield, never when one is
-        // sacrificed, so "sacrifice a land" yields zero landfall value —
-        // including it would reopen Zuran Orb in landfall decks. Genuine
-        // sacrifice-a-land ramp is already non-trivial via the mana / land-search
-        // classification arms `appraise_benefit` walks.
-        AbilityCost::Sacrifice(_) => {
-            count_death_triggers_on_board(
-                state,
-                ai_player,
-                &features.aristocrats.death_trigger_names,
-            ) > 0
-        }
+        // Sacrificing the source is a concrete cost, not a generic aristocrats
+        // discount.  Death triggers remain part of an ability's actual payoff
+        // appraisal; they must not make an otherwise trivial activation free.
+        AbilityCost::Sacrifice(_) => false,
         AbilityCost::PayLife { .. } => features.lifegain.commitment >= SYNERGY_COMMITMENT_FLOOR,
         AbilityCost::Discard { .. } => features.reanimator.commitment >= SYNERGY_COMMITMENT_FLOOR,
         // Exile from the AI's own hand/graveyard: no synergy stand-down. Graveyard
@@ -813,7 +1065,7 @@ fn synergy_justifies_cost(
         AbilityCost::Exile { .. } => false,
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
-            .any(|c| synergy_justifies_cost(features, state, ai_player, c)),
+            .any(|cost| synergy_justifies_cost(features, cost)),
         _ => false,
     }
 }

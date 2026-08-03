@@ -837,6 +837,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -1081,9 +1082,13 @@ fn entered_object_perturbs_quantity_ref(
         // that one reads the ENTRY-TIME record snapshot, so a
         // `FilterProp::WithKeyword` whose keyword a Layer-6 effect later removes,
         // or a controller-bearing filter under a non-`Controller` `player` scope,
-        // can still under-trigger. Neither is reachable from any producer today
-        // (all emit a bare `Typed`/`Or[Typed]`); the upgrade is a plain `=> true`
-        // if one becomes reachable.
+        // can still under-trigger. Neither is reachable from any producer today —
+        // measured over `data/card-data.json`: `WithKeyword` is 0/60 refs and a
+        // filter-level `controller` is 0/60. Property-bearing shapes ARE live, though:
+        // 13 of 60 REFS carry a `FilterProp` (10 `Typed[Another]`, 1 `Or[4x Another]`,
+        // 1 `HasColor`, 1 `FaceDown`), which is 16 property-bearing LEAVES (the one
+        // `Or` contributes 4). The upgrade is a plain `=> true` if either divergence
+        // case becomes reachable.
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             matches_target_filter(state, entered.id, filter, ctx)
         }
@@ -1640,6 +1645,9 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
         CastManaSpentMetric::DistinctColors => {
             usize_to_i32_saturating(spent_colors.distinct_colors())
         }
+        // CR 106.3 + CR 601.2h: how much mana of exactly this color paid the
+        // cost, read off the same per-color payment tally.
+        CastManaSpentMetric::OfColor { color } => u32_to_i32_saturating(spent_colors.get(*color)),
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
             source_snapshots
                 .iter()

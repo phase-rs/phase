@@ -4,7 +4,7 @@ use crate::game::{mana_payment, mana_sources};
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
     ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
-    ManaSpendRestriction, ObjectScope, ResolvedAbility, TargetFilter, TargetRef,
+    ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -13,24 +13,153 @@ use crate::types::game_state::{
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 use crate::types::player::PlayerId;
 
-/// CR 106.4: The player who receives (and, when a color is chosen, chooses) the
-/// mana produced by an `Effect::Mana`. A subject-led / chosen-player clause
-/// ("Choose a player. That player adds one mana of any color they choose" —
-/// Spectral Searchlight, Stadium Vendors) carries a player context-ref in
-/// `recipient_filter`; a non-player-ref filter or `None` leaves the controller
-/// as the recipient. Shared by the immediate `resolve` path, the color-choice
-/// prompt, and the prompt-completion path so all three agree on the recipient.
+/// CR 601.2c + CR 608.2b: A view of `ability` whose `targets` contain only the
+/// target chosen for `slot`, re-validated against that slot's own filter.
+/// Shared quantity resolution (`QuantityRef::TargetZoneCardCount`,
+/// `LifeTotal { player: Target }`) reads "the first player target", so each role
+/// must be resolved against a view holding only its own — otherwise the
+/// recipient at index 0 would be read as the count source. Scoping HERE keeps
+/// `game/quantity.rs` slot-agnostic, because `TargetZoneCardCount` serves many
+/// non-mana cards.
+///
+/// Returns `None` when the role declares no filter for `slot`, when that filter
+/// is a context-ref (no slot surfaced), when the index is out of range, or when
+/// the chosen target is no longer legal (CR 608.2b) — callers distinguish
+/// "no such role" from "role present but target illegal" via `role.filter_for`.
+fn ability_scoped_to_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    role: &ManaTargetRole,
+    slot: ManaTargetSlot,
+) -> Option<ResolvedAbility> {
+    let index = role.slot_index(slot)?;
+    let filter = role.filter_for(slot)?;
+    let chosen = ability.targets.get(index)?;
+    let legal = crate::game::targeting::validate_targets_for_ability(
+        state,
+        std::slice::from_ref(chosen),
+        filter,
+        ability,
+    );
+    let _kept = legal.into_iter().next()?;
+    let mut scoped = ability.clone();
+    scoped.targets = retain_only_player_at(ability, Some(index));
+    Some(scoped)
+}
+
+/// CR 601.2c: Narrow `ability.targets` to ONE player target — the entry at
+/// `keep`, or none at all when `keep` is `None` — while leaving every NON-player
+/// target in place at its original position.
+///
+/// Scoping must be confined to the axis the shared quantity resolvers actually
+/// read. `QuantityRef::TargetZoneCardCount` and `LifeTotal { player: Target }`
+/// scan for the FIRST `TargetRef::Player`, so leaving two players visible is
+/// what let a count read the recipient. Object-scoped production
+/// (`ManaProduction::AnyCombinationOfObjectColors { scope: Target }` via
+/// `object_colors_for_scope`) reads an OBJECT target from the same vec and
+/// requires nothing about the player roles — clearing the whole vec would make
+/// that half of the production silently produce no colors, which CR 608.2b does
+/// not license: only the part that "requires information about an illegal
+/// target" fails.
+fn retain_only_player_at(ability: &ResolvedAbility, keep: Option<usize>) -> Vec<TargetRef> {
+    ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| !matches!(t, TargetRef::Player(_)) || Some(*i) == keep)
+        .map(|(_, t)| t.clone())
+        .collect()
+}
+
+/// CR 601.2c + CR 608.2b: The ability view the production COUNT resolves
+/// against. FOUR distinct cases, which must not be collapsed:
+///
+/// 1. No count-source role declared (no role at all, or `Recipient`-only —
+///    Jetfire, and every single-role mana). The count reads nothing
+///    target-derived, so the unscoped ability is correct and this preserves
+///    today's behavior exactly.
+/// 2. The count source is a CONTEXT REF (`ScopedPlayer`, `TriggeringPlayer`,
+///    …). It surfaces no target slot, so there is no chosen target to be
+///    illegal — the player comes from context, exactly as the recipient path
+///    does. Resolving it through the CR 608.2b branch instead would silently
+///    yield 0 under a rule that does not apply, because nothing here is an
+///    illegal target.
+/// 3. A count source is declared, surfaces a slot, and its chosen target is
+///    still legal. Narrow to that ONE player, so shared "first player target"
+///    quantity resolution (`QuantityRef::TargetZoneCardCount`,
+///    `LifeTotal { player: Target }`) cannot read the recipient instead.
+/// 4. A count source is declared but its chosen target is no longer legal.
+///    CR 608.2b: the effect "fails to determine any such information" about an
+///    illegal target — so expose NO player, resolving the count to 0. Falling
+///    back to the unscoped ability here would be a BUG: it still holds the
+///    (legal) recipient, so the count would read the RECIPIENT's hand instead
+///    of failing.
+///
+/// In cases 3 and 4 only the PLAYER axis is narrowed; non-player targets stay
+/// put (see `retain_only_player_at`).
+fn count_scoped_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    role: Option<&ManaTargetRole>,
+) -> ResolvedAbility {
+    // Case 1: nothing target-derived to scope.
+    let Some(role) = role.filter(|r| r.count_source().is_some()) else {
+        return ability.clone();
+    };
+    // Case 2: context-ref count source — read the player from context, mirroring
+    // `mana_effect_recipient`, and expose it as the sole player target.
+    if let Some(filter) = role.count_source().filter(|filter| filter.is_context_ref()) {
+        let from_context = super::resolve_player_for_context_ref(state, ability, filter);
+        let mut scoped = ability.clone();
+        scoped.targets = retain_only_player_at(ability, None);
+        scoped.targets.push(TargetRef::Player(from_context));
+        return scoped;
+    }
+    // Case 3, else case 4.
+    ability_scoped_to_slot(state, ability, role, ManaTargetSlot::CountSource).unwrap_or_else(|| {
+        let mut scoped = ability.clone();
+        scoped.targets = retain_only_player_at(ability, None);
+        scoped
+    })
+}
+
+/// CR 106.4 + CR 608.2b: Which player's mana pool receives the mana.
+/// `None` means the effect declares a recipient whose chosen target is no longer
+/// legal — the mana is not added to any pool ("illegal targets won't be affected
+/// by parts of the effect for which they're illegal"). This is DISTINCT from a
+/// role with no recipient at all (Jeska's Will, Carpet of Flowers), which
+/// correctly deposits into `ability.controller`.
+///
+/// Shared by the immediate `resolve` path, the color-choice prompt, and the
+/// prompt-completion path so all three agree on the recipient. No quantity is
+/// inspected anywhere — the role states the answer.
 fn mana_effect_recipient(
     state: &GameState,
     ability: &ResolvedAbility,
-    recipient_filter: &Option<TargetFilter>,
-) -> PlayerId {
-    match recipient_filter {
-        Some(filter) if filter.is_context_ref() => {
-            super::resolve_player_for_context_ref(state, ability, filter)
-        }
-        _ => ability.controller,
+    role: Option<&ManaTargetRole>,
+) -> Option<PlayerId> {
+    let Some(filter) = role.and_then(ManaTargetRole::recipient) else {
+        // CR 106.4: no recipient role declared — the controller adds the mana.
+        return Some(ability.controller);
+    };
+    // CR 106.4: context-ref recipients (ScopedPlayer, TriggeringPlayer,
+    // ParentTargetController, chosen player) resolve via the context, not
+    // `ability.targets`.
+    if filter.is_context_ref() {
+        return Some(super::resolve_player_for_context_ref(
+            state, ability, filter,
+        ));
     }
+    // CR 115.1 + CR 106.4: "target player adds …" (Jetfire, Ingenious
+    // Scientist) — the targeted player was chosen at announcement and lives in
+    // this role's OWN slot. An illegal chosen target yields `None`: the mana is
+    // not deposited anywhere (CR 608.2b). Never fall back to the controller —
+    // that would hand a targeted player's mana to the caster.
+    let scoped = ability_scoped_to_slot(state, ability, role?, ManaTargetSlot::Recipient)?;
+    scoped.targets.iter().find_map(|t| match t {
+        TargetRef::Player(player_id) => Some(*player_id),
+        TargetRef::Object(_) => None,
+    })
 }
 
 /// Mana effect: adds mana to the recipient's mana pool (CR 106.4).
@@ -39,21 +168,26 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (produced, restrictions, grants, expiry, mana_recipient_filter) = match &ability.effect {
+    let (produced, restrictions, grants, expiry, mana_role) = match &ability.effect {
         Effect::Mana {
             produced,
             restrictions,
             grants,
             expiry,
-            // CR 106.4 + CR 115.1: `target` names the player whose mana pool
-            // receives the mana. For Jeska's Will mode 1 the count quantity
-            // inside `produced` references the target via `TargetZoneCardCount`;
-            // for subject-led mana clauses ("the active player adds {C}{C} …",
-            // Belbe) it is the recipient itself, resolved below.
+            // CR 601.2c: `target` is a ROLE. The RECIPIENT names the player
+            // whose mana pool receives the mana (CR 106.4); the COUNT SOURCE
+            // names the player a `TargetZoneCardCount` / `LifeTotal` quantity
+            // inside `produced` reads. Each is resolved below from its OWN
+            // target slot — no quantity shape is inspected to tell them apart.
             target,
         } => (produced, restrictions, grants, *expiry, target.clone()),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
+    // CR 601.2c + CR 608.2b: resolve the production count against a view of the
+    // ability holding ONLY the count source's own chosen target, so shared
+    // "first player target" quantity resolution cannot read the recipient.
+    let count_ability = count_scoped_ability(state, ability, mana_role.as_ref());
+    let count_ability = &count_ability;
     let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
         ability,
         state.current_trigger_event.as_ref(),
@@ -74,7 +208,13 @@ pub fn resolve(
         // (Spectral Searchlight, Stadium Vendors) that is the chosen player, not
         // the controller. Resolve it here so the prompt is directed correctly;
         // `handle_choose_mana_effect` re-derives the same recipient for deposit.
-        let prompt_player = mana_effect_recipient(state, ability, &mana_recipient_filter);
+        //
+        // CR 608.2b: when the declared recipient's chosen target is no longer
+        // legal, no player adds this mana, so there is no color for anyone to
+        // choose — the mana part of the effect simply does nothing.
+        let Some(prompt_player) = mana_effect_recipient(state, ability, mana_role.as_ref()) else {
+            return Ok(());
+        };
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: prompt_player,
             choice,
@@ -102,14 +242,14 @@ pub fn resolve(
                 // Resolve the count from the production descriptor, then produce
                 // that many units of the override color — mirrors the behavior of
                 // `resolve_single_color_override` in `mana_abilities.rs`.
-                let count = resolve_mana_types_with_ability(produced, &*state, ability).len();
+                let count = resolve_mana_types_with_ability(produced, &*state, count_ability).len();
                 vec![color; count]
             }
             Some(crate::types::game_state::ProductionOverride::Combination(types)) => types,
-            None => resolve_mana_types_with_ability(produced, &*state, ability),
+            None => resolve_mana_types_with_ability(produced, &*state, count_ability),
         }
     } else {
-        resolve_mana_types_with_ability(produced, &*state, ability)
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
     };
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
@@ -137,7 +277,22 @@ pub fn resolve(
         // CR 106.4: A subject-led mana clause routes the mana to the named
         // player ("the active player adds {C}{C} …" on a Phase trigger, "that
         // player adds one mana of any color" on Spectral Searchlight).
-        _ => mana_effect_recipient(state, ability, &mana_recipient_filter),
+        _ => match mana_effect_recipient(state, ability, mana_role.as_ref()) {
+            Some(player) => player,
+            // CR 608.2b: "Illegal targets won't be affected by parts of the
+            // effect for which they're illegal." A declared recipient whose
+            // chosen target is no longer legal receives nothing, and the mana is
+            // NOT redirected to the controller. The count source's half of the
+            // sentence already resolved above and is unaffected.
+            None => {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            }
+        },
     };
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
@@ -190,7 +345,12 @@ pub fn handle_choose_mana_effect(
         ));
     };
 
-    let mana_types = chosen_mana_types_for_prompt(state, ability, produced, prompt, chosen)?;
+    // CR 601.2c + CR 608.2b: the prompt-completion path derives the COUNT too
+    // (`SingleColor` multiplies the chosen color by it), so it must read the
+    // count source's own slot for exactly the same reason `resolve` does —
+    // otherwise a `Both` role with a color choice counts the RECIPIENT.
+    let count_ability = count_scoped_ability(state, ability, target.as_ref());
+    let mana_types = chosen_mana_types_for_prompt(state, &count_ability, produced, prompt, chosen)?;
     let source_could_produce_two_or_more_colors =
         mana_sources::mana_production_could_produce_two_or_more_colors(
             state,
@@ -203,21 +363,27 @@ pub fn handle_choose_mana_effect(
     // same player the color prompt was directed to in `resolve`), not the
     // controller. Priority still returns to the controller below — only the mana
     // is redirected.
-    let recipient = mana_effect_recipient(state, ability, target);
-    let produced_mana = !mana_types.is_empty();
-    for mana_type in mana_types {
-        mana_payment::produce_mana_with_attributes_from_source_quality(
-            state,
-            ability.source_id,
-            mana_type,
-            recipient,
-            false,
-            source_could_produce_two_or_more_colors,
-            &concrete_restrictions,
-            grants,
-            *expiry,
-            events,
-        );
+    //
+    // CR 608.2b: `None` means the declared recipient's chosen target is no
+    // longer legal — no player adds this mana, and it is NOT redirected to the
+    // controller.
+    let recipient = mana_effect_recipient(state, ability, target.as_ref());
+    let produced_mana = recipient.is_some() && !mana_types.is_empty();
+    if let Some(recipient) = recipient {
+        for mana_type in mana_types {
+            mana_payment::produce_mana_with_attributes_from_source_quality(
+                state,
+                ability.source_id,
+                mana_type,
+                recipient,
+                false,
+                source_could_produce_two_or_more_colors,
+                &concrete_restrictions,
+                grants,
+                *expiry,
+                events,
+            );
+        }
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
 
@@ -963,7 +1129,9 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: Some(TargetFilter::ScopedPlayer),
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer,
+                }),
             },
             vec![],
             source,
@@ -1014,6 +1182,360 @@ mod tests {
             state.players[0].mana_pool.total(),
             0,
             "controller (P0) must NOT receive the chosen player's mana"
+        );
+    }
+
+    /// CR 115.1 + CR 106.4: "Target player adds that much {C}" (Jetfire) — a
+    /// genuine `TargetFilter::Player` recipient whose count is NOT target-derived
+    /// deposits into the chosen target player (`ability.targets`), not the
+    /// controller. Revert-probe: before the `TargetFilter::Player` arm in
+    /// `mana_effect_recipient`, the mana lands in P0's pool.
+    #[test]
+    fn target_player_recipient_deposits_into_the_target_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 3 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Colorless),
+            3,
+            "the targeted player (P1) must receive the mana"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "controller (P0) must NOT receive a targeted recipient's mana"
+        );
+    }
+
+    /// Matrix row 5 (runtime half) — a CONTEXT-REF recipient plus a REAL count
+    /// source. The recipient occupies NO surfaced slot, so the count source
+    /// lands at surfaced index 0; naive "recipient == targets[0]" index math
+    /// breaks exactly here.
+    ///
+    /// This is the subject-predicate shape ("That player adds {R} for each card
+    /// in target opponent's hand", Blinkmoth Urn's route). CR 106.4: the mana
+    /// goes to the scoped player. CR 115.1: the amount is read from the chosen
+    /// count-source player's hand — NOT the scoped player's, and NOT the
+    /// controller's.
+    #[test]
+    fn context_ref_recipient_with_real_count_source_reads_the_count_slot() {
+        use crate::types::ability::{ManaProduction, ManaTargetRole, ZoneRef};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Subject Led Count Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // P1 is BOTH the scoped recipient and the chosen count source here only
+        // by construction of the two-player fixture; the discriminating fact is
+        // that the count must come from the TARGET slot, so give P1 a hand of a
+        // size the controller does not share.
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(50 + i),
+                PlayerId(1),
+                format!("Count Card {i}"),
+                Zone::Hand,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TargetZoneCardCount {
+                            zone: ZoneRef::Hand,
+                        },
+                    },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Both {
+                    recipient: TargetFilter::ScopedPlayer,
+                    count_source: TargetFilter::Player,
+                }),
+            },
+            // ONE target: the count source, at surfaced index 0. The context-ref
+            // recipient surfaces no slot and so consumes no target.
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.scoped_player = Some(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("subject-led count-source mana resolves");
+
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Colorless),
+            4,
+            "CR 106.4 + CR 115.1: the scoped recipient receives mana equal to the \
+             COUNT SOURCE slot's hand size"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "the controller receives nothing"
+        );
+    }
+
+    /// Matrix row 10a — CR 608.2b clause (1): an illegal RECIPIENT means "that
+    /// part of the effect does nothing", and the mana is NOT quietly redirected
+    /// to the controller (which would hand a targeted opponent's mana to the
+    /// caster). The count source's half is unaffected, and positions are stable.
+    ///
+    /// The chosen recipient here is the CONTROLLER while the recipient filter
+    /// demands an OPPONENT, so the target is illegal at resolution. A
+    /// `mana_effect_recipient` that skipped per-slot re-validation would find
+    /// P0 and deposit into it — which is exactly what this asserts must not
+    /// happen. Reach guard: the paired legal case below deposits a non-zero
+    /// amount through the same code path.
+    #[test]
+    fn illegal_recipient_target_deposits_no_mana_anywhere() {
+        use crate::types::ability::{ControllerRef, ManaProduction, ManaTargetRole, TypedFilter};
+
+        let opponent_only =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        let build = |chosen: PlayerId| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 3 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(ManaTargetRole::Recipient {
+                        recipient: opponent_only.clone(),
+                    }),
+                },
+                vec![TargetRef::Player(chosen)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        // Reach guard / positive: a LEGAL opponent recipient does receive mana,
+        // proving the negative below is not a vacuous "nothing ever resolves".
+        let mut state = GameState::new_two_player(42);
+        let legal = build(PlayerId(1));
+        let mut events = Vec::new();
+        crate::game::effects::mana::resolve(&mut state, &legal, &mut events)
+            .expect("a legal opponent recipient resolves");
+        assert_eq!(
+            state.players[1].mana_pool.total(),
+            3,
+            "reach guard: the legal recipient must actually receive the mana"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        // Negative: the CONTROLLER is not a legal "target opponent".
+        let mut state = GameState::new_two_player(42);
+        let illegal = build(PlayerId(0));
+        let mut events = Vec::new();
+        crate::game::effects::mana::resolve(&mut state, &illegal, &mut events)
+            .expect("an illegal recipient still resolves the effect, adding nothing");
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "CR 608.2b: an illegal recipient receives nothing and the mana is NOT \
+             redirected to the controller"
+        );
+        assert_eq!(state.players[1].mana_pool.total(), 0);
+    }
+
+    /// CR 601.2c + CR 106.4: multi-authority provenance fixture for the two mana
+    /// roles. The identical `TargetFilter::Player` is emitted both as a RECIPIENT
+    /// (subject-led "target player adds", count target-independent) and as a
+    /// COUNT SOURCE ("Add {U} for each card in target player's hand", count =
+    /// `TargetZoneCardCount`). The ROLE now STATES which is which — the previous
+    /// `mana_count_reads_targets` quantity-shape inference that had to GUESS is
+    /// deleted, so its two assertions are deliberately NOT ported. Only the
+    /// recipient role redirects the pool; a count-source-only role (and Jeska's
+    /// Will's `Typed(Opponent)`) leaves the recipient on the controller. Tested at
+    /// the `mana_effect_recipient` seam to avoid coupling to count resolution;
+    /// the end-to-end runtime counterparts are
+    /// `target_player_recipient_deposits_into_the_target_not_controller` and the
+    /// `mana_target_recipient_and_count_source` integration test.
+    #[test]
+    fn mana_role_separates_recipient_from_count_source() {
+        use crate::types::ability::{ControllerRef, TypedFilter, ZoneRef};
+
+        let state = GameState::new_two_player(42);
+        let src = ObjectId(100);
+        let targets = vec![TargetRef::Player(PlayerId(1))];
+
+        // Count-source production: the count reads a player target.
+        let count_source = ManaProduction::AnyOneColor {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                },
+            },
+            color_options: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        };
+
+        // Recipient production: a target-independent count ("that much" →
+        // EventContextAmount).
+        let recipient_prod = ManaProduction::Colorless {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        };
+
+        let mk = |produced: ManaProduction, role: ManaTargetRole| {
+            ResolvedAbility::new(
+                Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: Some(role),
+                },
+                targets.clone(),
+                src,
+                PlayerId(0),
+            )
+        };
+
+        // (a) Recipient role, target-independent count → the target (P1).
+        let recipient_role = ManaTargetRole::Recipient {
+            recipient: TargetFilter::Player,
+        };
+        let recip = mk(recipient_prod.clone(), recipient_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &recip, Some(&recipient_role)),
+            Some(PlayerId(1)),
+            "a Recipient role resolves to its own chosen target"
+        );
+
+        // (b) The SAME `TargetFilter::Player`, now declared as a COUNT SOURCE →
+        // the controller (P0). This is the case the deleted quantity-shape
+        // inference used to guess; the role states it.
+        let count_role = ManaTargetRole::CountSource {
+            count_source: TargetFilter::Player,
+        };
+        let cs = mk(count_source.clone(), count_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &cs, Some(&count_role)),
+            Some(PlayerId(0)),
+            "a CountSource role declares no recipient → the controller adds the mana"
+        );
+
+        // (c) Jeska's Will `Typed(Opponent)` count source → controller (P0).
+        let opp = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let jeska_role = ManaTargetRole::CountSource {
+            count_source: opp.clone(),
+        };
+        let jeska = mk(count_source.clone(), jeska_role.clone());
+        assert_eq!(
+            mana_effect_recipient(&state, &jeska, Some(&jeska_role)),
+            Some(PlayerId(0)),
+            "Jeska's Will Typed(Opponent) count source → controller (unchanged)"
+        );
+
+        // (d) No role at all (Cabal Coffers) → the controller.
+        let bare = ResolvedAbility::new(
+            Effect::Mana {
+                produced: recipient_prod.clone(),
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            src,
+            PlayerId(0),
+        );
+        assert_eq!(
+            mana_effect_recipient(&state, &bare, None),
+            Some(PlayerId(0)),
+            "no declared role → the controller adds the mana"
+        );
+    }
+
+    /// CR 106.6 + CR 115.1: Jetfire's produced {C} carries the negative spend
+    /// restriction "this mana can't be spent to cast nonartifact spells"
+    /// (`SpellTypeOrAbilityActivation{ Artifact, Any }`), and it is deposited on
+    /// the targeted player's mana units.
+    #[test]
+    fn target_player_recipient_mana_carries_spend_restriction() {
+        use crate::types::mana::{AbilityActivationScope, ManaRestriction};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jetfire".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: AbilityActivationScope::Any,
+                }],
+                grants: vec![],
+                expiry: None,
+                target: Some(ManaTargetRole::Recipient {
+                    recipient: TargetFilter::Player,
+                }),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].mana_pool.total(), 2);
+        assert!(
+            state.players[1].mana_pool.mana.iter().all(|unit| {
+                unit.restrictions
+                    .contains(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Artifact".to_string(),
+                        ability: AbilityActivationScope::Any,
+                    })
+            }),
+            "each produced {{C}} must carry the artifact-spell spend restriction"
         );
     }
 

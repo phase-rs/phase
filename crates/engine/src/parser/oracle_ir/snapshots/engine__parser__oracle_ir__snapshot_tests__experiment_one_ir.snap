@@ -133,7 +133,8 @@ expression: "&ir"
               "ExtractManaSpendTrigger"
             ]
           },
-          "die_results": []
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

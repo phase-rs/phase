@@ -1987,6 +1987,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2844,7 +2845,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Exploit { target }
         | Effect::LoseAllPlayerCounters { target }
         | Effect::Heist { target, .. }
-        | Effect::PutOnTopOrBottom { target }
         | Effect::Goad { target }
         | Effect::GoadAll { target }
         | Effect::Detain { target }
@@ -2866,6 +2866,10 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::PutOnTopOrBottom { target, chooser } => {
+            legacy_target_filter(target) || legacy_target_filter(chooser)
+        }
 
         Effect::ForceBlock {
             target, duration, ..
@@ -3158,9 +3162,21 @@ fn legacy_effect(x: &Effect) -> bool {
         }
 
         // ---- Options-only carriers ----
-        Effect::Mana { target, .. }
-        | Effect::LoseTheGame { target }
-        | Effect::WinTheGame { target } => otf(target),
+        // CR 601.2c (D5): `Effect::Mana`'s target is a ROLE (`ManaTargetRole`),
+        // not a bare `Option<TargetFilter>`, so it can no longer share the
+        // or-pattern below. It must still be scanned: several shipping mana
+        // cards carry exactly the frozen event-context tags this visitor exists
+        // to find — `TriggeringPlayer` (Bubbling Muck, High Tide, Mana Flare)
+        // and `ParentTargetController` (Fertile Ground, Utopia Sprawl, Wild
+        // Growth, Shimmerwilds Growth). Dropping Mana from the visitor would
+        // silently change `legacy_*` verdicts for all of them. Scan EVERY
+        // declared role filter (`declared_filters`, not `surfaced_filters`) —
+        // the tags live on context-ref filters, which `surfaced_filters`
+        // excludes by definition.
+        Effect::Mana { target, .. } => target
+            .as_ref()
+            .is_some_and(|role| role.declared_filters().any(|(_, f)| legacy_target_filter(f))),
+        Effect::LoseTheGame { target } | Effect::WinTheGame { target } => otf(target),
         Effect::ChooseFromZone { filter, .. } => otf(filter),
         Effect::ReduceNextSpellCost { spell_filter, .. }
         | Effect::GrantNextSpellAbility { spell_filter, .. } => otf(spell_filter),
@@ -6315,6 +6331,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -6553,6 +6570,60 @@ mod tests {
     use crate::types::ability::{
         AbilityKind, ChoiceType, Comparator, CountScope, PtValue, TargetSelectionMode,
     };
+
+    use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// Matrix rows 15b + 17 — zero delta for the D5 frozen-event-tag visitor,
+    /// which reads `Effect::Mana`'s target DIRECTLY and bypasses
+    /// `Effect::target_filter()` entirely.
+    ///
+    /// CR 603.10a: this visitor exists to find frozen event-context tags, and
+    /// seven of the eleven fixture mana entries carry exactly those tags
+    /// (`TriggeringPlayer` on Bubbling Muck / High Tide / Mana Flare,
+    /// `ParentTargetController` on the four Auras). Deleting Mana from the
+    /// or-pattern to silence the compiler — the path of least resistance — would
+    /// silently flip all seven; writing the split arm with `surfaced_filters()`
+    /// would too, since the tags live on context-ref filters that
+    /// `surfaced_filters` excludes by definition. Both mistakes fail here.
+    #[test]
+    fn legacy_effect_verdict_unchanged_for_every_fixture_mana_role() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+
+        for (name, role) in mana_fixture_roles() {
+            let sole = role
+                .declared_filters()
+                .next()
+                .map(|(_, f)| f)
+                .expect("every shipping role declares exactly one filter");
+            // The pre-change verdict: `otf(target)` over the bare filter.
+            let expected = legacy_target_filter(sole);
+            let effect = Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(role.clone()),
+            };
+            assert_eq!(
+                legacy_effect(&effect),
+                expected,
+                "{name}: D5 frozen-tag verdict must be identical to the pre-role reading"
+            );
+        }
+
+        // Reach guard: at least one fixture role IS tagged, so the loop above is
+        // not vacuously comparing `false == false` everywhere.
+        assert!(
+            mana_fixture_roles().iter().any(|(_, role)| {
+                role.declared_filters()
+                    .any(|(_, f)| legacy_target_filter(f))
+            }),
+            "the fixture set must contain at least one frozen-tag-bearing role,              or this test proves nothing"
+        );
+    }
+
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
@@ -8229,5 +8300,55 @@ mod tests {
         let twin = rw_quantity_ref(&QuantityRef::EventContextSourceModesChosen);
         assert_eq!(p.reads_event_live, twin.reads_event_live);
         assert_eq!(p.legacy_batch_prompt(), twin.legacy_batch_prompt());
+    }
+
+    /// CR 400.7d: the Adamant *rider* cards (Slaying Fire, Cauldron's Gift, …)
+    /// re-route from `AbilityCondition::ManaColorSpent` — an inert,
+    /// reads-nothing arm — to the generic
+    /// `QuantityCheck { ManaSpentToCast { OfColor } }`, which resolves through
+    /// `legacy_ref()`. Pin BOTH sides so the delta is explicit rather than
+    /// incidental: the flip is toward the MORE conservative classification
+    /// (batch-prompt rather than silent auto-order), which is fail-safe, and a
+    /// future retirement of `ManaColorSpent` cannot silently change it.
+    ///
+    /// Companion to `adamant_rider_generic_shape_reads_all_scan_axes` in
+    /// `ability_scan.rs`, which pins the corresponding scan-axis delta. Without
+    /// this test the `ability_rw` half of that re-routing is unpinned.
+    #[test]
+    fn adamant_rider_generic_shape_is_more_conservative_than_legacy() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+        use crate::types::mana::ManaColor;
+
+        let generic = AbilityCondition::QuantityCheck {
+            lhs: qref(QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::OfColor {
+                    color: ManaColor::Red,
+                },
+            }),
+            comparator: Comparator::GE,
+            rhs: qfix(3),
+        };
+        let legacy = AbilityCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+
+        // SCOPE OF THIS TEST: it pins the rw CLASSIFICATION of both shapes. It
+        // constructs the conditions directly and never invokes the parser, so it
+        // does NOT detect a revert of the `OfColor` lowering — that is guarded by
+        // `leading_word_mana_spent_condition_parses_adamant` in
+        // `parser/oracle_effect/conditions.rs`. What reverting the lowering WOULD
+        // do is make this test's `generic` shape unreachable in production while
+        // leaving it green; the pin below is what keeps the two classifications
+        // visibly different so such a change cannot pass unnoticed.
+        assert!(
+            rw_ability_condition(&generic).legacy_batch_prompt(),
+            "the generic ManaSpentToCast shape must carry the legacy_ref batch-prompt marker"
+        );
+        assert!(
+            !rw_ability_condition(&legacy).legacy_batch_prompt(),
+            "the legacy ManaColorSpent arm reads nothing; pinned so the delta stays visible"
+        );
     }
 }

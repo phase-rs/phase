@@ -22,55 +22,157 @@ expression: "&ir"
         "fragment": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "DealDamage",
-            "amount": {
-              "type": "Fixed",
-              "value": 5
-            },
-            "target": {
-              "type": "Player"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Draw",
-              "count": {
-                "type": "Fixed",
-                "value": 3
+        "Spell": {
+          "source_text": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 43,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Any player may have ~ deal 5 damage to them"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "DealDamage",
+                    "amount": {
+                      "type": "Fixed",
+                      "value": 5
+                    },
+                    "target": {
+                      "type": "Player"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": true,
+                "opponent_may_scope": "AnyPlayer",
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               },
-              "target": {
-                "type": "Player"
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 45,
+                    "end_byte": 92,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "If no one does, target player draws three cards"
+                },
+                "disposition": {
+                  "BranchOtherwise": {
+                    "else_def": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "Draw",
+                        "count": {
+                          "type": "Fixed",
+                          "value": 3
+                        },
+                        "target": {
+                          "type": "Player"
+                        }
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": null,
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
+                    "kind": "Bound"
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "otherwise_placeholder",
+                    "description": null
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": {
-              "type": "Not",
-              "condition": {
-                "type": "EffectOutcome",
-                "signal": "OptionalEffectPerformed"
-              }
-            },
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            ],
+            "kind": "Spell",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": true,
-          "optional_for": "AnyPlayer",
-          "forward_result": false
+          "shell": {
+            "sub_link": null
+          },
+          "die_results": [],
+          "root_transforms": [
+            {
+              "SetMinXValue": 0
+            },
+            {
+              "SetDescription": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards."
+            }
+          ]
         }
       }
     }

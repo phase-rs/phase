@@ -601,6 +601,38 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 608.2g + CR 115.1a: A per-opponent fanout has already chosen its
+    // player/object pairs as the trigger went on the stack. After resolution
+    // revalidation only the surviving object ids remain, so hand them to the
+    // existing free-cast window as an exact pool: do not rescan graveyards and
+    // do not substitute another card from the same opponent. The window's
+    // re-offer pipeline casts selected spells one at a time without priority.
+    let is_per_opponent_fanout = crate::game::ability_utils::is_per_opponent_target_fanout(ability);
+    let graveyard_destination = cast_from_zone_graveyard_destination(ability);
+    if driver.is_during_resolution()
+        && without_paying
+        && alt_ability_cost.is_none()
+        && is_per_opponent_fanout
+        && !target_ids.is_empty()
+    {
+        let mut window = ability.clone();
+        window.effect = Effect::FreeCastFromZones {
+            count: target_ids.len().try_into().unwrap_or(u8::MAX),
+            max_total_mv: None,
+            filter: target_filter.clone(),
+            zones: vec![Zone::Graveyard],
+            // The CastFromZone rider is stored as a sequential ParentTarget
+            // sub-ability; FreeCastWindow carries its exact destination as
+            // per-cast metadata instead of installing a source-global effect.
+            graveyard_replacement: graveyard_destination,
+        };
+        // The rider has been translated into the window's per-cast metadata;
+        // retaining it would run a second destination move after the window.
+        window.sub_ability = None;
+        window.targets = target_ids.drain(..).map(TargetRef::Object).collect();
+        return super::free_cast_from_zones::resolve(state, &window, events);
+    }
+
     if driver_free_cast || immediate_graveyard_free_cast {
         // CR 608.2g: both gates require `alt_ability_cost.is_none()`, so the
         // pre-targeted free-cast path never carries a borrowed keyword cost —

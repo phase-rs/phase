@@ -15,9 +15,9 @@ import { useUiStore } from "../../stores/uiStore";
  *
  * The cards are shown in a STABLE RANDOMIZED order rather than their true
  * library order. The engine deliberately leaves the on-wire `library` Vec order
- * untouched (sandbox debug exposes card *names* but must not leak *draw order*,
- * per `visibility.rs`), so this view shuffles the display once per open. Moving
- * a card out simply removes it from its slot — the rest keep their positions.
+ * untouched (debug exposes card *names* but must not leak *draw order*, per
+ * `visibility.rs`), so this view shuffles the display once per open. Moving a
+ * card out simply removes it from its slot — the rest keep their positions.
  */
 export function DebugLibraryViewer() {
   const viewer = useUiStore((s) => s.debugLibraryViewer);

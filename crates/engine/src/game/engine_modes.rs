@@ -38,6 +38,7 @@ pub(super) fn handle_ability_mode_choice(
     };
 
     validate_modal_indices(&modal, &indices, &unavailable_modes)?;
+
     record_modal_mode_choices(state, source_id, &modal, &indices);
 
     let mut resolved =
@@ -74,28 +75,7 @@ pub(super) fn handle_ability_mode_choice(
         )
     }?;
 
-    if !is_activated {
-        settle_completed_repeated_optional_payment_frame(state)?;
-    }
-
     Ok(waiting_for)
-}
-
-/// CR 603.12a: A repeated-payment frame retains K only until its reflexive
-/// modal has consumed the dynamic cap. The frame is then an AfterChild owner
-/// with no driver, so selection completion is its exact action boundary.
-fn settle_completed_repeated_optional_payment_frame(
-    state: &mut GameState,
-) -> Result<(), EngineError> {
-    if state
-        .active_repeated_optional_payment_frame()
-        .is_some_and(|frame| frame.pending.is_none())
-    {
-        state
-            .take_active_repeated_optional_payment_frame()
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-    }
-    Ok(())
 }
 
 struct ActivatedModeChoice {
@@ -311,6 +291,7 @@ pub(super) fn resolve_random_modal_trigger(
         // clear the cursor here.
         super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
+        state.pending_trigger_firing = None;
         return Ok(None);
     };
 
@@ -333,7 +314,6 @@ pub(super) fn resolve_random_modal_trigger(
         },
         events,
     )?;
-    settle_completed_repeated_optional_payment_frame(state)?;
     Ok(Some(waiting_for))
 }
 

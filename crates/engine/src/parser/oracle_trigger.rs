@@ -9,7 +9,7 @@ use nom::Parser;
 
 use super::oracle_effect::conditions::source_saddled_filter;
 use super::oracle_effect::{
-    attach_die_result_branches_before_finalization, condition_text_is_rehomeable,
+    attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
     lower_effect_chain_ir, parse_effect_chain_ir, try_parse_reanimator_aura_etb_effect_ir,
     try_parse_reanimator_aura_grant_etb_effect_ir,
 };
@@ -944,6 +944,12 @@ fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
         value((), tag("another player")),
         value((), tag("an opponent")),
         value((), tag("a player")),
+        // CR 508.1a + CR 725.1: "attacks the monarch ... that player controls" —
+        // the monarch is the attacked (defending) player chosen at attack
+        // declaration, so the trailing "that player" anaphor binds to
+        // `ControllerRef::DefendingPlayer` (The Spear of Bashenga: "destroy
+        // target tapped nonland permanent that player controls").
+        value((), tag("the monarch")),
     ))
     .parse(input)
 }
@@ -981,6 +987,29 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
         };
     }
     false
+}
+
+fn parse_if_defending_player(input: &str) -> OracleResult<'_, ()> {
+    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(input)?;
+    let (rest, _) = opt(tag("the ")).parse(rest)?;
+    value((), tag("defending player")).parse(rest)
+}
+
+/// CR 506.2 + CR 508.5: An attack-trigger's effect body may name "defending
+/// player" as the subject of a per-clause conditional AFTER an intervening
+/// imperative ("Whenever ~ attacks, choose a card name. If defending player
+/// has no cards ..., they may reveal their hand." — Smart Ass), rather than in
+/// the trigger's own head condition. `condition_introduces_defending_player`
+/// only sees the head (`cond_lower` is everything before the FIRST comma —
+/// CR 603.4's `split_trigger` boundary), so it never observes a defending-
+/// player conditional buried later in the effect text. Detecting that
+/// separately lets a later "they"/"that player" anaphor in the SAME effect
+/// body resolve to `ControllerRef::DefendingPlayer`
+/// (`resolve_they_pronoun`'s dedicated arm) instead of falling through to the
+/// generic `ParentTarget` default, which has no defending-player referent to
+/// inherit.
+fn effect_body_introduces_defending_player(effect_lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(effect_lower, parse_if_defending_player).is_some()
 }
 
 /// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
@@ -1320,6 +1349,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
+        actor: ctx.actor.clone(),
         object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
             .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
         in_trigger: true,
@@ -1332,6 +1362,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // split path derives the identical scope from the same condition.
     if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
         effect_ctx.relative_player_scope = Some(scope);
+    } else if effect_body_introduces_defending_player(&effect_lower) {
+        // CR 506.2 + CR 508.5: the head condition names no relative player
+        // (`cond_lower` is just "whenever ~ attacks"), but the effect body's
+        // own per-clause conditional names "defending player" later on
+        // (Smart Ass). Carry that scope through so a "they"/"that player"
+        // anaphor in the same body resolves to the combat-relative defending
+        // player instead of the generic `ParentTarget` fallback.
+        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
     }
     // CR 701.22a + CR 603.2: The completed-scry predicate establishes the
     // provenance for its "that many" effect body. Keep this as a pure match on
@@ -1341,6 +1379,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     if parse_completed_scry_bottom_condition(&cond_lower).is_some() {
         effect_ctx.quantity_ref = Some(QuantityRef::TriggeringScryBottomCount);
     }
+    // Keep the condition-established context intact for nested parser payloads.
+    // The body parser mutates its working context while it walks clauses, whereas
+    // each nested modal mode must begin from the same trigger-level facts.
+    let body_context = effect_ctx.clone();
     // Snapshot the condition-established scope before body parsing (which may
     // temporarily rebind it via `with_player_scope`) so lowering sees the scope
     // the condition introduced, not a transient nested-clause value.
@@ -1361,7 +1403,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             let effect_chain =
                 parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
             Some(TriggerBody::ReflexivePayment(Box::new(
-                ReflexivePaymentIr { cost, effect_chain },
+                ReflexivePaymentIr {
+                    cost,
+                    effect_chain,
+                    payment_chain: None,
+                    modal: None,
+                },
             )))
         } else if is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse) {
             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
@@ -1484,6 +1531,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         },
         source_text: text.to_string(),
         die_results: Vec::new(),
+        body_context,
     }
 }
 
@@ -1546,7 +1594,7 @@ fn lower_trigger_effect_chain(
     die_results: &[DieResultBranchIr],
 ) -> AbilityDefinition {
     let mut ability = lower_effect_chain_ir(chain_ir);
-    attach_die_result_branches_before_finalization(&mut ability, die_results);
+    attach_terminal_die_result_branches_before_finalization(&mut ability, die_results);
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
         && matches!(
@@ -1616,21 +1664,41 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
-            let mut pay_ability = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::PayCost {
-                    cost: reflexive.cost.clone(),
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-            );
+            if let Some(modal) = &reflexive.modal {
+                reflexive_ability = reflexive_ability.with_modal(
+                    modal.choice.clone(),
+                    modal
+                        .modes
+                        .iter()
+                        .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
+                        .collect(),
+                );
+            }
+
+            let mut pay_ability = match &reflexive.payment_chain {
+                Some(chain) => lower_trigger_effect_chain(chain, modifiers, &[]),
+                None => AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PayCost {
+                        cost: reflexive.cost.clone(),
+                        scale: None,
+                        payer: TargetFilter::Controller,
+                    },
+                ),
+            };
             pay_ability.optional = true;
             pay_ability.sub_ability = Some(Box::new(reflexive_ability));
             Some(Box::new(pay_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
-            lower_trigger_effect_chain(&modal.marker, modifiers, &[])
-                .with_modal(modal.choice.clone(), modal.mode_abilities.clone()),
+            lower_trigger_effect_chain(&modal.marker, modifiers, &[]).with_modal(
+                modal.choice.clone(),
+                modal
+                    .modes
+                    .iter()
+                    .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
+                    .collect(),
+            ),
         )),
         Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
             &vote.effect_chain(AbilityKind::Spell),
@@ -1884,12 +1952,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         && def.destination == Some(Zone::Graveyard)
     {
         def.trigger_zones = vec![Zone::Graveyard];
-    } else if let Some(zone) = def
-        .execute
-        .as_deref()
-        .and_then(|execute| self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str()))
-    {
-        def.trigger_zones = vec![zone];
+    } else if !matches!(def.valid_card, Some(TargetFilter::AttachedTo)) {
+        // CR 603.6c + CR 603.6e + CR 113.6 + CR 704.5m: A SelfRef return "from your
+        // graveyard" in the effect body implies the source is already in that
+        // zone when the trigger fires — EXCEPT for AttachedTo dies triggers
+        // (Necrotic Plague: "When enchanted creature dies, … Return this card
+        // from its owner's graveyard"). Those fire while the Aura is still on
+        // the battlefield; SBAs move it to the GY before the effect resolves, where
+        // CR 603.6e lets the Aura's trigger find that Aura card.
+        // Applying self-recursion here would park the trigger in the GY only,
+        // so the enchanted-creature death never matches.
+        if let Some(zone) = def.execute.as_deref().and_then(|execute| {
+            self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str())
+        }) {
+            def.trigger_zones = vec![zone];
+        }
     }
 
     // CR 608.2c: Off-battlefield source-return triggers (Senu, Keen-Eyed
@@ -4219,6 +4296,9 @@ pub(crate) fn static_condition_to_trigger_condition(
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
             player: PlayerFilter::Controller,
+        }),
+        StaticCondition::DuringOpponentsTurn => Some(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Opponent,
         }),
         StaticCondition::DayNightIs { .. } => None,
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => None,
@@ -10614,6 +10694,12 @@ fn try_parse_event(
                 // `valid_target = AttachedTo` (Curse of Predation, Curse of Chaos,
                 // Curse of Inertia).
                 value(AttackTargetFilter::Player, tag(" enchanted player")),
+                // CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type
+                // attack whose defending player must currently hold the monarch
+                // designation. The monarch-identity check is stateful and lives
+                // in `attack_target_matches`, not in this pure type parse (The
+                // Spear of Bashenga).
+                value(AttackTargetFilter::Monarch, tag(" the monarch")),
                 value(AttackTargetFilter::Battle, tag(" a battle")),
             ))
             .parse(input)

@@ -620,13 +620,13 @@ fn nonmatching_reflexive_coin_flip_trigger_is_discarded_not_left_pending() {
         // the general reflexive-discard rule keys on this lifetime.
         lifetime: engine::types::ability::DelayedTriggerLifetime::Reflexive,
     };
-    state.delayed_triggers.push(DelayedTrigger {
+    state.delayed_triggers.push(DelayedTrigger::new(
         condition,
-        ability: Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
-        controller: PlayerId(0),
-        source_id: source,
-        one_shot: true,
-    });
+        Box::new(build_resolved_from_def(&won_inner, source, PlayerId(0))),
+        PlayerId(0),
+        source,
+        true,
+    ));
 
     let life_before = state.players[0].life;
 

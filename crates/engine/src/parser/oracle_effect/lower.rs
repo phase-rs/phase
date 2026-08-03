@@ -9,6 +9,9 @@ use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once
 use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
+use super::super::oracle_nom::enters_under::{
+    parse_leading_control_clause, ControlClausePossessor,
+};
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -18,8 +21,8 @@ use super::super::oracle_quantity::{
     parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_anaphoric_target_ref, parse_target, parse_target_with_ctx, parse_that_clause_suffix,
-    parse_type_phrase, parse_type_phrase_with_ctx,
+    parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase,
+    parse_type_phrase_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
@@ -1028,11 +1031,11 @@ pub(super) fn attach_any_color_mana_rider_to_previous_play_from_exile(
 /// count 0, and duplicating it into a bogus `else_ability`). Building the rider
 /// directly here bypasses that generic mis-route.
 ///
-/// The exile destination is intentionally NOT handled here: it already lowers to
-/// the clean `ChangeZone{Exile, ParentTarget}` sub-ability via the general
-/// anaphor rebind (Torrential Gearhulk), and its effect shape never trips the
-/// bottom-cleanup detector. Returns `false` (no fold) for exile so that path is
-/// left undisturbed.
+/// The generic singular-spell route intentionally leaves exile to the existing
+/// `ChangeZone{Exile, ParentTarget}` anaphor path. The exact plural "a spell
+/// cast this way" form is handled separately by
+/// `attach_graveyard_redirect_rider_to_prior_free_cast_from_zones`, which is
+/// the only route that may attach stack/ParentTarget metadata for that wording.
 pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     defs: &mut [AbilityDefinition],
     dest: SpellStackToGraveyardReplacement,
@@ -1058,7 +1061,6 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             face_down_profile: None,
             enters_modified_if: None,
         },
-        // Exile keeps its existing clean `ChangeZone{Exile, ParentTarget}` path.
         SpellStackToGraveyardReplacement::Exile => return false,
     };
     let Some(prev) = defs.last_mut() else {
@@ -1070,6 +1072,29 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
     let mut rider = AbilityDefinition::new(AbilityKind::Spell, rider_effect);
     rider.sub_link = SubAbilityLink::SequentialSibling;
     prev.sub_ability = Some(Box::new(rider));
+    true
+}
+
+/// CR 614.1a + CR 608.2g: absorb an exact "a spell cast this way" destination
+/// rider into the immediately preceding free-cast window. Unlike the legacy
+/// "that spell" form, this rider applies independently to every spell the
+/// window casts, so it belongs on `FreeCastFromZones` metadata rather than as a
+/// sequential `ParentTarget` sub-ability.
+pub(super) fn attach_graveyard_redirect_rider_to_prior_free_cast_from_zones(
+    defs: &mut [AbilityDefinition],
+    dest: SpellStackToGraveyardReplacement,
+) -> bool {
+    let Some(prev) = defs.last_mut() else {
+        return false;
+    };
+    let Effect::FreeCastFromZones {
+        graveyard_replacement,
+        ..
+    } = &mut *prev.effect
+    else {
+        return false;
+    };
+    *graveyard_replacement = Some(dest);
     true
 }
 
@@ -2399,6 +2424,8 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
     if !matches!(current_target, TargetFilter::SelfRef) {
         return false;
     }
+    // CR 608.2c + CR 115.1: an instead clause later in the same instruction
+    // reuses the original chosen target rather than announcing a new target.
     // Existing attachment-host case — only when the antecedent is itself a `PutCounter`.
     // Preserved verbatim (clone the host filter) so attachment-host cards stay byte-identical.
     if let Effect::PutCounter {
@@ -2410,7 +2437,18 @@ pub(super) fn rewrite_counter_instead_target_from_antecedent(
             *current_target = antecedent_target.clone();
             return true;
         }
-        return false;
+        match antecedent_target {
+            // A printed target is selected once for the root instruction; the
+            // override must inherit that selection rather than open a new slot.
+            TargetFilter::Typed(_) => *current_target = TargetFilter::ParentTarget,
+            // Event and parent anaphors already identify the antecedent object
+            // at resolution. Reuse the same reference for a bare "it" override.
+            TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::TriggeringSource => *current_target = antecedent_target.clone(),
+            _ => return false,
+        }
+        return true;
     }
     // FIX A′ — CR 608.2c: an instead-override "Put a +1/+1 counter on it" whose antecedent
     // is a typed-targeted non-counter clause (Throw from the Saddle's "Target creature you
@@ -3958,8 +3996,40 @@ fn is_per_opponent_target_fanout_clause(clause: &ParsedEffectClause) -> bool {
     }
     clause.effect.target_filter().is_some_and(|filter| {
         target_filter_controller_ref(filter) == Some(ControllerRef::TargetPlayer)
-            && target_filter_is_single_object_target(filter)
+            && (target_filter_is_single_object_target(filter)
+                || target_filter_is_explicit_target_player_graveyard_card(filter))
     })
+}
+
+/// CR 115.1a + CR 108.3: The per-opponent fanout normally targets battlefield
+/// objects. This is the sole nonbattlefield exception: an explicit typed card
+/// target in a paired opponent's graveyard. An `Or` is allowed only when every
+/// branch independently carries that complete binding; it must not inherit the
+/// controller, ownership, or zone restriction from a sibling. This keeps "that
+/// player's graveyard" tied to the immediately preceding player target instead
+/// of broadly enabling all nonbattlefield fanout filters.
+pub(super) fn target_filter_is_explicit_target_player_graveyard_card(
+    filter: &TargetFilter,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.controller == Some(ControllerRef::TargetPlayer)
+                && !tf.type_filters.is_empty()
+                && tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                })
+                && tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                })
+        }
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(target_filter_is_explicit_target_player_graveyard_card)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn target_filter_is_single_object_target(filter: &TargetFilter) -> bool {
@@ -5949,7 +6019,151 @@ pub(super) fn extract_remove_counter_multi_target(text: &str) -> Option<MultiTar
     None
 }
 
-fn parse_each_of_up_to_damage_target<'a>(
+/// CR 115.4 + CR 115.1a: The noun class of a "to each of ⟨count⟩ ⟨noun⟩" head.
+///
+/// Not a `bool`: the two arms are different rules with different downstream
+/// handling. CR 115.4 gives a bare plural "two targets" the damage target class
+/// (creature, player, planeswalker, or battle) ⇒ `TargetFilter::Any`, while
+/// CR 115.1a's "two target ⟨type⟩" defers to `parse_target_with_ctx` for the
+/// printed filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EachOfTargetNoun {
+    /// Bare plural `targets` — CONSUMED by the combinator; the caller supplies
+    /// `TargetFilter::Any` itself.
+    AnyTargets,
+    /// `[other |another ]target ⟨type⟩` — NOT consumed; `parse_target_with_ctx`
+    /// needs the full phrase including the `target ` article.
+    Typed,
+}
+
+/// CR 601.2c: Bounded announced count ("one or two", "one, two, or three").
+/// Composes the trailing noun off `BOUNDED_TARGET_CARDINALITIES` exactly as
+/// that constant's doc comment prescribes, so a future cardinality is added in
+/// one place.
+fn parse_bounded_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(stem).parse(input) {
+            return Ok((rest, MultiTargetSpec::fixed(min, max)));
+        }
+    }
+    Err(oracle_err(input))
+}
+
+/// CR 601.2c: Optional announced count ("up to two", "up to X"). The count
+/// vocabulary is delegated to `parse_multi_target_count_expr`, the single
+/// authority for digits/English numerals/`x`/dynamic quantities.
+fn parse_optional_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    map(
+        preceded(tag("up to "), parse_multi_target_count_expr),
+        MultiTargetSpec::up_to,
+    )
+    .parse(input)
+}
+
+/// CR 601.2c: Exact announced count ("two", "X"). "Once the number of targets
+/// the spell has is determined, that number doesn't change."
+fn parse_exact_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    map(parse_multi_target_count_expr, MultiTargetSpec::exact).parse(input)
+}
+
+/// CR 115.4 + CR 115.1a: The noun following the announced count.
+///
+/// The bare-plural arm is fenced with `not(satisfy(char::is_alphanumeric))` so
+/// `targets` never matches inside a longer word — the same in-file form as the
+/// `" tapped"` fence below. `not` never consumes, so no `peek` wrapper is
+/// needed, and `satisfy` errors on empty input, so end-of-input is covered
+/// without an `eof` arm.
+///
+/// The typed arm is `peek`-only: `parse_target_with_ctx` must still see the
+/// `target `/`other target `/`another target ` article. `other`/`another` is a
+/// lexical modifier here, and `FilterProp::Another` is applied downstream by
+/// `parse_target_with_ctx` — the same grandfathered handling as
+/// `strip_optional_target_prefix`. Note the asymmetry: the bare-plural arm does
+/// NOT accept "other targets" (Drakuseth's "up to two other targets"), matching
+/// the pre-existing behaviour exactly rather than adding new leniency.
+fn parse_each_of_target_noun(input: &str) -> OracleResult<'_, EachOfTargetNoun> {
+    alt((
+        value(
+            EachOfTargetNoun::AnyTargets,
+            terminated(tag("targets"), not(satisfy(char::is_alphanumeric))),
+        ),
+        value(
+            EachOfTargetNoun::Typed,
+            peek(alt((
+                tag("target "),
+                tag("other target "),
+                tag("another target "),
+            ))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2c + CR 115.4: The parameterized "⟨cardinality⟩ ⟨noun⟩" head that
+/// follows "to each of ". Spans the cardinality × noun matrix (bounded /
+/// optional / exact × bare-plural / typed) that two single-leaf strippers
+/// previously covered one cell each.
+///
+/// One printed cell is deliberately excluded: `other`/`another` on the
+/// BARE-PLURAL arm ("each of up to two other targets", Drakuseth, Maw of
+/// Flames). On the typed arm the modifier survives into `parse_target_with_ctx`
+/// as `FilterProp::Another`, but the bare-plural arm consumes the noun and
+/// synthesizes `TargetFilter::Any`, so there is nowhere for the CR 115.3
+/// cross-slot distinctness to land — accepting it would silently drop the
+/// constraint. Drakuseth's clause is dropped upstream today anyway, so this
+/// changes nothing for it; the cell is left to whoever threads that constraint.
+///
+/// Each `alt` arm is a COMPLETE `(cardinality, multispace1, noun)` tuple so a
+/// noun failure backtracks the whole arm: `"one or two targets"` would
+/// otherwise have its leading `"one"` eaten by the exact arm. Bounded runs
+/// first as defence in depth; the tuple shape is what makes the ordering
+/// non-load-bearing.
+///
+/// Returns the ORIGINAL-CASE remainder so `parse_target_with_ctx` still sees
+/// printed casing.
+fn parse_each_of_target_distribution(
+    after_each_of: &str,
+) -> Option<(MultiTargetSpec, EachOfTargetNoun, &str)> {
+    let lower = after_each_of.to_ascii_lowercase();
+    let ((spec, noun), remainder) = nom_on_lower(after_each_of, lower.as_str(), |input| {
+        map(
+            alt((
+                (
+                    parse_bounded_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+                (
+                    parse_optional_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+                (
+                    parse_exact_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+            )),
+            |(spec, _, noun)| (spec, noun),
+        )
+        .parse(input)
+    })?;
+    // Return the remainder UNTRIMMED. A leading space is the compound-boundary
+    // marker every consumer of `try_parse_damage_with_remainder` keys on —
+    // `try_split_damage_compound` matches `tag(" and ")` and explicitly does not
+    // trim. Only the typed arm needs a phrase starting at `target `, so it trims
+    // at its own call site.
+    Some((spec, noun, remainder))
+}
+
+/// CR 601.2c + CR 115.4: "⟨source⟩ deals N damage to each of ⟨count⟩ ⟨noun⟩".
+///
+/// CR 601.2c fixes the announced target COUNT; CR 115.4 fixes the target CLASS
+/// for the bare-plural noun (creature, player, planeswalker, or battle). The
+/// count is recorded on `ctx.pending_damage_multi_target` so the filter and the
+/// count come from ONE parse rather than from a second text scan that can
+/// disagree with it.
+pub(super) fn parse_each_of_up_to_damage_target<'a>(
     target_phrase: &'a str,
     ctx: &mut ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {
@@ -5959,15 +6173,17 @@ fn parse_each_of_up_to_damage_target<'a>(
         .ok()?;
     let consumed = lower.len() - after_each_of_lower.len();
     let after_each_of = &target_phrase[consumed..];
-    if let Some((remainder, _)) = strip_bounded_targets_placeholder(after_each_of) {
-        if remainder.is_empty() {
-            return Some((TargetFilter::Any, ""));
+    let (spec, noun, remainder) = parse_each_of_target_distribution(after_each_of)?;
+    ctx.pending_damage_multi_target = Some(spec);
+    Some(match noun {
+        EachOfTargetNoun::AnyTargets => (TargetFilter::Any, remainder),
+        EachOfTargetNoun::Typed => {
+            // Only this arm trims: `parse_target_with_ctx` must see a phrase
+            // starting at `target `/`other target `/`another target `.
+            let (target, rest) = parse_target_with_ctx(remainder.trim_start(), ctx);
+            refine_damage_target_remainder(target, rest)
         }
-    }
-    let (target_text, multi_target) = strip_optional_target_prefix(after_each_of);
-    multi_target.as_ref()?;
-    let (target, remainder) = parse_target_with_ctx(target_text, ctx);
-    Some(refine_damage_target_remainder(target, remainder))
+    })
 }
 
 /// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
@@ -6188,11 +6404,14 @@ pub(super) fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTa
 pub(super) struct ReturnDestination {
     pub(super) zone: Zone,
     pub(super) transformed: bool,
-    // CR 110.2a: Controller override on ETB. `Some(ref)` routes the object to
-    // the player resolved from `ref`; `None` leaves the object under its
-    // owner's control. Downstream IR/Effect construction passes it through
-    // unchanged into `Effect::ChangeZone.enters_under`.
-    pub(super) enters_under: Option<ControllerRef>,
+    // CR 110.2a (docs/MagicCompRules.txt:618): the battlefield-entry control
+    // clause AS WRITTEN — raw syntax, deliberately unbound. A destination
+    // stripper sees only the destination phrase, never the moved object's
+    // filter or the enclosing `ParseContext`, so it cannot resolve a
+    // third-person anaphor ("under their control") without guessing. Binding
+    // happens at the caller via `bind_control_clause`, where both are in scope.
+    // `None` means the effect stated nothing otherwise (CR 110.2's default).
+    pub(super) control: Option<ControlClausePossessor>,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     pub(super) enter_tapped: bool,
     // CR 508.4: "tapped and attacking" — enters attacking.
@@ -6284,10 +6503,22 @@ fn strip_trailing_battlefield_riders(after_destination: &str) -> (&str, Battlefi
 }
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
+/// Thin wrapper over [`strip_return_destination_ext_with_remainder`] for call sites
+/// that discard the attach-host remainder (unit tests + legacy helpers).
+#[allow(dead_code)] // exercised from `oracle_effect/tests.rs` (cfg(test) sibling)
 pub(super) fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>) {
     let (target, dest, _) = strip_return_destination_ext_with_remainder(text);
     (target, dest)
 }
+
+type ReturnDestinationPattern = (
+    &'static str,
+    Zone,
+    bool,
+    Option<ControlClausePossessor>,
+    bool,
+    bool,
+);
 
 pub(super) fn strip_return_destination_ext_with_remainder(
     text: &str,
@@ -6295,18 +6526,24 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     let lower = text.to_lowercase();
     // Ordered longest-first to avoid partial matches.
     // "transformed" variants must come before their non-transformed counterparts.
-    // Tuples: (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking)
-    // The `enters_under_you` bool is the parser-table carrier for the
-    // controller-override flag; it maps to `Some(ControllerRef::You)` / `None`
-    // at the `ReturnDestination` construction site below (CR 110.2a).
+    // Tuples: (phrase, zone, transformed, control, enter_tapped, enters_attacking)
+    // CR 110.2a (docs/MagicCompRules.txt:618): the `control` column is the
+    // parser-table carrier for whatever control clause the row's phrase already
+    // spells out — `Some(You)` for "under your control", `Some(Owner)` for every
+    // "under <its|their|his|her> owner('s|s') control" spelling (CR 110.2 @ :616,
+    // which restates the default rather than overriding it), `None` otherwise.
+    // Non-battlefield rows are always `None`: CR 110.1 (:614) gives a controller
+    // only to permanents. Rows whose phrase carries no clause fall through to the
+    // `parse_leading_control_clause` pass below, which picks up the third-person
+    // forms the table never enumerated.
     // Ordered longest-first; compound patterns must precede their shorter substrings.
-    let patterns: &[(&str, Zone, bool, bool, bool, bool)] = &[
+    let patterns: &[ReturnDestinationPattern] = &[
         // Tapped + transformed + owner's control (compound, longest)
         (
             " to the battlefield tapped and transformed under its owner's control",
             Zone::Battlefield,
             true,
-            false,
+            Some(ControlClausePossessor::Owner),
             true,
             false,
         ),
@@ -6315,7 +6552,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed under your control",
             Zone::Battlefield,
             true,
-            true,
+            Some(ControlClausePossessor::You),
             false,
             false,
         ),
@@ -6324,7 +6561,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed under their owners' control",
             Zone::Battlefield,
             true,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6332,7 +6569,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed under its owner's control",
             Zone::Battlefield,
             true,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6340,7 +6577,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed under his owner's control",
             Zone::Battlefield,
             true,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6348,7 +6585,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed under her owner's control",
             Zone::Battlefield,
             true,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6356,7 +6593,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield transformed",
             Zone::Battlefield,
             true,
-            false,
+            None,
             false,
             false,
         ),
@@ -6365,7 +6602,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield tapped and attacking",
             Zone::Battlefield,
             false,
-            false,
+            None,
             true,
             true,
         ),
@@ -6373,7 +6610,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " onto the battlefield tapped and attacking",
             Zone::Battlefield,
             false,
-            false,
+            None,
             true,
             true,
         ),
@@ -6382,7 +6619,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " onto the battlefield attacking",
             Zone::Battlefield,
             false,
-            false,
+            None,
             false,
             true,
         ),
@@ -6390,7 +6627,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield attacking",
             Zone::Battlefield,
             false,
-            false,
+            None,
             false,
             true,
         ),
@@ -6399,7 +6636,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield tapped under their owners' control",
             Zone::Battlefield,
             false,
-            false,
+            Some(ControlClausePossessor::Owner),
             true,
             false,
         ),
@@ -6407,7 +6644,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield tapped under its owner's control",
             Zone::Battlefield,
             false,
-            false,
+            Some(ControlClausePossessor::Owner),
             true,
             false,
         ),
@@ -6415,7 +6652,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield tapped under your control",
             Zone::Battlefield,
             false,
-            true,
+            Some(ControlClausePossessor::You),
             true,
             false,
         ),
@@ -6424,7 +6661,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield under their owners' control",
             Zone::Battlefield,
             false,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6432,7 +6669,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield under its owner's control",
             Zone::Battlefield,
             false,
-            false,
+            Some(ControlClausePossessor::Owner),
             false,
             false,
         ),
@@ -6441,7 +6678,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield under your control",
             Zone::Battlefield,
             false,
-            true,
+            Some(ControlClausePossessor::You),
             false,
             false,
         ),
@@ -6450,7 +6687,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield tapped",
             Zone::Battlefield,
             false,
-            false,
+            None,
             true,
             false,
         ),
@@ -6458,7 +6695,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the battlefield",
             Zone::Battlefield,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6467,7 +6704,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " onto the battlefield under your control",
             Zone::Battlefield,
             false,
-            true,
+            Some(ControlClausePossessor::You),
             false,
             false,
         ),
@@ -6475,7 +6712,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " onto the battlefield tapped",
             Zone::Battlefield,
             false,
-            false,
+            None,
             true,
             false,
         ),
@@ -6483,7 +6720,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " onto the battlefield",
             Zone::Battlefield,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6492,7 +6729,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to its owner's hand",
             Zone::Hand,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6500,7 +6737,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to their owner's hand",
             Zone::Hand,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6508,18 +6745,18 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to their owners' hands",
             Zone::Hand,
             false,
-            false,
+            None,
             false,
             false,
         ),
-        (" to their hand", Zone::Hand, false, false, false, false),
-        (" to your hand", Zone::Hand, false, false, false, false),
+        (" to their hand", Zone::Hand, false, None, false, false),
+        (" to your hand", Zone::Hand, false, None, false, false),
         // Graveyard destinations
         (
             " to its owner's graveyard",
             Zone::Graveyard,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6527,7 +6764,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to their owner's graveyard",
             Zone::Graveyard,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6535,7 +6772,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to their owners' graveyards",
             Zone::Graveyard,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6543,7 +6780,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to your graveyard",
             Zone::Graveyard,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6552,7 +6789,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             " to the command zone",
             Zone::Command,
             false,
-            false,
+            None,
             false,
             false,
         ),
@@ -6568,7 +6805,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     // " face down" present and recording the rider. Rather than cross-product
     // every control/tapped row with a face-down twin, we try each row a second
     // time with " face down" spliced in right after "the battlefield".
-    for (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking) in patterns {
+    for (phrase, zone, transformed, row_control, enter_tapped, enters_attacking) in patterns {
         // Prefer the face-down variant (" to the battlefield face down ...") when
         // the text carries it; otherwise fall back to the plain destination row.
         let face_down_phrase = phrase
@@ -6599,6 +6836,14 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             // exactly as the pre-existing `pos + phrase_len` indexing already
             // assumes.
             let mut entry_offset = pos + phrase_len;
+            // CR 110.2a (docs/MagicCompRules.txt:618): one control-clause
+            // authority, two possible positions — inside the matched table
+            // phrase, or trailing it. Declared OUTSIDE the battlefield block
+            // because it is read at the `ReturnDestination` construction below,
+            // which EVERY row reaches (including the hand/graveyard/command
+            // rows, whose `control` is always `None` per CR 110.1 @ :614).
+            // `*row_control` is a `Copy` read out of the `&'static` table row.
+            let mut control: Option<ControlClausePossessor> = *row_control;
             if *zone == Zone::Battlefield {
                 let (rider_rest, riders) =
                     strip_trailing_battlefield_riders(&lower[entry_offset..]);
@@ -6607,6 +6852,30 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                 enter_tapped |= riders.enter_tapped;
                 enters_attacking |= riders.enters_attacking;
                 entry_offset = lower.len() - rider_rest.len();
+                // CR 110.2a: the table enumerates only the first- and
+                // owner-person spellings, so a third-person clause ("under
+                // their control", "under that player's control") survives on
+                // the tail. Consume it HERE, BEFORE `after_destination`, the
+                // counters-suffix scan and `original_after_destination` all
+                // read `entry_offset` — otherwise the clause is both dropped
+                // from the destination AND re-emitted as a dangling remainder.
+                if control.is_none() {
+                    if let Ok((rest, p)) = parse_leading_control_clause(&lower[entry_offset..]) {
+                        control = Some(p);
+                        entry_offset = lower.len() - rest.len();
+                        // CR 614.1c (:3060) + CR 508.4 (:2309) + CR 708.3
+                        // (:5707): entry riders are order-independent and may
+                        // ALSO trail the control clause ("under your control
+                        // face down and tapped").
+                        let (rest2, riders2) =
+                            strip_trailing_battlefield_riders(&lower[entry_offset..]);
+                        face_down |= riders2.face_down;
+                        transformed |= riders2.transformed;
+                        enter_tapped |= riders2.enter_tapped;
+                        enters_attacking |= riders2.enters_attacking;
+                        entry_offset = lower.len() - rest2.len();
+                    }
+                }
             }
             let after_destination = &lower[entry_offset..];
             let (enter_with_counters, counters_offset) =
@@ -6638,7 +6907,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                 Some(ReturnDestination {
                     zone: *zone,
                     transformed,
-                    enters_under: enters_under_you.then_some(ControllerRef::You),
+                    control,
                     enter_tapped,
                     enters_attacking,
                     enter_with_counters,
@@ -6698,27 +6967,21 @@ fn parse_leading_battlefield_return_destination(
         value((false, false, false), tag("")),
     ))
     .parse(input)?;
-    // CR 110.2a: parse the controller-override clause (or its absence) directly
-    // into `Option<ControllerRef>`. Only `"under your control"` produces a
-    // controller override; "owner's control" variants leave the object under
-    // its owner's control (no override).
-    let (input, enters_under) = alt((
-        value(
-            Some(ControllerRef::You),
-            tag::<_, _, OracleError<'_>>(" under your control"),
-        ),
-        value(None, tag(" under their owners' control")),
-        value(None, tag(" under its owner's control")),
-        value(None, tag("")),
-    ))
-    .parse(input)?;
+    // CR 110.2a (docs/MagicCompRules.txt:618): parse the control clause (or its
+    // absence) as raw syntax. The four hand-picked literal arms this replaces
+    // recognized only "under your control", "under their owners' control" and
+    // "under its owner's control"; the singular "under their/his/her owner's
+    // control" spellings fell through to the empty arm and their residue leaked
+    // into the TARGET text. The shared combinator recognizes every printed
+    // owner spelling plus the third-person forms.
+    let (input, control) = opt(parse_leading_control_clause).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     Ok((
         input,
         ReturnDestination {
             zone: Zone::Battlefield,
             transformed: modifier.0,
-            enters_under,
+            control,
             enter_tapped: modifier.1,
             enters_attacking: modifier.2,
             enter_with_counters: vec![],
@@ -6741,7 +7004,7 @@ fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, Return
         ReturnDestination {
             zone: Zone::Hand,
             transformed: false,
-            enters_under: None,
+            control: None,
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
@@ -6763,7 +7026,7 @@ fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, R
         ReturnDestination {
             zone: Zone::Graveyard,
             transformed: false,
-            enters_under: None,
+            control: None,
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
@@ -6779,7 +7042,7 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
         ReturnDestination {
             zone: Zone::Command,
             transformed: false,
-            enters_under: None,
+            control: None,
             enter_tapped: false,
             enters_attacking: false,
             enter_with_counters: vec![],
@@ -7119,14 +7382,17 @@ pub(super) fn try_parse_bidirectional_prevent(
     let prevention_duration =
         nom_primitives::scan_preceded(rest, parse_duration).map(|(_, d, _)| d);
 
-    // CR 608.2c: isolate the anaphor phrase following the bidirectional marker
-    // and bind it to the parent's chosen target. `parse_anaphoric_target_ref`
-    // returns `None` when `parent_target_available` is false — the load-bearing
-    // gate (a standalone "dealt to and dealt by that creature" with no prior
-    // target-selecting clause must NOT split into ParentTarget shields).
+    // CR 608.2c + CR 615: isolate the anaphor phrase following the
+    // bidirectional marker and resolve it via the same recipient resolution
+    // `parse_prevent_effect` uses (chosen target anaphor / any other
+    // recognized filter — Energy Arc's "those creatures" resolves via
+    // `parse_target`'s `TrackedSet` dispatch). `None` when no tier
+    // recognizes it — a standalone "dealt to and dealt by that creature"
+    // with no prior target-selecting clause must NOT split into ParentTarget
+    // shields.
     let anaphor_tp = TextPair::new(text, &lower).strip_after("dealt to and dealt by ")?;
-    let (anaphor_filter, _) =
-        parse_anaphoric_target_ref(anaphor_tp.original, parent_target_available)?;
+    let anaphor_filter =
+        super::imperative::resolve_prevent_recipient(anaphor_tp, parent_target_available)?;
 
     // CR 615: the recipient ("to") shield — scoped to the chosen creature as
     // the damage RECIPIENT (target: ParentTarget, no source restriction).
@@ -10087,11 +10353,44 @@ pub(super) fn apply_where_x_ability_expression(
     if let Some(sub) = def.sub_ability.as_mut() {
         apply_where_x_ability_expression(sub, where_x_expression);
     }
+    // CR 120.1 + CR 608.2c: `wrap_target_subject_damage` has already established
+    // that this target-only picker supplies the damage source. A trailing
+    // "where X is its power" binds after that wrapper is built, and the generic
+    // where-X grammar correctly starts from its ordinary `Source` scope. Restore
+    // the target-subject meaning after the binding so both direct damage legs
+    // read the chosen creature's characteristics (Self-Destruct class).
+    if where_x_expression.is_some() && matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            rebind_target_subject_damage_where_x(sub);
+        }
+    }
     if let Some(else_ability) = def.else_ability.as_mut() {
         apply_where_x_ability_expression(else_ability, where_x_expression);
     }
     for mode_ability in &mut def.mode_abilities {
         apply_where_x_ability_expression(mode_ability, where_x_expression);
+    }
+}
+
+/// CR 120.1 + CR 608.2c: Walk the target-subject damage clause emitted beneath
+/// `Effect::TargetOnly` and rebind only damage instructions whose source is the
+/// chosen target. Other chained instructions are left alone.
+fn rebind_target_subject_damage_where_x(def: &mut AbilityDefinition) {
+    match def.effect.as_mut() {
+        Effect::DealDamage {
+            amount,
+            damage_source: Some(DamageSource::Target),
+            ..
+        }
+        | Effect::DamageAll {
+            amount,
+            damage_source: Some(DamageSource::Target),
+            ..
+        } => super::rebind_target_subject_object_scope(amount),
+        _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rebind_target_subject_damage_where_x(sub);
     }
 }
 
@@ -12334,7 +12633,7 @@ mod strip_optional_effect_prefix_tests {
 mod dq_d_player_set_lift_tests {
     use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
-    use crate::types::ability::{PlayerFilter, QuantityExpr, QuantityRef};
+    use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
 
     // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
     // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
@@ -12476,5 +12775,250 @@ mod dq_d_player_set_lift_tests {
                  wrapper's `rest.is_empty()` gate fire): rest={rest:?}"
             ),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CR 601.2c + CR 115.4 — the "to each of ⟨cardinality⟩ ⟨noun⟩" matrix.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn x_expr() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    fn fixed(n: i32) -> QuantityExpr {
+        QuantityExpr::Fixed { value: n }
+    }
+
+    /// Claim 1 — all six cells of the cardinality × noun matrix parse, plus the
+    /// X-count and larger-literal leaves.
+    ///
+    /// CR 601.2c (announced count) × CR 115.4 (bare-plural damage target class)
+    /// / CR 115.1a (typed target).
+    #[test]
+    fn parse_each_of_target_distribution_covers_the_full_cardinality_noun_matrix() {
+        use super::{parse_each_of_target_distribution, EachOfTargetNoun};
+
+        // Cell 1 — bounded × bare plural. REGRESSION: Prismari Charm, Storm of Steel.
+        // ORDERING GUARD (load-bearing): this must be `fixed(1, 2)` with an EMPTY
+        // remainder, NOT `exact(1)` with remainder "or two targets". If the exact
+        // arm ever wins here, "one or two targets" silently becomes a one-target
+        // spell.
+        assert_eq!(
+            parse_each_of_target_distribution("one or two targets"),
+            Some((
+                MultiTargetSpec::fixed(1, 2),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "bounded × bare-plural must win over the exact arm's leading \"one\""
+        );
+
+        // Cell 2 — bounded × typed (new leaf). The noun is NOT consumed.
+        assert_eq!(
+            parse_each_of_target_distribution("one or two target creatures"),
+            Some((
+                MultiTargetSpec::fixed(1, 2),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cells 1b / 2b — the SECOND `BOUNDED_TARGET_CARDINALITIES` member.
+        // `parse_bounded_target_cardinality` composes its noun off that shared
+        // const, so both entries must be exercised or the second can regress (or
+        // be shadowed by the exact arm) without a matrix failure. Same ordering
+        // guard as cell 1: `fixed(1, 3)`, never `exact(1)` with a stranded
+        // remainder.
+        assert_eq!(
+            parse_each_of_target_distribution("one, two, or three targets"),
+            Some((
+                MultiTargetSpec::fixed(1, 3),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "the three-target bounded stem must win over the exact arm's leading \"one\""
+        );
+        assert_eq!(
+            parse_each_of_target_distribution("one, two, or three target creatures"),
+            Some((
+                MultiTargetSpec::fixed(1, 3),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 3 — optional × bare plural (new leaf). NEW: Shower of Coals,
+        // Jaya's Immolating Inferno, Myojin of Roaring Blades.
+        assert_eq!(
+            parse_each_of_target_distribution("up to three targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(3)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 4 — optional × typed. REGRESSION: Dual Shot, Wrap in Flames.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two target creatures"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 5 — exact × bare plural (new leaf). NEW: Furious Reprisal,
+        // Pinnacle of Rage.
+        assert_eq!(
+            parse_each_of_target_distribution("two targets"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 5b — exact × bare plural, X count. NEW: Firestorm, Meteor Blast.
+        assert_eq!(
+            parse_each_of_target_distribution("x targets"),
+            Some((
+                MultiTargetSpec::exact(x_expr()),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6 — exact × typed (new leaf). NEW: Jagged Lightning, Swelter,
+        // Twinstrike.
+        assert_eq!(
+            parse_each_of_target_distribution("two target creatures"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 6b — optional × bare plural, X count. Batroc the Leaper.
+        assert_eq!(
+            parse_each_of_target_distribution("up to x targets"),
+            Some((
+                MultiTargetSpec::up_to(x_expr()),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6c — Chandra, the Firebrand's [−6].
+        assert_eq!(
+            parse_each_of_target_distribution("up to six targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(6)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6d — Fall of the Titans, Chandra Hope's Beacon.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Grandfathered lexical `other` on the TYPED arm only (CR 115.3
+        // distinctness is applied downstream by `parse_target_with_ctx`, not by
+        // the cardinality head).
+        assert_eq!(
+            parse_each_of_target_distribution("up to two other target creatures"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "other target creatures"
+            ))
+        );
+
+        // FENCE GUARD — `targets` must not match inside a longer word. This pins
+        // `not(satisfy(char::is_alphanumeric))`; dropping the fence makes this
+        // return `Some(exact(2), AnyTargets, "omething")`.
+        assert_eq!(
+            parse_each_of_target_distribution("two targetsomething"),
+            None,
+            "the bare-plural arm must be fenced at a word boundary"
+        );
+
+        // Original casing is preserved in the remainder handed to
+        // `parse_target_with_ctx`.
+        assert_eq!(
+            parse_each_of_target_distribution("two target Goblins"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target Goblins"
+            ))
+        );
+    }
+
+    /// Claim 2 — hostile negatives, each paired with a positive reach-guard in
+    /// the SAME test so no `None` assertion is vacuous.
+    #[test]
+    fn parse_each_of_target_distribution_rejects_non_cardinality_heads() {
+        use super::{parse_each_of_target_distribution, EachOfTargetNoun};
+
+        // REACH-GUARD: the combinator is live in this test.
+        assert_eq!(
+            parse_each_of_target_distribution("two targets"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "reach-guard: the positive path must still parse, so the None \
+             assertions below are not vacuous"
+        );
+
+        // "~ deals N damage to each of your opponents" — must fall through to
+        // `parse_damage_each_player_scope` (DamageEachPlayer), not this seam.
+        assert_eq!(
+            parse_each_of_target_distribution("your opponents"),
+            None,
+            "player-scope heads belong to parse_damage_each_player_scope"
+        );
+
+        // No "of": "each creature" never reaches this combinator, but the head
+        // itself must not parse either.
+        assert_eq!(parse_each_of_target_distribution("each creature"), None);
+
+        // VERBATIM Shower of Coals Threshold anaphor. It must NOT parse — the
+        // second sentence stays dropped (an anaphor to the already-chosen
+        // targets), which is what keeps that card an honest PARTIAL fix.
+        assert_eq!(
+            parse_each_of_target_distribution("those permanents and/or players instead"),
+            None,
+            "the Threshold anaphor must not be mistaken for a cardinality head"
+        );
+
+        assert_eq!(parse_each_of_target_distribution("them"), None);
+
+        // A bare count with no noun at all.
+        assert_eq!(parse_each_of_target_distribution("two"), None);
+
+        // ASYMMETRY (deliberate, matches pre-existing behaviour): the
+        // bare-plural arm does NOT accept "other targets". Drakuseth's
+        // "up to two other targets" clause is dropped upstream by the
+        // compound-damage splitter, so this returns None exactly as before.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two other targets"),
+            None,
+            "bare-plural `other targets` is intentionally NOT accepted"
+        );
     }
 }

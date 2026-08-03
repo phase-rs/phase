@@ -2396,9 +2396,10 @@ pub(crate) fn try_parse_ignore_landwalk_for_blocking(
     )
 }
 
-/// CR 508.1d + CR 508.1h + CR 509.1c + CR 118.12a: Parse the combat-tax static family:
+/// CR 508.1b-c + CR 508.1h + CR 509.1c + CR 118.12a: Parse the combat-tax static family:
 ///
-/// - "Creatures can't attack [you | you or planeswalkers you control] unless their
+/// - "Creatures can't attack [you | planeswalkers you control | you or planeswalkers
+///   you control] unless their
 ///   controller pays {N} [for each of those creatures][, where X is the number of
 ///   <filter>][.]"
 /// - "Creatures can't block unless their controller pays {N} [for each of those
@@ -2544,7 +2545,7 @@ pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinit
 ///              | "each creature with one or more counters on it " | "~ "
 ///   color     := ("non")? ("white"|"blue"|"black"|"red"|"green")
 ///   restriction := "can't attack" | "can't block" | "can't attack or block"
-///   scope     := " you" | " you or planeswalkers you control"
+///   scope     := " you" | " planeswalkers you control" | " you or planeswalkers you control"
 ///   payer     := "their controller pays " | "its controller pays " | "you pay "
 ///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
@@ -2640,6 +2641,10 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
         ),
         value(
+            AttackTargetFilter::Planeswalker,
+            tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
+        ),
+        value(
             AttackTargetFilter::Player,
             tag_no_case::<_, _, OracleError<'_>>(" you"),
         ),
@@ -2669,6 +2674,9 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
         tag_no_case::<_, _, OracleError<'_>>(" for each of those creatures"),
         tag_no_case::<_, _, OracleError<'_>>(
             " for each creature they control that's attacking you or a planeswalker you control",
+        ),
+        tag_no_case::<_, _, OracleError<'_>>(
+            " for each creature they control that's attacking a planeswalker you control",
         ),
         tag_no_case::<_, _, OracleError<'_>>(
             " for each creature they control that's attacking you",

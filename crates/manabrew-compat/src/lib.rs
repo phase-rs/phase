@@ -2545,7 +2545,7 @@ pub fn convert_available_action(
                 produced_mana: None,
             }),
         }),
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             AvailableActionConversion::Available(AvailableAction {
                 id,
                 kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2567,9 +2567,10 @@ pub fn convert_available_action(
                 },
             })
         }
-        GameAction::PassPriority | GameAction::CancelCast | GameAction::Concede { .. } => {
-            AvailableActionConversion::Skip
-        }
+        GameAction::PassPriority
+        | GameAction::CancelCast
+        | GameAction::BackToManaPayment
+        | GameAction::Concede { .. } => AvailableActionConversion::Skip,
         GameAction::DeclareAttackers { .. } => AvailableActionConversion::Skip,
         GameAction::DeclareBlockers { .. } => AvailableActionConversion::Skip,
         GameAction::ChooseUntap { .. } => {

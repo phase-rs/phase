@@ -2177,31 +2177,22 @@ fn trigger_intervening_if_negated_cast_from_hand_chainer() {
 }
 
 /// Discordant Spirit: "if it's an opponent's turn" must hoist as the
-/// intervening-if condition. CR 102.1 + CR 102.2: a turn is never vacant, so
-/// "an opponent's turn" is "the active player is any non-controller" —
-/// `Not(DuringPlayersTurn { Controller })`, equivalent to "it's not your
-/// turn". Without this the condition was silently dropped and the counter
-/// would be placed on the controller's own end step too.
+/// intervening-if condition. CR 102.3 + CR 805.4a: an opponent's turn is a
+/// team-aware opponent relation, not merely a non-controller active seat.
+/// Without this the condition was silently dropped and the counter would be
+/// placed on the controller's own end step too.
 #[test]
 fn trigger_intervening_if_opponents_turn_discordant_spirit() {
     let def = parse_trigger_line(
             "At the beginning of each end step, if it's an opponent's turn, put a +1/+1 counter on this creature for each 1 damage dealt to you this turn.",
             "Discordant Spirit",
         );
-    match &def.condition {
-        Some(TriggerCondition::Not { condition }) => {
-            assert!(
-                matches!(
-                    condition.as_ref(),
-                    TriggerCondition::DuringPlayersTurn {
-                        player: PlayerFilter::Controller,
-                    }
-                ),
-                "expected Not(DuringPlayersTurn {{ Controller }}), got {condition:?}"
-            );
-        }
-        other => panic!("expected Not(DuringPlayersTurn), got {other:?}"),
-    }
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Opponent,
+        })
+    );
 }
 
 #[test]
@@ -3392,6 +3383,66 @@ fn trigger_attacks_enchanted_player_scopes_to_attached_player() {
         Some(TargetFilter::AttachedTo),
         "'attacks enchanted player' must scope the defender to the attached player"
     );
+}
+
+/// Issue #5249 — The Spear of Bashenga: "Whenever equipped creature attacks
+/// the monarch, destroy target tapped nonland permanent that player controls."
+/// The " the monarch" defender scope must parse to
+/// `attack_target_filter = Monarch` so the trigger fires only when the equipped
+/// creature attacks whoever currently holds the monarch designation (CR 725.1).
+/// Before the fix there was no " the monarch" arm, so the trigger degraded to a
+/// bare `Attacks` with no attack-target scope and fired on every attack.
+/// Runtime firing / non-firing is covered by the discriminating integration test
+/// `spear_of_bashenga_attacks_monarch_5249`.
+#[test]
+fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
+    let def = parse_trigger_line(
+        "Whenever equipped creature attacks the monarch, destroy target tapped nonland permanent that player controls.",
+        "The Spear of Bashenga",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.attack_target_filter,
+        Some(AttackTargetFilter::Monarch),
+        "'attacks the monarch' must scope the attack target to the Monarch filter"
+    );
+    // The subject "equipped creature" scopes the attacker via `valid_card`
+    // (a creature filter), NOT `valid_source`/`valid_target`. The monarch
+    // identity is carried by the Monarch attack-target filter itself.
+    assert!(
+        def.valid_card.is_some(),
+        "equipped-creature subject must populate valid_card, got {:?}",
+        def.valid_card
+    );
+    assert_eq!(
+        def.valid_source, None,
+        "monarch attack subject is an object (equipped creature), not a player"
+    );
+    assert_eq!(
+        def.valid_target, None,
+        "monarch identity is checked by the Monarch filter, not via valid_target"
+    );
+    // The destroy target is a tapped nonland permanent controlled by the
+    // defending (monarch) player — resolved via `ControllerRef::DefendingPlayer`.
+    let effect = def
+        .execute
+        .as_ref()
+        .map(|e| e.effect.as_ref())
+        .expect("trigger must have an execute effect");
+    assert!(
+        !matches!(effect, Effect::Unimplemented { .. }),
+        "destroy effect must not be Unimplemented: {effect:?}"
+    );
+    match effect {
+        Effect::Destroy { target, .. } => {
+            let json = format!("{target:?}");
+            assert!(
+                json.contains("DefendingPlayer"),
+                "destroy target must be controlled by DefendingPlayer, got {target:?}"
+            );
+        }
+        other => panic!("expected Effect::Destroy, got {other:?}"),
+    }
 }
 
 #[test]
@@ -10845,7 +10896,9 @@ fn high_tide_delayed_trigger_that_player_binds_triggering_player() {
             ..
         } => assert_eq!(
             *recipient,
-            TargetFilter::TriggeringPlayer,
+            crate::types::ability::ManaTargetRole::Recipient {
+                recipient: TargetFilter::TriggeringPlayer
+            },
             "\"that player\" must bind to the triggering (tapping) player, not the caster"
         ),
         other => panic!("expected Mana with an explicit recipient, got {other:?}"),
@@ -10888,7 +10941,9 @@ fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
         &*effect.effect,
         Effect::Mana {
             produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
-            target: Some(TargetFilter::TriggeringPlayer),
+            target: Some(crate::types::ability::ManaTargetRole::Recipient {
+                recipient: TargetFilter::TriggeringPlayer
+            }),
             ..
         } if colors == &vec![ManaColor::Black]
     ));
@@ -17723,7 +17778,9 @@ fn phase_trigger_blinkmoth_urn_that_player_adds_mana_for_their_artifacts() {
         } => {
             assert_eq!(
                 *target,
-                Some(TargetFilter::ScopedPlayer),
+                Some(crate::types::ability::ManaTargetRole::Recipient {
+                    recipient: TargetFilter::ScopedPlayer
+                }),
                 "mana recipient must be the active player (ScopedPlayer)"
             );
             let QuantityExpr::Ref {
@@ -22491,6 +22548,63 @@ fn smothering_tithe_that_player_pays_as_triggering_player() {
     }
 }
 
+/// CR 608.2d + CR 608.2k (issue #6477): the bare-pronoun counterpart of
+/// `smothering_tithe_that_player_pays_as_triggering_player` — "they may pay"
+/// anaphors back to "an opponent" from the trigger condition and must resolve
+/// identically to the explicit "that player may pay" phrasing: the opponent
+/// who cast the spell pays (not the Wandering Archaic controller), and the
+/// payment is optional (CR 608.2d) so a decline can gate the copy. The copy's
+/// "that spell" target is the untargeted spell object the trigger condition
+/// already named, carried forward per CR 608.2k.
+#[test]
+fn wandering_archaic_they_pay_as_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever an opponent casts an instant or sorcery spell, they may pay {2}. If they don't, you may copy that spell. You may choose new targets for the copy.",
+        "Wandering Archaic",
+    );
+
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::PayCost {
+            payer,
+            cost: AbilityCost::Mana { cost },
+            ..
+        } => {
+            assert_eq!(
+                payer,
+                &TargetFilter::TriggeringPlayer,
+                "the opponent who cast the spell pays, not the Wandering Archaic controller"
+            );
+            assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
+        }
+        other => panic!("expected PayCost, got: {other:?}"),
+    }
+    assert!(execute.optional, "they may pay should be optional");
+
+    let sub = execute
+        .sub_ability
+        .as_ref()
+        .expect("copy should remain chained");
+    assert_eq!(
+        sub.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed())
+        }),
+        "the copy is gated on the opponent having declined payment"
+    );
+    assert!(sub.optional, "you may copy that spell");
+    match &*sub.effect {
+        Effect::CopySpell {
+            target, retarget, ..
+        } => {
+            assert_eq!(target, &TargetFilter::TriggeringSource);
+            assert_eq!(retarget, &CopyRetargetPermission::MayChooseNewTargets);
+        }
+        other => panic!("expected CopySpell sub_ability, got: {other:?}"),
+    }
+}
+
 /// CR 603.4: Wedding Ring — "an opponent who controls F draws
 /// a card" parses the relative clause into an `ObjectCount >= 1`
 /// intervening-if scoped to the triggering player, ANDed with the
@@ -26303,4 +26417,300 @@ fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
         node_count >= 2,
         "reach guard: Thieving Skydiver must build a multi-node chain (GainControl + Attach continuation), got {node_count}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 608.2c + CR 608.2d (issue #6477 review follow-up): the "they may" subject
+// arm in `subject.rs` is a class fix, not a Wandering-Archaic special case —
+// every card whose Oracle text puts the "may" modal on the bare pronoun
+// "they" (rather than the explicit "that player"/"the player" forms already
+// handled) previously fell through `parse_subject_application` with NO match
+// (only the exact string "they", with no trailing "may", was accepted). The
+// caller's `unwrap_or` fallback then silently substituted
+// `SubjectApplication { affected: TargetFilter::Any, is_optional: false, .. }`
+// — an unbound target AND a mandatory (non-"may") ability, both wrong. These
+// four tests lock in the corrected behavior for every other printed card
+// found to share the pattern (via a before/after parse diff), so the fix's
+// wider blast radius is intentional and covered, not an unexplained
+// side effect.
+// ---------------------------------------------------------------------------
+
+/// Mishra's Command mode 1: "Choose target player. They may discard up to X
+/// cards." Before the fix: `Discard { target: Any, .. }`, non-optional —
+/// unbound to the just-chosen player and mandatory despite "may". After: the
+/// discard binds to `ParentTarget` (the chosen player) and is optional.
+#[test]
+fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
+    let parsed = parse_oracle_text(
+        "Choose two \u{2014}\n\u{2022} Choose target player. They may discard up to X cards. Then they draw a card for each card discarded this way.\n\u{2022} This spell deals X damage to target creature.\n\u{2022} This spell deals X damage to target planeswalker.\n\u{2022} Target creature gets +X/+0 and gains haste until end of turn.",
+        "Mishra's Command",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mode1 = parsed
+        .abilities
+        .first()
+        .expect("Mishra's Command must parse mode 1 as the first ability");
+    assert!(
+        matches!(*mode1.effect, Effect::TargetOnly { .. }),
+        "mode 1's head is the target-player slot, got {:?}",
+        mode1.effect
+    );
+    let discard = mode1
+        .sub_ability
+        .as_ref()
+        .expect("the discard must remain chained to the chosen target");
+    match &*discard.effect {
+        Effect::Discard { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::ParentTarget,
+                "\"they\" discard must bind to the just-chosen target player, not float unbound"
+            );
+        }
+        other => panic!("expected Discard, got {other:?}"),
+    }
+    assert!(
+        discard.optional,
+        "\"they may discard\" must be optional, not mandatory"
+    );
+}
+
+/// Undercity Plunder: "Target opponent discards a card. Then they may
+/// discard an additional card. If they don't, conjure ..." Before the fix:
+/// the second Discard's target was `Any` (unbound) and non-optional, so the
+/// "if they don't" branch's condition was unreachable in practice.
+#[test]
+fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
+    let parsed = parse_oracle_text(
+        "Target opponent discards a card. Then they may discard an additional card. If they don't, conjure a duplicate of a random card from their library into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
+        "Undercity Plunder",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let head = parsed
+        .abilities
+        .first()
+        .expect("Undercity Plunder must parse the initial discard");
+    let second_discard = head
+        .sub_ability
+        .as_ref()
+        .expect("\"they may discard an additional card\" must remain chained");
+    match &*second_discard.effect {
+        Effect::Discard { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::ParentTarget,
+                "the additional discard must bind to the same targeted opponent"
+            );
+        }
+        other => panic!("expected Discard, got {other:?}"),
+    }
+    assert!(
+        second_discard.optional,
+        "\"they may discard an additional card\" must be optional"
+    );
+    let conjure_gate = second_discard
+        .sub_ability
+        .as_ref()
+        .expect("the \"if they don't\" conjure branch must remain chained");
+    assert_eq!(
+        conjure_gate.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed())
+        }),
+        "the conjure branch is gated on declining the additional discard"
+    );
+}
+
+/// Tarnation: "Whenever a player commits a crime, they may draw a card."
+/// Before the fix: `Draw { target: Any, .. }`, non-optional — the draw had no
+/// player bound to it at all.
+#[test]
+fn tarnation_they_may_draw_binds_to_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever a player commits a crime, they may draw a card. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)",
+        "Tarnation",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::Draw { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::TriggeringPlayer,
+                "\"they\" draws for the player who committed the crime"
+            );
+        }
+        other => panic!("expected Draw, got {other:?}"),
+    }
+    assert!(execute.optional, "\"they may draw\" must be optional");
+}
+
+/// Smart Ass: "... If defending player has no cards with the chosen name in
+/// their hand, they may reveal their hand. If they don't reveal their hand,
+/// this creature can't be blocked this turn." CR 506.2: "defending player" is
+/// the combat-relative nonactive player being attacked, not a chosen or
+/// previously-targeted player — the intervening-if stamps
+/// `relative_player_scope = ControllerRef::DefendingPlayer`
+/// (`condition_introduces_defending_player`), so "they" must resolve to
+/// `TargetFilter::DefendingPlayer` specifically. Before the fix:
+/// `RevealHand { target: Any, .. }`, non-optional (the pronoun was unhandled
+/// entirely). An earlier version of this fix left `resolve_they_pronoun`
+/// without a `DefendingPlayer` arm, so "they" fell through to the generic
+/// `ParentTarget` default instead — plausible-looking (not `Any`) but still
+/// wrong, since there is no prior target for "defending player" to inherit.
+#[test]
+fn smart_ass_they_may_reveal_hand_binds_to_defending_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks, choose a card name. If defending player has no cards with the chosen name in their hand, they may reveal their hand. If they don't reveal their hand, this creature can't be blocked this turn.",
+        "Smart Ass",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let reveal = execute
+        .sub_ability
+        .as_ref()
+        .expect("the reveal-hand clause must remain chained to the naming choice");
+    match &*reveal.effect {
+        Effect::RevealHand { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::DefendingPlayer,
+                "\"they\" reveal must bind to the combat-relative defending player"
+            );
+        }
+        other => panic!("expected RevealHand, got {other:?}"),
+    }
+    assert!(
+        reveal.optional,
+        "\"they may reveal their hand\" must be optional"
+    );
+}
+
+/// Sibling case for `smart_ass_they_may_reveal_hand_binds_to_defending_player`:
+/// a "they may" pronoun under a DIFFERENT relative-player scope
+/// (`ControllerRef::TargetPlayer`, stamped by a "deals combat damage to a
+/// player" condition — CR 120.1) must still resolve to `TriggeringPlayer`
+/// (the damaged player), not fall into the new `DefendingPlayer` arm. Guards
+/// the scope routing in `resolve_they_pronoun`: the two `if` checks read the
+/// same `Option<ControllerRef>` field and are mutually exclusive by
+/// construction, but this locks in that the "they may" modal threading
+/// doesn't accidentally collapse distinct scopes onto one filter. Mirrors the
+/// existing bare-"they" (non-"may") coverage in
+/// `parse_unstoppable_slasher_combat_damage_half_life`. "Test Card" is a
+/// synthetic grammar-class fixture (see `trigger_you_may_pay_remains_controller`),
+/// not a printed card — no real card in the corpus pairs this exact
+/// combat-damage-to-a-player condition with a "they may" effect body.
+#[test]
+fn they_may_after_combat_damage_to_player_binds_to_triggering_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, they may draw a card.",
+        "Test Card",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::Draw { target, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::TriggeringPlayer,
+                "\"they\" after \"deals combat damage to a player\" must bind to the \
+                 damaged player (TriggeringPlayer), not DefendingPlayer"
+            );
+        }
+        other => panic!("expected Draw, got {other:?}"),
+    }
+    assert!(execute.optional, "\"they may draw\" must be optional");
+}
+
+/// Siege Dragon: "Whenever this creature attacks, if defending player
+/// controls no Walls, it deals 2 damage to each creature without flying
+/// that player controls." A before/after parse-diff audit of every printed
+/// card containing "if defending player" (18 cards, run while developing the
+/// `effect_body_introduces_defending_player` fix) surfaced this as a SECOND
+/// real defect fixed by the same mechanism: "that player controls" is a
+/// possessive-controller reference back to the if-condition's "defending
+/// player", and before the fix it resolved to `ControllerRef::You` — Siege
+/// Dragon was damaging creatures the ATTACKER controls instead of the
+/// defending player's, exactly backwards for an attack-punisher effect. Every
+/// other card in that audit (Fear of the Dark, Must Be Knights, Reaper of
+/// Night, Robber of the Rich, Septic Rats, Spectral Bears, Spectral Force,
+/// Aerial Surveyor, Blurry Beeble, and the static-ability "can't attack/block
+/// if defending player ..." cards) parsed identically before and after,
+/// confirming the fix's scope is exactly the cards that anaphor back to a
+/// body-level "defending player" conditional.
+#[test]
+fn siege_dragon_that_player_controls_binds_to_defending_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks, if defending player controls no Walls, it deals 2 damage to each creature without flying that player controls.",
+        "Siege Dragon",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    match &*execute.effect {
+        Effect::DamageAll { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "\"that player controls\" must bind to the defending player named by \
+                     the if-condition, not the attacker (ControllerRef::You)"
+                );
+            }
+            other => panic!("expected a Typed target filter, got {other:?}"),
+        },
+        other => panic!("expected DamageAll, got {other:?}"),
+    }
+}
+
+/// CR 508.5: For an ability of an attacking creature that refers to a defending
+/// player, that player is the player the creature attacks.
+/// Elder Brain: "Whenever this creature attacks a player, exile all cards
+/// from that player's hand, then they draw that many cards. ..." Unlike Smart
+/// Ass and Siege Dragon (which name "defending player" via a per-clause
+/// conditional buried in the effect body — the NEW
+/// `effect_body_introduces_defending_player` path), this trigger's OWN head
+/// condition is "whenever ~ attacks a player", which the PRE-EXISTING
+/// `condition_introduces_defending_player` check
+/// (`relative_player_scope_for_condition`) already recognized and stamped as
+/// `ControllerRef::DefendingPlayer` before this fix. What was still broken:
+/// `resolve_they_pronoun` had no arm reading that scope at all, so "they" in
+/// "they draw that many cards" fell through to the generic `ParentTarget`
+/// default regardless of which mechanism set the scope. This test locks in
+/// the production Oracle route through both the pre-existing head-condition
+/// detector and the new `resolve_they_pronoun` arm together, distinct from
+/// the body-conditional route the other two tests cover.
+#[test]
+fn elder_brain_they_draw_binds_to_defending_player() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks a player, exile all cards from that player's hand, then they draw that many cards. You may play lands and cast spells from among the exiled cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any color to cast it.",
+        "Elder Brain",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "head effect must remain the exile-hand ChangeZoneAll, got {:?}",
+        execute.effect
+    );
+    let draw = execute
+        .sub_ability
+        .as_ref()
+        .expect("the draw must remain chained to the exile");
+    match &*draw.effect {
+        Effect::Draw { target, count } => {
+            assert_eq!(
+                target,
+                &TargetFilter::DefendingPlayer,
+                "\"they draw\" must bind to the attacked defending player, not ParentTarget"
+            );
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                "\"that many cards\" must read the number of cards just exiled"
+            );
+        }
+        other => panic!("expected Draw, got {other:?}"),
+    }
 }

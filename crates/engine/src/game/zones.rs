@@ -1216,10 +1216,48 @@ pub fn move_to_zone(
     let static_dependency_after =
         crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
 
-    // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
-    // controller's hand (Carnage Interpreter, issue #3991) and hand-zone
-    // effects (Miracle in hand). Re-evaluate layers on any hand entry/exit.
+    // pod-lab loop-3 Q5: a plain Battlefield entry that doesn't originate
+    // from Hand or Exile, and isn't itself the source of a live
+    // zone-membership-dependent static (static_dependency_before/after),
+    // can take the cheaper `mark_layers_entered` path instead of forcing a
+    // full re-evaluation of every object's characteristics. This does NOT
+    // skip re-verification: `prepare_incremental_flush` (layers.rs) re-runs
+    // its own full Axis-1/Axis-2 safety analysis fresh from live state at
+    // flush time regardless of which mark got set here, and escalates to a
+    // full pass itself whenever that analysis can't prove the entering
+    // object is safe (a sourced continuous effect, a CDA, counters,
+    // attachments, or a population-perturbing static). This call only
+    // proposes the cheap mark when the mutation site itself has nothing
+    // else forcing a full re-evaluation; it is not the safety net.
+    //
+    // Hand and Exile are excluded UNCONDITIONALLY here, not merely folded
+    // into static_dependency_before/after, because both have a proven blind
+    // spot in that check:
+    //   - CR 611.3a + CR 400.3: hand size affects continuous effects gated
+    //     on the controller's hand (Carnage Interpreter, issue #3991), and
+    //     `layers.rs`'s `quantity_ref_reads_zone` classifier maps
+    //     `QuantityRef::HandSize` to a hardcoded `false` — a live
+    //     HandSize-gated static is not detected as a zone dependency at all.
+    //   - CR 613.1: characteristics set by "for each card exiled with/by
+    //     [this]"-style statics (`QuantityRef::CardsExiledBySource`,
+    //     `ExiledCardPower`, `TrackedSetSize`, `FilteredTrackedSetSize`,
+    //     `TrackedSetAggregate` — e.g. Unlicensed Hearse, Veteran Survivor,
+    //     Sutured Ghoul) have the identical blind spot: the same classifier
+    //     maps all of them to `false`, and the count is live-filtered on
+    //     `obj.zone == Zone::Exile` (see `linked_exile_for_context` /
+    //     `players.rs`), so it changes the instant a linked card leaves
+    //     Exile for the Battlefield. Neither axis has a Axis-2 analog in
+    //     `prepare_incremental_flush` (which is exclusively board-population
+    //     framed), so there is no flush-time safety net for either — the
+    //     unconditional mark at this mutation site is these statics' ONLY
+    //     protection, exactly as it is today.
     if to == Zone::Battlefield
+        && from != Zone::Hand
+        && from != Zone::Exile
+        && !(static_dependency_before || static_dependency_after)
+    {
+        crate::game::layers::mark_layers_entered(state, object_id);
+    } else if to == Zone::Battlefield
         || from == Zone::Battlefield
         || to == Zone::Hand
         || from == Zone::Hand
@@ -1310,6 +1348,17 @@ pub(crate) fn restore_after_rollback(
     events: &mut Vec<GameEvent>,
 ) {
     move_to_zone(state, object_id, to, events);
+    // CR 601.2 + CR 733.1: reversing an incomplete action needs full
+    // reconciliation regardless of which mark move_to_zone's own
+    // axis-gated internal logic picked — an undone action is rare
+    // (not gameplay-hot) and can leave board state in a shape the
+    // entry-only incremental-flush safety classifier was never designed to
+    // reason about, so there is no perf case for trusting it here. This is
+    // conservatively at-or-above today's marking, not byte-for-byte
+    // identical to it: some rollback transitions `move_to_zone` marks
+    // nothing for today (e.g. Stack->Library) become `Full` here, which is
+    // strictly safe, never a behavior change a test could observe as wrong.
+    crate::game::layers::mark_layers_full(state);
 }
 
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
@@ -4073,6 +4122,43 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
+        );
+    }
+
+    /// pod-lab loop-3 Q5, row 5: `restore_after_rollback` targeting the
+    /// battlefield must still force a full layers re-evaluation
+    /// unconditionally — CR 601.2 + CR 733.1, reversing an incomplete action
+    /// is rare (not gameplay-hot) and can leave board state in a shape the
+    /// entry-only incremental-flush safety classifier was never designed to
+    /// reason about, so there is no perf case for trusting `move_to_zone`'s
+    /// own (now axis-gated) internal decision here. Today's only production
+    /// caller targets Graveyard, not Battlefield, so this exercises the
+    /// function's general contract directly rather than replaying an
+    /// existing call site.
+    #[test]
+    fn restore_after_rollback_to_battlefield_marks_full() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rolled Back Spell".to_string(),
+            Zone::Stack,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        restore_after_rollback(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "restore_after_rollback targeting the battlefield must \
+             unconditionally force a full re-evaluation, got {:?}",
+            state.layers_dirty
         );
     }
 }

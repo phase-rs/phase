@@ -33,9 +33,9 @@ use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
-    InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
-    InteractionShortcutResponseCode, InteractionSubmission, PreviewRequestId,
-    MAX_INTERACTION_LIST_LEN,
+    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
+    InteractionShortcutPointKind, InteractionShortcutResponseCode, InteractionSubmission,
+    PreviewRequestId, MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::match_config::MatchPhase;
@@ -2327,6 +2327,133 @@ fn trigger_sequence_materializes_arbitrary_permutations_larger_than_four() {
     );
 }
 
+/// NEW-1 — a published CR 732.2a offer carrying `max_iterations: 0` is REJECTED, not
+/// clamped. `elimination_bounds` returns `0` to mean "no legal repetition exists and the
+/// caller must not offer" (CR 704.5a), so repairing it to `1` would render a
+/// one-iteration offer whose single iteration eliminates a player mid-proposal.
+///
+/// LATENT, NOT LIVE: no in-tree producer can emit `0` here — `build_shortcut_schema`'s two
+/// call sites both pass `MAX_SHORTCUT_CYCLES`, the per-viewer projection copies an existing
+/// value, and both `Default` and the `#[serde(default)]` resolve to the cap. Hand-assigning
+/// `max_iterations: 0` IS the loaded/persisted-authority seat, which is exactly the shape a
+/// restored dump can carry. This row is therefore a latent-hole guard, not a live-bug
+/// reproduction.
+///
+/// REVERT-PROBE, and note the FAILURE MODE: delete
+/// `if schema.max_iterations == 0 { return Err(..) }` ⇒ post-edit `max` is
+/// `0u32.min(1000) == 0`, so `suggested.clamp(1, 0)` trips `Ord::clamp`'s
+/// `assert!(min <= max)` and **PANICS** (`min > max. min = 1, max = 0`). That assert is a
+/// PLAIN assert, so it survives release — the guard is load-bearing against an engine
+/// panic on a malformed restored dump, not merely against a bad offer. The probe flips RED
+/// by panic, not by a value mismatch.
+#[test]
+fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
+    let shortcut_state = |max_iterations: u32| {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: Some(P0),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+                iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                max_iterations,
+                ..Default::default()
+            },
+        };
+        bind(&mut state, "loop-zero-bound");
+        state
+    };
+
+    // ── PAIRED CONTROL, first: the byte-identical schema at the DEFAULT bound projects a
+    //    shortcut schema. Without this the rejection below could be the whole window being
+    //    unsupported for an unrelated reason.
+    let control = shortcut_state(ShortcutDecisionSchema::default().max_iterations);
+    let control_view = priority_view(&control);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { .. },
+        ..
+    } = &control_view.opportunities[0].response
+    else {
+        panic!(
+            "control: the same window at the default bound must project a shortcut schema, \
+             else this row's rejection is not attributable to `max_iterations`"
+        );
+    };
+
+    // ── SUBJECT: the only variable is `max_iterations: 0`.
+    let subject = shortcut_state(0);
+    assert_eq!(
+        priority_view(&subject).availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::InvalidAuthorityState,
+        },
+        "CR 704.5a: `max_iterations == 0` means NO legal repetition exists, so the offer is \
+         an authority violation to reject — not a number to clamp back up to 1"
+    );
+}
+
+/// CR-12 — the picker's ceiling is the offer's OWN narrowed CR 732.2a bound, never the
+/// raw global safety limit. Before this row the file only ever asserted the default bound,
+/// so a projection that ignored `max_iterations` entirely would have stayed green.
+///
+/// Disclosed: an over-bound `suggested` is CLAMPED, not rejected. That is correct —
+/// `suggested` is a hint, `max_iterations` is the authority.
+///
+/// REVERT-PROBE: change `let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` back to
+/// `MAX_SHORTCUT_CYCLES` ⇒ `max` becomes the global cap ⇒ this assertion FAILS.
+#[test]
+fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+        },
+        schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+            // A NARROWED bound, i.e. what `elimination_bounds` produces on a real board.
+            iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
+            max_iterations: 3,
+            ..Default::default()
+        },
+    };
+    bind(&mut state, "loop-narrowed-bound");
+
+    // Reach-guard: the narrowed bound really is BELOW the global cap, else `min(..)` and
+    // the global cap coincide and the row cannot discriminate.
+    assert!(
+        3 < ShortcutDecisionSchema::default().max_iterations,
+        "reach-guard: the narrowed bound must be strictly below the global cap"
+    );
+
+    let view = priority_view(&state);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("loop shortcut uses a shortcut schema");
+    };
+    assert_eq!(
+        *count,
+        InteractionShortcutCountSpec::Fixed {
+            min: 1,
+            max: 3,
+            suggested: 3,
+        },
+        "CR 732.2a: the picker's ceiling is the offer's own narrowed bound (3), and an \
+         over-bound `suggested` (9) is clamped down to it rather than rejected"
+    );
+}
+
 #[test]
 fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
     let mut state = GameState::new_two_player(42);
@@ -2341,8 +2468,8 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
-            points: Vec::new(),
-            convoke_tappable_count: 0,
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
+            ..Default::default()
         },
     };
     bind(&mut state, "loop-count");
@@ -2395,6 +2522,8 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
+            // No narrowed CR 732.2a bound — the global cap, as every offer states today.
+            max_iterations: ShortcutDecisionSchema::default().max_iterations,
             points: vec![
                 DecisionPoint {
                     slot: slot(0),
