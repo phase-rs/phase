@@ -2694,22 +2694,15 @@ pub(super) fn try_parse_multi_zone_player_exile(
         {
             (after, Vec::new())
         } else {
-            // Delimit the head noun phrase at the " from " that introduces the
-            // owner possessive, then require the head noun to be "card"/"cards"
-            // (CR 108.2 — we exile CARDS from a player's zones, never battlefield
-            // permanents like "creatures from …") with a non-empty type qualifier.
+            // Type-qualified head "<types> card(s) from <owner> …" (CR 205.2a +
+            // CR 205.3a). Delimit the head noun phrase at the " from " that
+            // introduces the owner possessive, parse it as a full type phrase, and
+            // require it to be FULLY consumed — a malformed or non-type head (e.g.
+            // "creatures except X from …") leaves a remainder and is declined, so
+            // only a clean "<type restriction> card(s)" head is claimed. The
+            // owner-possessive + 2-zone-union structure parsed below is the rest of
+            // the discriminator (CR 108.2 — cards in a player's zones).
             let (after_head, head) = take_until::<_, _, OracleError<'_>>(" from ").parse(input)?;
-            // Guard: the head noun is "card"/"cards" with a NON-empty type
-            // qualifier before it. The binding is discarded — the parse below
-            // re-reads the whole head; this only gates out non-card heads.
-            let _qualifier = head
-                .strip_suffix(" cards")
-                .or_else(|| head.strip_suffix(" card"))
-                .filter(|q| !q.is_empty())
-                .ok_or_else(|| oracle_err(head))?;
-            // The head must be a well-formed type phrase that fully consumes it
-            // (CR 205.2a/205.3a card-type/subtype union). Parse the WHOLE head
-            // ("<types> cards") so the "card(s)" noun folds into the filter.
             let (tf, head_rem) = parse_type_phrase(head);
             let TargetFilter::Typed(tf) = tf else {
                 return Err(oracle_err(head));
