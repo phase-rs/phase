@@ -10,8 +10,51 @@ use crate::types::zones::Zone;
 
 use crate::game::ability_utils::build_target_slots;
 use crate::game::casting;
+use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::game_object::PreparedState;
 use crate::game::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored prepared-copy announcement for the Priority preflight.
+/// The source identity remains private to the Prepare authority until the
+/// Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPreparedCopyAnnouncement {
+    source_id: ObjectId,
+}
+
+impl PriorityPreparedCopyAnnouncement {
+    fn new(source_id: ObjectId) -> Self {
+        Self { source_id }
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+}
+
+/// Enumerates prepared copies that the current Priority holder can cast now.
+/// `can_cast_prepared_copy_now` remains the canonical legality authority; the
+/// ordinary reducer revalidates the fixed source when replaying on a clone.
+pub(in crate::game) fn priority_prepared_copy_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPreparedCopyAnnouncement> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&source_id| {
+            state.objects.get(&source_id).is_some_and(|object| {
+                object.controller == principal.semantic_holder()
+                    && object.prepared.is_some()
+                    && can_cast_prepared_copy_now(state, principal.semantic_holder(), source_id)
+            })
+        })
+        .map(PriorityPreparedCopyAnnouncement::new)
+        .collect()
+}
 
 // The prepare cast path now materializes a short-lived exile GameObject copy of
 // the prepare-spell face so the copy can reuse the normal casting pipeline
@@ -218,8 +261,12 @@ fn cleanup_failed_prepared_copy_cast(state: &mut GameState, copy_id: ObjectId) {
     // authority rather than expressed as a `retain`, which would leave both
     // per-entry side tables stranded and the removal unjournaled.
     if let Some(idx) = state.stack.iter().position(|entry| entry.id == copy_id) {
-        crate::game::stack::remove_stack_entry_at(state, idx)
-            .expect("position yielded a live stack index");
+        crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("position yielded a live stack index");
     }
     state.objects.remove(&copy_id);
 }

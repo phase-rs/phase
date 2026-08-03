@@ -62,9 +62,9 @@ fn load_migrated_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the real 4p gameState must deserialize into the current GameState");
-    PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("the real 4p gameState restores through the persisted ingress")
+        .into_game_state()
 }
 
 /// The acting player for the current beat (choice prompts carry their own `player`; a priority beat

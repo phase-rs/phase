@@ -315,26 +315,9 @@ fn setup_breeches_runtime(seed: u64) -> (GameState, ObjectId, ObjectId) {
 
     let trigger_event = state.current_trigger_event.clone();
     let mut events = Vec::new();
-    push_pending_trigger_to_stack(
-        &mut state,
-        PendingTrigger {
-            source_id: breeches,
-            controller: PlayerId(0),
-            condition: None,
-            ability: Box::new(ability),
-            timestamp: 0,
-            target_constraints: Vec::new(),
-            distribute: None,
-            trigger_event,
-            modal: None,
-            mode_abilities: vec![],
-            description: None,
-            may_trigger_origin: None,
-            subject_match_count: None,
-            die_result: None,
-        },
-        &mut events,
-    );
+    let mut pending = PendingTrigger::ordinary(breeches, PlayerId(0), None, Box::new(ability), 0);
+    pending.trigger_event = trigger_event;
+    push_pending_trigger_to_stack(&mut state, pending, &mut events);
 
     (state, spell, breeches)
 }

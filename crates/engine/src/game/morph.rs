@@ -4,15 +4,135 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
+
+/// An engine-authored turn-face-up announcement for the Priority preflight.
+/// The permanent identity remains owned by the face-down authority until the
+/// Priority facade reconstructs the special-action primer.
+pub(in crate::game) struct PriorityTurnFaceUpAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityTurnFaceUpAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+/// One finite Priority outcome from the turn-face-up special-action authority.
+/// `RequiresChosenX` deliberately has no action payload: mandatory progress
+/// must not guess a value for a player-chosen X cost.
+pub(in crate::game) enum PriorityTurnFaceUpCandidate {
+    Ready(PriorityTurnFaceUpAnnouncement),
+    RequiresChosenX,
+}
+
+/// Enumerates the current holder's face-up special-action outcomes in
+/// battlefield order. `turn_face_up_prepare` remains the single legality and
+/// cost authority; priority applies the reducer's action-specific cost
+/// adjustment and affordability check before offering a primer.
+pub(in crate::game) fn priority_turn_face_up_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityTurnFaceUpCandidate> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter_map(|object_id| {
+            let player = principal.semantic_holder();
+            let cost = turn_face_up_prepare(state, object_id, player).ok()?;
+            let cost = super::casting::apply_special_action_cost_reduction(
+                state,
+                player,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+                state,
+                player,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+            )
+            .then_some(())?;
+            Some(if super::casting_costs::cost_has_x(&cost) {
+                PriorityTurnFaceUpCandidate::RequiresChosenX
+            } else {
+                PriorityTurnFaceUpCandidate::Ready(PriorityTurnFaceUpAnnouncement::new(object_id))
+            })
+        })
+        .collect()
+}
+
+/// An engine-authored face-down play announcement for Priority preflight. The
+/// hand object and card identity remain private to the face-down authority
+/// until the Priority facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityPlayFaceDownAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+impl PriorityPlayFaceDownAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+/// Enumerates the current active Priority holder's hand primers for the normal
+/// face-down-play reducer. The shared casting predicates exclude cards without
+/// morph/disguise and cards that cannot be cast face down in this window.
+pub(in crate::game) fn priority_play_face_down_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayFaceDownAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player {
+        return Vec::new();
+    }
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            (super::casting::object_has_effective_face_down_keyword(state, object_id)
+                && super::casting::face_down_cast_is_permitted(state, player, object_id))
+            .then_some(())?;
+            state
+                .objects
+                .get(&object_id)
+                .map(|object| PriorityPlayFaceDownAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
@@ -558,6 +678,88 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    #[test]
+    fn priority_omits_an_unpayable_turn_face_up_action() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_turn_face_up_candidates(&state, &principal).is_empty(),
+            "Priority must not announce a turn-face-up action whose final cost cannot be paid"
+        );
+    }
+
+    #[test]
+    fn priority_applies_turn_face_up_cost_reductions_before_affordability() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::SpecialAction;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let id = setup_morph_creature(&mut state, player);
+        play_face_down(&mut state, player, id, &mut Vec::new()).expect("play morph face down");
+        let reducer = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Turn-up Reducer".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&reducer).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::ReduceActionCost {
+                action: SpecialAction::TurnFaceUp,
+                mode: CostModifyMode::Reduce,
+                amount: 3,
+            })]
+            .into();
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(matches!(
+            priority_turn_face_up_candidates(&state, &principal).as_slice(),
+            [PriorityTurnFaceUpCandidate::Ready(_)]
+        ));
+    }
+
+    #[test]
+    fn priority_omits_hand_cards_without_a_face_down_keyword() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Ordinary Creature".to_string(),
+            Zone::Hand,
+        );
+        let principal = crate::game::engine::priority_principal_for_preflight(&state)
+            .expect("the synchronized priority window has a principal");
+
+        assert!(
+            priority_play_face_down_announcements(&state, &principal).is_empty(),
+            "Priority must not announce ordinary hand cards as face-down casts"
+        );
     }
 
     /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's disguise discount is

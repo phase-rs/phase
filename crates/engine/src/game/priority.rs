@@ -87,7 +87,7 @@ pub fn handle_priority_pass_with_limit(
                 turns::auto_advance(state, events)
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
-                turns::advance_phase(state, events);
+                let _ = turns::advance_phase_once(state, events);
                 turns::auto_advance(state, events)
             }
         } else {

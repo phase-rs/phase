@@ -12135,7 +12135,7 @@ mod tests {
         MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
-        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken, ObjectId,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::Keyword;
@@ -12158,11 +12158,11 @@ mod tests {
     #[test]
     fn continuation_resume_preserves_live_delayed_trigger_firing() {
         let mut state = GameState::new_two_player(42);
-        let live = TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+        let live = TriggerFiring::ReceiptEligible(DelayedTriggerOrigin {
             token: DelayedTriggerToken(7),
             instance: DelayedTriggerInstanceId(11),
             source_id: ObjectId(13),
-        }));
+        });
         state.resolving_trigger_firing = Some(live);
 
         restore_continuation_trigger_firing(&mut state, None);

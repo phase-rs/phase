@@ -64,16 +64,45 @@ pub struct DelayedTriggerToken(pub u64);
 #[serde(transparent)]
 pub struct DelayedTriggerInstanceId(pub u64);
 
-/// Private durable provenance for a delayed-trigger installation.
+/// Private durable origin for a delayed-trigger installation.
 ///
 /// This belongs to engine scheduling state, never to a public `GameEvent`.
-/// `None` remains a supported legacy state when an older persisted delayed
-/// record cannot be matched unambiguously to a durable install command.
+/// [`DelayedInstallIdentity::LegacyDelayed`] represents an older persisted
+/// record that cannot be matched unambiguously to a durable install command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct DelayedTriggerProvenance {
+pub(crate) struct DelayedTriggerOrigin {
     pub(crate) token: DelayedTriggerToken,
     pub(crate) instance: DelayedTriggerInstanceId,
     pub(crate) source_id: ObjectId,
+}
+
+/// Durable identity carried by a CR 603.7 delayed-trigger installation.
+///
+/// A legacy installation remains a delayed trigger for rules scheduling, but
+/// lacks the command-backed root required for prospective receipt tracking.
+/// A fresh installation always carries the full root and can be transported to
+/// the corresponding [`TriggerFiring`] without re-deriving it from a source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum DelayedInstallIdentity {
+    #[default]
+    LegacyDelayed,
+    ReceiptEligible(DelayedTriggerOrigin),
+}
+
+impl DelayedInstallIdentity {
+    pub(crate) fn origin(self) -> Option<DelayedTriggerOrigin> {
+        match self {
+            Self::LegacyDelayed => None,
+            Self::ReceiptEligible(origin) => Some(origin),
+        }
+    }
+
+    pub(crate) fn firing(self) -> TriggerFiring {
+        match self {
+            Self::LegacyDelayed => TriggerFiring::LegacyDelayed,
+            Self::ReceiptEligible(origin) => TriggerFiring::ReceiptEligible(origin),
+        }
+    }
 }
 
 /// Private classification of a triggered-ability firing.
@@ -85,14 +114,15 @@ pub(crate) struct DelayedTriggerProvenance {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum TriggerFiring {
     Ordinary,
-    Delayed(Option<DelayedTriggerProvenance>),
+    LegacyDelayed,
+    ReceiptEligible(DelayedTriggerOrigin),
     #[default]
     UnknownLegacy,
 }
 
 impl TriggerFiring {
     pub(crate) fn is_delayed(self) -> bool {
-        matches!(self, Self::Delayed(_))
+        matches!(self, Self::LegacyDelayed | Self::ReceiptEligible(_))
     }
 }
 

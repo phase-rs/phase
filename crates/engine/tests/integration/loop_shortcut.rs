@@ -26,7 +26,8 @@ use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
+    CastPaymentMode, GameState, LoopDetectionMode, PersistedGameState, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -4922,9 +4923,9 @@ fn gunzip_dump(gz: &[u8]) -> String {
 fn restore_dump(json: &str) -> GameState {
     let envelope: serde_json::Value =
         serde_json::from_str(json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the real 4p gameState must deserialize into the current GameState");
-    engine::types::game_state::PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("the real 4p gameState must restore through the persisted-state boundary")
+        .into_game_state()
 }
 
 /// Opponents the ENGINE considers living. `Player::is_eliminated` is the authority the
