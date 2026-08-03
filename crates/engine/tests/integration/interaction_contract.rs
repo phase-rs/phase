@@ -3021,3 +3021,87 @@ fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
         14
     );
 }
+
+/// The interaction contract omits a debug-capability gate at the transport
+/// (`SessionManager::handle_interaction`) on the grounds that candidate
+/// enumeration never produces one. This converts that "cannot happen" into
+/// something that fails the day it starts happening.
+///
+/// It asserts on the **client-visible** publication — `derive_viewer_interaction`
+/// -> `opportunity_for_slot` -> `actor_candidates` -> `ai_support`'s validated
+/// candidate set — rather than on an internal helper, so it covers what a
+/// remote seat could actually submit.
+///
+/// The sandbox capability is armed *fully* and deliberately: the claim is not
+/// that debug actions are unreachable because sandbox mode is off, it is that
+/// enumeration ignores the flag even when it is on. All three of
+/// `allow_debug_actions`, `debug_mode`, and `debug_permitted` are set because
+/// `apply`'s own gate requires the latter two together — arming only one would
+/// leave the capability half-granted and the test could pass for the wrong
+/// reason.
+#[test]
+fn published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game() {
+    let mut state = GameState::new_two_player(42);
+    state.format_config.allow_debug_actions = true;
+    state.debug_mode = true;
+    state.debug_permitted.insert(P0);
+    bind(&mut state, "sandbox-debug-enumeration");
+
+    let view = priority_view(&state);
+
+    // Reach guard (1): a `ViewerInteraction` with `can_submit: false`, or a
+    // terminal `waiting_for`, publishes no opportunities at all and would
+    // satisfy the negative below vacuously.
+    assert!(
+        !view.opportunities.is_empty(),
+        "the fixture must publish something for the negative assertion to bite"
+    );
+
+    // Reach guard (3): the capability is genuinely in force at assertion time.
+    assert!(
+        state.format_config.allow_debug_actions
+            && state.debug_mode
+            && state.debug_permitted.contains(&P0),
+        "the sandbox capability must be armed, or this asserts nothing"
+    );
+
+    // Reach guard (2): `WaitingFor::Priority` maps to
+    // `HumanResponseModel::ExactCandidates`, which is the `actor_candidates`
+    // branch — the enumerator whose output this test is about.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the enumerating branch is selected by the waiting_for shape, got {:?}",
+        state.waiting_for
+    );
+
+    let mut saw_choices = false;
+    for opportunity in &view.opportunities {
+        let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+            continue;
+        };
+        saw_choices |= !choices.is_empty();
+        for choice in choices {
+            for surface in &choice.surfaces {
+                if let InteractionPresentationSurface::Action { code, .. } = surface {
+                    assert!(
+                        !matches!(
+                            code,
+                            InteractionActionCode::Debug
+                                | InteractionActionCode::GrantDebugPermission
+                                | InteractionActionCode::RevokeDebugPermission
+                        ),
+                        "candidate enumeration published a debug action ({code:?}); \
+                         `SessionManager::handle_interaction`'s missing debug gate is \
+                         no longer safe"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_choices,
+        "an ExactChoices opportunity with real choices is what proves the \
+         actor_candidates path ran"
+    );
+}

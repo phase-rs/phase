@@ -7924,6 +7924,21 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
     }
 }
 
+/// Wire-boundary bounds for one inbound submission, evaluated without touching
+/// game state.
+///
+/// Transports call this at the wire so a rejection is answered before the
+/// dispatcher does identity work; [`submit_interaction`] re-runs it via
+/// [`resolve_interaction_response`], so no caller can skip it and no transport
+/// can drift from these bounds by restating them.
+pub fn bound_interaction_submission(
+    submission: &InteractionSubmission,
+) -> Result<(), InteractionSubmitError> {
+    bound_string(submission.interaction_id.as_str())?;
+    validate_response_bounds(&submission.response)?;
+    Ok(())
+}
+
 fn slot_for_submission<'a>(
     state: &'a GameState,
     actor: PlayerId,
@@ -9321,8 +9336,7 @@ pub fn resolve_interaction_response(
     actor: PlayerId,
     submission: &InteractionSubmission,
 ) -> Result<GameAction, InteractionSubmitError> {
-    bound_string(submission.interaction_id.as_str())?;
-    validate_response_bounds(&submission.response)?;
+    bound_interaction_submission(submission)?;
     slot_for_submission(state, actor, &submission.interaction_id)?;
     let filtered = visibility::filter_state_for_viewer(state, actor);
     let (action, _) = materialize_response(
