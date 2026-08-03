@@ -60,8 +60,12 @@ fn load_realistic_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
+    // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
+    // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
+    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
-        .expect("the realistic 4p gameState restores through the persisted ingress")
+        .expect("gameState deserializes through the production decoder")
         .into_game_state()
 }
 

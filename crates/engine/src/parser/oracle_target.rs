@@ -2062,7 +2062,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
 /// with a union separator.
-fn match_mass_union_separator(lower: &str) -> Option<usize> {
+pub(crate) fn match_mass_union_separator(lower: &str) -> Option<usize> {
     alt((
         tag::<_, _, OracleError<'_>>(", and/or "),
         tag(", and "),

@@ -2076,23 +2076,18 @@ fn token_creation_needs_choice(
         count,
         applied: HashSet::new(),
     };
-    let candidates = replacement::find_applicable_replacements(state, &proposed, registry);
-    if candidates.is_empty() {
-        return false;
-    }
-    // (1) any single optional/MayCost applicable replacement → interactive.
-    let any_optional = candidates.iter().any(|rid| {
-        state
-            .objects
-            .get(&rid.source)
-            .and_then(|o| o.replacement_definitions.get(rid.index))
-            .map(|r| replacement::replacement_mode_is_optional(&r.mode))
-            .unwrap_or(true) // unknown ⇒ conservatively interactive
-    });
-    // (2) ≥2 candidates whose ordering is material → CR 616.1 player choice.
-    let ordering_material = candidates.len() >= 2
-        && replacement::replacement_ordering_is_material(state, &candidates, &proposed);
-    any_optional || ordering_material
+    // Delegates to the ONE prompt-cause authority. Term for term HEAD's two
+    // disjuncts: `OptionalCandidate` is the `any_optional` scan (with an
+    // unresolvable def — every virtual — conservatively optional) and
+    // `OrderingMaterial` is the `len() >= 2 && ordering_is_material` conjunct.
+    //
+    // `MandatoryBodyContinuation` is deliberately NOT read here. A drained body
+    // can set a non-priority `waiting_for`, so taking it would be a real
+    // token-batching change; it is left to its own change rather than smuggled
+    // into this delegation.
+    let causes = replacement::proposed_event_prompt_cause(state, &proposed, registry);
+    causes.contains(replacement::ReplacementPromptCause::OptionalCandidate)
+        || causes.contains(replacement::ReplacementPromptCause::OrderingMaterial)
 }
 
 /// CR 205: Extract the concrete `CoreType` set a `TypeFilter` counts, for the

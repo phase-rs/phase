@@ -145,6 +145,7 @@ pub mod public_state;
 pub mod quantity;
 pub mod replacement;
 pub mod replay;
+pub(crate) mod resolution_prompt;
 pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;

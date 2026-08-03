@@ -134,6 +134,13 @@ pub struct LoopCertificate {
     /// paths require an identical battlefield); wired now so an object-growth path
     /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
+    /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
+    /// producer that narrowed the CR 704 repetition bound (the bounded cycle offer).
+    /// `None` for every other offer, and for every save written before this field existed
+    /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
+    /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 impl LoopCertificate {
@@ -173,6 +180,11 @@ pub struct ShortcutProposal {
     /// streams (skip-if-none), so this is a byte-preserving addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
+    /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
+    /// authority for what a conformant cycle looks like. `None` for every offer whose
+    /// producer states no per-period signature (see [`LoopCertificate::per_cycle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the
@@ -271,6 +283,9 @@ pub fn detect_loop(
         // Invariant pinned by `residual_empty_for_constant_depth` (T12). (No CR
         // annotation: this is an invariant/plumbing comment, not rule-implementing code.)
         residual_board_delta: crate::analysis::resource::board_delta(cycle_start, cycle_end),
+        // CR 732.2a: `detect_loop` states no CR 704 repetition bound, so it publishes no
+        // per-period signature either. Only the bounded-cycle offer does.
+        per_cycle: None,
     })
 }
 
@@ -932,6 +947,7 @@ mod tests {
             win_kind: WinKind::LethalDamage,
             mandatory: true,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         };
         assert!(cert.covers(&[ResourceAxis::DamageDealt(pid(1))]));
         assert!(cert.covers(&[

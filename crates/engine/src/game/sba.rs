@@ -1917,8 +1917,17 @@ fn check_battle_protector(
         }
 
         // Compute legal choices.
+        // CR 310.11a: a Siege's controller "must choose its protector from among their
+        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
+        // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
+        // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
+        // PLACE: `is_alive` reads `Player::is_eliminated` while this reads
+        // `GameState::eliminated_players` — two different stores whose equivalence is not
+        // measured here, so deleting the redundant filter would smuggle an unmeasured
+        // behaviour change into a one-token routing.
         let legal_choices: Vec<PlayerId> = if is_siege {
-            crate::game::players::opponents(state, controller)
+            crate::game::players::choosable_opponents(state, controller)
                 .into_iter()
                 .filter(|p| !state.eliminated_players.contains(p))
                 .collect()

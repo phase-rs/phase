@@ -18,9 +18,9 @@ use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion, TargetFilter, TargetRef,
-    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
+    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
+    TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -6422,6 +6422,95 @@ pub(crate) fn opponent_dealt_damage_matches(
     false
 }
 
+/// CR 608.2c + CR 608.2h + CR 109.4: Did `player` possess a member of the most
+/// recent tracked object set matching `filter` (and `caused_by`, when bound)?
+///
+/// Single authority for `PlayerFilter::TrackedSetPossessor`, shared by the count
+/// path (`resolve_player_count`) and the recipient path
+/// (`effects::matches_player_scope`) — those two carry explicit "must stay in
+/// sync" contracts, so the predicate is written once and delegated to twice.
+///
+/// Set selection, the cause gate, and the live-vs-LKI filter branch mirror
+/// `QuantityRef::FilteredTrackedSetSize` exactly; only the final possession gate
+/// is new. `.any()` gives distinct-player semantics for free — a player who
+/// possessed three members is still one player.
+pub(crate) fn possessed_tracked_set_member(
+    state: &GameState,
+    player: PlayerId,
+    possession: PossessionAxis,
+    filter: &TargetFilter,
+    caused_by: Option<ThisWayCause>,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
+        return false;
+    };
+    let filter_ctx = FilterContext::from_source_with_controller(source_id, controller);
+    ids.iter().any(|&oid| {
+        // CR 608.2c + CR 614.6: an action-bound population ("a creature
+        // sacrificed this way") admits only members whose recorded producer
+        // ACTION equals the bound cause — keyed on the action, not the final
+        // zone, because CR 614.6 lets a replacement redirect the member
+        // elsewhere (a sacrifice sent to exile is still `Sacrificed`).
+        // `None` accepts every member.
+        let cause_ok = match caused_by {
+            None => true,
+            Some(cause) => state
+                .tracked_set_member_causes
+                .get(set_id)
+                .and_then(|causes| causes.get(&oid))
+                .is_some_and(|member_cause| *member_cause == cause),
+        };
+        if !cause_ok {
+            return false;
+        }
+        // CR 608.2h: a member that has left the battlefield is filtered on its
+        // last known information.
+        let matches_filter = if state.battlefield.contains(&oid) {
+            matches_target_filter(state, oid, filter, &filter_ctx)
+        } else {
+            state.lki_cache.get(&oid).map_or_else(
+                || matches_target_filter(state, oid, filter, &filter_ctx),
+                |lki| {
+                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        state,
+                        oid,
+                        lki,
+                        filter,
+                        &filter_ctx,
+                    )
+                },
+            )
+        };
+        if !matches_filter {
+            return false;
+        }
+        let holder = match possession {
+            PossessionAxis::Controller => {
+                if state.battlefield.contains(&oid) {
+                    // CR 109.4: an object ON the battlefield HAS a controller,
+                    // so read it live. Its `lki_cache` entry, if any, is a stale
+                    // snapshot from an EARLIER battlefield exit and must not win.
+                    state.objects.get(&oid).map(|o| o.controller)
+                } else {
+                    // CR 109.4 + CR 608.2h: off the battlefield it has NO
+                    // controller, so last known information is the only answer.
+                    // Deliberately NO owner fallback: crediting the owner is
+                    // precisely the wrong answer for a stolen creature, and a
+                    // silent one. A member that never was on the battlefield or
+                    // in exile has no LKI and matches nobody — correct, since
+                    // "who controlled it" is unanswerable under CR 109.4.
+                    state.lki_cache.get(&oid).map(|lki| lki.controller)
+                }
+            }
+            // CR 108.3: owner is stable across zone changes.
+            PossessionAxis::Owner => state.objects.get(&oid).map(|o| o.owner),
+        };
+        holder == Some(player)
+    })
+}
+
 /// Count players matching a PlayerFilter relative to the controller.
 pub(crate) fn resolve_player_count(
     state: &GameState,
@@ -6665,6 +6754,30 @@ pub(crate) fn resolve_player_count(
                                 state, p, controller, attr,
                             )
                             .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        }
+                        // CR 608.2c + CR 608.2h + CR 109.4: "for each opponent
+                        // who controlled a creature returned this way" — count
+                        // candidates satisfying both the `relation` predicate
+                        // and possession of a tracked-set member. Delegates to
+                        // the single authority shared with
+                        // `effects::matches_player_scope`.
+                        PlayerFilter::TrackedSetPossessor {
+                            relation,
+                            possession,
+                            filter,
+                            caused_by,
+                        } => {
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && possessed_tracked_set_member(
+                                state,
+                                p.id,
+                                *possession,
+                                filter,
+                                *caused_by,
+                                controller,
+                                source_id,
+                            )
                         }
                     }
             })
@@ -16293,6 +16406,170 @@ mod tests {
             count_for(None),
             4,
             "None must count every member of the set (legacy parity)"
+        );
+    }
+
+    /// H3 (issue #6943) — MULTI-AUTHORITY. CR 109.4: for a member that has left
+    /// the battlefield, the `Controller` axis reads the AT-EXIT CONTROLLER from
+    /// last known information (CR 608.2h), never the owner.
+    ///
+    /// The fixture is a stolen creature: owned by P0 (the caster), controlled by
+    /// P1 (an opponent) when it was bounced. "Each opponent who controlled a
+    /// creature returned this way" must count P1 — 1 player.
+    ///
+    /// This genuinely discriminates: an owner-keyed implementation (the mistake
+    /// `PlayerFilter::ZoneChangedThisWay` makes, which reads `obj.owner`) credits
+    /// P0, who is not an opponent, and the count is 0. The two readings differ,
+    /// so the fixture cannot pass under both.
+    #[test]
+    fn tracked_set_possessor_controller_axis_reads_lki_controller_not_owner() {
+        let mut state = GameState::new_two_player(42);
+        // Owned by P0, but P1 controlled it when it left the battlefield.
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stolen Creature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stolen).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.controller = PlayerId(1);
+        }
+        let lki = state.objects[&stolen].snapshot_public_characteristics();
+        assert_eq!(lki.owner, PlayerId(0), "fixture: owner is the caster");
+        assert_eq!(
+            lki.controller,
+            PlayerId(1),
+            "fixture: controller is the opponent — the two authorities MUST differ, \
+             or this fixture cannot discriminate"
+        );
+        // Bounce it: off the battlefield, so CR 109.4 leaves no live controller.
+        state.lki_cache.insert(stolen, lki);
+        state.battlefield.retain(|id| *id != stolen);
+        state.objects.get_mut(&stolen).unwrap().zone = Zone::Hand;
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![stolen]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "P1 CONTROLLED the returned creature — the Controller axis must credit them"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "P0 merely OWNED it — an owner-keyed implementation would wrongly credit them"
+        );
+        // H7: the same fixture read on the Owner axis flips the answer, proving
+        // `possession` is a live parameter rather than a dead one. CR 108.3.
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Owner,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the Owner axis must credit the owner (Kefka, Dancing Mad's reading)"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Owner,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the Owner axis must NOT credit the controller"
+        );
+    }
+
+    /// H8 (issue #6943) — LIVE vs LKI ordering. CR 109.4: an object that IS on
+    /// the battlefield HAS a controller, so it is read LIVE. Its `lki_cache`
+    /// entry may be a stale snapshot from an EARLIER battlefield exit (the
+    /// Sudden Salvation shape: permanents that died this turn and were returned)
+    /// and must not win.
+    ///
+    /// Revert discriminator: an LKI-first implementation reads P1 and both
+    /// assertions flip.
+    #[test]
+    fn tracked_set_possessor_prefers_live_controller_for_on_battlefield_member() {
+        let mut state = GameState::new_two_player(42);
+        let member = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Permanent".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.controller = PlayerId(0);
+        }
+        // A STALE snapshot from an earlier battlefield exit naming a different
+        // controller. It must be ignored while the object is on the battlefield.
+        let mut stale_lki = state.objects[&member].snapshot_public_characteristics();
+        stale_lki.controller = PlayerId(1);
+        state.lki_cache.insert(member, stale_lki);
+        assert!(
+            state.battlefield.contains(&member),
+            "fixture: the member must be ON the battlefield for this branch"
+        );
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the LIVE controller must win for an on-battlefield member"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the STALE LKI controller must not win for an on-battlefield member"
         );
     }
 

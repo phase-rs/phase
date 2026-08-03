@@ -624,10 +624,13 @@ fn compute_options(
         // satisfying that `PlayerFilter` — the controller then picks ONE of the
         // qualifying opponents (CR 608.2d handles ties), keeping it a single
         // pick rather than fanning the effect out to every tied opponent.
+        // CR 608.2d: "The player can't choose an option that's illegal or impossible" —
+        // a CHOICE, not a target (CR 115.10a), so the option list is the CHOOSABLE
+        // opponents. The distinctness and restriction filters below are untouched.
         ChoiceType::Opponent {
             restriction,
             distinctness,
-        } => players::opponents(state, controller)
+        } => players::choosable_opponents(state, controller)
             .iter()
             .filter(|id| {
                 *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
@@ -640,13 +643,20 @@ fn compute_options(
             })
             .map(|id| id.0.to_string())
             .collect(),
-        // CR 102.1: A player is one of the people in the game.
+        // CR 102.1: A player is one of the people in the game — so a seat that has LEFT
+        // the game (CR 800.4) is not one of the people to choose among, and neither is a
+        // phased-out seat (per the CR 702.26b MIRROR). CR 608.2d: the player can't choose
+        // an illegal option. `state.seat_order` is NOT pruned on elimination by any
+        // production writer, so without this conjunct the arm offers eliminated seats —
+        // a defect independent of phasing, and one every sibling choice seam already
+        // avoids.
         // CR 608.2c: `DistinctFromPriorChoices` (Gluntch's "choose a
         // second/third player") excludes players already chosen earlier in
         // this resolution; the default `Independent` does not.
         ChoiceType::Player { distinctness } => state
             .seat_order
             .iter()
+            .filter(|&&id| players::player_exists_for_choice(state, id))
             .filter(|id| {
                 *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
                     || !already_chosen.contains(id)
@@ -1318,6 +1328,102 @@ mod tests {
                 );
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    /// The shared 5-seat choice-legality board: P0 controller, **P1 phased out** through
+    /// the production API, **P2 eliminated**, P3/P4 valid.
+    ///
+    /// FIVE seats, not three, and that is a reach-guard rather than padding: `resolve`
+    /// early-returns when `options.is_empty()` and never publishes `NamedChoice` at all,
+    /// so a board narrow enough to empty the list would make every exclusion assertion
+    /// below pass vacuously.
+    fn choice_legality_board() -> GameState {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut events = Vec::new();
+
+        // Anti-vacuity on the SETUP, asserted before anything is measured:
+        // `phase_out_player` returns the ids it transitioned, so a setup that silently
+        // no-opped fails loudly here instead of quietly weakening the row.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(
+            state.players[1].is_phased_out(),
+            "P1 must read as phased out after the production call"
+        );
+
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "P2 must read as eliminated after the production call"
+        );
+        state
+    }
+
+    /// CR 102.1 ("a player is one of the people in the game") + CR 608.2d ("the player
+    /// can't choose an option that's illegal or impossible"): "choose a player" must offer
+    /// neither an eliminated nor a phased-out seat.
+    ///
+    /// TWO INDEPENDENT BEHAVIOUR CHANGES, and this row asserts both. The eliminated seat
+    /// `"2"` was offered at HEAD — a strictly-live CR 102.1 defect with nothing to do with
+    /// phasing, because `state.seat_order` is not pruned on elimination and this arm
+    /// filtered only on `already_chosen`. The phased-out seat `"1"` is the phasing half.
+    ///
+    /// Total equality, never `!contains`: exclusion AND identity in one assertion.
+    ///
+    /// REVERT-PROBE: restore the raw `state.seat_order.iter()` ⇒ `"1"` and `"2"` both
+    /// reappear ⇒ FAILS. SECOND, NARROWER REVERT-PROBE: replace `player_exists_for_choice`
+    /// with bare `is_alive` ⇒ `"1"` reappears while `"2"` stays out ⇒ FAILS. The second
+    /// probe is what stops either behaviour change being credited to the other.
+    #[test]
+    fn choose_a_player_offers_neither_an_eliminated_nor_a_phased_out_seat() {
+        let mut state = choice_legality_board();
+        let ability = make_choose_ability(ChoiceType::player());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["0", "3", "4"],
+                    "phased-out P1 and eliminated P2 are out; the controller and both \
+                     valid seats are in"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d: "choose an opponent" must offer neither an eliminated nor a phased-out
+    /// seat.
+    ///
+    /// R4n and R4m are each other's ATTRIBUTION CONTROL: same board, same resolver, same
+    /// `compute_options` call, differing only in the `ChoiceType` arm — so a green pair
+    /// proves each fix landed on the arm it claims to rather than on shared machinery.
+    ///
+    /// REVERT-PROBE: restore `players::opponents` at the `ChoiceType::Opponent` arm ⇒
+    /// `"1"` reappears ⇒ FAILS.
+    #[test]
+    fn choose_an_opponent_offers_neither_an_eliminated_nor_a_phased_out_seat() {
+        let mut state = choice_legality_board();
+        let ability = make_choose_ability(ChoiceType::opponent());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["3", "4"],
+                    "phased-out P1 and eliminated P2 are out; both valid opponents are in"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {other:?}"),
         }
     }
 

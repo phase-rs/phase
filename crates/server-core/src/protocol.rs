@@ -6,6 +6,7 @@ use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::InteractionSubmission;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -156,6 +157,19 @@ pub enum ClientMessage {
     PreviewManaPayment {
         request_id: u64,
         action: GameAction,
+    },
+    /// One opaque, engine-authored interaction response. The client echoes the
+    /// submission the engine published in `ViewerInteraction`; it never derives
+    /// a `GameAction` from the opportunity schema. Like `Action`, the
+    /// authenticated session — not the payload — determines the acting seat.
+    ///
+    /// Unlike `Action`, a bounds rejection on this variant is answered on
+    /// `ServerMessage::ActionRejected`, not `ServerMessage::Error`: a free-form
+    /// `Text` response can exceed `MAX_INTERACTION_STRING_LEN` by an ordinary
+    /// paste, and the native client tears the session down on any `Error`.
+    /// See `client_message_wire_guard::wire_rejection_message`.
+    Interaction {
+        submission: InteractionSubmission,
     },
     Reconnect {
         game_code: String,

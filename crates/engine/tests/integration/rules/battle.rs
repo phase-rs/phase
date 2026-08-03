@@ -365,6 +365,150 @@ fn battle_with_no_legal_protector_goes_to_graveyard() {
     ));
 }
 
+/// R4l — CR 310.11a (*"must choose its protector from among their opponents"*) +
+/// CR 704.5w (*"no player **in the game** designated as its protector"*): the protector
+/// pick is a CHOICE (CR 115.10a), so a phased-out seat is not among the choosable
+/// opponents (the CR 702.26b MIRROR), and a departed one is not either (CR 800.4 +
+/// CR 102.1).
+///
+/// THE SHARED 5-SEAT BOARD: P0 controls the Siege, P1 is phased out, P2 eliminated, P3/P4
+/// valid. Nothing in this file exercises phasing at all — every existing row asserts the
+/// behaviour 5c changes — so the shapes below are copied and the setups are not.
+///
+/// ARM 1 of three (the other two are `..._crosses_to_a_silent_auto_apply` and
+/// `..._crosses_to_the_graveyard`). Arm 1 is the published-prompt arm: two survivors keep
+/// `legal_choices.len() >= 2`, which is the reach-guard — below that the SBA takes a branch
+/// that publishes nothing and every `candidates` assertion would be unreachable.
+///
+/// REVERT-PROBE: restore `players::opponents` at the `legal_choices` derivation ⇒ P1
+/// reappears ⇒ the total equality FAILS.
+#[test]
+fn battle_protector_choice_excludes_a_phased_out_opponent_and_still_offers_the_rest() {
+    let (mut runner, battle) = phased_protector_board(&[P1]);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    match runner.state().waiting_for.clone() {
+        WaitingFor::BattleProtectorChoice {
+            player,
+            battle_id,
+            candidates,
+        } => {
+            assert_eq!(player, P0);
+            assert_eq!(battle_id, battle);
+            assert_eq!(
+                candidates,
+                vec![PlayerId(3), PlayerId(4)],
+                "phased-out P1 and eliminated P2 are out; both valid opponents are in"
+            );
+        }
+        other => panic!("Expected BattleProtectorChoice, got {other:?}"),
+    }
+}
+
+/// R4l arm 2 — THE `2 → 1` CROSSING, which is the hazard this site is actually about.
+///
+/// Narrowing the choosable set moves a board across `legal_choices.len()`'s branch
+/// boundary, and at `1` the engine writes the protector ITSELF and publishes nothing: no
+/// `WaitingFor`, no events. That is invisible to every `candidates` assertion the R4-family
+/// shape prescribes, so it needs its own arm. The auto-applied seat is not wrong — it is
+/// the sole surviving legal opponent, which CR 310.10 / CR 310.11a make the only
+/// appropriate player. What this arm guards is the SILENT DISAPPEARANCE of the prompt.
+///
+/// BOTH halves are required: (a) alone would pass on a board where the SBA never ran at
+/// all, and (b) alone would pass if the prompt had ALSO been published.
+///
+/// The crossing is reached by PHASING, not by board size — `battle_protector_auto_applies_
+/// with_single_candidate_2p` reaches `1` because its board has one opponent, which cannot
+/// witness a narrowing. It is also not reached by elimination: that is the A5 confound,
+/// which additionally ends the game.
+///
+/// REVERT-PROBE: restore `players::opponents` at site 14 ⇒ both phased-out seats return ⇒
+/// `legal_choices` is `[P1, P3, P4]` ⇒ `len() >= 2` ⇒ the prompt returns ⇒ (a) FAILS.
+#[test]
+fn battle_protector_narrowing_to_one_auto_applies_silently() {
+    let (mut runner, battle) = phased_protector_board(&[P1, PlayerId(4)]);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    // (a) the prompt is NOT published…
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::BattleProtectorChoice { .. }
+        ),
+        "one surviving legal opponent ⇒ the singleton branch, which publishes nothing"
+    );
+    // (b) …and the SBA did run: it wrote the sole surviving legal opponent as protector.
+    assert_eq!(
+        runner.state().objects[&battle].protector(),
+        Some(PlayerId(3)),
+        "the auto-applied seat is the ONLY surviving legal opponent (CR 310.11a)"
+    );
+    assert!(runner.state().battlefield.contains(&battle));
+}
+
+/// R4l arm 3 — the `→ 0` crossing: with every opponent phased out there is no appropriate
+/// player, and CR 310.10 / CR 704.5w put the battle into its owner's graveyard.
+///
+/// Reached by PHASING rather than by elimination on purpose: eliminating every opponent
+/// also ends the game (`waiting_for = GameOver`), which would confound the assertions with
+/// a game-over transition. Phasing keeps the table live, so what this arm reads is the
+/// battle rule and nothing else — asserted below.
+#[test]
+fn battle_protector_narrowing_to_zero_sends_the_battle_to_the_graveyard() {
+    let (mut runner, battle) = phased_protector_board(&[P1, PlayerId(3), PlayerId(4)]);
+
+    let mut events = Vec::new();
+    sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    assert_eq!(runner.state().objects[&battle].zone, Zone::Graveyard);
+    assert!(!runner.state().battlefield.contains(&battle));
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::BattleProtectorChoice { .. }
+    ));
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "the table must still be LIVE — reaching 0 by phasing rather than by elimination \
+         is what keeps this arm about CR 310.10 instead of about the game ending"
+    );
+}
+
+/// The shared choice-legality board for R4l's three arms: five seats, P0 controls a Siege
+/// seeded with the illegal `protector == controller` (CR 704.5x) so the SBA fires, P2
+/// eliminated, and each seat in `phase_out` transitioned through the PRODUCTION phasing
+/// API. Every arm differs ONLY in that list, which is what makes them one crossing series
+/// rather than three unrelated boards.
+fn phased_protector_board(phase_out: &[PlayerId]) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(5, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let battle = scenario.add_creature(P0, "Contested Siege", 0, 0).id();
+    let mut runner = scenario.build();
+    make_into_siege(&mut runner, battle, P0, 3);
+
+    let mut events = Vec::new();
+    for seat in phase_out {
+        // Setup anti-vacuity: the production API reports what it transitioned, so a
+        // silent no-op fails loudly here rather than quietly weakening the arm.
+        let transitioned =
+            engine::game::phasing::phase_out_player(runner.state_mut(), *seat, &mut events);
+        assert_eq!(
+            transitioned,
+            vec![*seat],
+            "phase_out_player must actually transition {seat:?}"
+        );
+    }
+    engine::game::elimination::eliminate_player(runner.state_mut(), PlayerId(2), &mut events);
+    assert!(
+        runner.state().players[2].is_eliminated,
+        "P2 must read as eliminated"
+    );
+    (runner, battle)
+}
+
 /// CR 310.10 + CR 704.5w: AI routing — when the 3-player SBA pauses with a
 /// protector choice, `legal_actions` emits one `ChooseBattleProtector` candidate
 /// per legal opponent, so the AI has a deterministic decision surface.

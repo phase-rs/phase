@@ -48,7 +48,7 @@
     "updated": "atualizado"
   },
   "comboDetector": {
-    "label": "Detector de combos",
+    "label": "Detector de combos (experimental)",
     "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente e mostrar recursos ∞ (desativado por padrão)",
     "on": "Ligado",
     "off": "Desligado",

@@ -77,6 +77,29 @@ impl Layer {
 }
 
 impl ContinuousModification {
+    /// CR 613.2a: whether this modification is applied in layer 1 (copy).
+    ///
+    /// Panic-free companion to [`Self::layer`]. Six of `layer`'s arms are
+    /// `unreachable!()` — `AddCounterOnEnter`, `SetStartingLoyalty`,
+    /// `RemoveManaCost` and the three combat-assignment variants are consumed at
+    /// copy resolution and never layered — so asking an arbitrary modification
+    /// (one read out of a `CopyValues` payload, say) for its layer can abort.
+    /// This answers the only layer question sublayer 1a needs without that
+    /// hazard. The variant list is exactly `layer`'s `Layer::Copy` set;
+    /// `copy_grants_continuous_static_covers_every_copy_layer_variant`
+    /// (`game/layers.rs`) pins the two together.
+    pub fn is_copy_layer(&self) -> bool {
+        matches!(
+            self,
+            ContinuousModification::CopyValues { .. }
+                | ContinuousModification::CopyChosen
+                | ContinuousModification::SetName { .. }
+                | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+                | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+                | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        )
+    }
+
     /// Returns the appropriate Layer for this modification type.
     pub fn layer(&self) -> Layer {
         match self {

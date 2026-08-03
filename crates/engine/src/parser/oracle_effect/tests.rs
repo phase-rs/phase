@@ -24242,6 +24242,189 @@ fn exile_all_creatures_and_spacecraft_lowers_to_mass_zone_change() {
     }
 }
 
+/// CR 406.2 + CR 404.1 (Ultimate Nullification): "Exile all creatures
+/// and graveyards" is ONE mass exile spanning the battlefield and every
+/// graveyard — a single `ChangeZoneAll { Or[Creature+InZone(BF),
+/// Card+InAnyZone([Graveyard])] }`, never a creature wipe plus an orphaned
+/// `Unimplemented { "graveyards" }` conjunct (the pre-fix parse). The self-return
+/// tail (`Put ~ on the bottom of its owner's library`) chains as a
+/// `PutAtLibraryPosition { SelfRef, Bottom }`.
+#[test]
+fn ultimate_nullification_exiles_creatures_and_all_graveyards() {
+    let def = parse_effect_chain(
+        "Exile all creatures and graveyards. Put ~ on the bottom of its owner's library.",
+        AbilityKind::Spell,
+    );
+
+    let target = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected ChangeZoneAll to Exile, got {other:?}"),
+    };
+    let filters = match target {
+        TargetFilter::Or { filters } => filters,
+        other => panic!("expected an Or of a battlefield leg and a graveyard leg, got {other:?}"),
+    };
+    // Battlefield creature leg: Typed(Creature) scoped to the battlefield so
+    // `extract_zones` yields Battlefield ∪ Graveyard.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )),
+        "missing battlefield creature leg, got {filters:?}"
+    );
+    // Whole-graveyard leg: every card (`TypeFilter::Card`), every owner
+    // (`controller: None`), in the graveyard zone.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.controller.is_none()
+                    && tf.properties.contains(&FilterProp::InAnyZone { zones: vec![Zone::Graveyard] })
+        )),
+        "missing all-cards all-graveyards leg, got {filters:?}"
+    );
+
+    // No coverage-gap sentinel anywhere in the lowered chain — the pre-fix parse
+    // emitted `Effect::Unimplemented { name: "graveyards" }`.
+    fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+    assert!(
+        !chain_has_unimplemented(&def),
+        "chain must not retain an Unimplemented node: {def:#?}"
+    );
+
+    // The self-return tail: put the spell on the bottom of its owner's library.
+    fn find_put_at_library(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if matches!(*ability.effect, Effect::PutAtLibraryPosition { .. }) {
+            return Some(ability);
+        }
+        ability.sub_ability.as_deref().and_then(find_put_at_library)
+    }
+    let put = find_put_at_library(&def).expect("expected a PutAtLibraryPosition tail");
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                position: LibraryPosition::Bottom,
+                ..
+            }
+        ),
+        "self-return must be PutAtLibraryPosition {{ SelfRef, Bottom }}, got {:?}",
+        put.effect
+    );
+}
+
+/// Reach-guard: a pure permanent-type union with NO zone leg ("Exile all
+/// creatures and artifacts") must be DECLINED by the heterogeneous recognizer and
+/// keep the existing type-union lowering — crucially with NO `InZone(Battlefield)`
+/// scoping injected (that belongs only to the mixed permanent+zone form).
+#[test]
+fn exile_permanents_and_zones_declines_pure_type_union() {
+    let def = parse_effect_chain("Exile all creatures and artifacts.", AbilityKind::Spell);
+    let filters = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target: TargetFilter::Or { filters },
+            ..
+        } => filters,
+        other => panic!("expected ChangeZoneAll with an Or filter, got {other:?}"),
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected exactly Creature/Artifact legs, got {filters:?}"
+    );
+    assert!(
+        filters
+            .iter()
+            .all(|f| matches!(f, TargetFilter::Typed(tf) if tf.properties.is_empty())),
+        "pure type union must carry no InZone scoping, got {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)
+        )),
+        "expected a Creature leg, got {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Artifact)
+        )),
+        "expected an Artifact leg, got {filters:?}"
+    );
+}
+
+/// Generalization: the zone-union tail is a building block, not a "graveyards"
+/// special case — "Exile all creatures and graveyards and hands" carries both
+/// zones on the whole-zone leg's `InAnyZone`.
+#[test]
+fn exile_permanents_and_zones_generalizes_to_multiple_zones() {
+    let def = parse_effect_chain(
+        "Exile all creatures and graveyards and hands.",
+        AbilityKind::Spell,
+    );
+    let filters = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target: TargetFilter::Or { filters },
+            ..
+        } => filters,
+        other => panic!("expected ChangeZoneAll with an Or filter, got {other:?}"),
+    };
+    // Battlefield permanent leg: the "creatures" operand scoped to the
+    // battlefield — validated from the same `filters` result as the zone leg so
+    // the union really carries both.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )),
+        "expected a Creature + InZone(Battlefield) leg, got {filters:?}"
+    );
+    // Whole-zone leg: every card, every owner, across both trailing zones.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.properties.contains(&FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard, Zone::Hand]
+                    })
+        )),
+        "expected a Card + InAnyZone([Graveyard, Hand]) leg, got {filters:?}"
+    );
+}
+
+// NOTE: the Thought Distortion regression now lives at the PRODUCTION boundary
+// (`crate::database::synthesis` tests →
+// `thought_distortion_declines_recognizer_at_production_boundary`), which parses
+// the card's COMPLETE Oracle text through `build_oracle_face` and asserts the
+// preserved `RevealHand`→opponent binding and `ChangeZoneAll { origin: Hand }`
+// shape — a stronger guard than an isolated-sentence `parse_effect_chain` call.
+
 #[test]
 fn parse_put_on_top_or_bottom_possessive() {
     // "Target creature's owner puts it on their choice of the top or bottom of their library."
@@ -39535,11 +39718,29 @@ fn identity_crisis_parses_multi_zone_player_exile() {
 #[test]
 fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     use crate::types::ability::ControllerRef;
+    // Bare "cards" form (CR 108.2): no type restriction (empty type_filters).
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
             "cards from target player's hand and graveyard."
         ),
         Some((
+            vec![],
+            ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        ))
+    );
+    // Type-qualified form (CR 205.2a): carries the noncreature/nonland restriction
+    // AND the owner scope AND the zone union (Thought Distortion).
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "noncreature, nonland cards from that player's hand and graveyard."
+        ),
+        Some((
+            vec![
+                TypeFilter::Card,
+                TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
             ControllerRef::TargetPlayer,
             vec![Zone::Hand, Zone::Graveyard]
         ))

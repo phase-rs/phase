@@ -48,7 +48,7 @@
     "updated": "zaktualizowano"
   },
   "comboDetector": {
-    "label": "Wykrywacz combosów",
+    "label": "Wykrywacz combosów (eksperymentalne)",
     "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
     "on": "Wł.",
     "off": "Wył.",

@@ -325,13 +325,35 @@ pub fn run_perf_suite(
 ) -> PerfReport {
     let start = Instant::now();
     let mut counters = PerfCounters::default();
-    for id in scenarios {
+    for (n, id) in scenarios.iter().enumerate() {
         let spec = find_matchup(id)
             .unwrap_or_else(|| panic!("perf scenario id '{id}' does not resolve via find_matchup"));
         let (payload, _p0, _p1) = resolve_matchup(db, spec)
             .unwrap_or_else(|err| panic!("perf scenario '{id}' failed to resolve decks: {err}"));
+        // Progress goes to STDERR only: the parent gate runs its children with
+        // `Stdio::null()` on stdout precisely so its own markdown table stays clean
+        // (`bin/ai_perf_gate.rs:185`), and stderr is inherited so these lines reach
+        // the CI log. Without them a killed sample leaves no evidence at all — the
+        // report is written once, after every scenario has finished.
+        let scenario_start = Instant::now();
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' start (seed={seed} action_cap={action_cap})",
+            n = n + 1,
+            total = scenarios.len(),
+        );
         let snapshot = run_perf_scenario(&payload, seed, action_cap);
-        counters.merge_add(&PerfCounters::from_snapshot(&snapshot));
+        let scenario_counters = PerfCounters::from_snapshot(&snapshot);
+        // One JSON line per scenario: a killed child still leaves a machine-readable
+        // partial payload for every scenario that did finish.
+        eprintln!(
+            "perf scenario {n}/{total} '{id}' done {ms}ms counters={json}",
+            n = n + 1,
+            total = scenarios.len(),
+            ms = scenario_start.elapsed().as_millis(),
+            json = serde_json::to_string(&scenario_counters)
+                .unwrap_or_else(|e| format!("<unserializable: {e}>")),
+        );
+        counters.merge_add(&scenario_counters);
     }
     let wall_clock_ms = start.elapsed().as_millis();
 

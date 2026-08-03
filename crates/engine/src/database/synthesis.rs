@@ -10766,6 +10766,165 @@ mod cycling_synthesis_tests {
         );
     }
 
+    /// Thought Distortion (PR #6940), production boundary (`build_oracle_face`):
+    /// "Exile all noncreature, nonland cards from that player's hand and
+    /// graveyard" lowers to ONE owner-scoped, type-restricted, multi-zone exile —
+    /// not a hand-only wipe plus an orphaned `Unimplemented { "graveyard" }` (the
+    /// pre-PR parse), and never the mis-parse that injected `InZone(Battlefield)`
+    /// and dropped the noncreature/nonland restriction. The asserted shape:
+    ///   - `RevealHand` targeting the Opponent (the parse-chain antecedent that
+    ///     the exile's "that player" anaphor resolves to — template/anaphora
+    ///     resolution, not a numbered rule),
+    ///   - a single `ChangeZoneAll` to Exile with `origin: None` (the zone union
+    ///     rides on the filter) whose `Typed` filter carries the
+    ///     `Non(Creature)`/`Non(Land)` restriction (CR 205.2a), the
+    ///     `ControllerRef::TargetPlayer` owner scope (CR 400.3), and
+    ///     `InAnyZone([Hand, Graveyard])` (CR 402.1 + CR 404.1) — with NO
+    ///     `InZone(Battlefield)`,
+    ///   - and NO remaining coverage gap (`card_face_gaps` is empty).
+    #[test]
+    fn thought_distortion_owner_scoped_multizone_exile_at_production_boundary() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        use crate::types::ability::{AbilityDefinition, ControllerRef, TypeFilter};
+        use crate::types::zones::Zone;
+
+        let oracle = "This spell can't be countered.\n\
+                      Target opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.";
+        let mtgjson = AtomicCard {
+            name: "Thought Distortion".to_string(),
+            mana_cost: Some("{4}{B}{B}".to_string()),
+            colors: vec!["B".to_string()],
+            color_identity: vec!["B".to_string()],
+            text: Some(oracle.to_string()),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 6.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("5f089ac6-9e92-4ec2-bf46-a0b08d1e2979".to_string()),
+                scryfall_id: Some("thought-distortion-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        // The reveal names the target opponent; the exile's "that player" anaphor
+        // resolves to that same antecedent (parser-chain behavior, not a CR rule).
+        let reveal = face
+            .abilities
+            .iter()
+            .find(|a| matches!(&*a.effect, Effect::RevealHand { .. }))
+            .expect("Thought Distortion must parse a RevealHand ability");
+        match &*reveal.effect {
+            Effect::RevealHand { target, .. } => assert!(
+                matches!(
+                    target,
+                    TargetFilter::Typed(tf)
+                        if tf.controller == Some(crate::types::ability::ControllerRef::Opponent)
+                ),
+                "RevealHand must target the opponent, got {target:?}"
+            ),
+            _ => unreachable!(),
+        }
+
+        // Walk the whole chain and locate the hand-exile ChangeZoneAll.
+        fn walk<'a>(a: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+            out.push(a);
+            if let Some(sub) = a.sub_ability.as_deref() {
+                walk(sub, out);
+            }
+            if let Some(els) = a.else_ability.as_deref() {
+                walk(els, out);
+            }
+        }
+        let mut chain = Vec::new();
+        for a in &face.abilities {
+            walk(a, &mut chain);
+        }
+
+        let exile = chain
+            .iter()
+            .find_map(|a| match &*a.effect {
+                Effect::ChangeZoneAll {
+                    destination: Zone::Exile,
+                    origin,
+                    target,
+                    ..
+                } => Some((origin, target)),
+                _ => None,
+            })
+            .expect("must lower to a ChangeZoneAll to Exile");
+        let (origin, target) = exile;
+
+        // Multi-zone origin rides on the filter, so the lowering passes None.
+        assert_eq!(
+            *origin, None,
+            "multi-zone exile carries its origin on the filter (InAnyZone), so origin is None"
+        );
+
+        // A single Typed leg (never an Or) carrying: the noncreature/nonland
+        // restriction, the target-player owner scope, and the hand+graveyard zone
+        // union — with NO battlefield injection.
+        let tf = match target {
+            TargetFilter::Typed(tf) => tf,
+            other => panic!("exile target must be a single Typed leg, got {other:?}"),
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                && tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+            "noncreature/nonland restriction must survive, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::TargetPlayer),
+            "the exile must be owner-scoped to the targeted player, got {:?}",
+            tf.controller
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard)
+            )),
+            "the zone union must span Hand and Graveyard, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield
+            }),
+            "no InZone(Battlefield) may be injected, got {:?}",
+            tf.properties
+        );
+
+        // The whole card is now supported: no coverage gap remains.
+        assert!(
+            crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "Thought Distortion must be fully supported, gaps: {:?}",
+            crate::game::coverage::card_face_gaps(&face)
+        );
+    }
+
     /// MSH Wave 2 (Storm, Queen of Wakanda): MTGJSON phantom-tags the Storm keyword
     /// (CR 702.40) because the card's name embeds the word "Storm". The synthesis
     /// name-guard must drop the uncorroborated Storm keyword while keeping the real

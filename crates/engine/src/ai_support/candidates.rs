@@ -3037,12 +3037,14 @@ pub fn candidate_actions_broad_with_probe(
         // accepted at `Fixed(0)`). Clamp, or the generator's sole candidate is rejected by
         // the reducer's `amount > max` guard and the AI has no legal action at this prompt.
         //
-        // Unreachable for the AI *today* and deliberately kept correct anyway: the AI's own
-        // `WaitingFor::LoopShortcut` arm below only ever proposes `IterationCount::
-        // UntilLethal`, which routes to `apply_until_lethal_shortcut` and never reaches
-        // `materialize_fixed_shortcut` — the only path that registers a stash. So no
-        // AI-declared shortcut currently produces this prompt; a human-declared one in a
-        // mixed game, or a future bounded AI offer, does.
+        // AI-reachable since the bounded fast-forward landed, which is what stales the older
+        // "the arm below only ever proposes `UntilLethal`" note this replaces: the
+        // `WaitingFor::LoopShortcut` arm below also proposes `Fixed(max_iterations)` against a
+        // bounded offer that publishes no pins, and only a `Fixed` count routes through
+        // `materialize_fixed_shortcut` — the single path that registers the stash `turns.rs`
+        // turns into this prompt. `UntilLethal` still routes to `apply_until_lethal_shortcut`
+        // and never gets here; it is now also not offered against a bounded offer at all. A
+        // human-declared shortcut in a mixed game reaches this prompt too.
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
@@ -3232,21 +3234,60 @@ pub fn candidate_actions_broad_with_probe(
         // policy/search layer, rather than the candidate generator, decides whether an AI
         // proposer declares or returns to ordinary priority.
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
-        WaitingFor::LoopShortcut { proposer, .. } => vec![
-            candidate(
-                GameAction::DeclareShortcut {
-                    count: crate::analysis::decision_template::IterationCount::UntilLethal,
-                    template: None,
-                },
-                TacticalClass::Utility,
-                Some(*proposer),
-            ),
-            candidate(
+        WaitingFor::LoopShortcut {
+            proposer, schema, ..
+        } => {
+            // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
+            // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
+            // a bounded one (`IterationCount::UntilLethal if offer.schema.is_bounded()` =>
+            // `reject_shortcut_declaration`), and that reject is a SUCCESSFUL, fail-closed
+            // handback to priority — `Ok(result)`, not an `Err`. So an unconditional
+            // `UntilLethal` candidate did not merely waste a search node: it handed the
+            // simulation layer an action the engine ACCEPTS and then silently discards,
+            // i.e. an illegal quantity choice wearing the shape of a legal one, which the
+            // policy layer then has to know to score away.
+            //
+            // Emit only the quantity choices the offer can actually take. A bounded offer
+            // gets `Fixed(max_iterations)` below when its pin set permits a `template: None`
+            // declaration; where neither applies, `DeclineShortcut` really is the only legal
+            // answer at the node, and representing that honestly is the point.
+            let mut v = Vec::new();
+            if !schema.is_bounded() {
+                v.push(candidate(
+                    GameAction::DeclareShortcut {
+                        count: crate::analysis::decision_template::IterationCount::UntilLethal,
+                        template: None,
+                    },
+                    TacticalClass::Utility,
+                    Some(*proposer),
+                ));
+            }
+            // CR 732.2a: a BOUNDED offer states a legal repetition count, and the declare
+            // handler rejects `UntilLethal` against one outright — so without this candidate
+            // the AI's only non-declining option at such a node is an answer the engine
+            // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
+            // authority for "this producer narrowed the bound"; do NOT re-spell it as a
+            // comparison against `MAX_SHORTCUT_CYCLES`. Gated on empty `points` because this
+            // candidate carries `template: None`, which a published pin set fail-closes on.
+            if schema.points.is_empty() && schema.is_bounded() {
+                v.push(candidate(
+                    GameAction::DeclareShortcut {
+                        count: crate::analysis::decision_template::IterationCount::Fixed(
+                            schema.max_iterations,
+                        ),
+                        template: None,
+                    },
+                    TacticalClass::Utility,
+                    Some(*proposer),
+                ));
+            }
+            v.push(candidate(
                 GameAction::DeclineShortcut,
                 TacticalClass::Pass,
                 Some(*proposer),
-            ),
-        ],
+            ));
+            v
+        }
         // CR 732.2b/c: an opponent answers a loop-shortcut offer. PR-7 Phase 4c (LOW-2):
         // self-preservation via the single-authority `smart_shortcut_response` — Shorten
         // when the polled player has a meaningful way to break the loop, else Accept.
@@ -5234,6 +5275,7 @@ mod tests {
                 win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
                 mandatory: false,
                 residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
         };

@@ -1929,6 +1929,30 @@ fn collect_matching_players(
                         )
                         .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
+                    // CR 608.2c + CR 608.2h + CR 109.4: candidate satisfies both
+                    // `relation` and possession of a member of the most recent
+                    // tracked object set. Delegates to the shared authority.
+                    PlayerFilter::TrackedSetPossessor {
+                        ref relation,
+                        ref possession,
+                        ref filter,
+                        ref caused_by,
+                    } => {
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            source_controller,
+                            *relation,
+                        ) && crate::game::quantity::possessed_tracked_set_member(
+                            state,
+                            p.id,
+                            *possession,
+                            filter,
+                            *caused_by,
+                            source_controller,
+                            source_id,
+                        )
+                    }
                 }
         })
         .map(|p| p.id)
@@ -2171,6 +2195,30 @@ pub fn resolve_each_player(
                             attr,
                         )
                         .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                    }
+                    // CR 608.2c + CR 608.2h + CR 109.4: candidate satisfies both
+                    // `relation` and possession of a member of the most recent
+                    // tracked object set. Delegates to the shared authority.
+                    PlayerFilter::TrackedSetPossessor {
+                        relation,
+                        possession,
+                        filter,
+                        caused_by,
+                    } => {
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            ability.controller,
+                            *relation,
+                        ) && crate::game::quantity::possessed_tracked_set_member(
+                            state,
+                            p.id,
+                            *possession,
+                            filter,
+                            *caused_by,
+                            ability.controller,
+                            ability.source_id,
+                        )
                     }
                 }
         })

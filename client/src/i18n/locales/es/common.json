@@ -48,7 +48,7 @@
     "updated": "actualizado"
   },
   "comboDetector": {
-    "label": "Detector de combos",
+    "label": "Detector de combos (experimental)",
     "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
     "on": "Activado",
     "off": "Desactivado",

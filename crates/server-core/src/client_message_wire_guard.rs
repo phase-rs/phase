@@ -2,8 +2,15 @@
 //! variant before handler dispatch and broker projection clones.
 //!
 //! Individual handlers still run their guards for defense in depth; this layer
-//! guarantees a single exhaustive match so new variants must declare wire policy
+//! guarantees that every wire policy is declared in an exhaustive, wildcard-free
+//! match, so a new `ClientMessage` variant cannot compile until it states one,
 //! and broker-projected frames are bounded before `to_lobby_client_message` clones.
+//!
+//! Three such matches live here, one per policy axis:
+//! [`guard_client_message_before_dispatch`] (payload bounding),
+//! [`wire_rejection_message`] (which channel a rejection is answered on), and
+//! [`guard_broker_projection_inbound`] (broker projection). A new variant must
+//! declare a policy in all three.
 
 use lobby_broker::inbound_guard::{
     guard_create_game_settings_inbound, guard_join_game_with_password_inbound,
@@ -25,9 +32,10 @@ use crate::draft_wire_guard::{
 use crate::emote_guard::guard_emote;
 use crate::game_action_payload_guard::guard_game_action_payload;
 use crate::game_reconnect_guard::guard_game_reconnect;
+use crate::interaction_payload_guard::guard_interaction_submission_payload;
 use crate::legacy_deck_guard::guard_legacy_deck;
 use crate::legacy_join_guard::guard_legacy_join_game;
-use crate::protocol::{ClientMessage, ServerMode};
+use crate::protocol::{ClientMessage, ServerMessage, ServerMode};
 use crate::seat_mutation_wire_guard::guard_seat_mutation;
 use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 
@@ -49,6 +57,9 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::JoinGame { game_code, deck } => guard_legacy_join_game(game_code, deck),
         ClientMessage::Action { action } | ClientMessage::PreviewManaPayment { action, .. } => {
             guard_game_action_payload(action)
+        }
+        ClientMessage::Interaction { submission } => {
+            guard_interaction_submission_payload(submission)
         }
         ClientMessage::Reconnect {
             game_code,
@@ -193,6 +204,59 @@ pub fn guard_client_message_before_dispatch(
     }
 }
 
+/// Answer a frame that [`guard_client_message_before_dispatch`] rejected, on
+/// the channel that frame's variant declares.
+///
+/// Exhaustive by design, like the two sibling matches in this module: a new
+/// variant must declare not only *which* bounds apply at the wire, but *how a
+/// rejection is answered*. The native client disposes its adapter on ANY
+/// `ServerMessage::Error`, so any variant whose wire bounds a routine,
+/// non-hostile client can trip MUST answer on `ActionRejected`.
+pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMessage {
+    match msg {
+        // An oversized interaction response is reachable without hostility:
+        // `TextChoiceProjection::allow_arbitrary` accepts free-form text and
+        // `MAX_INTERACTION_STRING_LEN` is 256, so a long paste is a rejected
+        // decision, not a malformed frame. `ServerMessage::error` here would
+        // end the match on a paste.
+        ClientMessage::Interaction { .. } => ServerMessage::ActionRejected { reason },
+
+        // Every other variant keeps today's behavior exactly: a bounds failure
+        // on these is a malformed frame, not a rejected decision.
+        ClientMessage::ClientHello { .. }
+        | ClientMessage::CreateGame { .. }
+        | ClientMessage::JoinGame { .. }
+        | ClientMessage::Action { .. }
+        | ClientMessage::PreviewManaPayment { .. }
+        | ClientMessage::Reconnect { .. }
+        | ClientMessage::AbandonGame
+        | ClientMessage::SubscribeLobby
+        | ClientMessage::UnsubscribeLobby
+        | ClientMessage::CreateGameWithSettings { .. }
+        | ClientMessage::JoinGameWithPassword { .. }
+        | ClientMessage::LookupJoinTarget { .. }
+        | ClientMessage::Concede
+        | ClientMessage::ConcedeMatch
+        | ClientMessage::BootstrapTerminalDelivery { .. }
+        | ClientMessage::ReadTerminalResult { .. }
+        | ClientMessage::AckTerminalDelivery { .. }
+        | ClientMessage::Emote { .. }
+        | ClientMessage::SpectatorJoin { .. }
+        | ClientMessage::Ping { .. }
+        | ClientMessage::UpdateLobbyMetadata { .. }
+        | ClientMessage::SeatMutate { .. }
+        | ClientMessage::UnregisterLobby { .. }
+        | ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. }
+        | ClientMessage::SpectateDraft { .. }
+        | ClientMessage::RequestTakeback
+        | ClientMessage::RespondTakeback { .. }
+        | ClientMessage::CancelTakeback => ServerMessage::error(reason),
+    }
+}
+
 /// Validate broker-projected lobby frames without constructing `LobbyClientMessage`.
 ///
 /// Used by `dispatch_broker` before `to_lobby_client_message` clones strings and
@@ -269,6 +333,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
@@ -298,6 +363,10 @@ mod tests {
     use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::game_state::ProductionOverride;
     use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::interaction::{
+        InteractionChoiceId, InteractionId, InteractionResponse, InteractionSubmission,
+        MAX_INTERACTION_LIST_LEN,
+    };
     use engine::types::mana::{
         ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
@@ -426,5 +495,87 @@ mod tests {
         };
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("game_code"));
+    }
+
+    fn interaction_frame(response: InteractionResponse) -> ClientMessage {
+        ClientMessage::Interaction {
+            submission: InteractionSubmission {
+                interaction_id: InteractionId("interaction-1".to_string()),
+                response,
+            },
+        }
+    }
+
+    fn oversized_interaction_frame() -> ClientMessage {
+        interaction_frame(InteractionResponse::Select {
+            choice_ids: vec![InteractionChoiceId("a".to_string()); MAX_INTERACTION_LIST_LEN + 1],
+        })
+    }
+
+    /// Direct sibling of `dispatch_guard_rejects_oversized_game_action_before_handler_work`.
+    #[test]
+    fn dispatch_guard_rejects_oversized_interaction_before_handler_work() {
+        let err =
+            guard_client_message_before_dispatch(&oversized_interaction_frame(), ServerMode::Full)
+                .unwrap_err();
+
+        assert!(err.contains("PayloadTooLarge"), "unexpected reason: {err}");
+    }
+
+    /// Non-vacuity guard for the test above, and a statement that the dispatch
+    /// guard does not double as the mode gate — that is `reject_if_disabled`'s
+    /// job.
+    #[test]
+    fn dispatch_guard_accepts_a_bounded_interaction() {
+        let msg = interaction_frame(InteractionResponse::Choose {
+            choice_id: InteractionChoiceId("a".to_string()),
+        });
+
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::Full).is_ok());
+        assert!(guard_client_message_before_dispatch(&msg, ServerMode::LobbyOnly).is_ok());
+    }
+
+    /// Declared wire policy for the projection boundary: an interaction is a
+    /// game frame, so `to_lobby_client_message` returns `None` for it and
+    /// nothing is ever cloned into the broker. Unbounded is safe here *only*
+    /// because nothing is cloned — which is why this test is meaningless
+    /// without its pair, `interaction_is_never_projected_into_the_lobby_broker`
+    /// in `phase-server`.
+    #[test]
+    fn broker_projection_accepts_an_interaction_without_bounding_it() {
+        assert!(guard_broker_projection_inbound(&oversized_interaction_frame()).is_ok());
+    }
+
+    /// Both halves are required: the `Interaction` half alone would pass for a
+    /// function that answered `ActionRejected` for everything, which would
+    /// change `Action`'s behavior.
+    #[test]
+    fn interaction_wire_rejection_answers_on_the_benign_channel() {
+        let interaction = oversized_interaction_frame();
+        let reason =
+            guard_client_message_before_dispatch(&interaction, ServerMode::Full).unwrap_err();
+
+        match wire_rejection_message(&interaction, reason.clone()) {
+            ServerMessage::ActionRejected { reason: answered } => {
+                assert_eq!(answered, reason);
+            }
+            other => panic!("an interaction rejection must not tear the session down: {other:?}"),
+        }
+
+        let action = ClientMessage::Action {
+            action: GameAction::ReorderHand {
+                order: vec![ObjectId(1); MAX_ACTION_LIST_LEN + 1],
+            },
+        };
+        let action_reason =
+            guard_client_message_before_dispatch(&action, ServerMode::Full).unwrap_err();
+
+        assert!(
+            matches!(
+                wire_rejection_message(&action, action_reason),
+                ServerMessage::Error { .. }
+            ),
+            "an oversized action stays a malformed frame"
+        );
     }
 }

@@ -20,7 +20,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, map, opt, peek, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -41,8 +41,9 @@ use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
-    TargetFilter, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, QuantityExpr, QuantityRef,
+    RoundingMode, TargetFilter, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -2686,6 +2687,89 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
     .parse(input)
 }
 
+/// Normalize the two existing "<object phrase> <verb> this way" tails to a
+/// common `(filter, cause)` pair. This CALLS them; it does not restate either
+/// verb table, so both keep their single authority over their own verbs.
+///
+/// - `parse_filtered_landing_zone_this_way` — the returned / put-into-a-graveyard
+///   table. Its only return shape is `FilteredTrackedSetSize { filter,
+///   caused_by: None }`; the `if let` asserts that structurally rather than
+///   assuming it. `caused_by` stays `None` because the cause is derived from the
+///   producing effect's DESTINATION (`this_way_cause_for_effect` maps
+///   `Battlefield ⇒ Returned`, `Hand ⇒ Bounced`) while the parser sees only the
+///   English verb "returned", which both destinations print.
+/// - `parse_destroyed_or_sacrificed_this_way_filter` — the destroyed /
+///   sacrificed / milled / discarded / exiled table, which is
+///   action-discriminated and so carries a real cause.
+///
+/// A `(None, cause)` result is REJECTED rather than mapped to a permissive
+/// filter: that delegate returns it for two different reasons — the type phrase
+/// was trivial, OR it did not fully consume. Mapping either to "no restriction"
+/// would conflate "unrestricted" with "not understood" and silently mis-filter.
+/// Rejecting lets the clause fall through to the existing `TrackedSetSize`
+/// fallback, i.e. exactly today's behaviour, keeping the gap visible.
+fn parse_this_way_filter_and_cause(lower: &str) -> Option<(TargetFilter, Option<ThisWayCause>)> {
+    if let Some(QuantityRef::FilteredTrackedSetSize { filter, caused_by }) =
+        parse_filtered_landing_zone_this_way(lower)
+    {
+        return Some((*filter, caused_by));
+    }
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        (Some(filter), cause) => Some((filter, Some(cause))),
+        (None, _) => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: "[population] who controlled|owned
+/// [article] <object tail> this way" → a player count over the possessors of
+/// the preceding effect's tracked object set (Faerie Slumber Party: "for each
+/// opponent who controlled a creature returned this way").
+///
+/// Distinct from `parse_action_this_way`, its sibling one function up: that one
+/// recognizes what a player DID (a CR 701.x keyword action, keyed on the
+/// `player_actions_this_way` ledger); this one recognizes what a player
+/// POSSESSED (a CR 108.3/109.4 relation, keyed on the published tracked set).
+///
+/// Nested by prefix — population → `"who "` → possession verb → article — and
+/// the OBJECT TAIL is delegated whole to the two existing this-way filter
+/// helpers, so no verb table is restated here. Every axis is exactly one
+/// `alt()`; there is no permutation enumeration.
+fn parse_tracked_set_possessor_this_way(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        PlayerRelation,
+        PossessionAxis,
+        TargetFilter,
+        Option<ThisWayCause>,
+    ),
+> {
+    let (input, relation) = parse_player_population(input)?;
+    let (input, _) = tag("who ").parse(input)?;
+    // CR 108.3 / CR 109.4: one `alt()` on the possession axis. Both tenses are
+    // the same relation ("controls" on Sudden Salvation, "owns" on Kefka); they
+    // cost one `tag` each and are not reachable from this dispatch site today
+    // because neither card carries the "this way" anaphor — noted, not hidden.
+    let (input, possession) = alt((
+        value(
+            PossessionAxis::Controller,
+            alt((tag("controlled "), tag("controls "))),
+        ),
+        value(PossessionAxis::Owner, alt((tag("owned "), tag("owns ")))),
+    ))
+    .parse(input)?;
+    // Leading article, stripped with a local `alt()` of `tag()`s exactly as
+    // `parse_searched_arm` does. ("one of those " is the demonstrative-anaphor
+    // form Guff/Sudden Salvation use.)
+    let (input, _) = opt(alt((tag("a "), tag("an "), tag("one of those ")))).parse(input)?;
+    // The tail — including its own " this way" terminator — is consumed whole by
+    // the delegated verb tables.
+    let (input, (filter, caused_by)) =
+        map_opt(rest, parse_this_way_filter_and_cause).parse(input)?;
+    Ok((input, (relation, possession, filter, caused_by)))
+}
+
 /// "opponent who does" / "players who do" → accepted the optional offer.
 fn parse_optional_offer_accepted_clause(
     input: &str,
@@ -3064,16 +3148,38 @@ fn parse_for_each_clause_with_they_controller(
         // Tempting Offer cycle's bonus-tutor-per-accepting-opponent step and
         // Wernog's bonus-investigate-per-investigating-opponent step. A single
         // verb-dispatched combinator handles every (population × verb tense ×
-        // article) permutation, returning a player-count quantity rather than
-        // the object-count `TrackedSetSize` fallback below. Must be tried before
-        // that fallback because every "[population] who … this way" clause does
-        // contain "this way".
+        // article) permutation OF A KEYWORD-ACTION VERB, returning a player-count
+        // quantity rather than the object-count `TrackedSetSize` fallback below.
+        // Possession verbs ("controlled"/"owned") are a different relation and
+        // are handled by the sibling arm immediately below, not here. Both must
+        // be tried before that fallback because every "[population] who … this
+        // way" clause does contain "this way".
         if let Ok((rest, (relation, action))) = parse_action_this_way(lower.as_str()) {
             if rest.is_empty() {
                 return Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::PerformedActionThisWay { relation, action },
                 });
             }
+        }
+        // CR 608.2c + CR 608.2h + CR 109.4: "[population] who controlled a
+        // <type> <verb> this way" counts PLAYERS who possessed a member of the
+        // preceding effect's tracked set — a different axis from the
+        // object-count `TrackedSetSize` fallback below, which would count the
+        // returned creatures themselves (Faerie Slumber Party #6943). Placed
+        // AFTER `parse_action_this_way` so the Tempting Offer cycle still
+        // matches its action arm first, and BEFORE the fallback because every
+        // such clause contains "this way".
+        if let Ok(("", (relation, possession, filter, caused_by))) =
+            parse_tracked_set_possessor_this_way(lower.as_str())
+        {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation,
+                    possession,
+                    filter,
+                    caused_by,
+                },
+            });
         }
         // CR 608.2c + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
@@ -7407,6 +7513,76 @@ mod tests {
             }
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
+    }
+
+    /// T2 (issue #6943) — the AST pin for Faerie Slumber Party's second
+    /// sentence: "For each opponent who controlled a creature returned this
+    /// way, you create two … tokens."
+    ///
+    /// CR 608.2c + CR 109.4: this counts PLAYERS on the possession axis. Before
+    /// the fix the clause fell through to the bare `TrackedSetSize` fallback and
+    /// counted the returned CREATURES instead — a silent wrong-answer misparse
+    /// (9 creatures × 2 = 18 tokens instead of 3 opponents × 2 = 6).
+    ///
+    /// This is the paired POSITIVE that stops the anti-swallow negatives below
+    /// from being vacuously satisfied by a fallback or an `Unimplemented`
+    /// early-return: it proves the new arm actually fires on the real clause.
+    #[test]
+    fn for_each_opponent_who_controlled_a_creature_returned_this_way_counts_players() {
+        let qty = parse_for_each_clause("opponent who controlled a creature returned this way")
+            .expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::Opponent,
+                    possession: PossessionAxis::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    // Derived from the producing effect's DESTINATION, which the
+                    // parser cannot see — both "returned to hand" and "returned
+                    // to the battlefield" print the same verb. `None` accepts
+                    // every member and is strictly more robust than pinning a
+                    // cause the parser would have to guess.
+                    caused_by: None,
+                },
+            },
+            "the possession-axis clause must count players, not the returned objects"
+        );
+    }
+
+    /// T3 (issue #6943) anti-swallow — Paradoxical Outcome: "Draw a card for
+    /// each card returned to your hand this way." Its clause has no
+    /// "[population] who" prefix, so the new possession arm must not touch it;
+    /// it stays the bare object-count `TrackedSetSize`.
+    ///
+    /// The realistic failure mode this guards is a SCANNING (non-anchored)
+    /// implementation. The shipped one is anchored at `parse_player_population`
+    /// → `tag("who ")`, so it structurally cannot reach this clause.
+    #[test]
+    fn paradoxical_outcome_card_returned_to_your_hand_this_way_stays_tracked_set_size() {
+        let qty = parse_for_each_clause("card returned to your hand this way").expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::TrackedSetSize,
+            "a bare object-count 'returned this way' clause must be unaffected"
+        );
+    }
+
+    /// T4 (issue #6943) anti-swallow — Revival Experiment: "You lose 3 life for
+    /// each card returned this way." Same guard as T3 on the shortest form of
+    /// the "returned" verb, where a scanning implementation would be most
+    /// likely to over-match.
+    #[test]
+    fn revival_experiment_card_returned_this_way_stays_tracked_set_size() {
+        let qty = parse_for_each_clause("card returned this way").expect("must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::TrackedSetSize,
+            "a bare 'card returned this way' clause must be unaffected"
+        );
     }
 
     /// CR 608.2c + CR 701.20b: "nonland card revealed this way" (Selvala,

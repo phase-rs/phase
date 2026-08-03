@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 185,
+      "date": "2026-08-03",
+      "title": "Jetfire takes flight",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Jetfire, Ingenious Scientist // Jetfire, Air Guardian is now fully playable, including targeted mana, “that much” colorless mana, adapt, and its artifact-spell restriction\n• Mana abilities with both a recipient and a “cards in target player’s hand” count now keep those targets separate, so effects such as Jetfire and Jeska’s Will resolve with the right player and amount\n\n🛠️ Cards That Now Work Right\n• The Spear of Bashenga only triggers when its equipped creature attacks the monarch, then destroys the correct tapped nonland permanent that player controls\n• Adamant and related “enters with” effects now honor their mana-spent condition (Ardenvale Paladin, Embereth Paladin, Garenbrig Paladin, Locthwain Paladin, Vantress Paladin, Necromantic Summons, and Dust Animus)\n• Culvert Ambusher and similar “enters or is turned face up” triggers now keep both event branches; Vigorous Farming recognizes long-form “enter the battlefield untapped” replacements\n• Arashin Sovereign now lets its controller choose top or bottom; Estrid returns Aura cards in its “do the same” clause; Chains of Mephistopheles now makes discard-this-way draw/mill outcomes mutually exclusive\n• Punishing Punch and similar “twice its power” effects use the correct creature’s power; depletion lands and Gemstone Mine now sacrifice themselves when their counters run out; Onakke Oathkeeper and Trade Caravan follow their printed timing and cost restrictions\n• Jailbreak and Gerrymandering now keep “under their control” clauses attached to the correct player\n• Faerie Slumber Party creates tokens for distinct opponents who returned creatures, rather than once per returned creature; Velomachus Lorehold and nine similar cards now enforce their card-type casting gates\n• Copy-token entries and copied continuous abilities now survive as-enters choices and layer recalculations correctly, while Ashaya-style type-changing effects refresh dependent power/toughness\n• “Draw that many, then discard that many” now records the draw count correctly (Varina, Lich Queen)\n\n⚔️ Combat & Gameplay\n• Untap choices can now be selected directly on the battlefield, and forced retargeting preserves the other targets of multi-target mana abilities\n• Infinite-combo shortcuts now keep their loop frames across forced windows, offer ETB life/token loops in multiplayer, and stop showing stale infinity badges after a collapse is scheduled\n• Swiss draft byes now count as match wins; team-aware timing correctly distinguishes an opponent’s turn from a teammate’s turn\n• Delayed combat-damage triggers and “until your next turn” riders now consume events once and expire on the right turn\n\n🖥️ Interface\n• Flexible mana lands now show the color each activation can produce (City of Brass, Reflecting Pool, Command Tower, and similar sources)\n• Native card-search/library visibility and legacy saved-game controls are preserved, while battlefield untap prompts route to the correct layout\n\n🤖 AI\n• AI better prices delivered draw benefits, rejects lethal life-payment lines, plans fetchland mana routes, improves mulligan and swarm choices, and certifies Pact upkeep payments\n\n🌐 Multiplayer\n• Attachment and other interaction submissions now work over multiplayer WebSockets with authenticated seats and normal action-rejection feedback",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1533859700146438175"
+    },
+    {
       "id": 184,
       "date": "2026-08-01",
       "title": "Sacrificial mana gets a choice",

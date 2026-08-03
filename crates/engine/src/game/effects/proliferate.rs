@@ -62,8 +62,13 @@ fn collect_proliferate_eligible(state: &GameState) -> Vec<TargetRef> {
         .map(|id| TargetRef::Object(*id))
         .collect();
 
+    // CR 701.34a: proliferate "means to choose any number of permanents and/or players
+    // that have a counter" — a CHOICE, not a target (CR 115.10a), so the seat is judged by
+    // the existence authority and NOT by the targeting-only exclusions.
     for player in &state.players {
-        if !proliferatable_player_counters(player).is_empty() {
+        if !proliferatable_player_counters(player).is_empty()
+            && crate::game::players::player_exists_for_choice(state, player.id)
+        {
             eligible.push(TargetRef::Player(player.id));
         }
     }
@@ -621,6 +626,80 @@ mod tests {
         } else {
             panic!("Expected ProliferateChoice");
         }
+    }
+
+    /// R4a — CR 701.34a + CR 102.1 + the CR 702.26b MIRROR: the proliferate offer is a
+    /// production-observable MINT, and item 1 changes what it publishes. A seat that has
+    /// left the game, and a seat that is phased out, are not among the "permanents and/or
+    /// players" a proliferate choice may range over, however many counters they carry.
+    ///
+    /// THE ELIMINATED HALF IS STRICTLY LIVE, independent of phasing: at HEAD this seam had
+    /// ZERO existence conjuncts of any kind, so a poisoned seat that had already lost the
+    /// game was still offered to the chooser.
+    ///
+    /// TOTAL EQUALITY, never `!contains` — exclusion AND identity in one assertion. Four
+    /// discriminators ride on the one `assert_eq!`:
+    ///   * P0 IN — the offer still fires and still reaches valid seats (the reach-guard:
+    ///     `drive_single_proliferate_action` publishes NO prompt at all when the eligible
+    ///     set is empty, so an exclusion-only row could pass on an offer that never fired);
+    ///   * P1 OUT by phasing, P2 OUT by elimination — the two behaviour changes;
+    ///   * P3 IN — a valid seat is not lost along with them;
+    ///   * P4 OUT for having no counters — the COUNTER-DISCRIMINATION control, which proves
+    ///     the list is "seats with counters, narrowed by existence" and not "every seat".
+    ///
+    /// REVERT-PROBE: drop the `player_exists_for_choice` conjunct ⇒ P1 and P2 reappear ⇒
+    /// FAILS. NARROWER PROBE: replace it with bare `is_alive` ⇒ P1 alone reappears ⇒ FAILS,
+    /// which separates the phasing half from the elimination half.
+    #[test]
+    fn proliferate_offer_excludes_eliminated_and_phased_out_seats_and_keeps_the_rest() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut events = Vec::new();
+
+        // Every seat but P4 is counter-eligible, so EXISTENCE is the only thing that can
+        // exclude P1 and P2 below.
+        for seat in [0usize, 1, 2, 3] {
+            state.players[seat].poison_counters = 1;
+        }
+
+        // Setup anti-vacuity, asserted before anything is measured: the production APIs
+        // report what they transitioned, so a silent no-op fails loudly here.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(
+            state.players[1].is_phased_out(),
+            "P1 must read as phased out"
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+        assert!(
+            state.players[1].poison_counters > 0 && state.players[2].poison_counters > 0,
+            "both excluded seats must still CARRY counters, or the counter filter would \
+             drop them first and this row would never reach the existence conjunct"
+        );
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let WaitingFor::ProliferateChoice { eligible, .. } = &state.waiting_for else {
+            panic!("expected ProliferateChoice, got {:?}", state.waiting_for);
+        };
+        assert_eq!(
+            eligible,
+            &vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(3)),
+            ],
+            "the offer ranges over counter-carrying seats that still exist: P1 is phased \
+             out, P2 has left the game, P4 has no counters"
+        );
     }
 
     #[test]
