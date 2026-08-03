@@ -10,7 +10,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, CastFromZoneDriver, CastPermissionConstraint, Comparator, Effect,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
@@ -712,6 +712,215 @@ fn epic_experiment_freezes_x_for_the_lingering_cast_permission() {
     assert_eq!(
         runner.state().objects[&mana_value_three].zone,
         Zone::Graveyard
+    );
+}
+
+/// Issue #6880: the "from among them" cast anaphor must carry the clause's
+/// card-type restriction, not just its mana-value constraint.
+///
+/// CR 601.3: "A player can begin to cast a spell only if a rule or effect
+/// allows that player to cast it." Velomachus Lorehold allows casting only *an
+/// instant or sorcery spell*, so the type gate is part of the cast-legality
+/// predicate exactly as much as the mana-value bound is. The parser bound the
+/// permission to a bare `TargetFilter::ExiledBySource`, dropping the type leg
+/// entirely — the mana-value ceiling survived as a `CastPermissionConstraint`
+/// while any card type at or below that ceiling became castable.
+///
+/// The composed shape mirrors the already-correct
+/// "from among cards exiled with [self]" sibling branch: the typed leg AND the
+/// exile-set anaphor.
+fn cast_target_of(oracle: &str, name: &str, types: &[&str]) -> TargetFilter {
+    let parsed = parse(oracle, name, types);
+    let Effect::CastFromZone { target, .. } = parsed_cast_from_zone(&parsed) else {
+        unreachable!("helper returns CastFromZone")
+    };
+    target.clone()
+}
+
+#[test]
+fn from_among_them_cast_retains_the_instant_or_sorcery_gate() {
+    let instant_or_sorcery = TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery]);
+
+    for (name, oracle, types) in [
+        ("Velomachus Lorehold", VELOMACHUS, &["Creature"][..]),
+        ("Jace's Mindseeker", JACE, &["Creature"][..]),
+        ("Talent of the Telepath", TALENT, &["Sorcery"][..]),
+    ] {
+        let target = cast_target_of(oracle, name, types);
+        let TargetFilter::And { filters } = &target else {
+            panic!(
+                "{name}: the cast permission must AND the card-type gate with the \
+                 exile-set anaphor, got {target:?}"
+            );
+        };
+        assert!(
+            filters.contains(&TargetFilter::ExiledBySource),
+            "{name}: the exile-set anaphor leg must survive the composition, got {filters:?}"
+        );
+        let typed = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: expected a typed leg, got {filters:?}"));
+        assert_eq!(
+            typed.type_filters,
+            vec![instant_or_sorcery.clone()],
+            "{name}: the clause restricts the cast to instant or sorcery spells"
+        );
+    }
+}
+
+/// Sibling guard: an *untyped* "cast a spell from among them" clause (Svella,
+/// Aetherworks Marvel, Apex of Power, ... — the 25-card majority of this
+/// anaphor family) must keep its bare `ExiledBySource` binding. A type gate
+/// synthesized where the Oracle text names no type would silently narrow every
+/// one of those cards.
+#[test]
+fn untyped_from_among_them_cast_stays_a_bare_exile_anaphor() {
+    for (name, oracle, types) in [
+        ("Svella, Ice Shaper", SVELLA, &["Creature"][..]),
+        ("Aetherworks Marvel", AETHERWORKS_MARVEL, &["Artifact"][..]),
+        ("Apex of Power", APEX, &["Sorcery"][..]),
+    ] {
+        assert_eq!(
+            cast_target_of(oracle, name, types),
+            TargetFilter::ExiledBySource,
+            "{name} names no card type, so its cast permission must stay unrestricted"
+        );
+    }
+}
+
+/// The user-visible half of issue #6880, driven through the real attack-trigger
+/// resolution pipeline rather than asserted on the AST.
+///
+/// Velomachus has power 5. The looked-at cards include a mana-value 3 *creature*
+/// — comfortably inside the mana-value ceiling but outside the "instant or
+/// sorcery" permission. Pre-fix the engine offered it; CR 601.3 says it was
+/// never a legal choice.
+///
+/// Reach guard against a vacuous negative: the same assertion block requires the
+/// legal mana-value 4 sorcery to BE offered, proving the choice was actually
+/// opened and populated rather than short-circuited to an empty prompt.
+#[test]
+fn velomachus_does_not_offer_a_creature_inside_its_mana_value_ceiling() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::DeclareAttackers);
+    let velomachus = scenario
+        .add_creature(P0, "Velomachus Lorehold", 5, 5)
+        .from_oracle_text_with_keywords(&["flying", "vigilance", "haste"], VELOMACHUS)
+        .id();
+    let legal_sorcery = scenario
+        .add_spell_to_library_top(P0, "Velomachus Legal Sorcery", false)
+        .with_mana_cost(ManaCost::generic(4))
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    // The trap: mana value 3 <= Velomachus's power 5, so only the card-type
+    // gate can exclude it.
+    let creature_inside_ceiling = scenario
+        .add_spell_to_library_top(P0, "Velomachus Trap Creature", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .as_creature()
+        .id();
+    for index in 0..5 {
+        scenario
+            .add_spell_to_library_top(P0, &format!("Velomachus Filler {index}"), false)
+            .with_mana_cost(ManaCost::generic(6))
+            .from_oracle_text("You gain 1 life.");
+    }
+
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![velomachus],
+        valid_attack_targets: vec![AttackTarget::Player(P1)],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    runner
+        .declare_attackers(&[(velomachus, AttackTarget::Player(P1))])
+        .expect("Velomachus must be able to attack");
+    runner.resolve_top();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting Velomachus's optional cast must succeed");
+
+    let WaitingFor::EffectZoneChoice { cards, zone, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!("Velomachus's attack trigger must reach the library cast choice")
+    };
+    assert_eq!(zone, Zone::Library);
+    assert!(
+        cards.contains(&legal_sorcery),
+        "reach guard: the legal instant-or-sorcery card must be offered, \
+         otherwise the negative assertion below is vacuous; offered = {cards:?}"
+    );
+    assert!(
+        !cards.contains(&creature_inside_ceiling),
+        "CR 601.3: Velomachus permits casting only an instant or sorcery spell — \
+         a creature within the mana-value ceiling must NEVER be offered \
+         (issue #6880); offered = {cards:?}"
+    );
+
+    // Observable outcome: taking the only legal card puts it on the stack and
+    // leaves the illegal creature in the library.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![legal_sorcery],
+        })
+        .expect("choosing Velomachus's legal sorcery must succeed");
+    assert_eq!(runner.state().objects[&legal_sorcery].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().objects[&creature_inside_ceiling].zone,
+        Zone::Library,
+        "the ineligible creature must stay in the library"
+    );
+    assert!(
+        runner.state().objects[&creature_inside_ceiling]
+            .casting_permissions
+            .is_empty(),
+        "the ineligible creature must not receive a casting permission"
+    );
+}
+
+/// Runtime sibling guard for the untyped majority: Svella says "cast a spell",
+/// so a creature in its looked-at set must STILL be offered. This is the
+/// runtime counterpart of `untyped_from_among_them_cast_stays_a_bare_exile_anaphor`
+/// and fails if the type gate is applied where no type was named.
+#[test]
+fn svella_untyped_peek_still_offers_a_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let svella = scenario
+        .add_creature(P0, "Svella, Ice Shaper", 2, 4)
+        .from_oracle_text(SVELLA)
+        .id();
+    let creature = scenario
+        .add_spell_to_library_top(P0, "Svella Creature", false)
+        .with_mana_cost(ManaCost::generic(2))
+        .as_creature()
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::Colorless, svella, false, vec![]))
+            .chain([
+                ManaUnit::new(ManaType::Red, svella, false, vec![]),
+                ManaUnit::new(ManaType::Green, svella, false, vec![]),
+            ])
+            .collect(),
+    );
+
+    let mut runner = scenario.build();
+    let outcome = runner.activate(svella, 0).accept_optional().resolve();
+    let WaitingFor::EffectZoneChoice { cards, .. } = outcome.final_waiting_for() else {
+        panic!("Svella's activated ability must reach the library cast choice")
+    };
+    assert!(
+        cards.contains(&creature),
+        "Svella's untyped \"cast a spell\" permission must still reach a creature; \
+         offered = {cards:?}"
     );
 }
 
