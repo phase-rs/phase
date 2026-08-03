@@ -2276,7 +2276,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         // `matches!` respectively.
         let retain = trigger.one_shot
             && !matches!(
-                trigger.condition,
+                &trigger.condition,
                 Cond::WhenNextEvent {
                     // CR 603.7b + CR 603.12: both a stated-"this turn" one-shot and
                     // any reflexive that (defensively) escaped its creation-batch
@@ -2290,7 +2290,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             // intervening (opponents') turns and is instead purged at the
             // controller's next turn start (see `execute_untap_with_choices`).
             || matches!(
-                trigger.condition,
+                &trigger.condition,
                 Cond::WheneverEvent {
                     expiry: WheneverEventExpiry::UntilControllersNextTurn { .. },
                     ..
