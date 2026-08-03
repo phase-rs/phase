@@ -149,6 +149,7 @@ mod destroy_redirect_to_battlefield_delivery_tail;
 mod deterministic_blocker_prompt_order;
 mod devour_co_entry_regression;
 mod devour_intellect_treasure_rider;
+mod dig_impossible_keep_count;
 mod dig_rest_pile_stranding_on_etb_pause;
 mod diligent_farmhand_counts_as_named;
 mod diluvian_primordial_6754;
