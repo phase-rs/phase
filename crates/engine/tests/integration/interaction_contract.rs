@@ -3105,3 +3105,303 @@ fn published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game() 
          actor_candidates path ran"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #6944: a flexible-mana land rendered an unlabelled "Tap for mana".
+//
+// `TapLandForMana` candidates are minted from `ManaSourceOption::semantic_selection`
+// (one *concrete* row per producible color) and executed via
+// `live_land_mana_option_for_selection`. The label projection resolved them
+// through the *manual* authority (`live_mana_source_option_for_selection`)
+// instead, whose `manual_selection_for_option` deliberately collapses a flexible
+// source to `Colorless` + `DeferredColorChoice`. The concrete row therefore never
+// matched, the resolver returned `Err`, and the projection silently emitted no
+// `ProducedMana` surface at all.
+//
+// Every test below asserts a *non-empty* produced-mana label for a flexible
+// source, which is exactly the surface that was missing before the fix.
+// ---------------------------------------------------------------------------
+
+/// Produced-mana symbols projected for each `TapLandForMana` candidate whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_land_mana_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Flatten per-candidate labels into one sorted symbol list, asserting that no
+/// candidate was left unlabelled. The unlabelled case is the #6944 regression.
+fn sorted_labelled_symbols(labels: &[Vec<String>], context: &str) -> Vec<String> {
+    assert!(
+        !labels.is_empty(),
+        "{context}: expected at least one TapLandForMana candidate"
+    );
+    assert!(
+        labels.iter().all(|units| !units.is_empty()),
+        "{context}: every mana candidate must carry a produced-mana label, got {labels:?}"
+    );
+    let mut symbols: Vec<String> = labels.iter().flatten().cloned().collect();
+    symbols.sort();
+    symbols
+}
+
+#[test]
+fn tap_land_for_mana_labels_each_color_of_an_any_one_color_land() {
+    // ManaProduction::AnyOneColor — the card from issue #6944.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let city = scenario
+        .add_land_from_oracle(
+            P0,
+            "City of Brass",
+            "Whenever this land becomes tapped, it deals 1 damage to you.\n{T}: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), city, "city-of-brass-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "City of Brass"),
+        ["B", "G", "R", "U", "W"],
+        "each concrete color row must project its own color, not an unlabelled tap"
+    );
+    assert!(
+        labels.iter().all(|units| units.len() == 1),
+        "'Add one mana of any color' produces exactly one unit per row: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_granted_flexible_mana_ability() {
+    // ManaProduction::AnyOneColor { count: 2 } reached through a `GrantAbility`
+    // static — the second card named in issue #6944. The label must carry both
+    // produced units and the granted spend restriction.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Resonating Lute",
+        "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.",
+    );
+    // An explicitly-printed mana ability, not `add_basic_land`: a basic land's
+    // production is subtype-inferred by `land_mana_options`, and that fallback is
+    // deliberately suppressed once any explicit `Effect::Mana` ability exists —
+    // which the grant itself supplies. Printing the ability keeps this test about
+    // the label projection rather than the basic-land fallback.
+    let forest = scenario
+        .add_land_from_oracle(P0, "Forest", "{T}: Add {G}.")
+        .id();
+    let mut runner = scenario.build();
+    // `GameScenario::build` does not run a layer pass, so the `GrantAbility`
+    // static has not yet been applied to the land's ability list.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let labels = projected_land_mana_labels(runner.state_mut(), forest, "resonating-lute-grant");
+    let symbols = sorted_labelled_symbols(&labels, "Resonating Lute granted ability");
+    let granted: Vec<&Vec<String>> = labels.iter().filter(|units| units.len() == 2).collect();
+    assert_eq!(
+        granted.len(),
+        5,
+        "the granted 'two mana of any one color' ability exposes one two-unit row \
+         per color: {labels:?}"
+    );
+    assert!(
+        granted
+            .iter()
+            .all(|units| units[0] == units[1] && symbols.contains(&units[0])),
+        "'any one color' produces two units of the SAME chosen color: {granted:?}"
+    );
+    assert!(
+        labels.iter().any(|units| units == &vec!["G".to_string()]),
+        "the Forest's own printed mana ability is still labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_type_produceable_by_land() {
+    // ManaProduction::AnyTypeProduceableBy.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pool = scenario
+        .add_land_from_oracle(
+            P0,
+            "Reflecting Pool",
+            "{T}: Add one mana of any type that a land you control could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pool, "reflecting-pool-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Reflecting Pool"),
+        ["G"],
+        "the surveyed Forest's type is the only produceable type"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_opponent_land_colors_land() {
+    // ManaProduction::OpponentLandColors.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), orchard, "exotic-orchard-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Exotic Orchard"),
+        ["U"],
+        "the opponent's Island is the only surveyed color"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_commander_color_identity_land() {
+    // ManaProduction::AnyInCommandersColorIdentity.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tower = scenario
+        .add_land_from_oracle(
+            P0,
+            "Command Tower",
+            "{T}: Add one mana of any color in your commander's color identity.",
+        )
+        .id();
+    let commander = scenario
+        .add_creature(P0, "Mono-Red Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_commander(commander);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), tower, "command-tower-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Command Tower"),
+        ["R"],
+        "the label follows the commander's color identity"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
+    // ManaProduction::AnyOneColorAmongPermanents.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plaza = scenario
+        .add_land_from_oracle(
+            P0,
+            "Plaza of Heroes",
+            "{T}: Add {C}.\n{T}: Add one mana of any color. Spend this mana only to cast a legendary spell.\n{T}: Add one mana of any color among legendary permanents you control.\n{3}, {T}, Exile this land: Target legendary creature gains hexproof and indestructible until end of turn.",
+        )
+        .id();
+    scenario
+        .add_creature(P0, "Legendary Red Bear", 2, 2)
+        .as_legendary()
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        });
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), plaza, "plaza-of-heroes-label");
+    let symbols = sorted_labelled_symbols(&labels, "Plaza of Heroes");
+    assert!(
+        symbols.contains(&"R".to_string()),
+        "the among-legendary-permanents ability projects the legend's color: {labels:?}"
+    );
+    assert!(
+        symbols.contains(&"C".to_string()),
+        "the sibling colorless ability stays labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
+    // ManaProduction::ChoiceAmongExiledColors.
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pit = scenario
+        .add_land_from_oracle(
+            P0,
+            "Pit of Offerings",
+            "{T}: Add {C}.\n{T}: Add one mana of any of the exiled cards' colors.",
+        )
+        .id();
+    let exiled = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: pit,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pit, "pit-of-offerings-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Pit of Offerings"),
+        ["C", "R"],
+        "the exiled red card's color is labelled alongside the colorless sibling"
+    );
+}
