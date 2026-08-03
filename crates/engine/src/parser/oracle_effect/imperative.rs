@@ -2767,6 +2767,17 @@ pub(super) fn try_parse_mass_exile_permanents_and_zones(
     // ("creatures", "creatures and artifacts", …); `rem` is the untyped tail
     // (e.g. " and graveyards").
     let (perm_filter, rem) = parse_mass_type_union(rest, ctx);
+    // The leading leg MUST be a bare battlefield permanent-type description. If
+    // `parse_mass_type_union` already consumed an explicit source zone or owner
+    // scope ("… cards from that player's hand", "… cards from all hands"), this
+    // form belongs to the owner-scoped multi-zone parser, not here — injecting
+    // `InZone(Battlefield)` below would make that zone leg unsatisfiable and the
+    // rebuilt zone leg would drop the parsed owner (CR 400.3) and type
+    // restriction (CR 205). Decline so Thought Distortion / Worldfire keep their
+    // existing owner-scoped parse.
+    if !is_bare_battlefield_permanent_leg(&perm_filter) {
+        return None;
+    }
     // CR 404.1 + CR 108.2: the trailing whole-zone union — declines if absent.
     let zones = parse_trailing_zone_union(&rem.to_lowercase())?;
     // CR 109.2: a bare card-type description ("creatures", no zone word / "card")
@@ -2786,6 +2797,37 @@ pub(super) fn try_parse_mass_exile_permanents_and_zones(
     let zone_leg =
         TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]));
     Some(merge_or_filters(perm_scoped, zone_leg))
+}
+
+/// Whether every leg of `filter` is a BARE battlefield permanent-type
+/// description — no owner scope (`controller`) and no explicit source-zone
+/// property (`InZone` / `InAnyZone`). This is the discriminator that keeps
+/// [`try_parse_mass_exile_permanents_and_zones`] off owner-scoped / zone-scoped
+/// forms: Thought Distortion ("… noncreature, nonland cards from that player's
+/// hand and graveyard") and Worldfire ("… cards from all hands and graveyards")
+/// both have `parse_mass_type_union` consume a leg that already carries its own
+/// zone (CR 404.1 / CR 402.1) and, for Thought Distortion, owner (CR 400.3)
+/// scope. Scoping such a leg to the battlefield would make it unsatisfiable and
+/// the rebuilt all-owners zone leg would drop the parsed owner/type restriction,
+/// exiling the wrong cards. Only a leg with no zone and no owner scope denotes
+/// "permanents of that type on the battlefield" (CR 109.2), which is the sole
+/// shape this recognizer may battlefield-scope and union with whole zones.
+fn is_bare_battlefield_permanent_leg(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.controller.is_none()
+                && !tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(is_bare_battlefield_permanent_leg)
+        }
+        TargetFilter::Not { filter } => is_bare_battlefield_permanent_leg(filter),
+        // Any other filter shape is not a bare permanent-type union.
+        _ => false,
+    }
 }
 
 /// CR 404.1 + CR 108.2: parse a trailing whole-zone union tail after the

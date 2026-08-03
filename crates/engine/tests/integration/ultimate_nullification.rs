@@ -20,6 +20,7 @@
 //! the mass exile is not a nuke of everything.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::EngineError;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::mana::ManaColor;
@@ -175,9 +176,17 @@ fn ultimate_nullification_requires_a_legendary_creature_to_sacrifice() {
     });
 
     match cast {
-        // The engine rejected the announcement outright — the sacrifice
-        // additional cost (CR 601.2f) cannot be paid with no legendary creature.
-        Err(_) => {}
+        // CR 601.2h: the engine rejected the announcement outright because its
+        // total cost cannot be paid — here the unpayable component is the
+        // mandatory legendary-creature sacrifice (CR 601.2f additional cost).
+        // Assert the SPECIFIC required-additional-cost rejection so an unrelated
+        // parser, mana, or implementation failure can't satisfy this branch.
+        Err(e) => {
+            assert!(
+                matches!(&e, EngineError::ActionNotAllowed(msg) if msg.contains("required additional cost")),
+                "cast must fail specifically because the required sacrifice is unpayable, got {e:?}"
+            );
+        }
         Ok(_) => {
             // Otherwise it must surface the mandatory sacrifice with NO legal
             // legendary to choose.

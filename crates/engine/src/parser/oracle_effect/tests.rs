@@ -24242,7 +24242,7 @@ fn exile_all_creatures_and_spacecraft_lowers_to_mass_zone_change() {
     }
 }
 
-/// CR 406.2 + CR 404.1 + CR 608.2f (Ultimate Nullification): "Exile all creatures
+/// CR 406.2 + CR 404.1 (Ultimate Nullification): "Exile all creatures
 /// and graveyards" is ONE mass exile spanning the battlefield and every
 /// graveyard — a single `ChangeZoneAll { Or[Creature+InZone(BF),
 /// Card+InAnyZone([Graveyard])] }`, never a creature wipe plus an orphaned
@@ -24392,6 +24392,19 @@ fn exile_permanents_and_zones_generalizes_to_multiple_zones() {
         } => filters,
         other => panic!("expected ChangeZoneAll with an Or filter, got {other:?}"),
     };
+    // Battlefield permanent leg: the "creatures" operand scoped to the
+    // battlefield — validated from the same `filters` result as the zone leg so
+    // the union really carries both.
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })
+        )),
+        "expected a Creature + InZone(Battlefield) leg, got {filters:?}"
+    );
+    // Whole-zone leg: every card, every owner, across both trailing zones.
     assert!(
         filters.iter().any(|f| matches!(
             f,
@@ -24402,6 +24415,86 @@ fn exile_permanents_and_zones_generalizes_to_multiple_zones() {
                     })
         )),
         "expected a Card + InAnyZone([Graveyard, Hand]) leg, got {filters:?}"
+    );
+}
+
+/// Regression (Thought Distortion / Worldfire): the heterogeneous
+/// permanent+zone recognizer MUST decline forms whose leading leg already
+/// carries its own source-zone / owner scope. Thought Distortion ("Exile all
+/// noncreature, nonland cards from that player's hand and graveyard") is a
+/// hand+graveyard exile of a *targeted opponent's* cards — it has no
+/// battlefield component. A prior version of the recognizer injected
+/// `InZone(Battlefield)` onto that leg (making the hand leg unsatisfiable) and
+/// rebuilt the zone leg as all-owners/all-cards (dropping "that player's" and
+/// the noncreature/nonland restriction). This test pins the fix: the lowered
+/// chain must contain NO `InZone(Battlefield)` leg, the hand exile must survive,
+/// and the noncreature/nonland restriction must be preserved.
+#[test]
+fn exile_permanents_and_zones_declines_owner_scoped_hand_graveyard_form() {
+    fn collect_typed<'a>(f: &'a TargetFilter, out: &mut Vec<&'a TypedFilter>) {
+        match f {
+            TargetFilter::Typed(tf) => out.push(tf),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().for_each(|c| collect_typed(c, out))
+            }
+            TargetFilter::Not { filter } => collect_typed(filter, out),
+            _ => {}
+        }
+    }
+
+    let def = parse_effect_chain(
+        "Exile all noncreature, nonland cards from that player's hand and graveyard.",
+        AbilityKind::Spell,
+    );
+
+    // Walk every effect in the chain, gathering the target filters of any
+    // ChangeZoneAll to Exile it lowered to.
+    let mut typed: Vec<&TypedFilter> = Vec::new();
+    let mut ability: Option<&AbilityDefinition> = Some(&def);
+    while let Some(a) = ability {
+        if let Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } = &*a.effect
+        {
+            collect_typed(target, &mut typed);
+        }
+        ability = a.sub_ability.as_deref();
+    }
+    assert!(
+        !typed.is_empty(),
+        "expected at least one ChangeZoneAll to Exile in the chain: {def:#?}"
+    );
+
+    // The bug signature: no leg may be scoped to the battlefield — these are
+    // hand/graveyard cards, never permanents.
+    assert!(
+        typed
+            .iter()
+            .all(|tf| !tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield
+            })),
+        "no leg may carry InZone(Battlefield); the cards are in hand/graveyard, got {typed:?}"
+    );
+    // The hand exile must survive (some leg still references the hand zone).
+    assert!(
+        typed.iter().any(|tf| tf.properties.iter().any(|p| match p {
+            FilterProp::InZone { zone } => *zone == Zone::Hand,
+            FilterProp::InAnyZone { zones } => zones.contains(&Zone::Hand),
+            _ => false,
+        })),
+        "the hand exile must be preserved, got {typed:?}"
+    );
+    // The noncreature/nonland restriction must be preserved on some leg.
+    assert!(
+        typed.iter().any(|tf| tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            && tf
+                .type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))),
+        "the noncreature/nonland restriction must be preserved, got {typed:?}"
     );
 }
 
