@@ -8149,8 +8149,9 @@ fn parse_state_change_event_start(input: &str) -> OracleResult<'_, ()> {
 /// The governing rules are the general trigger-condition / trigger-event rules, NOT
 /// CR 603.2e: this combinator is VOICE-AGNOSTIC — reached from both the
 /// `becomes`/`become` arm and the `is`/`are` arm — and 603.2e speaks specifically
-/// about the word "becomes", so it cannot govern roughly half of these inputs. It
-/// stays scoped to the `becomes` arm in `parse_state_change_event_start`. `parse_event_boundary` peeks eof/space/`,`/`.`, and its `space1` arm
+/// about the word "becomes", so it cannot govern roughly half of these inputs. The
+/// CR 603.2e citation stays scoped to the `becomes` arm in
+/// `parse_state_change_event_start`. `parse_event_boundary` peeks eof/space/`,`/`.`, and its `space1` arm
 /// is load-bearing: a qualifier may sit between the head and the `or`, which is what
 /// lets "becomes tapped during your turn or is dealt damage" split into
 /// [Taps, DamageReceived] (`state_change_head_terminates_subject_span`).

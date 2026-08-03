@@ -4,15 +4,15 @@
 //! The `becomes|is|are <complement>` trigger-event head is detected as an OPEN
 //! shape, so an unmodelled complement still produces its own trigger arm. That arm
 //! lands on `TriggerMode::Unknown`, which is the coverage authority's unsupported
-//! NOTE ON THE VEHICLE: `is_card_supported` is private, so it cannot be asserted
-//! from an integration test. `card_face_gaps` is the equivalent PUBLIC authority —
-//! it applies the same `Unknown(_) || !registry.contains_key` predicate through
-//! `check_trigger`, so `gaps.is_empty()` is the assertable form of "supported".
-//!
 //! marker (`game/coverage.rs`: `is_card_supported`, `check_trigger`,
 //! `build_trigger_item`). Before the open head the second branch vanished and the
 //! card reported as fully supported — parser coverage went green while a
 //! rules-bearing branch was lost.
+//!
+//! NOTE ON THE VEHICLE: `is_card_supported` is private, so it cannot be asserted
+//! from an integration test. `card_face_gaps` is the equivalent PUBLIC authority —
+//! it applies the same `Unknown(_) || !registry.contains_key` predicate through
+//! `check_trigger`, so `gaps.is_empty()` is the assertable form of "supported".
 //!
 //! The open shape's false-positive surface (a head match INSIDE a subject noun
 //! phrase) fails in the same direction, which is the reason it is acceptable: the
