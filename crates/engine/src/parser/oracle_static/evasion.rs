@@ -2555,8 +2555,42 @@ fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefiniti
     // not parse as if the rider were absent.
     tag::<_, _, OracleError<'_>>("unless ").parse(rest).ok()?;
     let tp = TextPair::new(text, &lower);
-    def.condition = Some(super::shared::parse_unless_static_condition(&tp)?);
+    let condition = super::shared::parse_unless_static_condition(&tp)?;
+    // Coverage-honesty gate (CR 604.1): only emit the forced-attack static when the
+    // `unless` gate is a FULLY-MODELED condition. `parse_unless_static_condition`
+    // wraps an unrecognized inner clause as `Not(Unrecognized)` — which (a) the
+    // coverage detector's TOP-LEVEL `Unrecognized` check misses, so the card is
+    // falsely reported supported, and (b) evaluates permanently false at runtime
+    // (`Unrecognized` is true; the wrapping `Not` negates it), silently disabling
+    // the whole requirement. Decline instead so the line stays honestly unsupported
+    // (coverage red) rather than shipping a broken static.
+    if static_condition_contains_unrecognized(&condition) {
+        return None;
+    }
+    def.condition = Some(condition);
     Some(def)
+}
+
+/// True when `condition` contains an `Unrecognized` clause ANYWHERE in its tree
+/// (recursing through the `Not` / `And` / `Or` combinators). Used by the
+/// forced-attack parser to decline a not-fully-modeled `unless` gate: the
+/// coverage detector only flags a TOP-LEVEL `Unrecognized`, so a nested one
+/// (`Not(Unrecognized)`, the shape `parse_unless_static_condition` emits for an
+/// unknown clause) would otherwise mark the card supported while its requirement
+/// is permanently inert at runtime.
+fn static_condition_contains_unrecognized(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::Unrecognized { .. } => true,
+        // The only sub-condition-embedding variants — recurse through them. If a NEW
+        // combinator variant that nests `StaticCondition` is added, extend this match;
+        // the leaf wildcard below would otherwise hide an unrecognized clause inside
+        // it. Every remaining variant is a leaf that cannot contain a nested clause.
+        StaticCondition::Not { condition } => static_condition_contains_unrecognized(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(static_condition_contains_unrecognized),
+        _ => false,
+    }
 }
 
 /// CR 702.122a / 702.171a / 702.184c: nom parser for the crew/saddle/station

@@ -8990,6 +8990,34 @@ fn forced_attack_defender_static_rejects_unmodelled_rider() {
 }
 
 #[test]
+fn forced_attack_defender_static_rejects_unmodelled_unless_condition() {
+    // Coverage-honesty guard: an `unless` gate whose INNER condition is not modeled
+    // must make the whole line decline. Otherwise it parses to `Not(Unrecognized)`,
+    // which the coverage detector's top-level `Unrecognized` check misses (falsely
+    // "supported") and which evaluates permanently false at runtime — silently
+    // disabling the forced-attack requirement. This is the grammar-class hole one
+    // level deeper than the rider test above: the rider sits BEFORE `unless`; here
+    // the unrecognized clause sits AFTER it.
+    //
+    // Reach-guard: the SAME shape with a MODELED `unless` condition still parses, so
+    // the rejection is the unrecognized condition's doing, not an unrelated failure.
+    let modeled = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        modeled.is_some(),
+        "reach-guard: a fully-modeled `unless` gate still parses",
+    );
+    let unmodeled = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent each combat if able unless you satisfy an unmodelled condition.",
+    );
+    assert!(
+        unmodeled.is_none(),
+        "an unmodeled `unless` condition must decline — never a broken, falsely-supported static",
+    );
+}
+
+#[test]
 fn flavor_labeled_non_forced_attack_line_is_not_hijacked() {
     // Anti-hijack: the flavor-label strip must not manufacture a forced-attack
     // static from an unrelated labeled line. `parse_forced_attack_defender_static`
