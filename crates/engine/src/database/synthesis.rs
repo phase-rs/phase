@@ -10766,27 +10766,25 @@ mod cycling_synthesis_tests {
         );
     }
 
-    /// Regression (Thought Distortion, PR #6940): the heterogeneous
-    /// permanent+zone mass-exile recognizer must DECLINE owner-scoped forms, so
-    /// this card's production parse stays byte-identical to its pre-PR baseline.
-    /// The prior defect rewrote its hand-exile `ChangeZoneAll { origin: Hand }`
-    /// (which ties the exile to the reveal target's hand) into an `origin: None`
-    /// `Or[.. + InZone(Battlefield), Card + InAnyZone(Graveyard)]`, injecting an
-    /// impossible hand-and-battlefield constraint and dropping the
-    /// noncreature/nonland restriction. This asserts the exact restored shape at
-    /// the production boundary (`build_oracle_face`): a `RevealHand` targeting the
-    /// Opponent (the owner binding); its `ChangeZoneAll` keeping `origin:
-    /// Some(Hand)` rather than `None`; and the exile filter keeping
-    /// `Non(Creature)`/`Non(Land)` + `InZone(Hand)` with NO `InZone(Battlefield)`,
-    /// as a single `Typed` rather than an `Or`.
-    ///
-    /// The trailing "and graveyard" leg remains an `Unimplemented` gap
-    /// (`Effect:graveyard`), a pre-existing main limitation this PR neither closes
-    /// nor worsens.
+    /// Thought Distortion (PR #6940), production boundary (`build_oracle_face`):
+    /// "Exile all noncreature, nonland cards from that player's hand and
+    /// graveyard" lowers to ONE owner-scoped, type-restricted, multi-zone exile —
+    /// not a hand-only wipe plus an orphaned `Unimplemented { "graveyard" }` (the
+    /// pre-PR parse), and never the mis-parse that injected `InZone(Battlefield)`
+    /// and dropped the noncreature/nonland restriction. The asserted shape:
+    ///   - `RevealHand` targeting the Opponent (the target that "that player"
+    ///     anaphorically binds to, CR 601.2c),
+    ///   - a single `ChangeZoneAll` to Exile with `origin: None` (the zone union
+    ///     rides on the filter) whose `Typed` filter carries the
+    ///     `Non(Creature)`/`Non(Land)` restriction (CR 205.2a), the
+    ///     `ControllerRef::TargetPlayer` owner scope (CR 400.3), and
+    ///     `InAnyZone([Hand, Graveyard])` (CR 402.1 + CR 404.1) — with NO
+    ///     `InZone(Battlefield)`,
+    ///   - and NO remaining coverage gap (`card_face_gaps` is empty).
     #[test]
-    fn thought_distortion_declines_recognizer_at_production_boundary() {
+    fn thought_distortion_owner_scoped_multizone_exile_at_production_boundary() {
         use crate::database::mtgjson::AtomicIdentifiers;
-        use crate::types::ability::{AbilityDefinition, TypeFilter};
+        use crate::types::ability::{AbilityDefinition, ControllerRef, TypeFilter};
         use crate::types::zones::Zone;
 
         let oracle = "This spell can't be countered.\n\
@@ -10870,22 +10868,21 @@ mod cycling_synthesis_tests {
                 } => Some((origin, target)),
                 _ => None,
             })
-            .expect("must retain a ChangeZoneAll to Exile for the hand leg");
+            .expect("must lower to a ChangeZoneAll to Exile");
         let (origin, target) = exile;
 
-        // The owner-linkage the bug destroyed: origin stays Hand, not None.
+        // Multi-zone origin rides on the filter, so the lowering passes None.
         assert_eq!(
-            *origin,
-            Some(Zone::Hand),
-            "hand-exile ChangeZoneAll must keep origin: Some(Hand) (bug changed it to None)"
+            *origin, None,
+            "multi-zone exile carries its origin on the filter (InAnyZone), so origin is None"
         );
 
-        // A single Typed leg (never collapsed into an Or), carrying the
-        // noncreature/nonland restriction and Hand scoping — and crucially NO
-        // battlefield injection.
+        // A single Typed leg (never an Or) carrying: the noncreature/nonland
+        // restriction, the target-player owner scope, and the hand+graveyard zone
+        // union — with NO battlefield injection.
         let tf = match target {
             TargetFilter::Typed(tf) => tf,
-            other => panic!("hand-exile target must be a single Typed leg, got {other:?}"),
+            other => panic!("exile target must be a single Typed leg, got {other:?}"),
         };
         assert!(
             tf.type_filters
@@ -10896,10 +10893,19 @@ mod cycling_synthesis_tests {
             "noncreature/nonland restriction must survive, got {:?}",
             tf.type_filters
         );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::TargetPlayer),
+            "the exile must be owner-scoped to the targeted player, got {:?}",
+            tf.controller
+        );
         assert!(
-            tf.properties
-                .contains(&FilterProp::InZone { zone: Zone::Hand }),
-            "hand scoping must survive, got {:?}",
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard)
+            )),
+            "the zone union must span Hand and Graveyard, got {:?}",
             tf.properties
         );
         assert!(
@@ -10910,12 +10916,11 @@ mod cycling_synthesis_tests {
             tf.properties
         );
 
-        // Documented boundary: the graveyard leg is still an unimplemented gap on
-        // main; this PR neither closes nor worsens it.
-        assert_eq!(
-            crate::game::coverage::card_face_gaps(&face),
-            vec!["Effect:graveyard".to_string()],
-            "only the pre-existing graveyard gap should remain"
+        // The whole card is now supported: no coverage gap remains.
+        assert!(
+            crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "Thought Distortion must be fully supported, gaps: {:?}",
+            crate::game::coverage::card_face_gaps(&face)
         );
     }
 

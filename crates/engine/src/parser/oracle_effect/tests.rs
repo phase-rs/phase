@@ -39718,11 +39718,29 @@ fn identity_crisis_parses_multi_zone_player_exile() {
 #[test]
 fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     use crate::types::ability::ControllerRef;
+    // Bare "cards" form (CR 108.2): no type restriction (empty type_filters).
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
             "cards from target player's hand and graveyard."
         ),
         Some((
+            vec![],
+            ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        ))
+    );
+    // Type-qualified form (CR 205.2a): carries the noncreature/nonland restriction
+    // AND the owner scope AND the zone union (Thought Distortion).
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "noncreature, nonland cards from that player's hand and graveyard."
+        ),
+        Some((
+            vec![
+                TypeFilter::Card,
+                TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ],
             ControllerRef::TargetPlayer,
             vec![Zone::Hand, Zone::Graveyard]
         ))

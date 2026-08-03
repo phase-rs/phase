@@ -910,6 +910,7 @@ mod the_immortal_sun;
 mod the_kingpin_of_crime_combat_damage;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
+mod thought_distortion;
 mod thoughtweft_trample_regression;
 mod throne_of_eldraine_mana_riders;
 mod throw_instead_tail_class;
