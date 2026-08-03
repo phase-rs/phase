@@ -9024,6 +9024,17 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[each|all] <type> card(s) in your <zone> perpetually
+    // get(s) +N/+M" — the ZONE-SCOPED CARD-SET sibling of the single-object arm
+    // above (Begin Anew, Feed the Bog, Bramblearmor Brawler, …). Disjoint from
+    // it: that arm requires a "target "/"that "/"it "/self-ref prefix, none of
+    // which `parse_type_phrase` can consume, so each would leave a non-empty
+    // subject remainder here. Ordered AFTER it so a single-object subject can
+    // never reach the filter grammar.
+    if let Some(effect) = try_parse_zone_scoped_cards_perpetual_modify_pt(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/that X] perpetually gains \"This spell costs {N}
     // less/more to cast\"" — persistent self-spell cost modifier (CR 601.2f).
     // Tried before the keyword grant: disjoint (this requires a quoted body, the
@@ -9406,6 +9417,27 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
     })
 }
 
+/// Digital-only Alchemy: `perpetually get(s) ±N/±M` — the shared PREDICATE tail
+/// of every perpetual power/toughness grant, independent of the subject.
+///
+/// Number agreement ("gets" for a singular subject, "get" for a plural or
+/// distributive one) is a single `alt()`; the delta itself delegates to the
+/// shared [`nom_primitives::parse_pt_modifier`] primitive, which accepts fixed
+/// digits only (so "+X/+X" is rejected here rather than at each call site).
+///
+/// SINGLE AUTHORITY for this predicate. Composed by every subject form in
+/// [`try_parse_perpetual_modify_pt`] (explicit target / anaphoric "that <type>" /
+/// anaphoric "it" / self-reference) and by
+/// [`try_parse_zone_scoped_cards_perpetual_modify_pt`], so the grammar lives in
+/// exactly one place and the five arms cannot drift apart.
+fn parse_perpetual_pt_predicate(input: &str) -> OracleResult<'_, (i32, i32)> {
+    preceded(
+        pair(tag("perpetually "), alt((tag("gets "), tag("get ")))),
+        nom_primitives::parse_pt_modifier,
+    )
+    .parse(input)
+}
+
 /// Digital-only Alchemy: parse the "perpetually gets +N/+M" modifier form —
 /// "[~ / this creature / …] perpetually gets +N/+M" or
 /// "that [type] perpetually gets +N/+M" → [`Effect::ApplyPerpetual`] with
@@ -9432,17 +9464,7 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
         let (target, after_target) = parse_target(lower);
         if !matches!(target, TargetFilter::Any) {
             let (rest, _) = space1::<_, OracleError<'_>>(after_target).ok()?;
-            let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-                .parse(rest)
-                .ok()?;
-            let (rest, _) = alt((
-                tag::<_, _, OracleError<'_>>("gets "),
-                tag::<_, _, OracleError<'_>>("get "),
-            ))
-            .parse(rest)
-            .ok()?;
-            let (rest, (power_delta, toughness_delta)) =
-                nom_primitives::parse_pt_modifier(rest).ok()?;
+            let (rest, (power_delta, toughness_delta)) = parse_perpetual_pt_predicate(rest).ok()?;
             return tail_done(rest).then_some(Effect::ApplyPerpetual {
                 target,
                 modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
@@ -9458,17 +9480,7 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
             .parse(after_that)
             .ok()?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-            .parse(rest)
-            .ok()?;
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("gets "),
-            tag::<_, _, OracleError<'_>>("get "),
-        ))
-        .parse(rest)
-        .ok()?;
-        let (rest, (power_delta, toughness_delta)) =
-            nom_primitives::parse_pt_modifier(rest).ok()?;
+        let (rest, (power_delta, toughness_delta)) = parse_perpetual_pt_predicate(rest).ok()?;
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
@@ -9479,15 +9491,8 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
     }
 
     // Anaphoric back-reference: "it perpetually gets +1/+0".
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("gets "),
-            tag::<_, _, OracleError<'_>>("get "),
-        ))
-        .parse(rest)
-        .ok()?;
-        let (rest, (power_delta, toughness_delta)) =
-            nom_primitives::parse_pt_modifier(rest).ok()?;
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it ").parse(lower) {
+        let (rest, (power_delta, toughness_delta)) = parse_perpetual_pt_predicate(rest).ok()?;
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
             target: TargetFilter::ParentTarget,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
@@ -9513,19 +9518,150 @@ fn try_parse_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
             .ok()
             .map(|(rest, _)| rest)
     })?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
-        .parse(after_subject)
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("gets "),
-        tag::<_, _, OracleError<'_>>("get "),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, (power_delta, toughness_delta)) = nom_primitives::parse_pt_modifier(rest).ok()?;
+    let (rest, (power_delta, toughness_delta)) =
+        parse_perpetual_pt_predicate(after_subject).ok()?;
     tail_done(rest).then_some(Effect::ApplyPerpetual {
         target: TargetFilter::Any,
         modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+            power_delta,
+            toughness_delta,
+        },
+    })
+}
+
+/// Digital-only Alchemy (no CR entry for "perpetually"; the delta itself applies
+/// as a CR 613.4c layer-7c power/toughness modification): parse the ZONE-SCOPED
+/// CARD-SET form of the perpetual P/T modifier —
+/// "[each|all|every] <type-phrase> card(s) in your <zone> perpetually get(s) +N/+M" →
+/// [`Effect::ApplyPerpetual`] with [`PerpetualModification::ModifyPowerToughness`]
+/// over the parsed subject filter (Begin Anew, Grow Old Together, Klement Novice
+/// Acolyte, Thoughtweft's Call, Kithkin Brinefarer, Blighted Nightmare, Feed the
+/// Bog, Elvish Elegy, Advanced Floral Invocations, Bramblearmor Brawler).
+///
+/// Sibling of [`try_parse_typed_cards_in_hand_perpetual_gain_cost`] for the
+/// `ModifyCost` axis, and of [`try_parse_perpetual_modify_pt`], which owns every
+/// SINGLE-OBJECT subject (target / "that <type>" / "it" / self-ref). The two are
+/// disjoint: this arm requires a type-phrase subject pinning a private per-player
+/// card zone, which none of those prefixes can produce, and it is ordered AFTER
+/// them.
+///
+/// CR 400.1 + CR 400.3 + CR 109.4 + CR 109.5: hand, library and graveyard are
+/// per-player zones (CR 400.1) whose contents have no controller (CR 109.4) and
+/// always sit in their OWNER's copy (CR 400.3); CR 109.5 is what then makes
+/// "you"/"your" on such a controllerless object refer to its OWNER, so
+/// "your <zone>" is an OWNERSHIP scope. The
+/// filter this arm emits is the plain `parse_type_phrase` shape
+/// (`controller: Some(ControllerRef::You)` + `FilterProp::InZone`); the
+/// owner-vs-controller reading is applied at the CONSUMING seam, where
+/// `game/effects/perpetual.rs`'s mass zone branch answers the predicate through
+/// `filter::matches_target_filter_in_owner_zone` for every
+/// `filter::is_owner_scoped_zone`. That is the same dispatch
+/// `off_zone_characteristics` already uses, so the parser does not fork a
+/// second, arm-local encoding of the scope.
+/// CR 115.1: this clause names no "target" — the affected set is a population
+/// enumerated at resolution, which is why
+/// `triggers::extract_target_filter_from_effect` carries a matching
+/// `ApplyPerpetual` carve-out keyed on the SAME zone set
+/// (`triggers::apply_perpetual_targets_zone_population`). Emitting a zone this
+/// arm accepts but that predicate rejects would leave the targeting authority
+/// demanding a pick the clause never declared, so the two zone sets are kept
+/// identical by construction.
+/// CR 611.2c: the affected set is determined when the effect begins — the
+/// resolver (`game/effects/perpetual.rs`, the mass non-battlefield zone branch)
+/// enumerates the zone once, at resolution.
+///
+/// Fail-closed guards — every one returns `None` rather than installing a
+/// subtly-wrong effect.
+///
+/// "Fail-closed" describes THIS ARM only, not the pipeline. A reject here falls
+/// through to the pre-existing dispatch, which for MOST of these shapes lands on
+/// `Effect::Pump { target: Any }` — today's misparse. A clause with an unmodeled
+/// compound rider ("…and gain flying") falls further, to the static-ability
+/// reading `Effect::GenericEffect` (pinned as H11 in
+/// `perpetual_zone_scoped_card_set_arm_honest_red`). Either way coverage still
+/// reports `supported: true`. That differs from the cost sibling
+/// [`try_parse_typed_cards_in_hand_perpetual_gain_cost`], whose rejects genuinely
+/// reach `Effect::unimplemented`. So a reject here is "no worse than today", NOT
+/// honest red; making it honest means fixing `oracle_effect/imperative.rs`'s
+/// position-agnostic `get +` acceptance, which is a separate follow-up. The
+/// guards:
+/// * an unconsumed subject remainder (a rider, a multi-subject conjunction, or a
+///   comma-separated multi-zone list — Arming Gala's "creatures you control and
+///   creature cards in your hand, library, and graveyard");
+/// * a subject pinning zero zones, more than one zone, or a zone outside the
+///   three private card zones (`perpetual_target_object_ids` has no mass
+///   battlefield path: it falls back to `ids.push(ability.source_id)`, silently
+///   pumping the source);
+/// * a controller scope other than `You` (mirrors the deliberate "your hand"-only
+///   restriction on the cost sibling, `parse_in_whose_hand_perpetually_gain_body`:
+///   a `None` controller would make the resolver sweep EVERY player's zone);
+/// * a delta the fixed-number grammar rejects ("+X/+X" — Golden Sidekick, Mycoid
+///   Resurrection); `parse_pt_modifier` accepts digits only;
+/// * any unconsumed clause tail (a compound "…and gain flying" rider).
+fn try_parse_zone_scoped_cards_perpetual_modify_pt(tp: TextPair) -> Option<Effect> {
+    fn tail_done(tail: &str) -> bool {
+        tail.is_empty() || tail == "."
+    }
+
+    let ((filter, power_delta, toughness_delta), rest) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            // Bound the subject at the perpetual adverb so the type-phrase
+            // authority can never over-consume into the predicate.
+            let (after_subject, subject) = take_until("perpetually ").parse(input)?;
+
+            // Predicate: "perpetually get(s) +N/+M" — the shared authority.
+            let (after_delta, (power_delta, toughness_delta)) =
+                parse_perpetual_pt_predicate(after_subject)?;
+
+            // Subject -> TargetFilter through the SINGLE type-phrase authority.
+            // `parse_type_phrase` lowercases internally and `parse_subtype`
+            // returns canonical registry casing case-insensitively, so the
+            // already-lowered slice is the correct input (pinned by
+            // `parse_type_phrase_zone_scoped_card_set_subjects_bind_fully` in
+            // `oracle_target.rs`). The remainder must be empty, or the subject
+            // carries something this arm does not model.
+            //
+            // The leading universal quantifier ("each"/"all"/"every") is NOT
+            // stripped here: `parse_type_phrase` already owns that axis — see its
+            // CR 109.2 annotation in `oracle_target.rs`, which covers all three
+            // words. A local strip would duplicate that authority and lag it.
+            let (filter, subject_rest) = parse_type_phrase(subject.trim_end());
+            if !subject_rest.trim().is_empty() {
+                return Err(oracle_err(subject));
+            }
+
+            Ok((after_delta, (filter, power_delta, toughness_delta)))
+        })?;
+
+    // Honest-red: any unconsumed tail (a compound "…and gain flying") means this
+    // leaf cannot faithfully model the clause.
+    if !tail_done(rest) {
+        return None;
+    }
+
+    // Zone guard: exactly one pinned zone, and one of the three private
+    // per-player CARD zones. An exhaustive slice match rejects the zero-zone
+    // ("creatures you control") and multi-zone (`InAnyZone`) cases in the same
+    // expression, and the enumerated set is identical to
+    // `triggers::apply_perpetual_targets_zone_population`, so every effect this
+    // arm emits is classified as a population — never a declared target — by the
+    // targeting authority.
+    match filter.extract_zones().as_slice() {
+        [Zone::Hand | Zone::Library | Zone::Graveyard] => {}
+        _ => return None,
+    }
+
+    // Controller guard: only "your <zone>" is modeled.
+    let TargetFilter::Typed(typed) = filter else {
+        return None;
+    };
+    if typed.controller != Some(ControllerRef::You) {
+        return None;
+    }
+
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Typed(typed),
+        modification: PerpetualModification::ModifyPowerToughness {
             power_delta,
             toughness_delta,
         },

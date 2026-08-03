@@ -10779,6 +10779,36 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Digital-only Alchemy (no CR entry for "perpetually") + CR 115.1 + CR 400.1:
+/// True when an [`Effect::ApplyPerpetual`] target denotes the POPULATION of a
+/// private per-player CARD zone rather than a declared target.
+///
+/// The zone set is ENUMERATED rather than expressed as `!= Battlefield` on
+/// purpose: `TargetFilter::extract_in_zone` also reports `Zone::Stack` for
+/// `StackSpell`/`StackAbility` and `Zone::Exile` for `ExiledBySource`, and
+/// `StackSpell`/`StackAbility` are NOT context refs — they surface a genuine
+/// declared target today ("Choose target spell. If it's a creature spell, it
+/// perpetually gets -2/-0"). Mirrors `phase_out_or_in_filter_is_mass` above: one
+/// typed predicate distinguishing a mass population filter from a declared
+/// target. The parser arm that emits these effects
+/// (`oracle_effect::try_parse_zone_scoped_cards_perpetual_modify_pt`) gates on
+/// the same three zones, so every effect it produces is classified here as a
+/// population.
+///
+/// The zone set itself is not restated here: it is
+/// [`crate::game::filter::is_owner_scoped_zone`], the single authority shared
+/// with `off_zone_characteristics`'s keyword-recipient dispatch and with
+/// `effects::perpetual`'s mass zone branch — the same three
+/// CR 109.4 + CR 109.5 + CR 400.3 owner-scoped zones (no controller per
+/// CR 109.4, always the OWNER's copy per CR 400.3, and CR 109.5 is what makes
+/// "your" on such a controllerless object read as its OWNER), which is exactly
+/// the set whose "your card" population the resolver enumerates.
+pub(crate) fn apply_perpetual_targets_zone_population(filter: &TargetFilter) -> bool {
+    filter
+        .extract_in_zone()
+        .is_some_and(crate::game::filter::is_owner_scoped_zone)
+}
+
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
@@ -10875,6 +10905,32 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
             if matches!(zone, Zone::Hand | Zone::Library) {
                 return None;
             }
+        }
+    }
+    // CR 115.1 + CR 400.1 — Digital-only Alchemy (no CR entry for "perpetually"):
+    // an `ApplyPerpetual` whose target pins a private card-set zone is a mass
+    // POPULATION filter, not a declared target — `perpetual_target_object_ids`
+    // (game/effects/perpetual.rs) enumerates the whole zone. Suppressing the slot
+    // here is what leaves `ability.targets` EMPTY, which is the precondition for
+    // that branch: with a slot filled, `perpetual_target_object_ids` short-circuits
+    // on the propagated target and the grant lands on the ONE chosen card instead
+    // of the population ("creature cards in your hand/graveyard/library perpetually
+    // get +1/+1" — Begin Anew, Feed the Bog, Bramblearmor Brawler; "[type] cards in
+    // your hand perpetually cost {1} less" — Blooming Cactusfolk, Fearsome Whelp).
+    // It also keeps the empty-zone case away from `legal_targets.is_empty() &&
+    // !optional_targeting`, which otherwise makes the spell uncastable and drops a
+    // trigger-hosted copy as `DroppedTargetUnresolved`. The is-pinned-zone test
+    // mirrors the `ChangeZone` / `PutAtLibraryPosition` / `CastFromZone` arms above.
+    //
+    // The zone set is ENUMERATED (see `apply_perpetual_targets_zone_population`)
+    // rather than written as `!= Battlefield` on purpose: `extract_in_zone` also
+    // reports Stack (`StackSpell`/`StackAbility`) and Exile (`ExiledBySource`),
+    // which ARE genuine declared targets. Keeping their slot leaves
+    // `ability.targets` non-empty, so the resolver honours the declared target —
+    // the targeting and resolution authorities still agree on the outcome.
+    if let Effect::ApplyPerpetual { target, .. } = effect {
+        if apply_perpetual_targets_zone_population(target) {
+            return None;
         }
     }
     // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
@@ -22011,6 +22067,148 @@ pub mod tests {
         assert_eq!(state.stack.len(), 1, "Ygra trigger should be on the stack");
     }
 
+    // --- Trigger-hosted zone-population ApplyPerpetual (root cause #19) ---
+
+    /// Klement, Novice Acolyte — the verbatim ETB LINE (verified against
+    /// `client/public/card-data.json`). The printed card has a second line,
+    /// `Specialize {2}`, which is deliberately omitted: it is an unrelated
+    /// activated ability and this fixture exercises only the ETB trigger.
+    const KLEMENT_ETB: &str =
+        "When Klement, Novice Acolyte enters, creature cards in your hand perpetually get +1/+1.";
+
+    /// Shared fixture: Klement on the battlefield with its parsed ETB trigger,
+    /// plus the ETB `ZoneChanged` event to feed `process_triggers`. Follows the
+    /// Ygra precedent above — the event is CONSTRUCTED here rather than assumed
+    /// to be emitted by the scenario helper, which places the creature directly
+    /// on the battlefield without running the ETB pipeline.
+    fn klement_etb_fixture() -> (crate::game::scenario::GameRunner, ObjectId, Vec<GameEvent>) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::TriggerIndex;
+
+        let mut scenario = GameScenario::new();
+        let klement = scenario
+            .add_creature_from_oracle(P0, "Klement, Novice Acolyte", 2, 2, KLEMENT_ETB)
+            .id();
+        let mut runner = scenario.build();
+
+        // Reach-guard on the FIXTURE itself: the parsed trigger really is the
+        // zone-pinned mass `ApplyPerpetual` this test is about. Without this the
+        // stack-depth assertions below could be satisfied by any other trigger.
+        let effect = runner
+            .state()
+            .objects
+            .get(&klement)
+            .expect("Klement is on the battlefield")
+            .trigger_definitions
+            .first()
+            .and_then(|t| t.definition.execute.as_ref())
+            .map(|a| (*a.effect).clone())
+            .expect("Klement's ETB trigger must parse");
+        let is_population = match &effect {
+            Effect::ApplyPerpetual { target, .. } => {
+                apply_perpetual_targets_zone_population(target)
+            }
+            _ => false,
+        };
+        assert!(
+            is_population,
+            "fixture guard: Klement's ETB must lower to a zone-pinned mass ApplyPerpetual, got {effect:?}"
+        );
+
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+        let events = vec![zone_changed_event(
+            klement,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        )];
+        (runner, klement, events)
+    }
+
+    /// CR 115.1 + CR 603.3: a trigger whose effect is a zone-pinned mass
+    /// `ApplyPerpetual` declares NO target, so it must reach the stack even when
+    /// the pinned zone holds no matching card. Without the carve-out,
+    /// `build_target_slots` returns `Err(no_legal_target_slots())` and the
+    /// trigger is discarded as
+    /// `TriggerDispatchDisposition::DroppedTargetUnresolved`.
+    #[test]
+    fn trigger_hosted_zone_perpetual_is_not_dropped_when_hand_is_empty() {
+        let (mut runner, _klement, events) = klement_etb_fixture();
+        assert!(
+            runner.state().players.iter().all(|p| p.hand.is_empty()),
+            "fixture guard: no player may hold a card for the empty-hand case"
+        );
+
+        process_triggers(runner.state_mut(), &events);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "a zone-pinned mass ApplyPerpetual trigger must reach the stack with an empty hand"
+        );
+    }
+
+    /// Paired POSITIVE reach-guard for the test above: with matching cards in
+    /// hand the same trigger must also reach the stack, must NOT stall on a
+    /// hidden-hand target prompt, and must actually RESOLVE onto the whole
+    /// population. Two matching cards, deliberately: with one, a declared target
+    /// slot and the population coincide and the fixture proves nothing.
+    #[test]
+    fn trigger_hosted_zone_perpetual_resolves_over_the_whole_hand_population() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::TriggerIndex;
+
+        let mut scenario = GameScenario::new();
+        let klement = scenario
+            .add_creature_from_oracle(P0, "Klement, Novice Acolyte", 2, 2, KLEMENT_ETB)
+            .id();
+        let bear = scenario.add_creature_to_hand(P0, "Bear", 2, 2).id();
+        let ogre = scenario.add_creature_to_hand(P0, "Ogre", 4, 1).id();
+        let mut runner = scenario.build();
+        TriggerIndex::rebuild_from_battlefield(runner.state_mut());
+
+        let events = vec![zone_changed_event(
+            klement,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        )];
+        process_triggers(runner.state_mut(), &events);
+
+        assert_eq!(runner.state().stack.len(), 1);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            ),
+            "the perpetual population must not surface a hidden-hand target prompt: {:?}",
+            runner.state().waiting_for
+        );
+
+        let mut resolution_events = Vec::new();
+        crate::game::stack::resolve_top(runner.state_mut(), &mut resolution_events);
+
+        for (id, expected) in [(bear, (Some(3), Some(3))), (ogre, (Some(5), Some(2)))] {
+            let obj = runner.state().objects.get(&id).expect("card still in hand");
+            assert_eq!(
+                (obj.base_power, obj.base_toughness),
+                expected,
+                "every matching card in the hand population must be modified, not just one"
+            );
+        }
+        assert!(
+            runner
+                .state()
+                .objects
+                .get(&klement)
+                .unwrap()
+                .perpetual_mods
+                .is_empty(),
+            "the trigger source must not receive the grant via the source fallback"
+        );
+    }
+
     // === extract_target_filter_from_effect private zone tests ===
 
     #[test]
@@ -22065,6 +22263,163 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "ChangeZone from battlefield should still extract target for stack-time targeting"
+        );
+    }
+
+    // --- ApplyPerpetual zone-population carve-out (root cause #19) ---
+
+    /// Shared fixture for the `ApplyPerpetual` carve-out tests: a
+    /// `ModifyPowerToughness` grant over an arbitrary target filter.
+    fn perpetual_over(target: TargetFilter) -> Effect {
+        Effect::ApplyPerpetual {
+            target,
+            modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                power_delta: 1,
+                toughness_delta: 1,
+            },
+        }
+    }
+
+    /// A `Typed[Creature]` filter with the given controller scope + properties.
+    fn perpetual_typed(properties: Vec<FilterProp>, controller: Option<ControllerRef>) -> Effect {
+        let mut typed = TypedFilter::default()
+            .with_type(TypeFilter::Creature)
+            .properties(properties);
+        if let Some(c) = controller {
+            typed = typed.controller(c);
+        }
+        perpetual_over(TargetFilter::Typed(typed))
+    }
+
+    /// H12 — CR 115.1 + CR 400.1: "Creature cards in your hand perpetually get
+    /// +1/+1" (Begin Anew, Klement, Thoughtweft's Call) names no "target". The
+    /// resolver mass-scans the hand (`perpetual_target_object_ids`' zone branch),
+    /// and it can only reach that branch while `ability.targets` is EMPTY —
+    /// suppressing the slot here is what keeps it empty.
+    #[test]
+    fn extract_target_skips_apply_perpetual_over_hand_population() {
+        let effect = perpetual_typed(
+            vec![FilterProp::InZone { zone: Zone::Hand }],
+            Some(ControllerRef::You),
+        );
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "a hand-pinned ApplyPerpetual population must not surface a target slot, got {:?}",
+            extract_target_filter_from_effect(&effect)
+        );
+    }
+
+    /// H12b — Bramblearmor Brawler's zone. Same branch; pinned separately so the
+    /// enumerated zone set cannot silently shrink to Hand-only.
+    #[test]
+    fn extract_target_skips_apply_perpetual_over_library_population() {
+        let effect = perpetual_typed(
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+            Some(ControllerRef::You),
+        );
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "a library-pinned ApplyPerpetual population must not surface a target slot, got {:?}",
+            extract_target_filter_from_effect(&effect)
+        );
+    }
+
+    /// H13 — Feed the Bog / Elvish Elegy / Blighted Nightmare. This is the test
+    /// that fails if the carve-out copies the sibling arms' `Hand | Library` set
+    /// verbatim instead of the three private CARD zones.
+    #[test]
+    fn extract_target_skips_apply_perpetual_over_graveyard_population() {
+        let effect = perpetual_typed(
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+            Some(ControllerRef::You),
+        );
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "a graveyard-pinned ApplyPerpetual population must not surface a target slot, got {:?}",
+            extract_target_filter_from_effect(&effect)
+        );
+    }
+
+    /// H14 — CR 115.1 boundary. Davriel's Withering's exact shape ("Target
+    /// creature an opponent controls perpetually gets -1/-2"): `properties` is
+    /// empty, so `extract_in_zone()` is `None` and the carve-out never fires.
+    /// Reverting the discriminator to a blanket `Effect::ApplyPerpetual =>
+    /// return None` flips this assertion.
+    #[test]
+    fn extract_target_keeps_apply_perpetual_single_object_target() {
+        let effect = perpetual_typed(vec![], Some(ControllerRef::Opponent));
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "a genuinely targeted ApplyPerpetual must keep its declared target slot"
+        );
+    }
+
+    /// H15 — mirrors `extract_target_keeps_change_zone_from_battlefield`. The
+    /// resolver does NOT take the mass branch for `Zone::Battlefield`, so the
+    /// targeting authority must not either.
+    #[test]
+    fn extract_target_keeps_apply_perpetual_pinned_to_battlefield() {
+        let effect = perpetual_typed(
+            vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            Some(ControllerRef::You),
+        );
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "a battlefield-pinned ApplyPerpetual must keep its target slot"
+        );
+    }
+
+    /// H16 — CR 109.2 + CR 115.1: `TargetFilter::StackSpell` reports
+    /// `Zone::Stack` from `extract_in_zone()` and is NOT an `is_context_ref`, so
+    /// it surfaces a genuine declared target today ("Choose target spell. If
+    /// it's a creature spell, it perpetually gets -2/-0"). The carve-out's zone
+    /// set is enumerated precisely so this keeps its slot.
+    #[test]
+    fn extract_target_keeps_apply_perpetual_over_stack_spell() {
+        let effect = perpetual_over(TargetFilter::StackSpell);
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "a stack-spell ApplyPerpetual is a declared target and must keep its slot"
+        );
+    }
+
+    /// H17 — the Exile sibling of H16. `extract_in_zone()` reports
+    /// `Zone::Exile`, which is deliberately OUTSIDE the enumerated population
+    /// set, so an exile-pinned filter keeps whatever semantics it has today.
+    #[test]
+    fn extract_target_keeps_apply_perpetual_pinned_to_exile() {
+        let effect = perpetual_typed(
+            vec![FilterProp::InZone { zone: Zone::Exile }],
+            Some(ControllerRef::You),
+        );
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "an exile-pinned ApplyPerpetual must keep today's declared-target semantics"
+        );
+    }
+
+    /// H17b — CR 406.6 + CR 607.2a: a bare `ExiledBySource` perpetual ("the
+    /// exiled card perpetually gets +1/+1") also reports `Zone::Exile`, but it
+    /// already returns `None` through the final `is_context_ref` guard. Pinned so
+    /// the carve-out is provably NOT what suppresses it — the exile-link class is
+    /// untouched by this change.
+    #[test]
+    fn extract_target_skips_apply_perpetual_over_exiled_by_source() {
+        let effect = perpetual_over(TargetFilter::ExiledBySource);
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "ExiledBySource stays a context ref, not a declared target"
+        );
+        assert!(
+            !apply_perpetual_targets_zone_population(&TargetFilter::ExiledBySource),
+            "the population predicate must NOT claim ExiledBySource — its None comes \
+             from the is_context_ref guard, which this change does not touch"
         );
     }
 

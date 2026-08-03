@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4726
-- **Total card appearances across root causes:** 4760 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4721
+- **Total card appearances across root causes:** 4755 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -12,7 +12,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 1 | Relative-clause / filter restriction on target dropped | 743 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 590 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
@@ -30,7 +30,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 16 | Keyword payload / multiplicity / mis-tokenization | 84 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 79 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
-| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 67 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
+| 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 65 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 22 | Attacks-alone / while-saddled combat constraint dropped | 43 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers (attacks-alone remainder); "while saddled" folds into the attack trigger's valid_card at declaration (And { filters: [subject, Typed([IsSaddled])] }, CR 508.1m) — no stored TriggerCondition, no LKI (done) |
@@ -47,7 +47,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (746 cards)
+### 1. Relative-clause / filter restriction on target dropped  (743 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -112,7 +112,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Battlefront Krushok
 - Battlegate Mimic
 - Beetle-Headed Merchants
-- Begin Anew
 - Behold the Sinister Six!
 - Benalish Missionary
 - Bitter Work duplicate?
@@ -132,7 +131,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Boxing Ring
 - Brace for Impact
 - Brainspoil
-- Bramblearmor Brawler
 - Brassclaw Orcs
 - Break Out
 - Brine Seer
@@ -413,7 +411,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Kitsune Palliator
 - Kjeldoran Frostbeast
 - Klement, Knowledge Acolyte
-- Klement, Novice Acolyte
 - Knight of Dusk
 - Knight of Valor
 - Knight of the Mists
@@ -4579,7 +4576,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (55 cards)
+### 19. Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn  (53 cards)
 
 **Signature.** 'perpetually' grant emitted with UntilEndOfTurn/null instead of a Perpetual duration; modification expires too soon.
 
@@ -4599,7 +4596,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Garruk, Wrath of the Wilds
 - Gitrog, Horror of Zhava
 - Goblin Trapfinder
-- Grow Old Together
 - Hardened Bonds
 - Homarid Warrior
 - Incessant Provocation
@@ -4633,7 +4629,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Teyo, Aegis Adept
 - The Five Stages of Grief
 - Thought Rattle
-- Thoughtweft's Call
 - Thrill-Kill Disciple
 - Timeline Culler
 - Traumatic Prank

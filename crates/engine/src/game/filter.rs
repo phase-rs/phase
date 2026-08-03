@@ -1546,6 +1546,22 @@ pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) ->
     }
 }
 
+/// CR 109.4 + CR 109.5 + CR 400.3: hand, library and graveyard are the zones
+/// whose contents have no controller at all (CR 109.4) and to which an object
+/// always goes to its OWNER's copy (CR 400.3); CR 109.5 is what then makes
+/// "you"/"your" on such an object refer to its OWNER. A "your card" predicate
+/// over one of them is therefore an OWNERSHIP scope, and must be evaluated with
+/// [`matches_target_filter_in_owner_zone`] rather than plain
+/// [`matches_target_filter`].
+///
+/// Single authority for that zone set: `off_zone_characteristics`'s keyword
+/// recipient dispatch, `triggers::apply_perpetual_targets_zone_population`, and
+/// `effects::perpetual`'s mass zone branch all key on this predicate so they
+/// cannot drift apart.
+pub(crate) fn is_owner_scoped_zone(zone: Zone) -> bool {
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
 /// CR 109.5 + CR 400.3: In owner-scoped zones (hand, library, graveyard),
 /// Oracle text still says "your card" even though cards are owned rather than
 /// controlled there. Evaluate the same typed filter with ownership standing in

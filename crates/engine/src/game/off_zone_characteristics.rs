@@ -1,5 +1,5 @@
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+    is_owner_scoped_zone, matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
 };
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, active_effect_condition_controller,
@@ -210,12 +210,6 @@ fn matches_off_zone_keyword_recipient(
     } else {
         matches_target_filter(state, object_id, filter, ctx)
     }
-}
-
-fn is_owner_scoped_zone(zone: Zone) -> bool {
-    // CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped
-    // by owner, not stale object controller/LKI.
-    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
 }
 
 fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> bool {

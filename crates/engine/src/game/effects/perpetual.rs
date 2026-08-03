@@ -104,12 +104,31 @@ fn perpetual_target_object_ids(
     // keep every object matching the filter — NOT a single declared target and
     // NOT the source fallback (the grant edits a set of cards, possibly empty, in
     // a hidden zone). Mirrors `layers::apply_continuous_effect_filtered`.
+    //
+    // CR 109.4 + CR 109.5 + CR 400.3: in the owner-scoped zones an object has no
+    // controller (CR 109.4) and always sits in its OWNER's copy of the zone
+    // (CR 400.3); CR 109.5 is what then makes "you"/"your" on a controllerless
+    // object refer to its OWNER. So the filter's "your"
+    // predicate must be answered against ownership — otherwise a card you own
+    // that an opponent last controlled is excluded from your own graveyard by
+    // stale control LKI, while a card an opponent owns that you last controlled
+    // is wrongly swept in. `matches_target_filter_in_owner_zone` is the existing
+    // authority for exactly that (game/filter.rs); the dispatch mirrors
+    // `off_zone_characteristics::matches_off_zone_keyword_recipient`.
     if let Some(zone) = target.extract_in_zone() {
         if zone != crate::types::zones::Zone::Battlefield {
             let ctx = crate::game::filter::FilterContext::from_source(state, ability.source_id);
             return crate::game::targeting::zone_object_ids(state, zone)
                 .into_iter()
-                .filter(|&id| crate::game::filter::matches_target_filter(state, id, target, &ctx))
+                .filter(|&id| {
+                    if crate::game::filter::is_owner_scoped_zone(zone) {
+                        crate::game::filter::matches_target_filter_in_owner_zone(
+                            state, id, target, &ctx,
+                        )
+                    } else {
+                        crate::game::filter::matches_target_filter(state, id, target, &ctx)
+                    }
+                })
                 .collect();
         }
     }
@@ -525,6 +544,370 @@ mod tests {
         assert_eq!(obj.base_power, Some(2));
         assert_eq!(obj.base_toughness, Some(2));
         assert_eq!(state.objects.get(&source).unwrap().base_power, None);
+    }
+
+    /// The mass non-battlefield-zone branch of `perpetual_target_object_ids`
+    /// keyed on a zone OTHER than Hand. `zone_object_ids` (game/targeting.rs) is
+    /// exhaustive over every `Zone` with the identical `players.iter().flat_map`
+    /// shape, so Graveyard must behave exactly like the already-covered Hand
+    /// case (`casting_tests.rs perpetual_mass_hand_cost_reduces_only_matching_cards`).
+    ///
+    /// CR 109.4 + CR 109.5 + CR 108.3: a card in a hidden zone has no controller
+    /// (CR 109.4), and CR 109.5 makes "you"/"your" on a controllerless object
+    /// refer to its OWNER — an ownership that CR 108.3 fixes for the whole game.
+    /// `effective_controller` (game/filter.rs) falls back to `obj.controller`,
+    /// which `GameObject::new` seeds from the owner — so `ControllerRef::You`
+    /// scopes to the OWNER's copy of the zone. Hostile siblings on the type axis
+    /// (a noncreature card in the same graveyard) and the controller axis (an
+    /// opponent's creature card in THEIR graveyard) must both be untouched.
+    #[test]
+    fn perpetual_mass_graveyard_pt_modifies_only_matching_cards() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
+
+        let mut scenario = GameScenario::new();
+        // Battlefield source so `FilterContext::from_source` can anchor `You`.
+        let source = scenario.add_creature(P0, "Feed the Bog Source", 1, 1).id();
+        let mine = scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .id();
+        // Second positive with DISTINCT base P/T. With only one match the test
+        // could not tell "the whole zone population was enumerated" from "the
+        // first match was taken"; distinct P/T additionally proves each card is
+        // modified from its OWN base rather than a shared/latched value.
+        let mine_second = scenario
+            .add_creature_to_graveyard(P0, "Runeclaw Bear", 3, 1)
+            .id();
+        let mine_noncreature = scenario.add_spell_to_graveyard(P0, "Shock", true).id();
+        let theirs = scenario
+            .add_creature_to_graveyard(P1, "Opposing Bears", 2, 2)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+
+        // Revert baseline, asserted BEFORE resolution.
+        for id in [mine, theirs] {
+            assert_eq!(state.objects.get(&id).unwrap().base_power, Some(2));
+            assert_eq!(state.objects.get(&id).unwrap().base_toughness, Some(2));
+        }
+        assert_eq!(
+            (
+                state.objects.get(&mine_second).unwrap().base_power,
+                state.objects.get(&mine_second).unwrap().base_toughness
+            ),
+            (Some(3), Some(1))
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Creature)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 1,
+                    toughness_delta: 1,
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(state, &ability, &mut events).unwrap();
+
+        for (id, expected, why) in [
+            (
+                mine,
+                (Some(3), Some(3)),
+                "first matching creature card in the controller's graveyard",
+            ),
+            (
+                mine_second,
+                (Some(4), Some(2)),
+                "SECOND matching card — proves the whole zone population is \
+                 enumerated, not just the first match, and that each card is \
+                 modified from its own distinct base P/T",
+            ),
+        ] {
+            let hit = state.objects.get(&id).unwrap();
+            assert_eq!((hit.base_power, hit.base_toughness), expected, "{why}");
+            assert!(!hit.perpetual_mods.is_empty(), "{why}");
+        }
+
+        for (id, why) in [
+            (
+                mine_noncreature,
+                "type axis: a noncreature card in the same graveyard",
+            ),
+            (theirs, "controller axis: an opponent's creature card"),
+            (
+                source,
+                "source fallback must NOT fire on the mass zone path",
+            ),
+        ] {
+            assert!(
+                state.objects.get(&id).unwrap().perpetual_mods.is_empty(),
+                "{why} must be untouched"
+            );
+        }
+        assert_eq!(
+            state.objects.get(&theirs).unwrap().base_power,
+            Some(2),
+            "controller axis"
+        );
+    }
+
+    /// Library sibling of `perpetual_mass_graveyard_pt_modifies_only_matching_cards`
+    /// (Bramblearmor Brawler's zone). No scenario helper places a creature CARD
+    /// with base P/T into a library, so this one keeps the module's raw
+    /// `create_object` form — `create_object` routes through `add_to_zone`, so
+    /// the object really joins `player.library`, which is what
+    /// `zone_object_ids(state, Zone::Library)` enumerates.
+    #[test]
+    fn perpetual_mass_library_pt_modifies_only_matching_cards() {
+        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(7);
+
+        fn seed_creature_card(
+            state: &mut GameState,
+            card: u64,
+            owner: PlayerId,
+            name: &str,
+            power: i32,
+            toughness: i32,
+        ) -> ObjectId {
+            let id = create_object(state, CardId(card), owner, name.to_string(), Zone::Library);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(power);
+            obj.base_toughness = Some(toughness);
+            id
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bramblearmor Brawler".to_string(),
+            Zone::Battlefield,
+        );
+        let mine = seed_creature_card(&mut state, 2, PlayerId(0), "Grizzly Bears", 2, 2);
+        // Second positive with DISTINCT base P/T — same discrimination as the
+        // Graveyard sibling: one match cannot separate "enumerated the whole
+        // zone" from "took the first match".
+        let mine_second = seed_creature_card(&mut state, 5, PlayerId(0), "Runeclaw Bear", 3, 1);
+        let theirs = seed_creature_card(&mut state, 3, PlayerId(1), "Opposing Bears", 2, 2);
+        // Type axis: a card with NO creature core type in the same library.
+        let mine_noncreature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Library,
+        );
+
+        assert_eq!(state.objects.get(&mine).unwrap().base_power, Some(2));
+        assert_eq!(state.objects.get(&theirs).unwrap().base_power, Some(2));
+        assert_eq!(
+            (
+                state.objects.get(&mine_second).unwrap().base_power,
+                state.objects.get(&mine_second).unwrap().base_toughness
+            ),
+            (Some(3), Some(1))
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Creature)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Library,
+                        }]),
+                ),
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 1,
+                    toughness_delta: 1,
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+
+        for (id, expected, why) in [
+            (
+                mine,
+                (Some(3), Some(3)),
+                "the controller's creature card in their library must be modified",
+            ),
+            (
+                mine_second,
+                (Some(4), Some(2)),
+                "SECOND matching library card — proves the whole zone population \
+                 is enumerated, each from its own distinct base P/T",
+            ),
+        ] {
+            let hit = state.objects.get(&id).unwrap();
+            assert_eq!((hit.base_power, hit.base_toughness), expected, "{why}");
+            assert!(!hit.perpetual_mods.is_empty(), "{why}");
+        }
+        for (id, why) in [
+            (mine_noncreature, "type axis"),
+            (theirs, "controller axis"),
+            (
+                source,
+                "source fallback must NOT fire on the mass zone path",
+            ),
+        ] {
+            assert!(
+                state.objects.get(&id).unwrap().perpetual_mods.is_empty(),
+                "{why} must be untouched"
+            );
+        }
+        assert_eq!(state.objects.get(&theirs).unwrap().base_power, Some(2));
+    }
+
+    /// CR 115.6 + CR 608.2c — chain-inheritance guard for the zone-population
+    /// `ApplyPerpetual`.
+    ///
+    /// Suppressing the stack-time slot for a zone-pinned `ApplyPerpetual` is
+    /// exactly what leaves `ability.targets` empty, which is the PRECONDITION
+    /// for `perpetual_target_object_ids` reaching its mass zone branch — with a
+    /// non-empty `targets` the function short-circuits and returns the single
+    /// propagated object instead.
+    ///
+    /// That makes the sub-ability inheritance path load-bearing: when such an
+    /// `ApplyPerpetual` is the SUB-ABILITY of a TARGETED parent,
+    /// `resolve_ability_chain` must NOT hand it the parent's object target, or
+    /// the grant lands on the parent's battlefield creature instead of the hand
+    /// population. `has_independent_target_slot` (game/effects/mod.rs) carries a
+    /// disjunct for exactly this, alongside the `ExiledBySource` one added for
+    /// the Fight Rigging / Collector's Cage class (issue #6437) — the same
+    /// species of bug.
+    ///
+    /// The parent is `Effect::SetTapState { scope: Single }` deliberately: its
+    /// target must SURVIVE resolution so its `perpetual_mods` can be inspected,
+    /// and its own effect stays observable as a reach-guard.
+    #[test]
+    fn perpetual_zone_population_sub_ability_ignores_parent_object_target() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, EffectScope, FilterProp, TapStateChange,
+            TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chain Source".to_string(),
+            Zone::Battlefield,
+        );
+        // The parent's declared object target: a battlefield creature that must
+        // stay a 2/2 with NO perpetual modification.
+        let board = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Board Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // The population the sub-ability is written for.
+        let hand_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hand Bear".to_string(),
+            Zone::Hand,
+        );
+        for id in [board, hand_card] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Creature)
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                ),
+                modification: PerpetualModification::ModifyPowerToughness {
+                    power_delta: 1,
+                    toughness_delta: 1,
+                },
+            },
+        ));
+
+        let ability = build_resolved_from_def_with_targets(
+            &def,
+            source,
+            PlayerId(0),
+            vec![TargetRef::Object(board)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Reach-guard: the TARGETED parent really applied to its declared target,
+        // so the chain genuinely carried an object target into the sub.
+        assert!(
+            state.objects.get(&board).unwrap().tapped,
+            "reach-guard: the parent's declared object target must actually be tapped"
+        );
+
+        let hand = state.objects.get(&hand_card).unwrap();
+        assert_eq!(
+            (hand.base_power, hand.base_toughness),
+            (Some(3), Some(3)),
+            "the hand population must receive the perpetual grant"
+        );
+
+        let target = state.objects.get(&board).unwrap();
+        assert_eq!(
+            (target.base_power, target.base_toughness),
+            (Some(2), Some(2)),
+            "the parent's battlefield target must NOT inherit the perpetual grant"
+        );
+        assert!(
+            target.perpetual_mods.is_empty(),
+            "the parent's battlefield target must record no perpetual modification"
+        );
+        assert!(
+            state
+                .objects
+                .get(&source)
+                .unwrap()
+                .perpetual_mods
+                .is_empty(),
+            "the source fallback must not fire on the mass zone path"
+        );
     }
 
     #[test]

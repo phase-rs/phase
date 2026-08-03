@@ -10679,6 +10679,29 @@ fn resolve_chain_body(
             // hit and exclude it — treating it as independent here stranded
             // that exclusion, sweeping the hit itself to the library bottom
             // alongside the misses.
+            // CR 115.1 + Digital-only Alchemy (root cause #19): a zone-pinned
+            // mass `ApplyPerpetual` ("creature cards in your hand perpetually
+            // get +1/+1") is ALSO independent — the same species as the
+            // `ExiledBySource` arm above. Its targeting authority
+            // (`extract_target_filter_from_effect`) deliberately suppresses the
+            // slot precisely so `ability.targets` stays EMPTY, which is what
+            // lets `perpetual_target_object_ids` reach its mass zone branch.
+            // Inheriting the parent's object target refills that vector, and the
+            // resolver then short-circuits and pumps the parent's battlefield
+            // target instead of the zone population.
+            //
+            // Carries the same `!effect_refs_parent_target` guard as the two
+            // disjuncts above, for the same reason: a BARE `ParentTarget` filter
+            // does have `extract_in_zone() == None`, but a COMPOSED one does not.
+            // `extract_in_zone` recurses into `And`/`Or`, so `And { ParentTarget,
+            // Typed { InZone { Graveyard } } }` reports `Some(Graveyard)` and the
+            // population predicate fires; and `filter_refs_parent_target` also
+            // fires for a plain `Typed` carrying `FilterProp::DistinctFrom {
+            // reference: ParentTarget }` (the Jodah cleanup-rider shape). In both
+            // of those the sub still needs the propagated parent object target so
+            // its `ParentTarget` anaphor can resolve — denying it would strand the
+            // reference. No card in the corpus has that shape today, but the guard
+            // is correctness, not decoration.
             let has_independent_target_slot =
                 (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
                     && !effect_refs_parent_target(&sub.effect)
@@ -10687,6 +10710,9 @@ fn resolve_chain_body(
                         .effect
                         .target_filter()
                         .is_some_and(TargetFilter::references_exiled_by_source)
+                        && !effect_refs_parent_target(&sub.effect))
+                    || (matches!(&sub.effect, Effect::ApplyPerpetual { target, .. }
+                        if crate::game::triggers::apply_perpetual_targets_zone_population(target))
                         && !effect_refs_parent_target(&sub.effect));
             sub_with_targets.targets = ability
                 .targets

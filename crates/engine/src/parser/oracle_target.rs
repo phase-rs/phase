@@ -10263,6 +10263,77 @@ mod tests {
         );
     }
 
+    /// CR 400.1 — Zone-scoped CARD-SET subject pin. `parse_type_phrase` is the
+    /// single subject-filter authority the perpetual zone-population arm
+    /// (`oracle_effect::try_parse_zone_scoped_cards_perpetual_modify_pt`)
+    /// delegates to, so the exact contract that arm depends on is pinned here:
+    /// for `"<type-phrase> card(s) in your <zone>"` the phrase must consume
+    /// COMPLETELY, yield a `Typed` filter, scope to `ControllerRef::You`, and
+    /// carry `FilterProp::InZone { zone }`. Both number forms (plural `cards`
+    /// and the singular `each … card` form) and both casings must agree — the
+    /// arm passes the pre-lowered slice through `nom_on_lower`, so a
+    /// casing-sensitive filter would silently diverge from the mixed-case
+    /// Oracle text.
+    #[test]
+    fn parse_type_phrase_zone_scoped_card_set_subjects_bind_fully() {
+        fn probe(text: &str) -> (Vec<TypeFilter>, Option<ControllerRef>, Vec<FilterProp>) {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "{text:?} left remainder {rest:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("{text:?} must bind a Typed filter, got {filter:?}");
+            };
+            (typed.type_filters, typed.controller, typed.properties)
+        }
+
+        for (text, zone) in [
+            ("Creature cards in your hand", Zone::Hand),
+            ("creature cards in your hand", Zone::Hand),
+            ("creature cards in your graveyard", Zone::Graveyard),
+            ("creature cards in your library", Zone::Library),
+            // The singular agreement form produced by "each <T> card in your …".
+            ("creature card in your graveyard", Zone::Graveyard),
+        ] {
+            let (types, controller, props) = probe(text);
+            assert!(
+                types.contains(&TypeFilter::Creature),
+                "{text:?} must carry TypeFilter::Creature, got {types:?}"
+            );
+            assert_eq!(
+                controller,
+                Some(ControllerRef::You),
+                "{text:?} must scope to the controller's own zone"
+            );
+            assert!(
+                props
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { zone: z } if *z == zone)),
+                "{text:?} must carry InZone{{{zone:?}}}, got {props:?}"
+            );
+        }
+
+        // Kithkin Brinefarer's subtype + core-type head. `parse_subtype` returns
+        // the canonical registry spelling case-insensitively, so the lowered
+        // slice the arm passes must still yield `Subtype("Kithkin")`.
+        for text in [
+            "Kithkin creature cards in your hand",
+            "kithkin creature cards in your hand",
+        ] {
+            let (types, controller, props) = probe(text);
+            assert!(
+                types.contains(&TypeFilter::Subtype("Kithkin".to_string())),
+                "{text:?} must carry the canonical Subtype(\"Kithkin\"), got {types:?}"
+            );
+            assert!(
+                types.contains(&TypeFilter::Creature),
+                "{text:?} must keep the Creature core type, got {types:?}"
+            );
+            assert_eq!(controller, Some(ControllerRef::You));
+            assert!(props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })));
+        }
+    }
+
     #[test]
     fn card_with_mana_value_equal_to_offset_event_source() {
         let (f, rest) = parse_type_phrase(

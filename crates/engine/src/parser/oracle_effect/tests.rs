@@ -35545,6 +35545,283 @@ fn perpetual_parser_maps_modify_pt() {
     ));
 }
 
+/// SHAPE — zone-scoped card-set arm, positives. Every clause is the VERBATIM
+/// text `card-data.json` hands the parser for a real card, one per grammar axis
+/// (zone × number agreement × subtype head). Root cause #19: before this arm
+/// each of these lowered to `Effect::Pump { target: Any }` with a `null`
+/// duration, i.e. an UNTIL-END-OF-TURN pump over every permanent.
+#[test]
+fn perpetual_zone_scoped_card_set_arm_binds_zone_and_controller() {
+    use crate::types::ability::{ControllerRef, FilterProp, PerpetualModification, TypeFilter};
+    use crate::types::zones::Zone;
+
+    fn zone_scoped(
+        text: &str,
+    ) -> (
+        Vec<TypeFilter>,
+        Option<ControllerRef>,
+        Vec<FilterProp>,
+        i32,
+        i32,
+    ) {
+        let e = parse_effect(text);
+        let Effect::ApplyPerpetual {
+            target: TargetFilter::Typed(typed),
+            modification:
+                PerpetualModification::ModifyPowerToughness {
+                    power_delta,
+                    toughness_delta,
+                },
+        } = e
+        else {
+            panic!("{text:?} must lower to a Typed ApplyPerpetual/ModifyPowerToughness, got {e:?}");
+        };
+        (
+            typed.type_filters,
+            typed.controller,
+            typed.properties,
+            power_delta,
+            toughness_delta,
+        )
+    }
+
+    for (text, zone) in [
+        // Begin Anew / Grow Old Together / Klement / Thoughtweft's Call.
+        (
+            "Creature cards in your hand perpetually get +1/+1.",
+            Zone::Hand,
+        ),
+        // Blighted Nightmare / Feed the Bog / Advanced Floral Invocations.
+        (
+            "creature cards in your graveyard perpetually get +1/+1",
+            Zone::Graveyard,
+        ),
+        // Bramblearmor Brawler.
+        (
+            "creature cards in your library perpetually get +1/+1",
+            Zone::Library,
+        ),
+        // Elvish Elegy — the `each` quantifier plus singular verb agreement.
+        (
+            "each creature card in your graveyard perpetually gets +1/+1",
+            Zone::Graveyard,
+        ),
+        // Universal-quantifier axis is owned by `parse_type_phrase` (CR 109.2),
+        // not by an arm-local strip — so all three of its words work, including
+        // "every", which no arm-local strip ever covered.
+        (
+            "all creature cards in your hand perpetually get +1/+1",
+            Zone::Hand,
+        ),
+        (
+            "every creature card in your graveyard perpetually gets +1/+1",
+            Zone::Graveyard,
+        ),
+    ] {
+        let (types, controller, props, power_delta, toughness_delta) = zone_scoped(text);
+        assert!(
+            types.contains(&TypeFilter::Creature),
+            "{text:?} must keep the Creature type axis, got {types:?}"
+        );
+        // The arm emits the PLAIN `parse_type_phrase` shape — no arm-local
+        // rebinding. CR 400.3 + CR 109.4's owner-vs-controller reading of "your
+        // <private card zone>" is applied at the consuming seam
+        // (`game/effects/perpetual.rs`'s mass zone branch, through
+        // `filter::matches_target_filter_in_owner_zone`), which is where the
+        // engine already answers that question for off-zone keyword grants.
+        assert_eq!(
+            controller,
+            Some(ControllerRef::You),
+            "{text:?} must keep `parse_type_phrase`'s natural You scope, got {controller:?}"
+        );
+        assert!(
+            !props.iter().any(|p| matches!(p, FilterProp::Owned { .. })),
+            "{text:?} must NOT carry an arm-local `Owned` rebind — the owner scoping \
+             lives at the resolver seam, got {props:?}"
+        );
+        assert!(
+            props
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: z } if *z == zone)),
+            "{text:?} must pin InZone{{{zone:?}}}, got {props:?}"
+        );
+        assert_eq!((power_delta, toughness_delta), (1, 1), "{text:?}");
+    }
+
+    // Kithkin Brinefarer — subtype head in front of the core type.
+    let (types, _, props, _, _) =
+        zone_scoped("Kithkin creature cards in your hand perpetually get +1/+1");
+    assert!(
+        types.contains(&TypeFilter::Subtype("Kithkin".to_string()))
+            && types.contains(&TypeFilter::Creature),
+        "Kithkin Brinefarer must keep BOTH the subtype and the core type, got {types:?}"
+    );
+    assert!(props
+        .iter()
+        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })));
+
+    // Building block, not the card: a type/zone/delta combination no printed
+    // card uses. The arm is parameterized on all three axes, so this must work
+    // without any new `tag()`.
+    let (types, controller, props, power_delta, toughness_delta) =
+        zone_scoped("artifact cards in your graveyard perpetually get -2/-0");
+    assert!(types.contains(&TypeFilter::Artifact), "got {types:?}");
+    assert_eq!(controller, Some(ControllerRef::You));
+    assert!(!props.iter().any(|p| matches!(p, FilterProp::Owned { .. })));
+    assert!(props.iter().any(|p| matches!(
+        p,
+        FilterProp::InZone {
+            zone: Zone::Graveyard
+        }
+    )));
+    assert_eq!((power_delta, toughness_delta), (-2, 0));
+}
+
+/// SHAPE — zone-scoped card-set arm, hostile inputs. Each negative is paired
+/// with a positive reach-guard proving the clause still reaches a real parse
+/// (H5) or is left EXACTLY as broken as it is today (H7-H13), so a deferral is
+/// honest rather than a silent new `Unimplemented`.
+#[test]
+fn perpetual_zone_scoped_card_set_arm_honest_red() {
+    fn is_zone_scoped_perpetual(e: &Effect) -> bool {
+        matches!(
+            e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        )
+    }
+
+    // H5 — no "perpetually" adverb: `take_until("perpetually ")` fails, and the
+    // clause keeps today's ordinary pump parse. Paired positive reach-guard: it
+    // really does still parse to a pump, and NOT to Unimplemented.
+    let e = parse_effect("Creature cards in your hand get +1/+1.");
+    assert!(
+        !is_zone_scoped_perpetual(&e),
+        "a non-perpetual pump must not reach the perpetual arm, got {e:?}"
+    );
+    assert!(
+        matches!(e, Effect::Pump { .. } | Effect::PumpAll { .. }),
+        "reach-guard: the non-perpetual clause must still parse to a pump, got {e:?}"
+    );
+
+    // H6 — the single-object arm above still owns "target …". Davriel's
+    // Withering's real clause; §6.5's H14 pins that it also keeps its slot.
+    let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
+    assert!(
+        matches!(
+            &e,
+            Effect::ApplyPerpetual {
+                target: TargetFilter::Typed(f),
+                modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
+                    power_delta: -1,
+                    toughness_delta: -2,
+                },
+            } if f.properties.is_empty()
+                && f.controller == Some(crate::types::ability::ControllerRef::Opponent)
+        ),
+        "the single-object arm must still own the targeted form, got {e:?}"
+    );
+
+    // Each negative carries its OWN expected fallthrough shape, not just
+    // "didn't match". A bare `!is_zone_scoped_perpetual` cannot tell "the arm
+    // was reached and this guard inside it rejected the clause" from "the arm
+    // was never reached at all" — a dispatch reorder or a `take_until` change
+    // would keep all seven green for the wrong reason. Pinning the exact
+    // fallthrough is what makes each one prove which guard fired.
+    let pump: fn(&Effect) -> bool = |e| matches!(e, Effect::Pump { .. });
+    let generic: fn(&Effect) -> bool = |e| matches!(e, Effect::GenericEffect { .. });
+
+    for (label, text, expected_fallthrough, expected_desc) in [
+        // H7 — X-valued delta: `parse_pt_modifier` is digits-only, so the arm is
+        // reached and rejected there; the clause keeps today's `Pump` with a
+        // `Variable("X")` delta.
+        (
+            "H7 X-delta",
+            "creature cards in your hand perpetually get +X/+X, where X is the amount of life you gained",
+            pump,
+            "Effect::Pump",
+        ),
+        // H8 — multi-subject conjunction + multi-zone list (Arming Gala).
+        (
+            "H8 multi-subject",
+            "creatures you control and creature cards in your hand, library, and graveyard perpetually get +1/+1",
+            pump,
+            "Effect::Pump",
+        ),
+        // H9 — battlefield/zoneless mass (Legion of Clay). `extract_zones()` is
+        // empty, so the slice match falls to `_`. The resolver has no mass
+        // battlefield path — it would pump the SOURCE only.
+        (
+            "H9 zoneless",
+            "creatures you control perpetually get +1/+1",
+            pump,
+            "Effect::Pump",
+        ),
+        // H10 — controller scope other than `You`: the resolver would sweep
+        // EVERY player's copy of the zone.
+        (
+            "H10 other controller",
+            "creature cards in that player's hand perpetually get +1/+1",
+            pump,
+            "Effect::Pump",
+        ),
+        // H11 — compound rider the leaf cannot model (`tail_done`). Falls all
+        // the way through to the pre-existing static-ability reading (a
+        // `SelfRef` continuous grant), which is exactly as wrong as it is today
+        // — the arm changes nothing about it.
+        (
+            "H11 compound tail",
+            "Creature cards in your hand perpetually get +1/+1 and gain flying.",
+            generic,
+            "Effect::GenericEffect",
+        ),
+        // H12 — SINGULAR-SUBJECT near-miss (Dalkovan Outrider, verbatim). The
+        // clause reaches the arm — `take_until("perpetually ")` and
+        // `parse_perpetual_pt_predicate` both succeed, the zone is `Library`,
+        // the delta is a plain +1/+1 — and is rejected ONLY by the
+        // subject-remainder guard, because `parse_type_phrase` cannot consume a
+        // leading "the " head (`oracle_target.rs` strips "a "/"an "/"any " only,
+        // and only when a type word follows). That is a POPULATION-vs-ONE
+        // distinction, not a formatting one: the clause edits the single topmost
+        // library card, while this arm would hand the resolver a filter matching
+        // EVERY creature card in the library. Pinned so the guard cannot become
+        // incidental if that shared head-stripping authority ever learns "the ".
+        (
+            "H12 singular 'the topmost' head",
+            "the topmost creature card in your library perpetually gets +1/+1",
+            pump,
+            "Effect::Pump",
+        ),
+        // H13 — the same singular-subject class through the OTHER head that
+        // shares this grammar: "a random <T> card in your <zone>" (Golden
+        // Sidekick, Freyalise Skyshroud Partisan). Golden Sidekick's printed
+        // clause also carries an X-delta, which H7 already covers; the delta is
+        // fixed here so the "a random " head is the ONLY reason for the reject
+        // and the row stays a clean isolation of it. `parse_type_phrase` strips
+        // "a " only when a type word follows it, so "random" blocks the strip
+        // today — again incidentally.
+        (
+            "H13 singular 'a random' head",
+            "a random creature card in your hand perpetually gets +1/+1",
+            pump,
+            "Effect::Pump",
+        ),
+    ] {
+        let e = parse_effect(text);
+        assert!(
+            !is_zone_scoped_perpetual(&e),
+            "{label}: {text:?} must stay deferred, got {e:?}"
+        );
+        assert!(
+            expected_fallthrough(&e),
+            "{label}: reach-guard — {text:?} must fall through to \
+             {expected_desc} (today's unchanged reading), got {e:?}"
+        );
+    }
+}
+
 #[test]
 fn perpetual_parser_maps_grant_keywords() {
     use crate::types::ability::PerpetualModification;
