@@ -55,6 +55,9 @@ fn thought_distortion_exiles_only_the_targeted_opponents_noncreature_nonland_car
     let opp_gy_creature = scenario
         .add_creature_to_graveyard(P1, "Opp GY Bear", 2, 2)
         .id();
+    // A land card in the SAME graveyard: proves the `nonland` restriction is
+    // enforced on the graveyard origin too, not just hand (the filter spans both).
+    let opp_gy_land = scenario.add_land_to_graveyard(P1, "Opp GY Swamp").id();
 
     // --- Caster (P0): owner-scope controls — must NOT move. ---
     let my_hand_noncreature = scenario.add_spell_to_hand(P0, "My Hand Instant", true).id();
@@ -99,6 +102,12 @@ fn thought_distortion_exiles_only_the_targeted_opponents_noncreature_nonland_car
         outcome.zone_of(opp_gy_creature),
         Zone::Graveyard,
         "a creature card must stay in the target's graveyard"
+    );
+    assert_eq!(
+        outcome.zone_of(opp_gy_land),
+        Zone::Graveyard,
+        "a land card is not nonland — it must stay in the target's GRAVEYARD \
+         (proves the nonland restriction on the graveyard origin)"
     );
 
     // --- Owner-scope controls: the CASTER's own qualifying cards never move. ---
