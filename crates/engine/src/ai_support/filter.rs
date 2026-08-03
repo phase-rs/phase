@@ -943,6 +943,10 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        // CR 903.3 / CR 903.3d: a controller-scoped battlefield scan for a commander
+        // (via `game::commander`), like the other `YouControl*` predicates — reads no
+        // combat/damage/pending-cast history, so it is memo-safe.
+        | ParsedCondition::ControlsCommander { .. }
         // CR 503.1: reads only `state.phase`, apply()-constant global state.
         | ParsedCondition::IsDuringUpkeep
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,

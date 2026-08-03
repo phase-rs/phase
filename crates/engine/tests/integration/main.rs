@@ -905,6 +905,7 @@ mod swans_prevention_followup;
 mod swarm_combat_witness;
 mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
+mod tchaka_venerable_king;
 mod teamwork_aggregate_legal_actions;
 mod teamwork_origin_composition;
 mod teferi_time_raveler_sorcery_speed_lock;
