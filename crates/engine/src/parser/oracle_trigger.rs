@@ -8204,7 +8204,7 @@ fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
     value((), tag("tied for ")).parse(input)
 }
 
-/// CR 603.1b + CR 603.2e: the FULL trigger-event head lexicon — active-voice
+/// CR 603.2e: the FULL trigger-event head lexicon — active-voice
 /// verbs plus the state-change/passive voices.
 ///
 /// Composed at exactly TWO of the nine `parse_event_verb_start` call sites: the
