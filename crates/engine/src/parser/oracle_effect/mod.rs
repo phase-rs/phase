@@ -16650,13 +16650,31 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Vesuva ("...on each of up to one target land and up to one target
     // creature") would be wrongly mandatory. Re-derive it from the consumed
     // primary-clause prefix via the same building block that produced it.
-    let primary_multi_target = if matches!(&primary_effect, Effect::PutCounter { .. }) {
-        let primary_clause = &text[..text.len() - remainder.len()];
-        let primary_lower = primary_clause.to_ascii_lowercase();
-        counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+    // CR 122.1: `ReproduceEventCounters` shares the identical target-side "…on up
+    // to N target …" grammar as `PutCounter` and is discarded the same way on the
+    // `ZoneCounterProxy` route, so a COMPOUND reproduction primary ("put one of
+    // each of those kinds of counters on up to one other target creature and
+    // <effect>") reaches this splitter and must recover its bound here too — the
+    // direct-clause fixup in `lower_imperative_clause` never runs for the compound
+    // return. Re-derive from the same building block that produced the effect.
+    let primary_multi_target = match &primary_effect {
+        Effect::PutCounter { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+                .and_then(|(_, _, multi)| multi)
+        }
+        Effect::ReproduceEventCounters { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_reproduce_event_counters(
+                &primary_lower,
+                primary_clause,
+                &mut ctx.clone(),
+            )
             .and_then(|(_, _, multi)| multi)
-    } else {
-        None
+        }
+        _ => None,
     };
 
     Some(ParsedEffectClause {

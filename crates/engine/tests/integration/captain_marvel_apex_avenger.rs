@@ -844,6 +844,126 @@ fn aragorn_up_to_one_target_declined_reproduces_nothing() {
 }
 
 // ===========================================================================
+// Compound reproduction primary — the reproduction is the PRIMARY clause of a
+// compound ("... on up to one other target creature AND draw a card"). This
+// clause returns from `try_split_targeted_compound` before the direct-clause
+// multi_target fixup, so the splitter's own primary-cardinality recovery must
+// also cover `ReproduceEventCounters` (mirrors the `PutCounter` recovery).
+// ===========================================================================
+
+/// Synthetic compound: Aragorn's optional-target reproduction primary followed by
+/// a second conjunct. No printed card pairs these today, so this exercises the
+/// building block (the compound split + primary-cardinality recovery), not a card.
+const COMPOUND_REPRODUCER: &str = "Whenever you put one or more counters on Compound Reproducer, \
+                                   put one of each of those kinds of counters on up to one other \
+                                   target creature and draw a card.";
+
+/// PARSE (CR 115.1d + CR 122.1, compound route): the primary reproduction clause
+/// must retain `MultiTargetSpec::up_to(1)` even when a trailing conjunct pushes it
+/// through `try_split_targeted_compound`, and the conjunct must survive as a
+/// sub-ability. Reverting the `ReproduceEventCounters` arm of the splitter's
+/// primary-cardinality recovery drops the bound and this assertion fails.
+#[test]
+fn compound_reproduction_primary_retains_up_to_one() {
+    let parsed = parse_oracle_text(
+        COMPOUND_REPRODUCER,
+        "Compound Reproducer",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string()],
+    );
+    let trig = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::CounterAdded)
+        .expect("compound reproducer has a CounterAdded trigger");
+    let execute = trig
+        .execute
+        .as_deref()
+        .expect("trigger has an execute ability");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ReproduceEventCounters { .. }
+        ),
+        "primary clause must be the reproduction effect, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "compound reproduction primary must retain MultiTargetSpec::up_to(1)",
+    );
+    assert!(
+        execute.sub_ability.is_some(),
+        "the trailing \"and draw a card\" conjunct must survive as a sub-ability",
+    );
+}
+
+/// RUNTIME (compound, one target): the optional slot takes a target, so the chosen
+/// creature gains the reproduced counter AND the mandatory second conjunct draws.
+#[test]
+fn compound_reproduction_one_target_reproduces_and_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Reward Card"]);
+    let reproducer = scenario
+        .add_creature_from_oracle(P0, "Compound Reproducer", 3, 3, COMPOUND_REPRODUCER)
+        .id();
+    let ally = scenario.add_creature(P0, "Ally Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Solo Bolster",
+            true,
+            "Put a shield counter on target creature.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    // Spell target (reproducer) consumed first; the "up to one other target
+    // creature" slot then consumes the ally.
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[reproducer, ally])
+        .resolve();
+    outcome.assert_counters(reproducer, CounterType::Shield, 1);
+    // Reproduced onto the chosen optional target.
+    outcome.assert_counters(ally, CounterType::Shield, 1);
+    // The mandatory second conjunct resolved.
+    outcome.assert_hand_drawn(P0, 1);
+}
+
+/// RUNTIME (compound, zero targets): the optional slot is declined, so nothing is
+/// reproduced, but the mandatory second conjunct still draws — proving the target
+/// is optional (min=0) without suppressing the rest of the compound.
+#[test]
+fn compound_reproduction_zero_targets_still_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Reward Card"]);
+    let reproducer = scenario
+        .add_creature_from_oracle(P0, "Compound Reproducer", 3, 3, COMPOUND_REPRODUCER)
+        .id();
+    let bystander = scenario.add_creature(P0, "Bystander Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Solo Bolster",
+            true,
+            "Put a shield counter on target creature.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    // Only the reproducer is declared; the optional reproduction slot gets nothing.
+    let outcome = runner.cast(spell).target_objects(&[reproducer]).resolve();
+    outcome.assert_counters(reproducer, CounterType::Shield, 1);
+    // Zero-target reproduction places no counters elsewhere...
+    outcome.assert_counters(bystander, CounterType::Shield, 0);
+    // ...but the mandatory second conjunct still resolved.
+    outcome.assert_hand_drawn(P0, 1);
+}
+
+// ===========================================================================
 // Captain Marvel — mixed multi-recipient placement (one Kree + one non-Kree)
 // exercising the per-recipient intervening-if in the batched grouping path.
 // ===========================================================================
