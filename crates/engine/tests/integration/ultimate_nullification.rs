@@ -23,7 +23,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::EngineError;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
-use engine::types::mana::ManaColor;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -31,6 +32,28 @@ use engine::types::zones::Zone;
 // printed name, exercising the `~`-normalization -> `SelfRef` path).
 const ULTIMATE_NULLIFICATION: &str = "As an additional cost to cast this spell, sacrifice a legendary creature.\n\
      Exile all creatures and graveyards. Put Ultimate Nullification on the bottom of its owner's library.";
+
+// The printed cost: {4}{W}. Both fixtures set this on the spell and seed matching
+// mana so the REAL total cost is paid — the sacrifice is an ADDITIONAL cost on
+// top of it (CR 601.2f), never a stand-in for the mana cost.
+fn ultimate_nullification_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 4,
+    }
+}
+
+// {4}{W} worth of mana: one white plus four generic (colorless satisfies generic).
+fn ultimate_nullification_mana() -> Vec<ManaUnit> {
+    let unit = |color| ManaUnit::new(color, ObjectId(0), false, vec![]);
+    vec![
+        unit(ManaType::White),
+        unit(ManaType::Colorless),
+        unit(ManaType::Colorless),
+        unit(ManaType::Colorless),
+        unit(ManaType::Colorless),
+    ]
+}
 
 #[test]
 fn ultimate_nullification_wipes_creatures_and_all_graveyards_then_self_tucks() {
@@ -45,7 +68,11 @@ fn ultimate_nullification_wipes_creatures_and_all_graveyards_then_self_tucks() {
     // plain creature, and a noncreature permanent (land) that must survive.
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Ultimate Nullification", false, ULTIMATE_NULLIFICATION)
+        .with_mana_cost(ultimate_nullification_cost())
         .id();
+    // Fund the {4}{W} mana cost from the pool so the cast harness auto-pays it;
+    // the sacrifice is the additional cost paid on top.
+    scenario.with_mana_pool(P0, ultimate_nullification_mana());
     let legendary = scenario
         .add_creature(P0, "Legendary Bear", 2, 2)
         .as_legendary()
@@ -161,9 +188,13 @@ fn ultimate_nullification_requires_a_legendary_creature_to_sacrifice() {
 
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Ultimate Nullification", false, ULTIMATE_NULLIFICATION)
+        .with_mana_cost(ultimate_nullification_cost())
         .id();
     // Only a NONlegendary creature — not a legal sacrifice for this cost.
     let plain_creature = scenario.add_vanilla(P0, 1, 1);
+    // Seed the full {4}{W} so mana is payable: the ONLY unpayable component is the
+    // legendary sacrifice, so the announcement can't fail for a mana reason.
+    scenario.with_mana_pool(P0, ultimate_nullification_mana());
 
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;

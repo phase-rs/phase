@@ -24418,85 +24418,12 @@ fn exile_permanents_and_zones_generalizes_to_multiple_zones() {
     );
 }
 
-/// Regression (Thought Distortion / Worldfire): the heterogeneous
-/// permanent+zone recognizer MUST decline forms whose leading leg already
-/// carries its own source-zone / owner scope. Thought Distortion ("Exile all
-/// noncreature, nonland cards from that player's hand and graveyard") is a
-/// hand+graveyard exile of a *targeted opponent's* cards — it has no
-/// battlefield component. A prior version of the recognizer injected
-/// `InZone(Battlefield)` onto that leg (making the hand leg unsatisfiable) and
-/// rebuilt the zone leg as all-owners/all-cards (dropping "that player's" and
-/// the noncreature/nonland restriction). This test pins the fix: the lowered
-/// chain must contain NO `InZone(Battlefield)` leg, the hand exile must survive,
-/// and the noncreature/nonland restriction must be preserved.
-#[test]
-fn exile_permanents_and_zones_declines_owner_scoped_hand_graveyard_form() {
-    fn collect_typed<'a>(f: &'a TargetFilter, out: &mut Vec<&'a TypedFilter>) {
-        match f {
-            TargetFilter::Typed(tf) => out.push(tf),
-            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-                filters.iter().for_each(|c| collect_typed(c, out))
-            }
-            TargetFilter::Not { filter } => collect_typed(filter, out),
-            _ => {}
-        }
-    }
-
-    let def = parse_effect_chain(
-        "Exile all noncreature, nonland cards from that player's hand and graveyard.",
-        AbilityKind::Spell,
-    );
-
-    // Walk every effect in the chain, gathering the target filters of any
-    // ChangeZoneAll to Exile it lowered to.
-    let mut typed: Vec<&TypedFilter> = Vec::new();
-    let mut ability: Option<&AbilityDefinition> = Some(&def);
-    while let Some(a) = ability {
-        if let Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            target,
-            ..
-        } = &*a.effect
-        {
-            collect_typed(target, &mut typed);
-        }
-        ability = a.sub_ability.as_deref();
-    }
-    assert!(
-        !typed.is_empty(),
-        "expected at least one ChangeZoneAll to Exile in the chain: {def:#?}"
-    );
-
-    // The bug signature: no leg may be scoped to the battlefield — these are
-    // hand/graveyard cards, never permanents.
-    assert!(
-        typed
-            .iter()
-            .all(|tf| !tf.properties.contains(&FilterProp::InZone {
-                zone: Zone::Battlefield
-            })),
-        "no leg may carry InZone(Battlefield); the cards are in hand/graveyard, got {typed:?}"
-    );
-    // The hand exile must survive (some leg still references the hand zone).
-    assert!(
-        typed.iter().any(|tf| tf.properties.iter().any(|p| match p {
-            FilterProp::InZone { zone } => *zone == Zone::Hand,
-            FilterProp::InAnyZone { zones } => zones.contains(&Zone::Hand),
-            _ => false,
-        })),
-        "the hand exile must be preserved, got {typed:?}"
-    );
-    // The noncreature/nonland restriction must be preserved on some leg.
-    assert!(
-        typed.iter().any(|tf| tf
-            .type_filters
-            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
-            && tf
-                .type_filters
-                .contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))),
-        "the noncreature/nonland restriction must be preserved, got {typed:?}"
-    );
-}
+// NOTE: the Thought Distortion regression now lives at the PRODUCTION boundary
+// (`crate::database::synthesis` tests →
+// `thought_distortion_declines_recognizer_at_production_boundary`), which parses
+// the card's COMPLETE Oracle text through `build_oracle_face` and asserts the
+// preserved `RevealHand`→opponent binding and `ChangeZoneAll { origin: Hand }`
+// shape — a stronger guard than an isolated-sentence `parse_effect_chain` call.
 
 #[test]
 fn parse_put_on_top_or_bottom_possessive() {
