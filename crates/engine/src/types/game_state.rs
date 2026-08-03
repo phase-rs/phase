@@ -27,8 +27,8 @@ use super::events::{
 };
 use super::format::FormatConfig;
 use super::identifiers::{
-    CardId, DelayedTriggerProvenance, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding,
-    ObjectIncarnationRef, TrackedSetId, TriggerFiring,
+    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, LogicalZoneChangeGroupId, ObjectId,
+    ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId, TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
@@ -5168,6 +5168,17 @@ pub enum TokenEntryEventEmission {
     Suppress,
 }
 
+/// CR 400.7: the three values a postponed token battlefield entry needs at flush time. The
+/// characteristics are NOT stored — they are re-snapshotted from the live object at flush, which
+/// is the whole point of postponing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTokenBattlefieldEntry {
+    pub object_id: ObjectId,
+    /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
+    pub name: String,
+    pub source_id: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -5251,10 +5262,12 @@ pub enum PendingCounterPostAction {
         enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
+    /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
+    /// `GameState::pending_token_battlefield_entry` once the ETB-counter ordering choice has
+    /// drained. It carries only the object identity — the entry's `name` / `source_id` live on the
+    /// parked record, and its characteristics are re-snapshotted from the live object at flush.
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
-        name: String,
-        source_id: ObjectId,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -5393,11 +5406,11 @@ pub struct DelayedTrigger {
     /// Whether this trigger fires once and is removed (most delayed triggers).
     /// CR 603.7c.
     pub one_shot: bool,
-    /// Private command-backed installation provenance. `None` is a valid
-    /// legacy delayed trigger and continues through the normal rules lifecycle
-    /// without receipt or forced-transition authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provenance: Option<DelayedTriggerProvenance>,
+    /// Private command-backed installation identity. Legacy delayed triggers
+    /// continue through the normal rules lifecycle without receipt or
+    /// forced-transition authority.
+    #[serde(default)]
+    pub(crate) provenance: DelayedInstallIdentity,
 }
 
 impl DelayedTrigger {
@@ -5416,7 +5429,7 @@ impl DelayedTrigger {
             controller,
             source_id,
             one_shot,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         }
     }
 }
@@ -7561,25 +7574,52 @@ pub struct TrustedGameStateEnvelope {
     precast_shortcut_runtime: PrecastShortcutRuntime,
 }
 
-fn decode_persisted_resolution_state(mut value: serde_json::Value) -> Result<GameState, String> {
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
-    // Historical persistence payloads predate the explicit resolution-state
-    // discriminator. This outer persistence boundary, which already knows it
-    // is reading an old raw GameState shape, gives them the legacy-only v1
-    // marker before the first GameState decode. ResolutionStateWire itself
-    // continues to reject missing/unknown discriminators.
-    object
-        .entry("resolution_state_version".to_string())
-        .or_insert_with(|| serde_json::Value::from(1));
-    let state = serde_json::from_value::<ResolutionStateWire>(value)
-        .map(ResolutionStateWire::into_game_state)
-        .map_err(|error| error.to_string())?;
-    validate_trigger_firing_coherence(&state)?;
-    #[cfg(debug_assertions)]
-    debug_assert_runtime_resolution_invariants(&state);
-    Ok(state)
+fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameState, String> {
+    GameStateDecode::decode_persisted_resolution_state(value, GameStateDecodeMode::PersistedRaw)
+}
+
+fn delayed_install_origins(state: &GameState) -> impl Iterator<Item = DelayedTriggerOrigin> + '_ {
+    state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::DelayedTriggerInstall(command) => {
+                command.trigger.provenance.origin()
+            }
+            _ => None,
+        })
+        .chain(
+            state
+                .delayed_triggers
+                .iter()
+                .filter_map(|trigger| trigger.provenance.origin()),
+        )
+}
+
+fn normalize_delayed_trigger_allocators(state: &mut GameState) -> Result<(), String> {
+    let max_token = delayed_install_origins(state)
+        .map(|origin| origin.token.0)
+        .max()
+        .unwrap_or(0);
+    let max_instance = delayed_install_origins(state)
+        .map(|origin| origin.instance.0)
+        .max()
+        .unwrap_or(0);
+    let next_token = max_token
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger token allocator overflow".to_string())?;
+    let next_instance = max_instance
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger instance allocator overflow".to_string())?;
+
+    state.next_delayed_trigger_token = state.next_delayed_trigger_token.max(next_token).max(1);
+    state.next_delayed_trigger_instance = state
+        .next_delayed_trigger_instance
+        .max(next_instance)
+        .max(1);
+    Ok(())
 }
 
 /// Validates the private CR 603.7 identity transport after raw-state migration.
@@ -7592,7 +7632,7 @@ fn decode_persisted_resolution_state(mut value: serde_json::Value) -> Result<Gam
 pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(), String> {
     let mut roots = BTreeMap::<(u64, u64), ObjectId>::new();
 
-    let mut register_root = |provenance: DelayedTriggerProvenance,
+    let mut register_root = |provenance: DelayedTriggerOrigin,
                              source_id: ObjectId,
                              carrier: &str|
      -> Result<(), String> {
@@ -7637,19 +7677,27 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
         else {
             continue;
         };
-        let provenance = command
-            .trigger
-            .provenance
-            .ok_or_else(|| "delayed-trigger install command has no provenance".to_string())?;
-        if command.token != provenance.token {
-            return Err(
-                "delayed-trigger install command token disagrees with its provenance".to_string(),
-            );
+        match command.trigger.provenance {
+            DelayedInstallIdentity::LegacyDelayed => {
+                if command.token.0 != 0 {
+                    return Err(
+                        "legacy delayed-trigger install command has a receipt token".to_string()
+                    );
+                }
+            }
+            DelayedInstallIdentity::ReceiptEligible(provenance) => {
+                if command.token != provenance.token {
+                    return Err(
+                        "delayed-trigger install command token disagrees with its provenance"
+                            .to_string(),
+                    );
+                }
+                register_root(provenance, command.trigger.source_id, "journal")?;
+            }
         }
-        register_root(provenance, command.trigger.source_id, "journal")?;
     }
     for trigger in &state.delayed_triggers {
-        if let Some(provenance) = trigger.provenance {
+        if let Some(provenance) = trigger.provenance.origin() {
             register_root(provenance, trigger.source_id, "live delayed trigger")?;
         }
     }
@@ -7657,11 +7705,11 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
     let validate_firing =
         |firing: TriggerFiring, source_id: ObjectId, carrier: &str| -> Result<(), String> {
             match firing {
-                TriggerFiring::Ordinary | TriggerFiring::Delayed(None) => Ok(()),
+                TriggerFiring::Ordinary | TriggerFiring::LegacyDelayed => Ok(()),
                 TriggerFiring::UnknownLegacy => Err(format!(
                     "{carrier} has no canonical trigger firing discriminator"
                 )),
-                TriggerFiring::Delayed(Some(provenance)) => {
+                TriggerFiring::ReceiptEligible(provenance) => {
                     if provenance.source_id != source_id {
                         return Err(format!(
                             "{carrier} delayed-trigger provenance does not match its source"
@@ -7687,6 +7735,11 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
         validate_firing(firing, pending.source_id, "pending trigger")?;
     }
     for context in &state.deferred_triggers {
+        validate_trigger_dispatch_origin(
+            context.dispatch_origin,
+            context.firing(),
+            "deferred trigger",
+        )?;
         validate_firing(
             context.firing(),
             context.pending.source_id,
@@ -7696,6 +7749,11 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
     if let Some(order) = &state.pending_trigger_order {
         for group in &order.groups {
             for context in &group.triggers {
+                validate_trigger_dispatch_origin(
+                    context.dispatch_origin,
+                    context.firing(),
+                    "ordered trigger",
+                )?;
                 validate_firing(
                     context.firing(),
                     context.pending.source_id,
@@ -7808,6 +7866,33 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
     Ok(())
 }
 
+/// The public scheduling classifier and private firing identity are redundant
+/// on queued triggers. They must agree so a direct current-format decode cannot
+/// retain contradictory legacy and canonical carrier data.
+fn validate_trigger_dispatch_origin(
+    origin: crate::game::triggers::PendingTriggerDispatchOrigin,
+    firing: TriggerFiring,
+    carrier: &str,
+) -> Result<(), String> {
+    let agrees = matches!(
+        (origin, firing),
+        (
+            crate::game::triggers::PendingTriggerDispatchOrigin::Normal,
+            TriggerFiring::Ordinary
+        ) | (
+            crate::game::triggers::PendingTriggerDispatchOrigin::Delayed,
+            TriggerFiring::LegacyDelayed | TriggerFiring::ReceiptEligible(_)
+        )
+    );
+    if agrees {
+        Ok(())
+    } else {
+        Err(format!(
+            "{carrier} dispatch origin disagrees with its firing carrier"
+        ))
+    }
+}
+
 /// Upgrade pre-canonical in-flight trigger carriers before wire decoding.
 ///
 /// `dispatch_origin` is retained as the public pre-PR1 classifier. The private
@@ -7815,8 +7900,9 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
 /// classifier can only establish ordinary versus delayed-without-provenance.
 pub(crate) fn migrate_legacy_trigger_firing_carriers(
     value: &mut serde_json::Value,
+    allow_unlabeled_v1_carriers: bool,
 ) -> Result<(), String> {
-    migrate_legacy_continuation_firing(value)?;
+    migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
     let state = value
         .as_object_mut()
         .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
@@ -7828,7 +7914,11 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
         if !context.contains_key("pending") {
             return Err("persisted pending trigger context has no pending trigger".to_string());
         }
-        let canonical = context.get("firing").cloned();
+        let canonical = context
+            .get("firing")
+            .cloned()
+            .map(|value| legacy_firing_to_canonical(&value))
+            .transpose()?;
         let legacy = context
             .remove("firing_classification")
             .or_else(|| context.get("dispatch_origin").cloned());
@@ -7838,8 +7928,11 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                 if !legacy_firing_class_matches(&canonical, &legacy) {
                     return Err("pending trigger firing representations disagree".to_string());
                 }
+                context.insert("firing".to_string(), canonical);
             }
-            (Some(_), None) => {}
+            (Some(canonical), None) => {
+                context.insert("firing".to_string(), canonical);
+            }
             (None, Some(legacy)) => {
                 context.insert("firing".to_string(), legacy_firing_to_canonical(&legacy)?);
             }
@@ -7867,29 +7960,42 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                     .or_else(|| pending.remove("firing_classification"))
                     .or_else(|| pending.remove("dispatch_origin"))
             };
-            let canonical = state.get("pending_trigger_firing").cloned();
+            let canonical = state
+                .get("pending_trigger_firing")
+                .cloned()
+                .map(|value| legacy_firing_to_canonical(&value))
+                .transpose()?;
             match (canonical, legacy) {
                 (Some(canonical), Some(legacy)) => {
                     let legacy = legacy_firing_to_canonical(&legacy)?;
                     if !legacy_firing_class_matches(&canonical, &legacy) {
                         return Err("pending trigger firing representations disagree".to_string());
                     }
+                    state.insert("pending_trigger_firing".to_string(), canonical);
                 }
-                (Some(_), None) => {}
+                (Some(canonical), None) => {
+                    state.insert("pending_trigger_firing".to_string(), canonical);
+                }
                 (None, Some(legacy)) => {
                     state.insert(
                         "pending_trigger_firing".to_string(),
                         legacy_firing_to_canonical(&legacy)?,
                     );
                 }
-                // Unlike a deferred/order context, an active pending trigger
-                // no longer retains its delayed scheduler origin. Historical
-                // omission is therefore ambiguous and must not be guessed as
-                // ordinary (CR 603.7).
+                // CR 603.7: an unlabelled v1 active trigger may have been
+                // delayed, so preserve it as a non-receipt-eligible legacy
+                // firing rather than inventing ordinary or receipt identity.
                 (None, None) => {
-                    return Err(
-                        "active legacy pending trigger has no firing discriminator".to_string()
-                    );
+                    if allow_unlabeled_v1_carriers {
+                        state.insert(
+                            "pending_trigger_firing".to_string(),
+                            serde_json::Value::String("LegacyDelayed".to_string()),
+                        );
+                    } else {
+                        return Err(
+                            "active legacy pending trigger has no firing discriminator".to_string()
+                        );
+                    }
                 }
             }
         }
@@ -7926,7 +8032,33 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
                 .ok_or_else(|| "legacy stack delayed provenance must be an object".to_string())?;
             let mut migrated = serde_json::Map::new();
             for (entry, provenance) in old_stack {
-                migrated.insert(entry.clone(), serde_json::json!({ "Delayed": provenance }));
+                migrated.insert(
+                    entry.clone(),
+                    serde_json::json!({ "ReceiptEligible": provenance }),
+                );
+            }
+            state.insert(
+                "stack_trigger_firings".to_string(),
+                serde_json::Value::Object(migrated),
+            );
+        } else if allow_unlabeled_v1_carriers {
+            let entries = state
+                .get("stack")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "persisted game state has no stack array".to_string())?;
+            let mut migrated = serde_json::Map::new();
+            for entry in entries {
+                if !serialized_stack_entry_is_triggered(entry) {
+                    continue;
+                }
+                let entry_id = entry
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "persisted triggered stack entry has no id".to_string())?;
+                migrated.insert(
+                    entry_id.to_string(),
+                    serde_json::Value::String("LegacyDelayed".to_string()),
+                );
             }
             state.insert(
                 "stack_trigger_firings".to_string(),
@@ -7941,21 +8073,56 @@ pub(crate) fn migrate_legacy_trigger_firing_carriers(
         if let Some(provenance) = old_resolving {
             state.insert(
                 "resolving_trigger_firing".to_string(),
-                serde_json::json!({ "Delayed": provenance }),
+                serde_json::json!({ "ReceiptEligible": provenance }),
+            );
+        } else if allow_unlabeled_v1_carriers
+            && state
+                .get("resolving_stack_entry")
+                .is_some_and(serialized_stack_entry_is_triggered)
+        {
+            state.insert(
+                "resolving_trigger_firing".to_string(),
+                serde_json::Value::String("LegacyDelayed".to_string()),
             );
         }
     } else if old_resolving.is_some() {
         return Err("legacy and canonical resolving firing carriers both present".to_string());
     }
+    // A v1 `pending_continuation` is the paused child of the active resolution,
+    // but may have no trigger-event context of its own. Once its triggered parent
+    // has been classified above, transfer that exact firing to the child as well.
+    if allow_unlabeled_v1_carriers {
+        if let (Some(firing), Some(continuation)) = (
+            state.get("resolving_trigger_firing").cloned(),
+            state
+                .get_mut("pending_continuation")
+                .and_then(serde_json::Value::as_object_mut),
+        ) {
+            if continuation.contains_key("chain") && !continuation.contains_key("trigger_firing") {
+                continuation.insert("trigger_firing".to_string(), firing);
+            }
+        }
+    }
     Ok(())
 }
 
+fn serialized_stack_entry_is_triggered(entry: &serde_json::Value) -> bool {
+    entry
+        .get("kind")
+        .and_then(|kind| kind.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("TriggeredAbility")
+}
+
 fn legacy_firing_to_canonical(value: &serde_json::Value) -> Result<serde_json::Value, String> {
-    if value == "Normal" {
+    if value == "Normal" || value == "Ordinary" {
         return Ok(serde_json::Value::String("Ordinary".to_string()));
     }
-    if value == "Delayed" {
-        return Ok(serde_json::json!({ "Delayed": null }));
+    if value == "Delayed" || value == "LegacyDelayed" {
+        return Ok(serde_json::Value::String("LegacyDelayed".to_string()));
+    }
+    if value == "UnknownLegacy" {
+        return Ok(serde_json::Value::String("UnknownLegacy".to_string()));
     }
     let object = value
         .as_object()
@@ -7966,8 +8133,15 @@ fn legacy_firing_to_canonical(value: &serde_json::Value) -> Result<serde_json::V
     if object.contains_key("Normal") {
         return Ok(serde_json::Value::String("Ordinary".to_string()));
     }
-    if let Some(provenance) = object.get("Delayed") {
-        return Ok(serde_json::json!({ "Delayed": provenance }));
+    if let Some(origin) = object.get("Delayed") {
+        return if origin.is_null() {
+            Ok(serde_json::Value::String("LegacyDelayed".to_string()))
+        } else {
+            Ok(serde_json::json!({ "ReceiptEligible": origin }))
+        };
+    }
+    if let Some(origin) = object.get("ReceiptEligible") {
+        return Ok(serde_json::json!({ "ReceiptEligible": origin }));
     }
     Err("unknown legacy trigger firing discriminator".to_string())
 }
@@ -7978,7 +8152,7 @@ fn legacy_firing_class_matches(canonical: &serde_json::Value, legacy: &serde_jso
             canonical == legacy
         }
         (serde_json::Value::Object(canonical), serde_json::Value::Object(legacy)) => {
-            canonical.contains_key("Delayed") && legacy.contains_key("Delayed")
+            canonical.contains_key("ReceiptEligible") && legacy.contains_key("ReceiptEligible")
         }
         _ => false,
     }
@@ -7987,11 +8161,14 @@ fn legacy_firing_class_matches(canonical: &serde_json::Value, legacy: &serde_jso
 /// Upgrade the firing carrier inside every serialized ability-continuation
 /// frame. Resolution-frame envelopes have evolved, but a continuation always
 /// owns both `chain` and `trigger_context`.
-fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(), String> {
+fn migrate_legacy_continuation_firing(
+    value: &mut serde_json::Value,
+    allow_unlabeled_v1_carriers: bool,
+) -> Result<(), String> {
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
-                migrate_legacy_continuation_firing(value)?;
+                migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
             }
         }
         serde_json::Value::Object(object) => {
@@ -8001,7 +8178,11 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
                     || object.contains_key("firing_classification")
                     || object.contains_key("dispatch_origin"))
             {
-                let canonical = object.get("trigger_firing").cloned();
+                let canonical = object
+                    .get("trigger_firing")
+                    .cloned()
+                    .map(|value| legacy_firing_to_canonical(&value))
+                    .transpose()?;
                 let legacy = object
                     .remove("firing_classification")
                     .or_else(|| object.remove("dispatch_origin"));
@@ -8013,8 +8194,23 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
                                 "continuation trigger firing representations disagree".to_string()
                             );
                         }
+                        object.insert("trigger_firing".to_string(), canonical);
                     }
-                    (Some(_), None) | (None, None) => {}
+                    (Some(canonical), None) => {
+                        object.insert("trigger_firing".to_string(), canonical);
+                    }
+                    (None, None)
+                        if allow_unlabeled_v1_carriers
+                            && object
+                                .get("trigger_context")
+                                .is_some_and(|context| !context.is_null()) =>
+                    {
+                        object.insert(
+                            "trigger_firing".to_string(),
+                            serde_json::Value::String("LegacyDelayed".to_string()),
+                        );
+                    }
+                    (None, None) => {}
                     (None, Some(legacy)) => {
                         object.insert(
                             "trigger_firing".to_string(),
@@ -8024,7 +8220,7 @@ fn migrate_legacy_continuation_firing(value: &mut serde_json::Value) -> Result<(
                 }
             }
             for value in object.values_mut() {
-                migrate_legacy_continuation_firing(value)?;
+                migrate_legacy_continuation_firing(value, allow_unlabeled_v1_carriers)?;
             }
         }
         _ => {}
@@ -8042,7 +8238,8 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
     let state = value
         .as_object_mut()
         .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
-    let (migrated_commands, mut used_tokens, mut used_instances) = if let Some(entries) = state
+    normalize_delayed_install_identities_for_migration(state)?;
+    let (mut used_tokens, mut used_instances) = if let Some(entries) = state
         .get_mut("resolved_rules_journal")
         .and_then(serde_json::Value::as_object_mut)
         .and_then(|journal| journal.get_mut("entries"))
@@ -8050,18 +8247,12 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
     {
         let mut used_tokens = std::collections::BTreeSet::new();
         let mut used_instances = std::collections::BTreeSet::new();
-        let mut explicit_tokens = std::collections::BTreeSet::new();
-        let mut legacy_explicit_tokens = std::collections::BTreeSet::new();
         let mut provenance_tokens = std::collections::BTreeSet::new();
         let mut provenance_instances = std::collections::BTreeSet::new();
         for entry in entries.iter() {
             let Some(command) = delayed_trigger_install_command(entry) else {
                 continue;
             };
-            let has_provenance = command
-                .get("trigger")
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(|trigger| trigger.get("provenance").is_some());
             if let Some(provenance) = command
                 .get("trigger")
                 .and_then(serde_json::Value::as_object)
@@ -8087,128 +8278,46 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 }
                 used_tokens.insert(token);
                 used_instances.insert(instance);
-            }
-            if let Some(token) = command.get("token").and_then(serde_json::Value::as_u64) {
-                if token != 0 {
-                    if !explicit_tokens.insert(token) {
+                if let Some(command_token) =
+                    command.get("token").and_then(serde_json::Value::as_u64)
+                {
+                    if command_token != 0 && command_token != token {
                         return Err(
-                            "legacy delayed-trigger install commands reuse an explicit token"
+                            "delayed-trigger install command token disagrees with provenance"
                                 .to_string(),
                         );
                     }
-                    if !has_provenance {
-                        legacy_explicit_tokens.insert(token);
-                    }
-                    used_tokens.insert(token);
                 }
             }
-            if let (Some(command_token), Some(provenance_token)) = (
-                command.get("token").and_then(serde_json::Value::as_u64),
-                command
-                    .get("trigger")
-                    .and_then(serde_json::Value::as_object)
-                    .and_then(|trigger| trigger.get("provenance"))
-                    .and_then(serde_json::Value::as_object)
-                    .and_then(|provenance| provenance.get("token"))
-                    .and_then(serde_json::Value::as_u64),
-            ) {
-                if command_token != 0 && command_token != provenance_token {
-                    return Err(
-                        "delayed-trigger install command token disagrees with provenance"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        if legacy_explicit_tokens
-            .iter()
-            .any(|token| provenance_tokens.contains(token))
-        {
-            return Err(
-                "legacy delayed-trigger explicit token collides with installed provenance"
-                    .to_string(),
-            );
         }
 
-        let mut next_token = 1_u64;
-        let mut next_instance = 1_u64;
         for entry in entries.iter_mut() {
-            // Gather every input before opening the mutable command map. The
-            // write below must not overlap the immutable legacy-payload read.
-            let (explicit_token, already_migrated, source_id) = {
-                let Some(command) = delayed_trigger_install_command(entry) else {
-                    continue;
-                };
-                let trigger = command
-                    .get("trigger")
-                    .and_then(serde_json::Value::as_object)
-                    .ok_or_else(|| {
-                        "delayed-trigger install command has no trigger payload".to_string()
-                    })?;
-                (
-                    command
-                        .get("token")
-                        .and_then(serde_json::Value::as_u64)
-                        .filter(|token| *token != 0),
-                    trigger.get("provenance").is_some(),
-                    trigger.get("source_id").cloned(),
-                )
-            };
-            if already_migrated {
+            let Some(command) = delayed_trigger_install_command_mut(entry) else {
                 continue;
-            }
-            let source_id = source_id
-                .ok_or_else(|| "delayed-trigger install command has no source id".to_string())?;
-            let token = explicit_token.unwrap_or_else(|| {
-                while used_tokens.contains(&next_token) {
-                    next_token = next_token.saturating_add(1);
-                }
-                next_token
-            });
-            while used_instances.contains(&next_instance) {
-                next_instance = next_instance.saturating_add(1);
-            }
-
-            let command = delayed_trigger_install_command_mut(entry)
-                .expect("command was present during immutable migration read");
-            command
-                .get_mut("trigger")
-                .and_then(serde_json::Value::as_object_mut)
-                .expect("trigger was present during immutable migration read")
-                .insert(
-                    "provenance".to_string(),
-                    serde_json::json!({
-                        "token": token,
-                        "instance": next_instance,
-                        "source_id": source_id,
-                    }),
-                );
+            };
+            let trigger = command
+                .get("trigger")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    "delayed-trigger install command has no trigger payload".to_string()
+                })?;
+            let token = trigger
+                .get("provenance")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|provenance| provenance.get("token"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             command.insert("token".to_string(), serde_json::Value::from(token));
-            used_tokens.insert(token);
-            used_instances.insert(next_instance);
-            next_token = next_token.saturating_add(1);
-            next_instance = next_instance.saturating_add(1);
         }
 
-        let migrated_commands = entries
-            .iter()
-            .filter_map(delayed_trigger_install_command)
-            .map(|command| command.get("trigger").cloned())
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| "delayed-trigger install command has no trigger payload".to_string())?;
-        (migrated_commands, used_tokens, used_instances)
+        (used_tokens, used_instances)
     } else {
         (
-            Vec::new(),
             std::collections::BTreeSet::new(),
             std::collections::BTreeSet::new(),
         )
     };
 
-    // A live record which already carries provenance has consumed its matching
-    // command. Reserve it before binding any legacy `None` records, otherwise
-    // identical delayed-trigger payloads can be rebound to the same command.
-    let mut bound_commands = std::collections::BTreeSet::new();
     let mut live_tokens = std::collections::BTreeSet::new();
     let mut live_instances = std::collections::BTreeSet::new();
     if let Some(live_delayed) = state
@@ -8246,50 +8355,20 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
             }
             used_tokens.insert(token);
             used_instances.insert(instance);
-            bound_commands.extend(
-                migrated_commands
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, command_trigger)| {
-                        command_trigger.get("provenance") == Some(provenance)
-                    })
-                    .map(|(index, _)| index),
-            );
         }
     }
-    if let Some(live_delayed) = state
-        .get_mut("delayed_triggers")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for delayed in live_delayed {
-            if !delayed.is_object() {
-                return Err("persisted delayed trigger must be a JSON object".to_string());
-            }
-            if delayed.get("provenance").is_some() {
-                continue;
-            }
-            let matches: Vec<usize> = migrated_commands
-                .iter()
-                .enumerate()
-                .filter(|(index, command_trigger)| {
-                    !bound_commands.contains(index)
-                        && delayed_trigger_payload_matches(delayed, command_trigger)
-                })
-                .map(|(index, _)| index)
-                .collect();
-            if let [index, ..] = matches.as_slice() {
-                let provenance = migrated_commands[*index]
-                    .get("provenance")
-                    .cloned()
-                    .expect("migrated command always has private provenance");
-                delayed
-                    .as_object_mut()
-                    .expect("delayed trigger was validated as an object")
-                    .insert("provenance".to_string(), provenance);
-                bound_commands.insert(*index);
-            }
-        }
-    }
+    let next_token = used_tokens
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger token allocator overflow".to_string())?;
+    let next_instance = used_instances
+        .last()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "delayed-trigger instance allocator overflow".to_string())?;
     state.insert(
         "next_delayed_trigger_token".to_string(),
         serde_json::Value::from(
@@ -8297,7 +8376,7 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 .get("next_delayed_trigger_token")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1)
-                .max(used_tokens.last().copied().unwrap_or(0).saturating_add(1)),
+                .max(next_token),
         ),
     );
     state.insert(
@@ -8307,15 +8386,289 @@ pub(crate) fn migrate_legacy_delayed_trigger_provenance(
                 .get("next_delayed_trigger_instance")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1)
-                .max(
-                    used_instances
-                        .last()
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(1),
-                ),
+                .max(next_instance),
         ),
     );
+    canonicalize_delayed_install_identities(state)?;
+    Ok(())
+}
+
+/// Accept the historical optional-origin shape while migration validates its
+/// complete receipt roots. Current payloads use `DelayedInstallIdentity`; a
+/// missing historical root remains legacy rather than being reconstructed.
+fn normalize_delayed_install_identities_for_migration(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(entries) = state
+        .get_mut("resolved_rules_journal")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|journal| journal.get_mut("entries"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for entry in entries {
+            let Some(command) = delayed_trigger_install_command_mut(entry) else {
+                continue;
+            };
+            let trigger = command.get_mut("trigger").ok_or_else(|| {
+                "delayed-trigger install command has no trigger payload".to_string()
+            })?;
+            normalize_delayed_install_identity(trigger)?;
+        }
+    }
+    if let Some(delayed_triggers) = state
+        .get_mut("delayed_triggers")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for trigger in delayed_triggers {
+            normalize_delayed_install_identity(trigger)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_delayed_install_identity(trigger: &mut serde_json::Value) -> Result<(), String> {
+    let object = trigger
+        .as_object_mut()
+        .ok_or_else(|| "persisted delayed trigger must be a JSON object".to_string())?;
+    let identity = object.remove("provenance");
+    match identity {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(value)) if value == "LegacyDelayed" => {}
+        Some(serde_json::Value::Object(identity)) => {
+            if let Some(origin) = identity.get("ReceiptEligible") {
+                if identity.len() != 1 {
+                    return Err("receipt-eligible delayed identity has extra fields".to_string());
+                }
+                object.insert("provenance".to_string(), origin.clone());
+            } else if identity.contains_key("token")
+                && identity.contains_key("instance")
+                && identity.contains_key("source_id")
+            {
+                object.insert(
+                    "provenance".to_string(),
+                    serde_json::Value::Object(identity),
+                );
+            } else {
+                return Err("unknown delayed-trigger installation identity".to_string());
+            }
+        }
+        Some(_) => return Err("unknown delayed-trigger installation identity".to_string()),
+    }
+    Ok(())
+}
+
+fn canonicalize_delayed_install_identities(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(entries) = state
+        .get_mut("resolved_rules_journal")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|journal| journal.get_mut("entries"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for entry in entries {
+            let Some(command) = delayed_trigger_install_command_mut(entry) else {
+                continue;
+            };
+            let trigger = command.get_mut("trigger").ok_or_else(|| {
+                "delayed-trigger install command has no trigger payload".to_string()
+            })?;
+            canonicalize_delayed_install_identity(trigger)?;
+        }
+    }
+    if let Some(delayed_triggers) = state
+        .get_mut("delayed_triggers")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for trigger in delayed_triggers {
+            canonicalize_delayed_install_identity(trigger)?;
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_delayed_install_identity(trigger: &mut serde_json::Value) -> Result<(), String> {
+    let object = trigger
+        .as_object_mut()
+        .ok_or_else(|| "persisted delayed trigger must be a JSON object".to_string())?;
+    let identity = match object.remove("provenance") {
+        None | Some(serde_json::Value::Null) => {
+            serde_json::Value::String("LegacyDelayed".to_string())
+        }
+        Some(serde_json::Value::Object(origin)) => {
+            serde_json::json!({ "ReceiptEligible": origin })
+        }
+        Some(other) => return Err(format!("invalid normalized delayed identity: {other}")),
+    };
+    object.insert("provenance".to_string(), identity);
+    Ok(())
+}
+
+/// Upgrade `Effect::Mana.target` snapshots written before `ManaTargetRole`
+/// made the target's grammatical role explicit. The old bare `TargetFilter`
+/// cannot tell whether it named the mana recipient or the count source, so the
+/// owning card's parsed Oracle clause is the migration authority.
+///
+/// The lookup is intentionally name-based rather than shape-based: Carpet of
+/// Flowers and Spectral Searchlight both serialize ordinary player filters but
+/// assign opposite roles. Unknown cards fail restoration rather than silently
+/// changing which player receives mana or supplies its amount.
+pub(crate) fn migrate_legacy_mana_target_roles(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let object_names = value
+        .as_object()
+        .and_then(|state| state.get("objects"))
+        .and_then(serde_json::Value::as_object)
+        .map(|objects| {
+            objects
+                .iter()
+                .filter_map(|(key, object)| {
+                    let object = object.as_object()?;
+                    let id = object
+                        .get("id")
+                        .and_then(json_object_id)
+                        .or_else(|| key.parse().ok())?;
+                    let name = object.get("name")?.as_str()?;
+                    (!name.is_empty()).then(|| (id, name.to_string()))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    migrate_legacy_mana_target_roles_in_value(value, &object_names, None)
+}
+
+fn json_object_id(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse::<u64>().ok())
+}
+
+fn legacy_mana_target_role(card_name: &str) -> Option<(&'static str, &'static str)> {
+    match card_name {
+        // The named player receives the produced mana. This catalog is the
+        // complete pre-`ManaTargetRole` card-data surface; add future entries
+        // only after verifying their parsed Oracle role.
+        "A Display of My Dark Power"
+        | "Barbflare Gremlin"
+        | "Belbe, Corrupted Observer"
+        | "Bigger on the Inside"
+        | "Blighted Burgeoning"
+        | "Blinkmoth Urn"
+        | "Bubbling Muck"
+        | "Buried in the Garden"
+        | "Cheering Crowd"
+        | "Color Pie"
+        | "Dawn's Reflection"
+        | "Dictate of Karametra"
+        | "Eladamri, Lord of Leaves Avatar"
+        | "Eladamri's Vineyard"
+        | "Eloren Wilds"
+        | "Elvish Guidance"
+        | "Extraplanar Lens"
+        | "Fertile Ground"
+        | "Gauntlet of Might"
+        | "Gauntlet of Power"
+        | "Glittering Frost"
+        | "Heartbeat of Spring"
+        | "High Tide"
+        | "Jetfire, Ingenious Scientist"
+        | "Keeper of Progenitus"
+        | "Lavaleaper"
+        | "Mad Science Fair Project"
+        | "Magus of the Vineyard"
+        | "Mana Flare"
+        | "Market Festival"
+        | "Organ Harvest"
+        | "Overabundance"
+        | "Overgrowth"
+        | "Priest of Forgotten Gods"
+        | "Radiant Lotus"
+        | "Red Death, Shipwrecker"
+        | "Shimmerwilds Growth"
+        | "Shizuko, Caller of Autumn"
+        | "Snowfall"
+        | "Spectral Searchlight"
+        | "Stadium Vendors"
+        | "Tangleroot"
+        | "The Fertile Lands of Saulvinia"
+        | "The Warring Triad"
+        | "Trace of Abundance"
+        | "Utopia Sprawl"
+        | "Valleymaker"
+        | "Verdant Haven"
+        | "Vernal Bloom"
+        | "Wild Growth"
+        | "Winter's Night"
+        | "Wolfwillow Haven"
+        | "Zhur-Taa Ancient" => Some(("Recipient", "recipient")),
+        // The named player supplies the production count while the ability's
+        // controller receives the mana. Jeska's Will is the affected live-save
+        // case; Rousing Refrain has the same Oracle sentence.
+        "Carpet of Flowers" | "Jeska's Will" | "Orcish Squatters Avatar" | "Rousing Refrain" => {
+            Some(("CountSource", "count_source"))
+        }
+        _ => None,
+    }
+}
+
+fn migrate_legacy_mana_target_roles_in_value(
+    value: &mut serde_json::Value,
+    object_names: &HashMap<u64, String>,
+    inherited_owner: Option<String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_mana_target_roles_in_value(
+                    value,
+                    object_names,
+                    inherited_owner.clone(),
+                )?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let source_owner = object
+                .get("source_id")
+                .and_then(json_object_id)
+                .and_then(|source_id| object_names.get(&source_id))
+                .cloned();
+            let owner = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .or(source_owner)
+                .or(inherited_owner);
+
+            let legacy_target = object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|effect_type| effect_type == "Mana")
+                .then(|| object.get("target"))
+                .flatten()
+                .filter(|target| !target.is_null() && target.get("role").is_none())
+                .cloned();
+            if let Some(target) = legacy_target {
+                let owner = owner.as_deref().ok_or_else(|| {
+                    "legacy mana target has no source card name for role migration".to_string()
+                })?;
+                let (role, field) = legacy_mana_target_role(owner).ok_or_else(|| {
+                    format!("legacy mana target on {owner:?} has no verified role migration")
+                })?;
+                object.insert(
+                    "target".to_string(),
+                    serde_json::json!({ "role": role, field: target }),
+                );
+            }
+
+            for value in object.values_mut() {
+                migrate_legacy_mana_target_roles_in_value(value, object_names, owner.clone())?;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -8335,23 +8688,6 @@ fn delayed_trigger_install_command_mut(
         .get_mut("command")?
         .get_mut("DelayedTriggerInstall")?
         .as_object_mut()
-}
-
-fn delayed_trigger_payload_matches(
-    delayed: &serde_json::Value,
-    command_trigger: &serde_json::Value,
-) -> bool {
-    let mut delayed = delayed.clone();
-    let mut command_trigger = command_trigger.clone();
-    delayed
-        .as_object_mut()
-        .expect("delayed trigger was validated as an object")
-        .remove("provenance");
-    command_trigger
-        .as_object_mut()
-        .expect("command trigger was validated as an object")
-        .remove("provenance");
-    delayed == command_trigger
 }
 
 impl Serialize for TrustedGameStateEnvelope {
@@ -8390,7 +8726,11 @@ impl<'de> Deserialize<'de> for TrustedGameStateEnvelope {
             Some(runtime) => serde_json::from_value(runtime).map_err(serde::de::Error::custom)?,
             None => PrecastShortcutRuntime::default(),
         };
-        let state = decode_persisted_resolution_state(state).map_err(serde::de::Error::custom)?;
+        let state = GameStateDecode::decode_persisted_resolution_state(
+            state,
+            GameStateDecodeMode::TrustedEnvelope,
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             state,
             precast_shortcut_runtime,
@@ -12480,8 +12820,50 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GameState {
+/// Declares the runtime state and its private serde-only raw mirror from one
+/// field list. Keeping the field declaration single-sourced makes persistence
+/// ingress exhaustive whenever `GameState` evolves.
+macro_rules! declare_game_state {
+    (
+        $(
+            $(#[$attribute:meta])*
+            $visibility:vis $field:ident: $field_type:ty,
+        )*
+    ) => {
+        #[derive(Debug, Clone, Serialize)]
+        pub struct GameState {
+            $(
+                $(#[$attribute])*
+                $visibility $field: $field_type,
+            )*
+        }
+
+        #[derive(Deserialize)]
+        struct RawGameStateFields {
+            $(
+                $(#[$attribute])*
+                $visibility $field: $field_type,
+            )*
+        }
+
+        impl From<RawGameStateFields> for GameState {
+            fn from(raw: RawGameStateFields) -> Self {
+                let RawGameStateFields {
+                    $(
+                        $field,
+                    )*
+                } = raw;
+                Self {
+                    $(
+                        $field,
+                    )*
+                }
+            }
+        }
+    };
+}
+
+declare_game_state! {
     pub turn_number: u32,
     pub active_player: PlayerId,
     pub phase: Phase,
@@ -12690,6 +13072,15 @@ pub struct GameState {
     /// (Soul Warden) match against the fully-realized copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
+
+    /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
+    /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
+    /// object is not yet the thing that entered — `BecomeCopy` has not run and/or a mandatory
+    /// as-enters choice (CR 614.12a) is unanswered. Parked here so it survives an arbitrary number
+    /// of client round-trips; realized by the single authority
+    /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -14431,6 +14822,116 @@ pub struct GameState {
     /// boundary, so it is excluded from serialization and structural equality.
     #[serde(skip)]
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
+}
+
+/// Selects the persistence contract for materializing raw game-state fields.
+/// Historical formats must declare their migration mode; direct `GameState`
+/// serde is deliberately limited to the current canonical raw representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GameStateDecodeMode {
+    PersistedRaw,
+    TrustedEnvelope,
+    ResolutionWireV1,
+    ResolutionWireV2,
+    DirectCurrentRaw,
+}
+
+/// The sole authority that converts serialized raw state fields into a live
+/// [`GameState`]. Keeping migration and invariant checks here prevents a new
+/// restore caller from silently becoming a second compatibility boundary.
+pub(crate) struct GameStateDecode;
+
+impl GameStateDecode {
+    pub(crate) fn decode_persisted_resolution_state(
+        mut value: serde_json::Value,
+        mode: GameStateDecodeMode,
+    ) -> Result<GameState, String> {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+        match mode {
+            // Historical raw persistence predates the explicit resolution-wire
+            // discriminator. This is the only ingress allowed to stamp v1.
+            GameStateDecodeMode::PersistedRaw => {
+                object
+                    .entry("resolution_state_version".to_string())
+                    .or_insert_with(|| serde_json::Value::from(1));
+            }
+            // Trusted snapshots are written as versioned resolution-wire
+            // envelopes and must retain their declared compatibility mode.
+            GameStateDecodeMode::TrustedEnvelope => {}
+            GameStateDecodeMode::ResolutionWireV1
+            | GameStateDecodeMode::ResolutionWireV2
+            | GameStateDecodeMode::DirectCurrentRaw => {
+                return Err("invalid persisted resolution-state decode mode".to_string());
+            }
+        }
+        let mut state = serde_json::from_value::<ResolutionStateWire>(value)
+            .map(ResolutionStateWire::into_game_state)
+            .map_err(|error| error.to_string())?;
+        normalize_delayed_trigger_allocators(&mut state)?;
+        validate_trigger_firing_coherence(&state)?;
+        #[cfg(debug_assertions)]
+        debug_assert_runtime_resolution_invariants(&state);
+        Ok(state)
+    }
+
+    pub(crate) fn decode(
+        mut value: serde_json::Value,
+        mode: GameStateDecodeMode,
+    ) -> Result<GameState, String> {
+        reject_legacy_raw_prompt_authority(&value)?;
+        if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
+            migrate_legacy_delayed_trigger_provenance(&mut value)?;
+            migrate_legacy_trigger_firing_carriers(
+                &mut value,
+                matches!(
+                    mode,
+                    GameStateDecodeMode::PersistedRaw | GameStateDecodeMode::ResolutionWireV1
+                ),
+            )?;
+        }
+        let mut state = Self::materialize_prepared(value)?;
+        normalize_delayed_trigger_allocators(&mut state)?;
+        validate_trigger_firing_coherence(&state)?;
+        #[cfg(debug_assertions)]
+        debug_assert_runtime_resolution_invariants(&state);
+        Ok(state)
+    }
+
+    pub(crate) fn prepare_resolution_wire(
+        value: &mut serde_json::Value,
+        mode: GameStateDecodeMode,
+    ) -> Result<(), String> {
+        debug_assert!(matches!(
+            mode,
+            GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
+        ));
+        reject_legacy_raw_prompt_authority(value)?;
+        migrate_legacy_delayed_trigger_provenance(value)?;
+        migrate_legacy_trigger_firing_carriers(
+            value,
+            matches!(mode, GameStateDecodeMode::ResolutionWireV1),
+        )?;
+        migrate_legacy_mana_target_roles(value)
+    }
+
+    pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
+        let raw = serde_json::from_value::<RawGameStateFields>(value)
+            .map_err(|error| error.to_string())?;
+        Ok(GameState::from(raw))
+    }
+}
+
+impl<'de> Deserialize<'de> for GameState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        GameStateDecode::decode(value, GameStateDecodeMode::DirectCurrentRaw)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// CR 116.2c: names the whole continuous effect ONE resolution created, so a
@@ -17813,6 +18314,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             static_gate_truth: im::HashMap::new(),
             trigger_index: TriggerIndex::default(),
@@ -18746,7 +19248,7 @@ impl GameState {
         }
         for dt in clone.delayed_triggers.iter_mut() {
             dt.ability.clear_trigger_identity_recursive();
-            dt.provenance = None;
+            dt.provenance = DelayedInstallIdentity::LegacyDelayed;
         }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
@@ -19361,6 +19863,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        pending_token_battlefield_entry: _,
         layers_dirty: _,
         static_gate_truth: _,
         trigger_index: _,
@@ -19673,6 +20176,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike
             // `layers_dirty`/`public_state_dirty` (which encode pending work),
@@ -20689,9 +21193,13 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+    use crate::types::identifiers::{
+        DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+    };
+    use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
 
     #[test]
-    fn migration_reserves_commands_already_bound_by_live_provenance() {
+    fn migration_preserves_missing_install_roots_as_legacy() {
         let mut persisted = serde_json::json!({
             "resolved_rules_journal": {
                 "entries": [
@@ -20720,17 +21228,17 @@ mod tests {
         migrate_legacy_delayed_trigger_provenance(&mut persisted).expect("migration succeeds");
 
         assert_eq!(
-            persisted["delayed_triggers"][1]["provenance"]["token"],
-            serde_json::json!(2),
-            "the legacy live record must bind the unclaimed second command"
+            persisted["delayed_triggers"][1]["provenance"],
+            serde_json::json!("LegacyDelayed"),
+            "a missing historical install root must remain legacy"
         );
         assert_eq!(
             persisted["next_delayed_trigger_token"],
-            serde_json::json!(3)
+            serde_json::json!(2)
         );
         assert_eq!(
             persisted["next_delayed_trigger_instance"],
-            serde_json::json!(3)
+            serde_json::json!(2)
         );
     }
 
@@ -20812,27 +21320,56 @@ mod tests {
             "Delayed install root".to_string(),
             Zone::Battlefield,
         );
-        crate::game::triggers::install_delayed_trigger(
-            &mut state,
-            DelayedTrigger::new(
-                crate::types::ability::DelayedTriggerCondition::AtNextPhase {
-                    phase: Phase::Upkeep,
+        let token = DelayedTriggerToken(1);
+        let mut trigger = DelayedTrigger::new(
+            crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
                 },
-                Box::new(ResolvedAbility::new(
-                    Effect::Draw {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::Controller,
-                    },
-                    Vec::new(),
-                    source,
-                    PlayerId(0),
-                )),
-                PlayerId(0),
+                Vec::new(),
                 source,
-                true,
-            ),
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
         );
+        trigger.provenance = DelayedInstallIdentity::ReceiptEligible(DelayedTriggerOrigin {
+            token,
+            instance: DelayedTriggerInstanceId(1),
+            source_id: source,
+        });
+        let command = ResolvedDelayedTriggerCommand {
+            trigger,
+            token,
+            expected_installed_count: 0,
+            cause: state.current_or_begin_rules_execution_node(),
+        };
+        crate::game::triggers::apply_resolved_delayed_trigger(&mut state, &command)
+            .expect("fixture replay install is coherent");
+        state
+            .resolved_rules_journal
+            .record_delayed_trigger_install(command)
+            .expect("fixture install has a journal cause");
         (state, source)
+    }
+
+    #[test]
+    fn direct_current_raw_decode_repairs_stale_delayed_trigger_allocators() {
+        let (state, _) = delayed_install_fixture();
+        let mut serialized = serde_json::to_value(state).expect("fixture serializes");
+        serialized["next_delayed_trigger_token"] = serde_json::Value::from(1);
+        serialized["next_delayed_trigger_instance"] = serde_json::Value::from(1);
+
+        let restored: GameState =
+            serde_json::from_value(serialized).expect("stale allocators repair after decode");
+
+        assert_eq!(restored.next_delayed_trigger_token, 2);
+        assert_eq!(restored.next_delayed_trigger_instance, 2);
     }
 
     fn erase_delayed_install_provenance(value: &mut serde_json::Value) {
@@ -20860,16 +21397,19 @@ mod tests {
             .and_then(serde_json::Value::as_object_mut)
             .expect("fixture command has a trigger")
             .remove("provenance");
+        state["deferred_triggers"][0]["firing"] =
+            serde_json::Value::String("LegacyDelayed".to_string());
     }
 
     /// The raw and trusted envelopes differ only in their outer runtime data.
     /// Both must therefore migrate the same private delayed-install record and
-    /// preserve an in-flight carrier that aliases that record.
+    /// preserve an in-flight carrier as legacy when its root was unavailable.
     #[test]
     fn delayed_install_migration_has_raw_and_trusted_carrier_parity() {
         let (mut state, source) = delayed_install_fixture();
         let provenance = state.delayed_triggers[0]
             .provenance
+            .origin()
             .expect("installer mints provenance");
         let pending = crate::game::triggers::PendingTrigger::ordinary(
             source,
@@ -20908,7 +21448,11 @@ mod tests {
         assert_eq!(
             raw.deferred_triggers[0].firing(),
             trusted.deferred_triggers[0].firing(),
-            "the in-flight carrier must retain the migrated root identity"
+            "the in-flight carrier must use the same legacy classification"
+        );
+        assert_eq!(
+            raw.deferred_triggers[0].firing(),
+            TriggerFiring::LegacyDelayed
         );
         assert_eq!(raw.next_delayed_trigger_token, 2);
         assert_eq!(raw.next_delayed_trigger_instance, 2);
@@ -20930,7 +21474,7 @@ mod tests {
             } else {
                 &mut persisted
             };
-            state["delayed_triggers"][0]["provenance"]["source_id"] =
+            state["delayed_triggers"][0]["provenance"]["ReceiptEligible"]["source_id"] =
                 serde_json::Value::from(9_999);
             let error = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect_err("a delayed carrier cannot alias an install root from another source");
@@ -21172,6 +21716,52 @@ mod tests {
     }
 
     #[test]
+    fn v1_unlabeled_trigger_carriers_migrate_to_legacy_delayed() {
+        let mut state = trigger_continuation_fixture();
+        let continuation = state
+            .active_ability_continuation()
+            .expect("fixture parks a trigger continuation")
+            .clone();
+        state.resolution_stack = ResolutionStack::default();
+        let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
+        v1["resolution_state_version"] = serde_json::Value::from(1);
+        v1["pending_continuation"] =
+            serde_json::to_value(continuation).expect("legacy continuation serializes");
+        let v1_state = v1.as_object_mut().expect("v1 fixture is a state object");
+        v1_state.remove("pending_trigger_firing");
+        v1_state.remove("stack_trigger_firings");
+        v1_state.remove("resolving_trigger_firing");
+        v1_state["pending_continuation"]
+            .as_object_mut()
+            .expect("legacy continuation is an object")
+            .remove("trigger_firing");
+
+        let restored = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("v1 fixture conservatively restores unlabelled trigger carriers")
+            .into_game_state();
+
+        assert_eq!(
+            restored.pending_trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored.stack_trigger_firings.get(&ObjectId(9_003)),
+            Some(&TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored.resolving_trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
+        assert_eq!(
+            restored
+                .active_ability_continuation()
+                .expect("v1 continuation restores")
+                .trigger_firing,
+            Some(TriggerFiring::LegacyDelayed)
+        );
+    }
+
+    #[test]
     fn direct_resolution_wire_rejects_unlabeled_active_trigger_carriers() {
         let state = normal_trigger_firing_fixture();
         let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
@@ -21230,6 +21820,68 @@ mod tests {
                 .contains("paused trigger continuation has no firing carrier"),
             "expected direct-wire continuation failure, got {continuation_error}"
         );
+    }
+
+    #[test]
+    fn direct_current_raw_requires_canonical_trigger_firing_carriers() {
+        let state = normal_trigger_firing_fixture();
+        let raw = serde_json::to_value(&state).expect("current game state serializes");
+
+        let restored = serde_json::from_value::<GameState>(raw.clone())
+            .expect("complete current raw state restores directly");
+        assert_eq!(
+            restored.pending_trigger_firing,
+            Some(TriggerFiring::Ordinary),
+            "direct current raw restores the canonical pending carrier"
+        );
+
+        let mut unknown = raw.clone();
+        unknown["pending_trigger_firing"] = serde_json::Value::String("UnknownLegacy".to_string());
+        let unknown_error = serde_json::from_value::<GameState>(unknown)
+            .expect_err("direct raw must reject an unknown active firing carrier");
+        assert!(
+            unknown_error
+                .to_string()
+                .contains("pending trigger has no canonical trigger firing discriminator"),
+            "expected strict direct-current carrier rejection, got {unknown_error}"
+        );
+
+        let mut missing = raw.clone();
+        missing
+            .as_object_mut()
+            .expect("raw fixture is a state object")
+            .remove("pending_trigger_firing");
+        let missing_error = serde_json::from_value::<GameState>(missing)
+            .expect_err("direct raw must reject an unlabeled active pending trigger");
+        assert!(
+            missing_error
+                .to_string()
+                .contains("pending trigger has no firing carrier"),
+            "expected strict direct-current missing-carrier rejection, got {missing_error}"
+        );
+
+        let mut conflict = raw;
+        conflict["deferred_triggers"][0]["dispatch_origin"] =
+            serde_json::Value::String("Delayed".to_string());
+        let conflict_error = serde_json::from_value::<GameState>(conflict)
+            .expect_err("direct raw must reject conflicting scheduler and firing carriers");
+        assert!(
+            conflict_error
+                .to_string()
+                .contains("deferred trigger dispatch origin disagrees with its firing carrier"),
+            "expected strict direct-current conflict rejection, got {conflict_error}"
+        );
+
+        let (delayed, source) = delayed_install_fixture();
+        let delayed_raw = serde_json::to_value(&delayed).expect("current delayed state serializes");
+        serde_json::from_value::<GameState>(delayed_raw.clone())
+            .expect("canonical delayed provenance restores directly");
+
+        let mut source_only = delayed_raw;
+        source_only["delayed_triggers"][0]["provenance"] =
+            serde_json::json!({ "source_id": source.0 });
+        serde_json::from_value::<GameState>(source_only)
+            .expect_err("direct raw must reject source-only historical delayed provenance");
     }
 
     #[test]
@@ -21976,7 +22628,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: ObjectId(5),
             one_shot: true,
-            provenance: None,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
         });
         a.stack.push_back(StackEntry {
             id: ObjectId(20),
@@ -22937,7 +23589,7 @@ mod tests {
             .insert(ObjectId(91), TriggerFiring::Ordinary);
         delayed
             .stack_trigger_firings
-            .insert(ObjectId(91), TriggerFiring::Delayed(None));
+            .insert(ObjectId(91), TriggerFiring::LegacyDelayed);
 
         assert!(
             !loop_states_equal(&ordinary, &delayed),
@@ -25044,6 +25696,7 @@ mod tests {
             subject_match_count: None,
             die_result: None,
         }));
+        state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
 
         let json = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&json).unwrap();
@@ -25175,10 +25828,15 @@ mod tests {
             },
         });
 
+        let mut trusted_state = raw.clone();
+        // Trusted envelopes declare their resolution-wire mode. Only bare
+        // historical raw snapshots receive the implicit v1 discriminator.
+        trusted_state["resolution_state_version"] = serde_json::Value::from(1);
+
         for persisted in [
-            raw.clone(),
+            raw,
             serde_json::json!({
-                "state": raw,
+                "state": trusted_state,
             }),
         ] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)

@@ -624,15 +624,10 @@ fn park_search_observer_triggers(
     if !trigger_events.is_empty() {
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
-    // The parent spell already left the stack; clear the stashed resolving entry
-    // so the next priority pass can drain `deferred_triggers`.
-    if state.active_ability_continuation().is_none()
-        && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    {
-        super::stack::clear_resolving_stack_entry(state);
-        // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-        state.resolution_source_relatch = None;
-    }
+    // A search continuation can park another typed resolution frame. Let the
+    // shared carrier authority prove that every such frame has drained before
+    // retiring the parent and releasing its CR 400.7j self-move link.
+    super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
     ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
 }
 
@@ -4122,7 +4117,7 @@ pub(super) fn handle_resolution_choice(
                 return Ok(action_result_outcome(events, state.waiting_for.clone()));
             }
 
-            turns::advance_phase(state, events);
+            let _ = turns::advance_phase_once(state, events);
             return Ok(ResolutionChoiceOutcome::WaitingFor(turns::auto_advance(
                 state, events,
             )));
@@ -4652,6 +4647,7 @@ pub(super) fn handle_resolution_choice(
                     subject: None,
                 });
                 set_priority(state, player);
+                super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));

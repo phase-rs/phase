@@ -101,9 +101,9 @@ pub fn resolve(
             controller: ability.controller,
             source_id: ability.source_id,
             one_shot: true,
-            provenance: None,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         };
-        crate::game::triggers::install_delayed_trigger(state, exile_tokens);
+        crate::game::triggers::install_delayed_trigger(state, exile_tokens, events);
     }
 
     events.push(GameEvent::EffectResolved {

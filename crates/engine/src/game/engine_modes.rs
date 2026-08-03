@@ -289,7 +289,10 @@ pub(super) fn resolve_random_modal_trigger(
         // CR 603.3c: No legal mode — drop the trigger. The interactive branches
         // already removed the in-flight stack entry before this point, so just
         // clear the cursor here.
-        super::stack::pop_uncommitted_pending_trigger_entry(state);
+        super::stack::pop_uncommitted_pending_trigger_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
         state.pending_trigger = None;
         state.pending_trigger_firing = None;
         return Ok(None);

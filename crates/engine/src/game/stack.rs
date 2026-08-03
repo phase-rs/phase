@@ -30,12 +30,37 @@ use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
-/// Clears the resolving entry and its coupled trigger classification together.
-/// A firing map row exists only while the triggered entry is on the stack; once
-/// popped, this pair is the sole resolution-time carrier of that identity.
-pub(crate) fn clear_resolving_stack_entry(state: &mut GameState) {
-    state.resolving_stack_entry = None;
-    state.resolving_trigger_firing = None;
+/// Transfers an already-popped stack entry into the active resolution carrier.
+pub(super) fn begin_resolving_stack_entry(
+    state: &mut GameState,
+    entry: StackEntry,
+    firing: Option<TriggerFiring>,
+) {
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
+    debug_assert_eq!(
+        matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }),
+        firing.is_some()
+    );
+    state.resolving_stack_entry = Some(entry);
+    state.resolving_trigger_firing = firing;
+}
+
+/// Settles the active resolution carrier after its owning resolution completes.
+pub(super) fn finish_resolving_stack_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) {
+    let entry = state.resolving_stack_entry.take();
+    let firing = state.resolving_trigger_firing.take();
+    debug_assert!(
+        firing.is_none()
+            || entry
+                .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+    );
+    if let Some(firing) = firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
 }
 
 /// CR 405.1: Add an object to the stack.
@@ -340,6 +365,22 @@ pub(crate) struct PoppedStackEntry {
     pub trigger_firing: Option<TriggerFiring>,
 }
 
+/// Takes the firing classification coupled to a stack entry.
+///
+/// Current scheduler pushes always install a row for triggered entries. Older
+/// persisted states and direct fixture construction can lack that row, in which
+/// case the canonical unknown-legacy form preserves the pair without inventing
+/// a receipt-eligible delayed identity.
+fn take_stack_trigger_firing(state: &mut GameState, entry: &StackEntry) -> Option<TriggerFiring> {
+    let firing = state.stack_trigger_firings.remove(&entry.id);
+    if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+        Some(firing.unwrap_or(TriggerFiring::UnknownLegacy))
+    } else {
+        debug_assert!(firing.is_none());
+        None
+    }
+}
+
 /// CR 405.2: removes one object from the stack at a known index.
 ///
 /// The single authority for every one-entry stack removal — the CR 405.5
@@ -360,7 +401,7 @@ pub(crate) struct PoppedStackEntry {
 /// with its own record, and routing it through this authority would journal one
 /// mutation twice, so a replay would remove two entries where execution removed
 /// one.
-pub(crate) fn remove_stack_entry_at(
+fn remove_stack_entry_at_unobserved(
     state: &mut GameState,
     index: usize,
 ) -> Option<PoppedStackEntry> {
@@ -372,7 +413,7 @@ pub(crate) fn remove_stack_entry_at(
     let entry = state.stack.remove(index);
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
-    let trigger_firing = state.stack_trigger_firings.remove(&entry.id);
+    let trigger_firing = take_stack_trigger_firing(state, &entry);
 
     // CR 733: journal once ALL THREE removals have settled, so the record
     // describes a stack the entry has already left. An out-of-range index is the
@@ -397,14 +438,40 @@ pub(crate) fn remove_stack_entry_at(
     })
 }
 
+/// Removes a stack entry for a non-resolution reason and observes the exact
+/// firing only after the entry and side tables have been settled.
+pub(super) fn remove_nonresolving_stack_entry_at(
+    state: &mut GameState,
+    index: usize,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) -> Option<PoppedStackEntry> {
+    let popped = remove_stack_entry_at_unobserved(state, index)?;
+    if let Some(firing) = popped.trigger_firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+    Some(popped)
+}
+
 /// CR 405.2: removes the topmost object from the stack.
 ///
-/// A thin wrapper over [`remove_stack_entry_at`] — the top of an N-deep stack is
+/// A thin wrapper over [`remove_stack_entry_at_unobserved`] — the top of an N-deep stack is
 /// index N-1 — kept because the resolution and drain callers have no index to
-/// pass and reading `remove_stack_entry_at(state, state.stack.len() - 1)` at
+/// pass and reading `remove_stack_entry_at_unobserved(state, state.stack.len() - 1)` at
 /// each of them would obscure that they are simply resolving the top object.
 pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEntry> {
-    remove_stack_entry_at(state, state.stack.len().checked_sub(1)?)
+    remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
+}
+
+/// Removes the top stack entry outside normal resolution.
+pub(super) fn pop_nonresolving_top_stack_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) -> Option<PoppedStackEntry> {
+    let popped = pop_top_stack_entry(state)?;
+    if let Some(firing) = popped.trigger_firing {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
+    Some(popped)
 }
 
 /// Replays one already-resolved CR 405.2 stack removal.
@@ -471,7 +538,10 @@ pub fn apply_resolved_stack_removal(
 /// piece of construction state owned by
 /// `engine::drop_mid_construction_pending_trigger`, which calls this and then
 /// clears it.
-pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+pub(super) fn pop_uncommitted_pending_trigger_entry(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) {
     let Some(entry_id) = state.pending_trigger_entry.take() else {
         // No cursor: nothing was consumed and nothing settled, so there is no
         // mutation to journal.
@@ -482,10 +552,26 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
             let entry = state.stack.pop_back().expect("the entry was just observed");
             state.stack_paid_facts.remove(&entry_id);
             state.stack_trigger_event_batches.remove(&entry_id);
-            state.stack_trigger_firings.remove(&entry_id);
-            entry
+            let firing = take_stack_trigger_firing(state, &entry);
+            PoppedStackEntry {
+                entry,
+                paid_facts: None,
+                trigger_event_batch: None,
+                trigger_firing: firing,
+            }
         })
         .map(Box::new);
+
+    if let Some(removed) = removed.as_ref() {
+        let pending_firing = state
+            .pending_trigger_firing
+            .expect("uncommitted trigger removal must retain its pending firing carrier");
+        assert_eq!(
+            removed.trigger_firing,
+            Some(pending_firing),
+            "uncommitted trigger removal carriers must agree"
+        );
+    }
 
     // CR 733: journal AFTER the removal settles, and journal BOTH outcomes. The
     // `.take()` above is unconditional, so a guard that declines to pop still
@@ -494,7 +580,9 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
     let cause = state.current_or_begin_rules_execution_node();
     let command = ResolvedUncommittedTriggerRemovalCommand {
         consumed_entry_id: entry_id,
-        removed,
+        removed: removed
+            .as_ref()
+            .map(|removed| Box::new(removed.entry.clone())),
         resulting_depth: state.stack.len(),
         cause,
     };
@@ -502,6 +590,9 @@ pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
         .resolved_rules_journal
         .record_uncommitted_trigger_removal(command)
         .expect("resolved uncommitted trigger removal must have a live journal cause");
+    if let Some(firing) = removed.and_then(|removed| removed.trigger_firing) {
+        super::lifecycle::record_delayed_terminal(firing, disposition);
+    }
 }
 
 /// Installs one already-resolved CR 603.3d removal verbatim.
@@ -827,20 +918,30 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 603.3d: A stale construction cursor on a malformed trigger
             // with no legal required targets cannot keep a triggered ability
             // suspended forever.
+            if let Some(firing) = state.pending_trigger_firing.take() {
+                assert_eq!(
+                    state.stack_trigger_firings.get(&pending_id).copied(),
+                    Some(firing),
+                    "stale pending trigger must transfer its firing to the live stack entry"
+                );
+            }
             state.pending_trigger_entry = None;
             state.pending_trigger = None;
-            state.pending_trigger_firing = None;
             state.pending_trigger_event_batch.clear();
         }
     }
 
-    // CR 707.10: A fresh resolution invalidates any previously stashed
-    // resolving entry. `resolving_stack_entry` is set below and must persist
-    // across an optional-choice round-trip (the Chain cycle's "you may copy
-    // this spell" defers the copy past a player decision, by which point the
-    // spell has left the stack) — so it is cleared here at the start of the
-    // *next* resolution rather than at the end of this one.
-    clear_resolving_stack_entry(state);
+    // CR 608.2c: A resolution that completed at the preceding Priority
+    // boundary must settle its exact carrier before another stack object can
+    // begin resolving. A parked continuation remains live and therefore still
+    // fails the invariant below rather than being silently cleared.
+    super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+    // CR 707.10: A prior resolution must have settled before another stack
+    // object can begin resolving. A parked continuation owns its carrier until
+    // its own completion or abort path; silently clearing it here would lose a
+    // receipt-eligible delayed firing.
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -859,6 +960,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     else {
         return;
     };
+    // CR 603.4 + CR 608.2b: transfer the exact firing before any branch can
+    // abort, resolve, or park this popped triggered ability.
+    begin_resolving_stack_entry(state, entry.clone(), trigger_firing);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -870,6 +974,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         events.push(GameEvent::StackResolved {
             object_id: entry.id,
         });
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.resolution_source_relatch = None;
         return;
     }
 
@@ -894,6 +1003,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             events.push(GameEvent::StackResolved {
                 object_id: entry.id,
             });
+            finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
+            );
+            state.resolution_source_relatch = None;
             return;
         }
     }
@@ -1033,6 +1147,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
+        state.resolution_source_relatch = None;
         return;
     }
 
@@ -1148,14 +1267,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 707.10: Expose the resolving stack entry so a `CopySpell` carried as
+    // CR 707.10: Preserve the resolving stack entry so a `CopySpell` carried as
     // the spell's own effect (the Chain cycle's "you may copy this spell")
     // can copy itself even though `resolve_top` has already popped it off the
     // stack — and even after the spell has moved to the graveyard while an
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
-    state.resolving_stack_entry = Some(entry.clone());
-    state.resolving_trigger_firing = trigger_firing;
     // CR 107.3a + CR 107.3i: republish the resolving activated ability's announced X for
     // the duration of its own resolution, so a triggered ability of the SAME object that
     // this resolution causes (Hydra Broodmaster / Polukranos: "when this becomes
@@ -1233,6 +1350,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // CR 706.2 + CR 706.4: clear the carried die-roll result at the
                 // same cross-resolution boundary as the batched subject count.
                 state.die_result_this_resolution = None;
+                finish_resolving_stack_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::AllTargetsIllegal,
+                );
+                state.resolution_source_relatch = None;
                 return;
             }
             execute_effect(state, &validated, events);
@@ -1311,7 +1433,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .and_then(|a| a.context.cast_from_zone)
             .or_else(|| super::casting::spell_cast_origin(state, entry.id));
         if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
         } else {
             false
         }
@@ -2090,7 +2212,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         .any(|k| matches!(k, crate::types::keywords::Keyword::Warp(_)))
                 });
                 if has_warp {
-                    create_warp_delayed_trigger(state, entry.id, entry.controller);
+                    create_warp_delayed_trigger(state, entry.id, entry.controller, events);
                 }
                 // CR 702.185a + CR 400.7: stamp the per-object warp marker after
                 // `reset_for_battlefield_entry` cleared it, mirroring the Evoke /
@@ -2306,12 +2428,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 702.109a: a dash-cast permanent gains haste and is returned to
             // its owner's hand at the beginning of the next end step.
             if casting_variant == CastingVariant::Dash {
-                crate::game::dash::install_dash_riders(state, entry.id, entry.controller);
+                crate::game::dash::install_dash_riders(state, entry.id, entry.controller, events);
             }
             // CR 702.152a: a blitz-cast permanent gains haste and a dies-draw
             // trigger, and is sacrificed at the beginning of the next end step.
             if casting_variant == CastingVariant::Blitz {
-                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller);
+                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller, events);
             }
         }
     }
@@ -2328,6 +2450,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
+    // The popped object remains the resolving carrier through every typed
+    // resolution frame, including a direct optional-choice frame. In particular,
+    // a self-moving trigger needs that carrier to establish its CR 400.7j
+    // re-entry link after an accepted choice (Ajani, Nacatl Pariah).
+    if super::triggers::resolution_completion_can_settle(state)
+        && state.active_spell_resolution().is_none()
+        && state.pending_resolution_completion.is_none()
+    {
+        finish_resolving_stack_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::Resolved,
+        );
+        state.resolution_source_relatch = None;
+    }
 }
 
 /// CR 113.3b + CR 113.7a: Resolve an activated keyword ability from the stack.
@@ -3324,7 +3460,8 @@ fn resolve_batched(
 ) -> u32 {
     let consumed = plan.consumed();
     crate::game::perf_counters::record_stack_batched_entries(consumed);
-    clear_resolving_stack_entry(state);
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
 
@@ -3360,8 +3497,9 @@ fn resolve_batched(
         }
     }
 
-    state.resolving_stack_entry = popped.first().map(|popped| popped.entry.clone());
-    state.resolving_trigger_firing = popped.first().and_then(|popped| popped.trigger_firing);
+    if let Some(popped) = popped.first() {
+        begin_resolving_stack_entry(state, popped.entry.clone(), popped.trigger_firing);
+    }
 
     // CR 608.2: Apply the effect N times through the existing per-resolution body.
     plan.execute(state, ability, events);
@@ -3374,14 +3512,28 @@ fn resolve_batched(
     // cross-resolution boundary as the batched subject count.
     state.die_result_this_resolution = None;
 
-    // §5.4: one StackResolved per consumed entry.
-    for popped in &popped {
+    let popped_count = popped.len() as u32;
+
+    // §5.4: one StackResolved and terminal settlement per consumed entry.
+    for (index, popped) in popped.into_iter().enumerate() {
         events.push(GameEvent::StackResolved {
             object_id: popped.entry.id,
         });
+        if index == 0 {
+            finish_resolving_stack_entry(
+                state,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        } else if let Some(firing) = popped.trigger_firing {
+            super::lifecycle::record_delayed_terminal(
+                firing,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        }
     }
+    state.resolution_source_relatch = None;
 
-    popped.len() as u32
+    popped_count
 }
 
 /// CR 603.2 + CR 603.3 + CR 603.6a: Layer C — battlefield-wide
@@ -3661,7 +3813,8 @@ fn resolve_inert_noop_batch(
     consumed: u32,
     events: &mut Vec<GameEvent>,
 ) -> u32 {
-    clear_resolving_stack_entry(state);
+    debug_assert!(state.resolving_stack_entry.is_none());
+    debug_assert!(state.resolving_trigger_firing.is_none());
     // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
     state.resolution_source_relatch = None;
     for _ in 0..consumed {
@@ -3671,6 +3824,12 @@ fn resolve_inert_noop_batch(
         events.push(GameEvent::StackResolved {
             object_id: removed.entry.id,
         });
+        if let Some(firing) = removed.trigger_firing {
+            super::lifecycle::record_delayed_terminal(
+                firing,
+                super::lifecycle::DelayedTerminalDisposition::Resolved,
+            );
+        }
     }
     consumed
 }
@@ -4277,6 +4436,7 @@ pub(crate) fn create_warp_delayed_trigger(
     state: &mut GameState,
     object_id: ObjectId,
     controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
 ) {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Effect,
@@ -4339,8 +4499,9 @@ pub(crate) fn create_warp_delayed_trigger(
             controller,
             source_id: object_id,
             one_shot: true,
-            provenance: None,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
+        events,
     );
 }
 
@@ -4697,6 +4858,10 @@ mod tests {
             },
         });
         state.pending_trigger_entry = Some(entry_id);
+        state
+            .stack_trigger_firings
+            .insert(entry_id, TriggerFiring::Ordinary);
+        state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
         state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,

@@ -71,7 +71,7 @@ describe("BlockAssignmentLines", () => {
       document.body.append(anchor);
     }
 
-    render(<BlockAssignmentLines />);
+    render(<BlockAssignmentLines effectiveMultiplayerBoardLayout="focused" />);
     act(() => {
       rafCallbacks.shift()?.(0);
     });
@@ -107,7 +107,7 @@ describe("BlockAssignmentLines", () => {
     attackerAnchor.dataset.objectId = "100";
     document.body.append(hud, attackerAnchor);
 
-    render(<BlockAssignmentLines />);
+    render(<BlockAssignmentLines effectiveMultiplayerBoardLayout="focused" />);
     act(() => {
       rafCallbacks.shift()?.(0);
     });

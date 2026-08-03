@@ -15,7 +15,7 @@ use crate::types::game_state::{
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
     StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -34,7 +34,10 @@ use super::ability_utils::{
 };
 use super::casting;
 use super::casting_costs;
+use super::companion;
+use super::crew_payment;
 use super::effects;
+use super::end_continuous_effect;
 use super::engine_casting;
 use super::engine_combat;
 use super::engine_modes;
@@ -44,19 +47,24 @@ use super::engine_replacement;
 use super::engine_resolution_choices;
 use super::engine_stack;
 use super::interaction;
+use super::keywords;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources;
 use super::match_flow;
+use super::morph;
 use super::mulligan;
+use super::planechase;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{
     bump_state_revision, finalize_display_state, finalize_public_state, finalize_rules_state,
     mark_public_state_all_dirty, mark_public_state_from_events, sync_waiting_for,
 };
+use super::room;
 use super::sba;
 use super::splice;
+use super::transform;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -78,6 +86,634 @@ pub enum EngineError {
     NotYourPriority,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+}
+
+/// The three non-interchangeable authorities carried by a live Priority
+/// window. This is deliberately restricted to `game`: only engine-owned
+/// preflight providers may name it, and only this module can construct it.
+pub(in crate::game) struct PriorityPrincipal {
+    semantic_holder: PlayerId,
+    authenticated_actor: PlayerId,
+    land_resource_owner: PlayerId,
+}
+
+/// Why an actionless Priority preflight cannot safely proceed. These failures
+/// are intentionally distinct from ordinary reducer errors: no mandatory
+/// transition may turn an uncertain Priority window into a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflightIndeterminate {
+    NotPriority,
+    PriorityAuthorityMismatch,
+    SharedTeamHolderOutsideActiveTeam,
+}
+
+impl PriorityPrincipal {
+    fn from_priority_window(state: &GameState) -> Result<Self, PriorityPreflightIndeterminate> {
+        let semantic_holder = match &state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            _ => return Err(PriorityPreflightIndeterminate::NotPriority),
+        };
+        let authenticated_actor =
+            turn_control::authorized_submitter_for_player(state, semantic_holder);
+        if state.priority_player != authenticated_actor {
+            return Err(PriorityPreflightIndeterminate::PriorityAuthorityMismatch);
+        }
+        let land_resource_owner = if state.format_config.topology().has_shared_team_turns() {
+            if !super::topology::team_members(state, state.active_player).contains(&semantic_holder)
+            {
+                return Err(PriorityPreflightIndeterminate::SharedTeamHolderOutsideActiveTeam);
+            }
+            semantic_holder
+        } else {
+            turn_control::turn_resource_owner(state)
+        };
+        Ok(Self {
+            semantic_holder,
+            authenticated_actor,
+            land_resource_owner,
+        })
+    }
+
+    pub(in crate::game) fn semantic_holder(&self) -> PlayerId {
+        self.semantic_holder
+    }
+
+    pub(in crate::game) fn authenticated_actor(&self) -> PlayerId {
+        self.authenticated_actor
+    }
+
+    pub(in crate::game) fn land_resource_owner(&self) -> PlayerId {
+        self.land_resource_owner
+    }
+}
+
+/// Build the authoritative Priority principal for the private mandatory
+/// transition preflight. Callers receive no fallback identity when a Priority
+/// window is stale or absent.
+pub(in crate::game) fn priority_principal_for_preflight(
+    state: &GameState,
+) -> Result<PriorityPrincipal, PriorityPreflightIndeterminate> {
+    PriorityPrincipal::from_priority_window(state)
+}
+
+/// The closed set of ordinary Priority reducer families that can make a
+/// mandatory transition unsafe. `PassPriority` and `SetAutoPass` deliberately
+/// have no member: neither proves the holder has a meaningful action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityReducerFamily {
+    PlayLand,
+    TapLandForMana,
+    ActivateManaSource,
+    UntapLandForMana,
+    CastSpell,
+    Foretell,
+    ActivateAbility,
+    UnlockRoomDoor,
+    RollPlanarDie,
+    Equip,
+    CrewVehicle,
+    ActivateStation,
+    SaddleMount,
+    Transform,
+    ActivateNinjutsu,
+    CastSpellAsSneak,
+    CastSpellAsWebSlinging,
+    CastSpellForFree,
+    PlayFaceDown,
+    TurnFaceUp,
+    CompanionToHand,
+    EndContinuousEffect,
+    CastPreparedCopy,
+}
+
+impl PriorityReducerFamily {
+    const ALL: [Self; 23] = [
+        Self::PlayLand,
+        Self::TapLandForMana,
+        Self::ActivateManaSource,
+        Self::UntapLandForMana,
+        Self::CastSpell,
+        Self::Foretell,
+        Self::ActivateAbility,
+        Self::UnlockRoomDoor,
+        Self::RollPlanarDie,
+        Self::Equip,
+        Self::CrewVehicle,
+        Self::ActivateStation,
+        Self::SaddleMount,
+        Self::Transform,
+        Self::ActivateNinjutsu,
+        Self::CastSpellAsSneak,
+        Self::CastSpellAsWebSlinging,
+        Self::CastSpellForFree,
+        Self::PlayFaceDown,
+        Self::TurnFaceUp,
+        Self::CompanionToHand,
+        Self::EndContinuousEffect,
+        Self::CastPreparedCopy,
+    ];
+}
+
+/// The reason a Priority preflight cannot establish that passing is safe.
+/// This stays private because mandatory progression only distinguishes
+/// `Actionless` from every other outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflightBlock {
+    Principal(PriorityPreflightIndeterminate),
+    RequiresChosenX,
+    ReducerRejected,
+}
+
+/// The only outcomes a mandatory transition may observe at Priority. Only
+/// `Actionless` permits a transition; every other result is an uncharged block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::game) enum PriorityPreflight {
+    Actionless,
+    Actionable {
+        family: PriorityReducerFamily,
+    },
+    NotPriorityWindow,
+    Indeterminate {
+        family: Option<PriorityReducerFamily>,
+        block: PriorityPreflightBlock,
+    },
+}
+
+/// Engine-only read capability for the eventual provider-owned announcement
+/// facades. It is non-unit and has no cloning or default construction so sibling
+/// providers can name it in a borrowed accessor without manufacturing one.
+pub(in crate::game) struct PriorityAnnouncementFacadeAccess {
+    engine_only: std::marker::PhantomData<fn() -> ()>,
+}
+
+impl PriorityAnnouncementFacadeAccess {
+    fn new() -> Self {
+        Self {
+            engine_only: std::marker::PhantomData,
+        }
+    }
+}
+
+/// One typed, engine-authored primer for a normal Priority reducer arm. The
+/// enum is intentionally private: it is neither an action protocol nor an AI
+/// candidate API, and conversion is confined to the facade below.
+enum PriorityAnnouncement {
+    PlayLand(casting::PriorityPlayLandAnnouncement),
+    TapLandForMana(mana_sources::PriorityLandManaAnnouncement),
+    ActivateManaSource(mana_sources::PriorityNonlandManaAnnouncement),
+    UntapLandForMana(mana_sources::PriorityUntapLandAnnouncement),
+    CastSpell(casting::PriorityCastSpellAnnouncement),
+    Foretell(casting::PriorityForetellAnnouncement),
+    ActivateAbility(casting::PriorityActivateAbilityAnnouncement),
+    UnlockRoomDoor(room::PriorityUnlockRoomDoorAnnouncement),
+    RollPlanarDie(planechase::PriorityPlanarDieAnnouncement),
+    Equip(effects::attach::PriorityEquipAnnouncement),
+    CrewVehicle(crew_payment::PriorityCrewAnnouncement),
+    ActivateStation(crew_payment::PriorityStationAnnouncement),
+    SaddleMount(crew_payment::PrioritySaddleAnnouncement),
+    Transform(transform::PriorityTransformAnnouncement),
+    ActivateNinjutsu(keywords::PriorityNinjutsuAnnouncement),
+    CastSpellAsSneak(casting::PrioritySneakAnnouncement),
+    CastSpellAsWebSlinging(casting::PriorityWebSlingingAnnouncement),
+    CastSpellForFree(casting::PriorityCastFreeAnnouncement),
+    PlayFaceDown(morph::PriorityPlayFaceDownAnnouncement),
+    TurnFaceUp(morph::PriorityTurnFaceUpAnnouncement),
+    CompanionToHand(companion::PriorityCompanionAnnouncement),
+    EndContinuousEffect(end_continuous_effect::PriorityEndContinuousEffectAnnouncement),
+    CastPreparedCopy(effects::prepare::PriorityPreparedCopyAnnouncement),
+}
+
+impl PriorityAnnouncement {
+    fn family(&self) -> PriorityReducerFamily {
+        match self {
+            Self::PlayLand(_) => PriorityReducerFamily::PlayLand,
+            Self::TapLandForMana(_) => PriorityReducerFamily::TapLandForMana,
+            Self::ActivateManaSource(_) => PriorityReducerFamily::ActivateManaSource,
+            Self::UntapLandForMana(_) => PriorityReducerFamily::UntapLandForMana,
+            Self::CastSpell(_) => PriorityReducerFamily::CastSpell,
+            Self::Foretell(_) => PriorityReducerFamily::Foretell,
+            Self::ActivateAbility(_) => PriorityReducerFamily::ActivateAbility,
+            Self::UnlockRoomDoor(_) => PriorityReducerFamily::UnlockRoomDoor,
+            Self::RollPlanarDie(_) => PriorityReducerFamily::RollPlanarDie,
+            Self::Equip(_) => PriorityReducerFamily::Equip,
+            Self::CrewVehicle(_) => PriorityReducerFamily::CrewVehicle,
+            Self::ActivateStation(_) => PriorityReducerFamily::ActivateStation,
+            Self::SaddleMount(_) => PriorityReducerFamily::SaddleMount,
+            Self::Transform(_) => PriorityReducerFamily::Transform,
+            Self::ActivateNinjutsu(_) => PriorityReducerFamily::ActivateNinjutsu,
+            Self::CastSpellAsSneak(_) => PriorityReducerFamily::CastSpellAsSneak,
+            Self::CastSpellAsWebSlinging(_) => PriorityReducerFamily::CastSpellAsWebSlinging,
+            Self::CastSpellForFree(_) => PriorityReducerFamily::CastSpellForFree,
+            Self::PlayFaceDown(_) => PriorityReducerFamily::PlayFaceDown,
+            Self::TurnFaceUp(_) => PriorityReducerFamily::TurnFaceUp,
+            Self::CompanionToHand(_) => PriorityReducerFamily::CompanionToHand,
+            Self::EndContinuousEffect(_) => PriorityReducerFamily::EndContinuousEffect,
+            Self::CastPreparedCopy(_) => PriorityReducerFamily::CastPreparedCopy,
+        }
+    }
+}
+
+/// The sole Priority-announcement conversion path. It creates a local access
+/// capability before exhaustively rebuilding the ordinary reducer action.
+fn priority_announcement_to_action(announcement: PriorityAnnouncement) -> GameAction {
+    let _access = PriorityAnnouncementFacadeAccess::new();
+    match announcement {
+        PriorityAnnouncement::PlayLand(announcement) => GameAction::PlayLand {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::TapLandForMana(announcement) => GameAction::TapLandForMana {
+            selection: announcement.selection(&_access).clone(),
+        },
+        PriorityAnnouncement::ActivateManaSource(announcement) => GameAction::ActivateManaSource {
+            selection: announcement.selection(&_access).clone(),
+        },
+        PriorityAnnouncement::UntapLandForMana(announcement) => GameAction::UntapLandForMana {
+            object_id: announcement.object_id(&_access),
+        },
+        PriorityAnnouncement::CastSpell(announcement) => GameAction::CastSpell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+        PriorityAnnouncement::Foretell(announcement) => GameAction::Foretell {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::ActivateAbility(announcement) => GameAction::ActivateAbility {
+            source_id: announcement.source_id(&_access),
+            ability_index: announcement.ability_index(&_access),
+        },
+        PriorityAnnouncement::UnlockRoomDoor(announcement) => GameAction::UnlockRoomDoor {
+            object_id: announcement.object_id(&_access),
+            door: announcement.door(&_access),
+        },
+        PriorityAnnouncement::RollPlanarDie(_) => GameAction::RollPlanarDie,
+        PriorityAnnouncement::Equip(announcement) => {
+            let equipment_id = announcement.equipment_id(&_access);
+            GameAction::Equip {
+                equipment_id,
+                // The Priority reducer ignores this field and enters its normal
+                // target-selection flow when the choice is not forced.
+                target_id: equipment_id,
+            }
+        }
+        PriorityAnnouncement::CrewVehicle(announcement) => GameAction::CrewVehicle {
+            vehicle_id: announcement.vehicle_id(&_access),
+            creature_ids: Vec::new(),
+        },
+        PriorityAnnouncement::ActivateStation(announcement) => GameAction::ActivateStation {
+            spacecraft_id: announcement.spacecraft_id(&_access),
+            creature_id: None,
+        },
+        PriorityAnnouncement::SaddleMount(announcement) => GameAction::SaddleMount {
+            mount_id: announcement.mount_id(&_access),
+            creature_ids: Vec::new(),
+        },
+        PriorityAnnouncement::Transform(announcement) => GameAction::Transform {
+            object_id: announcement.object_id(&_access),
+        },
+        PriorityAnnouncement::ActivateNinjutsu(announcement) => GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: announcement.ninjutsu_object_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
+        },
+        PriorityAnnouncement::CastSpellAsSneak(announcement) => GameAction::CastSpellAsSneak {
+            hand_object: announcement.hand_object(&_access),
+            card_id: announcement.card_id(&_access),
+            creature_to_return: announcement.creature_to_return(&_access),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+        PriorityAnnouncement::CastSpellAsWebSlinging(announcement) => {
+            GameAction::CastSpellAsWebSlinging {
+                hand_object: announcement.hand_object(&_access),
+                card_id: announcement.card_id(&_access),
+                creature_to_return: announcement.creature_to_return(&_access),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            }
+        }
+        PriorityAnnouncement::CastSpellForFree(announcement) => GameAction::CastSpellForFree {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+            source_id: announcement.source_id(&_access),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+        PriorityAnnouncement::PlayFaceDown(announcement) => GameAction::PlayFaceDown {
+            object_id: announcement.object_id(&_access),
+            card_id: announcement.card_id(&_access),
+        },
+        PriorityAnnouncement::TurnFaceUp(announcement) => GameAction::TurnFaceUp {
+            object_id: announcement.object_id(&_access),
+            x: 0,
+        },
+        PriorityAnnouncement::CompanionToHand(_) => GameAction::CompanionToHand,
+        PriorityAnnouncement::EndContinuousEffect(announcement) => {
+            GameAction::EndContinuousEffect {
+                group: announcement.group(&_access),
+                source_name: announcement.source_name(&_access).to_string(),
+                cost: announcement.cost(&_access).clone(),
+            }
+        }
+        PriorityAnnouncement::CastPreparedCopy(announcement) => GameAction::CastPreparedCopy {
+            source: announcement.source_id(&_access),
+        },
+    }
+}
+
+fn apply_priority_announcement(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+    announcement: PriorityAnnouncement,
+) -> Result<ActionResult, EngineError> {
+    let mut projected = state.clone();
+    let action = priority_announcement_to_action(announcement);
+    apply_interaction_for_simulation(
+        &mut projected,
+        principal.authenticated_actor(),
+        principal.semantic_holder(),
+        action,
+    )
+}
+
+enum PriorityPreflightCandidate {
+    Announcement(PriorityAnnouncement),
+    Indeterminate {
+        family: PriorityReducerFamily,
+        block: PriorityPreflightBlock,
+    },
+}
+
+impl PriorityPreflightCandidate {
+    fn family(&self) -> PriorityReducerFamily {
+        match self {
+            Self::Announcement(announcement) => announcement.family(),
+            Self::Indeterminate { family, .. } => *family,
+        }
+    }
+}
+
+/// Enumerate only reducer-shaped, finite Priority primers from the engine's
+/// existing legality authorities. This intentionally never reaches into
+/// `ai_support`: tactical candidates are neither complete nor an authority for
+/// mandatory progress.
+fn priority_preflight_candidates(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPreflightCandidate> {
+    let semantic_holder = principal.semantic_holder();
+    let mut candidates = Vec::new();
+    let split_second_active = super::keywords::stack_has_split_second(state);
+    let is_active = state.active_player == semantic_holder;
+    candidates.extend(
+        casting::priority_play_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::PlayLand)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+
+    let (land_mana_announcements, nonland_mana_announcements) =
+        mana_sources::priority_mana_announcements(state, principal).into_partitioned();
+    candidates.extend(
+        land_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::TapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    candidates.extend(
+        nonland_mana_announcements
+            .into_iter()
+            .map(PriorityAnnouncement::ActivateManaSource)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    candidates.extend(
+        mana_sources::priority_untap_land_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::UntapLandForMana)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+
+    if !split_second_active {
+        candidates.extend(
+            casting::priority_cast_spell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            casting::priority_cast_free_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellForFree)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_activate_ability_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateAbility)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            effects::attach::priority_equip_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Equip)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            transform::priority_transform_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Transform)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            effects::prepare::priority_prepared_copy_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastPreparedCopy)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        let (crew_announcements, station_announcements, saddle_announcements) =
+            crew_payment::priority_tap_payment_announcements(state, principal).into_partitioned();
+        candidates.extend(
+            crew_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::CrewVehicle)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            station_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateStation)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            saddle_announcements
+                .into_iter()
+                .map(PriorityAnnouncement::SaddleMount)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            room::priority_unlock_room_door_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::UnlockRoomDoor)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            keywords::priority_ninjutsu_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::ActivateNinjutsu)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_sneak_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellAsSneak)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+
+        candidates.extend(
+            casting::priority_web_slinging_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::CastSpellAsWebSlinging)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+    }
+
+    if is_active {
+        candidates.extend(
+            casting::priority_foretell_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::Foretell)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+        candidates.extend(
+            morph::priority_play_face_down_announcements(state, principal)
+                .into_iter()
+                .map(PriorityAnnouncement::PlayFaceDown)
+                .map(PriorityPreflightCandidate::Announcement),
+        );
+    }
+
+    candidates.extend(
+        morph::priority_turn_face_up_candidates(state, principal)
+            .into_iter()
+            .map(|candidate| match candidate {
+                morph::PriorityTurnFaceUpCandidate::Ready(announcement) => {
+                    PriorityPreflightCandidate::Announcement(PriorityAnnouncement::TurnFaceUp(
+                        announcement,
+                    ))
+                }
+                morph::PriorityTurnFaceUpCandidate::RequiresChosenX => {
+                    PriorityPreflightCandidate::Indeterminate {
+                        family: PriorityReducerFamily::TurnFaceUp,
+                        block: PriorityPreflightBlock::RequiresChosenX,
+                    }
+                }
+            }),
+    );
+
+    if let Some(announcement) = companion::priority_companion_announcement(state, principal) {
+        candidates.push(PriorityPreflightCandidate::Announcement(
+            PriorityAnnouncement::CompanionToHand(announcement),
+        ));
+    }
+    candidates.extend(
+        end_continuous_effect::priority_end_continuous_effect_announcements(state, principal)
+            .into_iter()
+            .map(PriorityAnnouncement::EndContinuousEffect)
+            .map(PriorityPreflightCandidate::Announcement),
+    );
+    if let Some(announcement) = planechase::priority_planar_die_announcement(state, principal) {
+        candidates.push(PriorityPreflightCandidate::Announcement(
+            PriorityAnnouncement::RollPlanarDie(announcement),
+        ));
+    }
+    candidates
+}
+
+/// Probe every finite Priority primer through exactly one normal interaction
+/// boundary on an isolated clone. A reducer rejection is not interpreted as a
+/// pass: it remains an indeterminate mandatory-transition block.
+pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityPreflight {
+    debug_assert_eq!(PriorityReducerFamily::ALL.len(), 23);
+    let principal = match priority_principal_for_preflight(state) {
+        Ok(principal) => principal,
+        Err(PriorityPreflightIndeterminate::NotPriority) => {
+            return PriorityPreflight::NotPriorityWindow;
+        }
+        Err(block) => {
+            return PriorityPreflight::Indeterminate {
+                family: None,
+                block: PriorityPreflightBlock::Principal(block),
+            };
+        }
+    };
+    let mut candidates = priority_preflight_candidates(state, &principal);
+    for family in PriorityReducerFamily::ALL {
+        let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.family() == family)
+        else {
+            continue;
+        };
+        match candidates.remove(index) {
+            PriorityPreflightCandidate::Indeterminate { block, .. } => {
+                return PriorityPreflight::Indeterminate {
+                    family: Some(family),
+                    block,
+                };
+            }
+            PriorityPreflightCandidate::Announcement(announcement) => {
+                match apply_priority_announcement(state, &principal, announcement) {
+                    Ok(_) => return PriorityPreflight::Actionable { family },
+                    Err(_) => {
+                        return PriorityPreflight::Indeterminate {
+                            family: Some(family),
+                            block: PriorityPreflightBlock::ReducerRejected,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    PriorityPreflight::Actionless
+}
+
+/// The narrow admission gate for engine-owned prospective progress. It keeps
+/// the detailed preflight result private to `game` while ensuring a caller can
+/// advance only an already-proven actionless Priority window.
+pub(crate) fn priority_window_is_actionless_for_mandatory_progress(state: &GameState) -> bool {
+    matches!(
+        preflight_priority_window(state),
+        PriorityPreflight::Actionless
+    )
+}
+
+/// Submit the sole ordinary pass for an already-proven actionless Priority
+/// window during an engine-owned prospective simulation. The caller receives
+/// no actor, semantic holder, or action-construction authority.
+pub(crate) fn apply_actionless_priority_pass_for_prospective(
+    state: &mut GameState,
+) -> Result<ProspectiveSimulationOutcome, EngineError> {
+    let principal = priority_principal_for_preflight(state).map_err(|_| {
+        EngineError::ActionNotAllowed("Priority is not safe for mandatory progress".to_string())
+    })?;
+    if !priority_window_is_actionless_for_mandatory_progress(state) {
+        return Err(EngineError::ActionNotAllowed(
+            "Priority is not actionless".to_string(),
+        ));
+    }
+    apply_interaction_for_prospective_simulation(
+        state,
+        principal.authenticated_actor(),
+        principal.semantic_holder(),
+        GameAction::PassPriority,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +902,31 @@ pub(crate) fn apply_interaction_for_simulation(
     )
 }
 
+/// Apply one reducer-backed action for a prospective route and retain only the
+/// observation sidecar emitted by its successful outer action boundary.
+///
+/// Rules state, events, and ordinary simulation behavior remain identical to
+/// `apply_interaction_for_simulation`; the additional data is deliberately
+/// opaque and cannot be forged into a live action.
+pub(crate) fn apply_interaction_for_prospective_simulation(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ProspectiveSimulationOutcome, EngineError> {
+    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let (action, lifecycle_facts) = finish_action_boundary_with_lifecycle(
+        state,
+        raw,
+        PublicFinalizeMode::DeferredDisplay,
+        true,
+    )?;
+    Ok(ProspectiveSimulationOutcome {
+        action,
+        lifecycle_facts,
+    })
+}
+
 /// Apply exactly the reducer portion of an interaction action for the
 /// clone-local life-safety preview. The normal public/simulation entry points
 /// continue through the complete reconciliation and presentation boundary.
@@ -276,7 +937,11 @@ pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
     let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
-    Ok(raw.result)
+    let RawActionApplication {
+        result, lifecycle, ..
+    } = raw;
+    lifecycle.discard();
+    Ok(result)
 }
 
 pub(super) fn apply_action_boundary(
@@ -332,6 +997,41 @@ struct RawActionApplication {
     previous_interaction_slots: Vec<crate::types::interaction::ActiveInteractionSlot>,
     submitted_interaction_owner: Option<PlayerId>,
     preserve_interaction: bool,
+    lifecycle: super::lifecycle::ActionLifecycleGuard,
+}
+
+/// Receipt-relevant observations from one prospective action. The lifecycle
+/// frame itself remains private to `game`; consumers only receive exact,
+/// immutable delayed-trigger facts after a successful outer boundary.
+pub(crate) struct ProspectiveSimulationOutcome {
+    pub(crate) action: ActionResult,
+    lifecycle_facts: Option<super::lifecycle::ProspectiveLifecycleFacts>,
+}
+
+impl ProspectiveSimulationOutcome {
+    pub(crate) fn has_outer_lifecycle_facts(&self) -> bool {
+        self.lifecycle_facts.is_some()
+    }
+
+    pub(crate) fn delayed_installations(
+        &self,
+    ) -> impl Iterator<Item = (DelayedTriggerOrigin, ObjectId, PlayerId)> + '_ {
+        self.lifecycle_facts
+            .iter()
+            .flat_map(|facts| facts.delayed_installations())
+    }
+
+    pub(crate) fn receipt_finished_normally(&self, origin: DelayedTriggerOrigin) -> bool {
+        self.lifecycle_facts
+            .as_ref()
+            .is_some_and(|facts| facts.receipt_finished_normally(origin))
+    }
+
+    pub(crate) fn receipt_terminalized(&self, origin: DelayedTriggerOrigin) -> bool {
+        self.lifecycle_facts
+            .as_ref()
+            .is_some_and(|facts| facts.receipt_terminalized(origin))
+    }
 }
 
 fn apply_action_boundary_core(
@@ -341,7 +1041,11 @@ fn apply_action_boundary_core(
     action: GameAction,
     stack_resolution_limit: Option<u32>,
 ) -> Result<RawActionApplication, EngineError> {
-    mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
+    let lifecycle = super::lifecycle::enter_action_frame();
+    if let Err(error) = mana_sources::preflight_tap_land_action(state, semantic_owner, &action) {
+        lifecycle.discard();
+        return Err(error);
+    }
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -363,16 +1067,60 @@ fn apply_action_boundary_core(
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
     if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+        lifecycle.discard();
         *state = boundary_snapshot;
         return Err(err);
     }
-    let result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
+            lifecycle.discard();
             *state = boundary_snapshot;
             return Err(err);
         }
     };
+    // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
+    // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
+    // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
+    // `apply_action` realizes it itself on every route that reaches `run_post_action_pipeline`.
+    //
+    // CR 603.6a: the entry pair this realization emits IS the event that puts a permanent onto the
+    // battlefield, so every permanent must be checked for matching enters-the-battlefield triggers
+    // (CR 603.2 + CR 603.3b place them on the stack before the next player receives priority).
+    // Reaching here with something to realize means the action settled WITHOUT running
+    // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
+    // out of the match (`handle_tribute_choice` is the reachable one). Converge those onto the same
+    // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
+    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
+    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
+    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // `false` when nothing was parked or an earlier convergence point already consumed it
+    // (`Option::take_if`).
+    let scan_from = result.events.len();
+    if effects::token::realize_settled_token_battlefield_entry(state, &mut result.events) {
+        let wf = match engine_priority::run_post_action_pipeline_from(
+            state,
+            &mut result.events,
+            scan_from,
+            &result.waiting_for,
+            false,
+            false,
+        ) {
+            Ok(wf) => wf,
+            Err(err) => {
+                *state = boundary_snapshot;
+                return Err(err);
+            }
+        };
+        // The pipeline's terminal return hands back `flush_pending_priority_intercepts(..)` WITHOUT
+        // writing `state.waiting_for`, and the drain can raise `OrderTriggers` (CR 603.3b; measured
+        // on the Fanatic route). BOTH writes are load-bearing: `finish_action_boundary` copies
+        // `result.waiting_for` INTO the state at `sync_waiting_for`, and
+        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without ever
+        // calling `finish_action_boundary`.
+        state.waiting_for = wf.clone();
+        result.waiting_for = wf;
+    }
     Ok(RawActionApplication {
         result,
         journal_start,
@@ -382,6 +1130,7 @@ fn apply_action_boundary_core(
         previous_interaction_slots,
         submitted_interaction_owner,
         preserve_interaction,
+        lifecycle,
     })
 }
 
@@ -390,6 +1139,21 @@ fn finish_action_boundary(
     raw: RawActionApplication,
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
+    finish_action_boundary_with_lifecycle(state, raw, mode, false).map(|(result, _)| result)
+}
+
+fn finish_action_boundary_with_lifecycle(
+    state: &mut GameState,
+    raw: RawActionApplication,
+    mode: PublicFinalizeMode,
+    return_outer_lifecycle: bool,
+) -> Result<
+    (
+        ActionResult,
+        Option<super::lifecycle::ProspectiveLifecycleFacts>,
+    ),
+    EngineError,
+> {
     state.consumed_before_priority_trigger_events.clear();
     let RawActionApplication {
         mut result,
@@ -400,6 +1164,7 @@ fn finish_action_boundary(
         previous_interaction_slots,
         submitted_interaction_owner,
         preserve_interaction,
+        lifecycle,
     } = raw;
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
@@ -437,6 +1202,7 @@ fn finish_action_boundary(
         )
         .is_err()
         {
+            lifecycle.discard();
             *state = boundary_snapshot;
             return Err(EngineError::InvalidAction(
                 "Unable to allocate interaction authority for the resulting decision".to_string(),
@@ -445,7 +1211,13 @@ fn finish_action_boundary(
     }
     #[cfg(debug_assertions)]
     debug_assert_runtime_resolution_invariants(state);
-    Ok(result)
+    let lifecycle_facts = if return_outer_lifecycle {
+        lifecycle.take_outer_facts()
+    } else {
+        lifecycle.commit_into_parent();
+        None
+    };
+    Ok((result, lifecycle_facts))
 }
 
 thread_local! {
@@ -3547,7 +4319,59 @@ pub(super) fn resume_pending_continuation_if_priority(
             )?;
         }
     }
+    settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
+}
+
+/// CR 608.2c: A paused stack object remains the active resolution owner until
+/// its continuation and every typed resolution frame have drained. Once this
+/// priority boundary proves that completion, settle the exact carrier before
+/// any deferred trigger can start its own resolution.
+pub(super) fn settle_resolving_stack_entry_after_continuation_resume(state: &mut GameState) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || !resolving_stack_entry_can_settle(state)
+    {
+        return;
+    }
+    settle_finished_resolving_stack_entry(state);
+}
+
+/// CR 608.2c: Once a resolution has completed, its carrier must settle before
+/// a trigger-selection prompt created by that resolution can construct a new
+/// stack object. Unlike the priority-boundary wrapper above, this is called at
+/// the exact completion point when the prompt has already replaced Priority.
+pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut GameState) {
+    if !resolving_stack_entry_can_settle(state) {
+        return;
+    }
+    settle_finished_resolving_stack_entry(state);
+}
+
+fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
+    state.resolving_stack_entry.is_some()
+        && state.resolving_trigger_firing.is_some()
+            == state
+                .resolving_stack_entry
+                .as_ref()
+                .is_some_and(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        && state.active_ability_continuation().is_none()
+        && state.active_spell_resolution().is_none()
+        && state.pending_cast.is_none()
+        && state.pending_resolution_completion.is_none()
+        && triggers::resolution_completion_can_settle(state)
+}
+
+fn settle_finished_resolving_stack_entry(state: &mut GameState) {
+    debug_assert!(
+        resolving_stack_entry_can_settle(state),
+        "only a fully completed resolution carrier may settle"
+    );
+    super::stack::finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
+    // CR 400.7j: resolution-scoped self-move state ends with its carrier.
+    state.resolution_source_relatch = None;
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Resume the exact outer cost action after
@@ -4734,16 +5558,10 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            if state
-                .objects
-                .get(&selection.source.object_id)
-                .is_some_and(|object| {
-                    object
-                        .card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Land)
-                })
-            {
+            if matches!(
+                mana_sources::priority_mana_route(state, &selection),
+                Some(mana_sources::PriorityManaRoute::LandTap)
+            ) {
                 return Err(EngineError::ActionNotAllowed(
                     "Land mana abilities use TapLandForMana".to_string(),
                 ));
@@ -8760,7 +9578,6 @@ fn apply_action(
                     }
                 }
             } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
-                state.pending_trigger_firing = None;
                 // CR 601.2d + CR 603.3d: Triggered abilities divide effects
                 // while being put on the stack. The chosen per-target amounts
                 // are resolution data on the resolved ability. The entry is
@@ -8938,6 +9755,15 @@ fn apply_action(
         // the action's result, not the pre-action state (fixes stale TargetSelection
         // after CancelCast).
         state.waiting_for = waiting_for.clone();
+        // CR 704.3 + CR 704.5f: a token battlefield entry postponed by an as-enters choice is
+        // realized HERE, before the pipeline below, so the CR 400.7 row is written ahead of that
+        // pipeline's SBA pass and survives a copy that enters with 0 toughness. It also puts the
+        // entry pair into this action's `events` ahead of the CR 603.2 / CR 603.6a scan — no longer
+        // the ONLY way that check runs (the action-boundary convergence in
+        // `apply_action_boundary_core` runs the same pipeline for direct-return handlers), but
+        // still the only placement that beats the SBA pass. Same gate as that boundary call, one
+        // authority; keeping it here also avoids two full pipeline passes per settling action.
+        effects::token::realize_settled_token_battlefield_entry(state, &mut events);
         let wf = engine_priority::run_post_action_pipeline(
             state,
             &mut events,
@@ -9117,7 +9943,10 @@ fn apply_retarget(
 /// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
 /// was declined before mode choice.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
-    super::stack::pop_uncommitted_pending_trigger_entry(state);
+    super::stack::pop_uncommitted_pending_trigger_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+    );
     state.pending_trigger = None;
     state.pending_trigger_firing = None;
 }
@@ -9213,7 +10042,10 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mode_abilities,
                 &unavailable_modes,
             ) else {
-                super::stack::pop_uncommitted_pending_trigger_entry(state);
+                super::stack::pop_uncommitted_pending_trigger_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+                );
                 state.pending_trigger = None;
                 state.pending_trigger_firing = None;
                 return Ok(None);
@@ -9233,7 +10065,10 @@ pub(super) fn begin_pending_trigger_target_selection(
                  dispatch_pending_trigger_context must resolve it inline",
             );
             if modal.selection.is_random() {
-                super::stack::pop_uncommitted_pending_trigger_entry(state);
+                super::stack::pop_uncommitted_pending_trigger_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+                );
                 state.pending_trigger = None;
                 state.pending_trigger_firing = None;
                 return Ok(None);
@@ -9248,7 +10083,10 @@ pub(super) fn begin_pending_trigger_target_selection(
             // dead branch — kept as a defensive cleanup for any
             // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
-                super::stack::pop_uncommitted_pending_trigger_entry(state);
+                super::stack::pop_uncommitted_pending_trigger_entry(
+                    state,
+                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+                );
                 state.pending_trigger = None;
                 state.pending_trigger_firing = None;
                 return Ok(None);
@@ -9364,7 +10202,10 @@ pub(super) fn begin_pending_trigger_target_selection(
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
         // cursor.
-        super::stack::pop_uncommitted_pending_trigger_entry(state);
+        super::stack::pop_uncommitted_pending_trigger_entry(
+            state,
+            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
+        );
         state.pending_trigger = None;
         state.pending_trigger_firing = None;
         return Ok(None);
@@ -9583,6 +10424,13 @@ fn handle_play_land(
             ));
         }
     }
+    // CR 305.1 + CR 116.2a: A land play is a special action only during a
+    // main phase of the player's turn while the stack is empty.
+    if !state.stack.is_empty() {
+        return Err(EngineError::ActionNotAllowed(
+            "Can only play lands while the stack is empty".to_string(),
+        ));
+    }
 
     // CR 305.2 + CR 505.6b: Validate land limit.
     // Base limit is max_lands_per_turn (normally 1), plus any additional drops
@@ -9612,22 +10460,10 @@ fn handle_play_land(
             "Player is under a CantPlayLand static (CR 305.2)".to_string(),
         ));
     }
-    // CR 116.2a + CR 305.1: A `ProhibitPlayFromZone` deny covers the play-land
-    // half of "play" (a land play is a special action, not a cast), so this gate
-    // is the land-side counterpart to the cast-gate check in
-    // `casting::prepare_spell_cast` (Memory Vessel: "can't play cards from their
-    // hand"). The card's current zone is the discriminator.
+    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
+    // play-from-zone and per-land prohibitions for every legal source zone.
     if let Some(obj) = state.objects.get(&object_id) {
-        if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-            return Err(EngineError::ActionNotAllowed(
-                "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
-            ));
-        }
-        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
-        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
-        // be played") — the filter-scoped counterpart to the blanket
-        // `CantPlayLand` check above.
-        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
             return Err(EngineError::ActionNotAllowed(
                 "A temporary effect prevents playing this land (CR 305.1)".to_string(),
             ));
@@ -11359,6 +12195,355 @@ mod keyword_action_stack_tests;
 mod mdfc_land_tests;
 
 #[cfg(test)]
+mod priority_reducer_census_tests {
+    use super::PriorityReducerFamily;
+    use std::collections::BTreeSet;
+
+    /// R14–R18: Freeze the independently discovered Priority-reducer surface
+    /// before the private announcement facade is introduced. This scans the
+    /// normal reducer source rather than deriving the result from a future
+    /// facade inventory, so a new direct Priority arm cannot hide behind the
+    /// inventory it is required to update.
+    #[test]
+    fn priority_reducer_has_the_frozen_action_family_census() {
+        let source = include_str!("engine.rs");
+        let start = source
+            .find("(WaitingFor::Priority { player }, GameAction::PassPriority)")
+            .expect("Priority reducer starts at PassPriority");
+        let end_marker = "(WaitingFor::Priority { player }, GameAction::SetAutoPass { mode })";
+        let end = source[start..]
+            .find(end_marker)
+            .map(|offset| start + offset + end_marker.len())
+            .expect("Priority reducer ends at SetAutoPass");
+
+        let mut families = BTreeSet::new();
+        let mut lines_after_priority_pattern = 0usize;
+        for line in source[start..end].lines() {
+            if line.contains("WaitingFor::Priority { player }") {
+                lines_after_priority_pattern = 6;
+            }
+            if lines_after_priority_pattern > 0 {
+                if let Some(action) = line.split("GameAction::").nth(1) {
+                    let name = action
+                        .chars()
+                        .take_while(|character| {
+                            character.is_ascii_alphabetic() || *character == '_'
+                        })
+                        .collect::<String>();
+                    if !name.is_empty() {
+                        families.insert(name);
+                    }
+                }
+                lines_after_priority_pattern -= 1;
+            }
+        }
+
+        let expected = [
+            "ActivateAbility",
+            "ActivateManaSource",
+            "ActivateNinjutsu",
+            "ActivateStation",
+            "CastPreparedCopy",
+            "CastSpell",
+            "CastSpellAsSneak",
+            "CastSpellAsWebSlinging",
+            "CastSpellForFree",
+            "CompanionToHand",
+            "CrewVehicle",
+            "EndContinuousEffect",
+            "Equip",
+            "Foretell",
+            "PassPriority",
+            "PlayFaceDown",
+            "PlayLand",
+            "RollPlanarDie",
+            "SaddleMount",
+            "SetAutoPass",
+            "TapLandForMana",
+            "Transform",
+            "TurnFaceUp",
+            "UnlockRoomDoor",
+            "UntapLandForMana",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(families, expected);
+        let preflight_families = PriorityReducerFamily::ALL
+            .into_iter()
+            .map(|family| format!("{family:?}"))
+            .collect::<BTreeSet<_>>();
+        let expected_preflight_families = expected
+            .iter()
+            .filter(|family| *family != "PassPriority" && *family != "SetAutoPass")
+            .map(|family| (*family).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(preflight_families, expected_preflight_families);
+    }
+}
+
+#[cfg(test)]
+mod priority_facade_boundary_tests {
+    /// R18: Provider announcements remain opaque until the one engine-owned
+    /// facade. This source guard is intentionally scoped to the frozen provider
+    /// set: ordinary `GameAction` producers are not part of this boundary.
+    #[test]
+    fn facade_access_is_constructed_once_and_provider_accessors_only_borrow_it() {
+        let engine_source = include_str!("engine.rs");
+        let facade_constructor = ["PriorityAnnouncementFacadeAccess::", "new()"].concat();
+        assert_eq!(
+            engine_source.matches(&facade_constructor).count(),
+            1,
+            "the facade capability must have one constructor call"
+        );
+
+        let announcement_start = engine_source
+            .find("enum PriorityAnnouncement {")
+            .map(|offset| offset + "enum PriorityAnnouncement {".len())
+            .expect("private announcement sum exists");
+        let announcement_end = engine_source[announcement_start..]
+            .find("\n}\n\nimpl PriorityAnnouncement")
+            .map(|offset| announcement_start + offset)
+            .expect("private announcement sum closes before its family match");
+        assert!(
+            !engine_source[announcement_start..announcement_end].contains('{'),
+            "Priority announcements must carry provider-owned opaque values, not raw fields"
+        );
+
+        for provider_source in [
+            include_str!("casting.rs"),
+            include_str!("mana_sources.rs"),
+            include_str!("morph.rs"),
+            include_str!("transform.rs"),
+            include_str!("keywords.rs"),
+            include_str!("room.rs"),
+            include_str!("companion.rs"),
+            include_str!("planechase.rs"),
+            include_str!("end_continuous_effect.rs"),
+            include_str!("crew_payment.rs"),
+            include_str!("effects/prepare.rs"),
+            include_str!("effects/attach.rs"),
+        ] {
+            assert!(
+                !provider_source.contains("PriorityAnnouncementFacadeAccess::"),
+                "providers may not construct or invoke the facade capability"
+            );
+            for line in provider_source
+                .lines()
+                .filter(|line| line.contains("PriorityAnnouncementFacadeAccess"))
+            {
+                assert!(
+                    line.contains("use ") || line.contains("_access: &"),
+                    "provider capability mentions must be imports or borrowed read-only accessors: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_principal_tests {
+    use super::{
+        apply_actionless_priority_pass_for_prospective, preflight_priority_window,
+        priority_principal_for_preflight, PriorityPreflight, PriorityPreflightBlock,
+        PriorityPreflightIndeterminate, PriorityReducerFamily,
+    };
+    use crate::game::zones;
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn principal_preserves_the_controlled_priority_seat() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controller;
+
+        let principal = priority_principal_for_preflight(&state)
+            .expect("a synchronized controlled Priority window has a principal");
+
+        assert_eq!(principal.semantic_holder(), controlled_seat);
+        assert_eq!(principal.authenticated_actor(), controller);
+        assert_eq!(principal.land_resource_owner(), controlled_seat);
+    }
+
+    #[test]
+    fn principal_rejects_stale_priority_authority_without_mutating_the_wait() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controlled_seat;
+        let waiting_before = state.waiting_for.clone();
+
+        assert!(matches!(
+            priority_principal_for_preflight(&state),
+            Err(PriorityPreflightIndeterminate::PriorityAuthorityMismatch)
+        ));
+        assert_eq!(state.waiting_for, waiting_before);
+    }
+
+    #[test]
+    fn principal_rejects_non_priority_without_mutating_the_wait() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let waiting_before = state.waiting_for.clone();
+
+        assert!(matches!(
+            priority_principal_for_preflight(&state),
+            Err(PriorityPreflightIndeterminate::NotPriority)
+        ));
+        assert_eq!(state.waiting_for, waiting_before);
+    }
+
+    #[test]
+    fn priority_preflight_reports_an_actionless_empty_window() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionless
+        );
+    }
+
+    #[test]
+    fn priority_preflight_reports_stale_authority_without_inventing_a_family() {
+        let controlled_seat = PlayerId(0);
+        let controller = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = controlled_seat;
+        state.waiting_for = WaitingFor::Priority {
+            player: controlled_seat,
+        };
+        state.turn_decision_controller = Some(controller);
+        state.priority_player = controlled_seat;
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Indeterminate {
+                family: None,
+                block: PriorityPreflightBlock::Principal(
+                    PriorityPreflightIndeterminate::PriorityAuthorityMismatch,
+                ),
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_clones_a_land_announcement_without_mutating_live_state() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[player.0 as usize].hand.push_back(land);
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::PlayLand
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn priority_preflight_routes_basic_land_mana_through_the_mana_provider() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let forest = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let forest = state
+            .objects
+            .get_mut(&forest)
+            .expect("new battlefield Forest exists");
+        forest.card_types.core_types.push(CoreType::Land);
+        forest.card_types.subtypes.push("Forest".to_string());
+        let before = state.clone();
+
+        assert_eq!(
+            preflight_priority_window(&state),
+            PriorityPreflight::Actionable {
+                family: PriorityReducerFamily::TapLandForMana,
+            }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn prospective_actionless_pass_rejects_an_actionable_window_without_mutation() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[player.0 as usize].hand.push_back(land);
+        let before = state.clone();
+
+        assert!(apply_actionless_priority_pass_for_prospective(&mut state).is_err());
+        assert_eq!(state, before);
+    }
+}
+
+#[cfg(test)]
 mod shortcut_schema_tests {
     use super::shortcut_iteration_count;
     use crate::analysis::decision_template::IterationCount;
@@ -11764,9 +12949,9 @@ mod kilo_interruptibility_tests {
         // (`migrate_transient_loop_sequence`) drops the dump's 6 stale pinless steps on load —
         // exactly as the integration helper does. Deserializing directly would bypass the hook,
         // leaving the stale prefix so the live drive yields an 8-step (not 2-step) sequence.
-        let raw: GameState =
-            serde_json::from_value(envelope["gameState"].clone()).expect("gameState deserializes");
-        PersistedGameState::Raw(Box::new(raw)).into_game_state()
+        serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+            .expect("gameState restores through the persisted ingress")
+            .into_game_state()
     }
 
     fn beat_actor(state: &GameState) -> PlayerId {
