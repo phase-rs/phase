@@ -9012,17 +9012,16 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         }
     }
 
-    // CR 109.4 + CR 603.7c + CR 608.2c: Anaphoric subjects that only bind inside a
-    // DELAYED triggered ability created by a parent ability. These pronouns have
-    // no antecedent in a standalone printed trigger, so they are recognized ONLY
-    // when parsing a delayed-trigger condition (`ctx.trigger_condition_scope ==
-    // Delayed`, set by `try_parse_whenever_this_turn`). This keeps a standalone
-    // printed trigger that happens to contain the same words honestly coverage-red
-    // rather than binding its source to `Any`.
+    // Parser heuristic (no CR citation — this is Oracle-text interpretation, not a
+    // rule implementation): anaphoric subjects that only bind inside a DELAYED
+    // triggered ability created by a parent ability. These pronouns have no
+    // antecedent in a standalone printed trigger, so they are recognized ONLY when
+    // parsing a delayed-trigger condition (`ctx.trigger_condition_scope == Delayed`,
+    // set by `try_parse_whenever_this_turn`). This keeps a standalone printed trigger
+    // that happens to contain the same words honestly coverage-red rather than
+    // binding its source to `Any`.
     if ctx.trigger_condition_scope == TriggerConditionScope::Delayed {
-        // CR 201.5: text referring to the object it's on (here the trigger
-        // source, via a gendered pronoun) means just that object → `SelfRef`.
-        // Nominative-only
+        // A gendered pronoun naming the trigger source → `SelfRef`. Nominative-only
         // ("he "/"she ") and guarded on the following damage verb, mirroring the
         // "it enters" bare-pronoun precedent above: a gendered pronoun naming the
         // trigger SOURCE is always nominative, and in this delayed combat-damage
@@ -9044,8 +9043,8 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
             }
         }
 
-        // CR 608.2c + CR 603.7c: plural-set anaphora → `ParentTarget`. Compose the
-        // quantifier axis (one `alt`) with the noun axis (one `alt`), per the
+        // Plural-set anaphora → `ParentTarget` (parser heuristic, no CR citation).
+        // Compose the quantifier axis (one `alt`) with the noun axis (one `alt`), per the
         // "compose, don't enumerate permutations" convention. "those creatures" /
         // "any of those creatures" back-references the set the parent ability
         // established (Love's declared attackers, Kang's per-opponent tap

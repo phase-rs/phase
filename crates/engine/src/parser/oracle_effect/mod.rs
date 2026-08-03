@@ -1045,10 +1045,11 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // Effect is the remainder after the split boundary.
     let effect_text = after.original;
 
-    // Parse the condition as a trigger using the trigger parser.
-    // CR 603.7c: this is a DELAYED trigger condition — the `Delayed` scope enables
-    // anaphoric subject resolution ("he"/"she" → SelfRef, "those creatures" →
-    // ParentTarget) that is valid only as a back-reference to the creating ability.
+    // Parse the condition as a trigger using the trigger parser. This is a DELAYED
+    // trigger condition, so the `Delayed` scope enables anaphoric subject resolution
+    // ("he"/"she" → SelfRef, "those creatures" → ParentTarget) that is valid only as
+    // a back-reference to the creating ability. (Parser scaffolding — no CR citation:
+    // this selects a parsing mode, it does not implement a rule.)
     let mut inner_ctx = ParseContext {
         trigger_condition_scope: TriggerConditionScope::Delayed,
         ..ParseContext::default()
