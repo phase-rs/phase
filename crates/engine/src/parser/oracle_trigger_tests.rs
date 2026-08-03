@@ -3364,6 +3364,217 @@ fn trigger_attacks_you_or_planeswalker_you_control() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+/// Helper for the CR 508.3a attack-target scope shape tests: the
+/// opponent-relative defending-player filter (`Typed { controller: Opponent }`).
+fn attacked_opponent_target_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+}
+
+/// CR 508.3a — Mila, Crafty Companion: "Whenever an opponent attacks one or
+/// more planeswalkers you control, …". Before the attack-target grammar was
+/// composed by dimension, no arm matched " one or more planeswalkers you
+/// control", so BOTH axes were dropped (`attack_target_filter: null`,
+/// `valid_target: null`) and `attack_target_matches` returned unconditionally
+/// true — the trigger fired on every attack any opponent declared. Runtime
+/// firing / non-firing is covered by the discriminating integration test
+/// `attack_target_planeswalker_scope`.
+#[test]
+fn trigger_attacks_one_or_more_planeswalkers_you_control_scopes_both_axes() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks one or more planeswalkers you control, put a loyalty counter on each planeswalker you control.",
+        "Mila, Crafty Companion",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.attack_target_filter,
+        Some(AttackTargetFilter::Planeswalker),
+        "the planeswalker-only attack-target scope must reach the type axis"
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Controller),
+        "'planeswalkers you control' must bind the defending player to the source's controller"
+    );
+}
+
+/// CR 508.3a + CR 506.2 — Oath of Kaya: "Whenever an opponent attacks a
+/// planeswalker you control with one or more creatures, …". The type axis
+/// already parsed; the " you control" controller relation on the planeswalker
+/// noun was dropped, so the trigger fired when an opponent attacked a THIRD
+/// player's planeswalker.
+#[test]
+fn trigger_attacks_a_planeswalker_you_control_binds_defending_player() {
+    let def = parse_trigger_line(
+        "Whenever an opponent attacks a planeswalker you control with one or more creatures, Oath of Kaya deals 2 damage to that player and you gain 2 life.",
+        "Oath of Kaya",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.attack_target_filter,
+        Some(AttackTargetFilter::Planeswalker)
+    );
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+/// CR 508.3a — Gahiji, Honored One: "Whenever a creature attacks one of your
+/// opponents or a planeswalker an opponent controls, …". The flat `alt` matched
+/// " one of your opponents" first and never saw the " or a planeswalker …"
+/// disjunct, so `attack_target_filter` stayed `Player` and the pump was silently
+/// lost on planeswalker attacks.
+#[test]
+fn trigger_attacks_opponent_or_planeswalker_an_opponent_controls() {
+    let def = parse_trigger_line(
+        "Whenever a creature attacks one of your opponents or a planeswalker an opponent controls, that creature gets +2/+0 until end of turn.",
+        "Gahiji, Honored One",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.attack_target_filter,
+        Some(AttackTargetFilter::PlayerOrPlaneswalker),
+        "the planeswalker disjunct must widen the TYPE axis"
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(attacked_opponent_target_filter()),
+        "the player leaf stays authoritative for the defending-PLAYER axis"
+    );
+}
+
+/// CR 508.3a — Frontier Warmonger: the same grammar as Gahiji with a "they
+/// control" relation and a plural batched subject.
+#[test]
+fn trigger_attacks_opponent_or_planeswalker_they_control() {
+    let def = parse_trigger_line(
+        "Whenever one or more creatures attack one of your opponents or a planeswalker they control, those creatures gain menace until end of turn.",
+        "Frontier Warmonger",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.attack_target_filter,
+        Some(AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(def.valid_target, Some(attacked_opponent_target_filter()));
+}
+
+/// CR 508.3d — Cunning Rhetoric / Davriel, Soul Broker: "attacks you and/or
+/// one or more planeswalkers you control" must keep `TriggerMode::
+/// AttackersDeclared` (fires once per attack declaration) while gaining the
+/// widened `PlayerOrPlaneswalker` type axis. The mode routing now reads the
+/// typed player leaf instead of re-probing the raw text for " you".
+#[test]
+fn trigger_opponent_attacks_you_and_or_planeswalkers_keeps_declaration_mode() {
+    let triggers = parse_trigger_lines(
+        "Whenever an opponent attacks you and/or one or more planeswalkers you control, exile the top card of that player's library.",
+        "Cunning Rhetoric",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::AttackersDeclared);
+    assert_eq!(
+        triggers[0].attack_target_filter,
+        Some(AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(triggers[0].valid_target, Some(TargetFilter::Controller));
+
+    // Davriel's plural "and/or planeswalkers you control" (no "one or more")
+    // takes the same composed path.
+    let davriel = parse_trigger_line(
+        "Whenever an opponent attacks you and/or planeswalkers you control, they discard a card.",
+        "Davriel, Soul Broker",
+    );
+    assert_eq!(davriel.mode, TriggerMode::AttackersDeclared);
+    assert_eq!(
+        davriel.attack_target_filter,
+        Some(AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(davriel.valid_target, Some(TargetFilter::Controller));
+}
+
+/// CR 508.3a + CR 506.2 — no-regression shape lock on the attack-target leaves
+/// this change did NOT intend to alter, plus the two composed shapes that carry
+/// no defending-player restriction.
+#[test]
+fn trigger_attack_target_leaves_are_shape_locked() {
+    // " a player" — names a player but imposes no identity restriction.
+    let any_player = parse_trigger_line(
+        "Whenever a creature attacks a player, that player loses 1 life.",
+        "Any Player Probe",
+    );
+    assert_eq!(
+        any_player.attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    assert_eq!(any_player.valid_target, None);
+
+    // CR 508.3a: a player leaf with no identity restriction must NOT inherit the
+    // planeswalker disjunct's controller relation — that would wrongly narrow
+    // the player half of "a player or a planeswalker they control".
+    let any_player_or_pw = parse_trigger_line(
+        "Whenever a creature attacks a player or a planeswalker they control, that player loses 1 life.",
+        "Any Player Or Planeswalker Probe",
+    );
+    assert_eq!(
+        any_player_or_pw.attack_target_filter,
+        Some(AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(
+        any_player_or_pw.valid_target, None,
+        "the planeswalker relation must not be promoted to the whole trigger's defender scope"
+    );
+
+    // CR 725.1: the monarch identity is resolved statefully, so no valid_target.
+    let monarch = parse_trigger_line(
+        "Whenever a creature attacks the monarch, draw a card.",
+        "Monarch Probe",
+    );
+    assert_eq!(
+        monarch.attack_target_filter,
+        Some(AttackTargetFilter::Monarch)
+    );
+    assert_eq!(monarch.valid_target, None);
+
+    // CR 310.5: battles are a distinct attackable permanent class.
+    let battle = parse_trigger_line(
+        "Whenever a creature attacks a battle, draw a card.",
+        "Battle Probe",
+    );
+    assert_eq!(
+        battle.attack_target_filter,
+        Some(AttackTargetFilter::Battle)
+    );
+    assert_eq!(battle.valid_target, None);
+
+    // CR 303.4e: the Curse Aura leaf.
+    let enchanted = parse_trigger_line(
+        "Whenever a creature attacks enchanted player, put a +1/+1 counter on it.",
+        "Curse of Predation",
+    );
+    assert_eq!(
+        enchanted.attack_target_filter,
+        Some(AttackTargetFilter::Player)
+    );
+    assert_eq!(enchanted.valid_target, Some(TargetFilter::AttachedTo));
+
+    // A bare " you" leaf.
+    let you = parse_trigger_line(
+        "Whenever a creature attacks you, you gain 1 life.",
+        "You Probe",
+    );
+    assert_eq!(you.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(you.valid_target, Some(TargetFilter::Controller));
+
+    // Word-boundary guard: the possessive " your ..." must NOT be swallowed by
+    // the bare " you" leaf and mis-scoped to the source's controller.
+    let possessive = parse_trigger_line(
+        "Whenever a creature attacks your opponents, you gain 1 life.",
+        "Possessive Probe",
+    );
+    assert_eq!(
+        possessive.attack_target_filter, None,
+        "' your ...' must not match the bare ' you' leaf"
+    );
+    assert_eq!(possessive.valid_target, None);
+}
+
 /// Issue #4744 — Curse of Predation: "Whenever a creature attacks enchanted
 /// player, put a +1/+1 counter on it." The "enchanted player" defender scope
 /// must bind to the Aura's attached player (`valid_target = AttachedTo`), not be
@@ -3443,6 +3654,87 @@ fn trigger_attacks_the_monarch_scopes_to_monarch_filter() {
         }
         other => panic!("expected Effect::Destroy, got {other:?}"),
     }
+}
+
+/// CR 725.1 + CR 508.3a — `AttackTargetFilter::Monarch` conflates the
+/// attacked-object-type axis with the monarch player-identity constraint that
+/// `attack_target_matches` applies statefully, so no composed value can express
+/// "the monarch OR a planeswalker". `parse_attack_target_scope_bare` must
+/// therefore REFUSE the monarch + planeswalker disjunct rather than widen it to
+/// `PlayerOrPlaneswalker`, which would silently drop the identity constraint and
+/// fire on any player-or-planeswalker attack (fail-open). No printed card uses
+/// this shape today; the real remedy is engine-side (split the monarch identity
+/// onto its own axis). The bare monarch leaf must be completely unaffected —
+/// The Spear of Bashenga and Okoye, Mighty and Adored depend on it.
+#[test]
+fn attack_target_monarch_planeswalker_disjunct_fails_closed() {
+    // (a) The disjunct must not parse at all.
+    for phrase in [
+        "the monarch or a planeswalker they control",
+        "the monarch or one or more planeswalkers",
+        "the monarch and/or a planeswalker they control",
+    ] {
+        let parsed = parse_attack_target_scope_bare(phrase);
+        assert!(
+            parsed.is_err(),
+            "'{phrase}' must fail to parse rather than widening to PlayerOrPlaneswalker, got {:?}",
+            parsed.map(|(_, s)| s.scope)
+        );
+    }
+
+    // The failure is specific to the monarch leaf: the same disjunct shape on
+    // every other player leaf still composes to `PlayerOrPlaneswalker`, so this
+    // is a targeted refusal, not a broken combinator.
+    let (_, any_player) = parse_attack_target_scope_bare("a player or a planeswalker they control")
+        .expect("'a player or a planeswalker they control' must still parse");
+    assert_eq!(any_player.scope, AttackTargetFilter::PlayerOrPlaneswalker);
+
+    // (b) The bare monarch leaf keeps its exact pre-existing shape: a Monarch
+    // attack-target filter with NO parse-time defender restriction (CR 725.1 —
+    // the identity is resolved statefully at trigger-match time).
+    let (rest, bare) =
+        parse_attack_target_scope_bare("the monarch").expect("bare 'the monarch' must still parse");
+    assert_eq!(rest, "");
+    assert_eq!(bare.scope, AttackTargetFilter::Monarch);
+    assert_eq!(bare.defender, None);
+    assert_eq!(bare.player_leaf, Some(AttackedPlayerLeaf::Monarch));
+
+    // Same shape end-to-end through the real trigger line (The Spear of
+    // Bashenga's printed Oracle text).
+    let spear = parse_trigger_line(
+        "Whenever equipped creature attacks the monarch, destroy target tapped nonland permanent that player controls.",
+        "The Spear of Bashenga",
+    );
+    assert_eq!(
+        spear.attack_target_filter,
+        Some(AttackTargetFilter::Monarch)
+    );
+    assert_eq!(spear.valid_target, None);
+
+    // The refusal degrades the trigger to an unscoped `Attacks` at the caller
+    // (`try_parse_event` reads the scope with `.ok()`), which is the honest
+    // "parser did not understand this attack target" outcome — NOT a Monarch or
+    // PlayerOrPlaneswalker scope silently asserted from a phrase the type system
+    // cannot represent.
+    let disjunct = parse_trigger_line(
+        "Whenever a creature attacks the monarch or a planeswalker they control, draw a card.",
+        "Monarch Disjunct Probe",
+    );
+    assert_eq!(
+        disjunct.attack_target_filter, None,
+        "the refused disjunct must not yield any attack-target filter"
+    );
+    assert_eq!(disjunct.valid_target, None);
+
+    // Okoye, Mighty and Adored's delayed trigger uses the same bare leaf with a
+    // trailing " this turn" qualifier — the leaf must still resolve to Monarch
+    // and leave the qualifier for the caller.
+    let (okoye_rest, okoye) =
+        parse_attack_target_scope_bare("the monarch this turn, it gains double strike")
+            .expect("Okoye's bare monarch leaf must still parse");
+    assert_eq!(okoye.scope, AttackTargetFilter::Monarch);
+    assert_eq!(okoye.defender, None);
+    assert_eq!(okoye_rest, " this turn, it gains double strike");
 }
 
 #[test]
@@ -23569,6 +23861,96 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
             count: 2,
         })
     );
+}
+
+/// CR 508.3a: Tomik, Wielder of Law is the second corpus card on the
+/// attack-batch minimum arm and carries the identical attack-target phrase, so
+/// it pins the same defending-player scope (`You`) and attacked-object axis
+/// (`PlayerOrPlaneswalker`) as Mangara.
+#[test]
+fn tomik_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
+    let def = parse_trigger_line(
+            "Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.",
+            "Tomik, Wielder of Law",
+        );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                filter: None,
+            },
+            comparator: Comparator::GE,
+            count: 2,
+        })
+    );
+}
+
+/// CR 506.2 + CR 508.3a: `AttackersDeclaredCountSubject::AttackTarget.controller`
+/// IS the defending-player axis, so the attack-batch minimum arm must derive it
+/// from the parsed phrase. This arm shares the composed attack-target
+/// combinator, which recognizes strictly more defender shapes than this subject
+/// can express — every shape it cannot express must fail the parse rather than
+/// be silently relabelled as `You` and count attackers aimed at somebody else.
+#[test]
+fn attackers_declared_min_derives_defending_player_and_rejects_unmodelable_shapes() {
+    // `None` == the arm refused the phrase; the trailing-clause assertion keeps
+    // an accepted phrase from passing on a partial consume.
+    let condition_for = |phrase: &str| -> Option<TriggerCondition> {
+        let input =
+            format!("if two or more of those creatures are attacking {phrase}, draw a card.");
+        let (rest, condition) = parse_attackers_to_controller_min_condition(&input).ok()?;
+        assert_eq!(rest, ", draw a card.", "{phrase:?} consumed the wrong span");
+        Some(condition)
+    };
+    let expected = |controller, attacked| TriggerCondition::AttackersDeclaredCount {
+        subject: AttackersDeclaredCountSubject::AttackTarget {
+            controller,
+            attacked,
+            filter: None,
+        },
+        comparator: Comparator::GE,
+        count: 2,
+    };
+
+    // Source-controller-relative defenders — the shapes this subject models.
+    for (phrase, attacked) in [
+        (
+            "you and/or planeswalkers you control",
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            "planeswalkers you control",
+            AttackTargetFilter::Planeswalker,
+        ),
+        ("you", AttackTargetFilter::Player),
+    ] {
+        assert_eq!(
+            condition_for(phrase),
+            Some(expected(ControllerRef::You, attacked)),
+            "{phrase:?} should count attackers aimed at the source's controller",
+        );
+    }
+    assert_eq!(
+        condition_for("one of your opponents"),
+        Some(expected(
+            ControllerRef::Opponent,
+            AttackTargetFilter::Player
+        )),
+        "an opponent-relative defender must be carried through, not flattened to `You`",
+    );
+
+    // CR 303.4e + CR 310.5 + CR 725.1: shapes with no source-relative defending
+    // player. `ControllerRef` cannot express any of them, so the arm fails
+    // closed instead of counting the wrong attackers.
+    for phrase in ["a player", "enchanted player", "the monarch", "a battle"] {
+        assert!(
+            condition_for(phrase).is_none(),
+            "{phrase:?} names no source-relative defending player and must fail the parse",
+        );
+    }
 }
 
 /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces

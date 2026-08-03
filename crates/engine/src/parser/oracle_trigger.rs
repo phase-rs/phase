@@ -6458,28 +6458,29 @@ fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, 
     let (rest, _) = tag("if ").parse(input)?;
     let (rest, minimum) = nom_primitives::parse_number.parse(rest)?;
     let (rest, _) = tag(" or more of those creatures are attacking ").parse(rest)?;
-    let (rest, attacked) = alt((
-        value(
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            tag("you and/or planeswalkers you control"),
-        ),
-        value(
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            tag("you or planeswalkers you control"),
-        ),
-        value(
-            AttackTargetFilter::Planeswalker,
-            tag("planeswalkers you control"),
-        ),
-        value(AttackTargetFilter::Player, tag("you")),
-    ))
-    .parse(rest)?;
+    // CR 508.3a: same attack-target grammar as the "attacks [target]" trigger
+    // arm, so it shares the composed combinator rather than re-enumerating it.
+    let (rest_after, scope) = parse_attack_target_scope_bare(rest)?;
+    // CR 506.2: `AttackTarget.controller` IS the defending-player axis, so it
+    // must be derived from the phrase's parsed defender — never assumed. This
+    // subject can only express a defender that is relative to the source's
+    // controller, so every other shape ("a player", "enchanted player", "the
+    // monarch", "a battle") fails the parse rather than being silently
+    // relabelled as `You` and counting the wrong attackers.
+    let controller = match &scope.defender {
+        Some(TargetFilter::Controller) => ControllerRef::You,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        })) => ControllerRef::Opponent,
+        _ => return Err(oracle_err(rest)),
+    };
     Ok((
-        rest,
+        rest_after,
         TriggerCondition::AttackersDeclaredCount {
             subject: AttackersDeclaredCountSubject::AttackTarget {
-                controller: ControllerRef::You,
-                attacked,
+                controller,
+                attacked: scope.scope,
                 filter: None,
             },
             comparator: Comparator::GE,
@@ -10444,6 +10445,216 @@ fn strip_attack_alone_qualifier(after: &str) -> (bool, &str) {
     }
 }
 
+/// CR 508.1b: which *kind of player* an attack-target phrase names ("the active
+/// player announces which player, planeswalker, or battle each of the chosen
+/// creatures is attacking"). Kept as a discriminant rather than a handful of
+/// booleans so the leaf→scope and leaf→defender mappings below are exhaustive
+/// `match`es the compiler checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttackedPlayerLeaf {
+    /// "you" — the trigger source's controller.
+    You,
+    /// "a player" — names a player but imposes no identity restriction.
+    AnyPlayer,
+    /// "one of your opponents" — any opponent of the source's controller.
+    YourOpponent,
+    /// CR 303.4e: "enchanted player" — the player this Curse Aura is attached
+    /// to, whose controller is separate from the Aura's controller.
+    EnchantedPlayer,
+    /// CR 725.1: "the monarch" — the monarch is a dynamic single-player
+    /// designation resolved statefully in `attack_target_matches`, so this leaf
+    /// contributes no parse-time defending-player scope.
+    Monarch,
+}
+
+/// CR 508.3a: an attack-target phrase ("attacks [a player, planeswalker, or
+/// battle]") decomposed into its two INDEPENDENT axes.
+///
+/// The engine models these as two separate fields on `TriggerDefinition` and the
+/// runtime matcher consumes them separately (`attack_target_type_matches` vs
+/// `valid_player_matches` in `game/trigger_matchers.rs`), so the parser keeps
+/// them separate too. Fusing them — or re-deriving the defender axis by
+/// rescanning text the type parse already discarded — is the bug this type
+/// exists to prevent; see the design note in
+/// `crates/engine/tests/integration/issue_3314_killian.rs`.
+#[derive(Debug, Clone)]
+struct AttackTargetScope {
+    /// The attacked-OBJECT type axis → `TriggerDefinition::attack_target_filter`.
+    scope: AttackTargetFilter,
+    /// The defending-PLAYER identity axis → `TriggerDefinition::valid_target`,
+    /// stored relative to the trigger source's controller. `None` when the
+    /// phrase names no player restriction ("a player", "the monarch",
+    /// "a battle", a bare "a planeswalker").
+    defender: Option<TargetFilter>,
+    /// The player leaf, when the phrase named one. Retained so the caller can
+    /// route CR 508.3d ("Whenever [a player] attacks you" fires once per attack
+    /// declaration) without re-scanning the source text.
+    player_leaf: Option<AttackedPlayerLeaf>,
+}
+
+/// CR 506.2: the opponent-relative defending-player filter shared by the
+/// player-side ("one of your opponents") and planeswalker-side ("an opponent
+/// controls" / "they control") controller relations.
+fn attacked_opponent_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+}
+
+/// CR 109.4 + CR 506.2: the controller relation attached to an attacked noun.
+/// Yields the defending-player scope RELATIVE TO THE TRIGGER SOURCE'S
+/// CONTROLLER — never a concrete player id, because control of the attacked
+/// planeswalker is read live on every attack (CR 109.4).
+fn parse_attacked_controller_relation(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(TargetFilter::Controller, tag(" you control")),
+        value(attacked_opponent_filter(), tag(" an opponent controls")),
+        value(attacked_opponent_filter(), tag(" they control")),
+    ))
+    .parse(input)
+}
+
+/// CR 508.1b: the planeswalker side of an attack-target phrase — noun (with its
+/// plurality) plus an optional controller relation. One `alt` per axis; the
+/// plurality axis and the relation axis are composed, never enumerated as a
+/// product. Space-free so it can serve both as a top-level leaf and as the
+/// right-hand side of a disjunction.
+fn parse_attacked_planeswalker_side(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, _) = alt((
+        tag("one or more planeswalkers"),
+        tag("a planeswalker"),
+        tag("planeswalkers"),
+    ))
+    .parse(input)?;
+    opt(parse_attacked_controller_relation).parse(rest)
+}
+
+/// CR 508.1b: the player side of an attack-target phrase. Longest-first, because
+/// nom `alt` is leftmost-match. The bare "you" arm is word-boundary guarded so
+/// it cannot swallow the possessive "your ...".
+fn parse_attacked_player_side(input: &str) -> OracleResult<'_, AttackedPlayerLeaf> {
+    alt((
+        value(
+            AttackedPlayerLeaf::YourOpponent,
+            tag("one of your opponents"),
+        ),
+        value(AttackedPlayerLeaf::EnchantedPlayer, tag("enchanted player")),
+        value(AttackedPlayerLeaf::Monarch, tag("the monarch")),
+        value(AttackedPlayerLeaf::AnyPlayer, tag("a player")),
+        value(AttackedPlayerLeaf::You, terminated(tag("you"), not(alpha1))),
+    ))
+    .parse(input)
+}
+
+/// CR 508.3a + CR 725.1: the attacked-object type axis a player leaf
+/// contributes on its own.
+fn player_leaf_scope(leaf: AttackedPlayerLeaf) -> AttackTargetFilter {
+    match leaf {
+        // CR 725.1: "attacks the monarch" is a Player-type attack whose
+        // monarch-identity constraint is applied statefully in
+        // `attack_target_matches` (The Spear of Bashenga).
+        AttackedPlayerLeaf::Monarch => AttackTargetFilter::Monarch,
+        AttackedPlayerLeaf::You
+        | AttackedPlayerLeaf::AnyPlayer
+        | AttackedPlayerLeaf::YourOpponent
+        | AttackedPlayerLeaf::EnchantedPlayer => AttackTargetFilter::Player,
+    }
+}
+
+/// CR 506.2: the defending-player identity a player leaf names, relative to the
+/// trigger source's controller.
+fn player_leaf_defender(leaf: AttackedPlayerLeaf) -> Option<TargetFilter> {
+    match leaf {
+        AttackedPlayerLeaf::You => Some(TargetFilter::Controller),
+        AttackedPlayerLeaf::YourOpponent => Some(attacked_opponent_filter()),
+        // CR 303.4e: scoped to the player this Curse Aura is attached to;
+        // `AttachedTo` resolves via `source.attached_to.as_player()` in
+        // `player_matches_filter` (`game/trigger_matchers.rs`).
+        AttackedPlayerLeaf::EnchantedPlayer => Some(TargetFilter::AttachedTo),
+        // No parse-time identity restriction: any player (CR 508.1b), or the
+        // monarch (resolved statefully, CR 725.1).
+        AttackedPlayerLeaf::AnyPlayer | AttackedPlayerLeaf::Monarch => None,
+    }
+}
+
+/// CR 508.3a: the player-side arm of `parse_attack_target_scope_bare` — a
+/// player leaf, optionally disjoined with a planeswalker side.
+fn parse_attack_target_player_arm(input: &str) -> OracleResult<'_, AttackTargetScope> {
+    let (rest, leaf) = parse_attacked_player_side(input)?;
+    let (rest, planeswalker_side) = opt(preceded(
+        alt((tag(" and/or "), tag(" or "))),
+        parse_attacked_planeswalker_side,
+    ))
+    .parse(rest)?;
+    let scope = match (leaf, &planeswalker_side) {
+        // CR 725.1 + CR 508.3a: fail CLOSED. `AttackTargetFilter::Monarch`
+        // conflates two axes that this phrase separates — the attacked-object
+        // type (a player) and the monarch player-identity constraint that
+        // `attack_target_matches` applies statefully. There is therefore no
+        // composed `AttackTargetFilter` value meaning "the monarch OR a
+        // planeswalker": widening to `PlayerOrPlaneswalker` would silently drop
+        // the monarch identity constraint and fire the trigger on ANY
+        // player-or-planeswalker attack. Refusing the parse keeps coverage
+        // honestly red instead. The real remedy is engine-side — split the
+        // monarch identity out of `AttackTargetFilter` onto its own axis so the
+        // two compose; only then can this arm accept the shape. Unreachable
+        // today: no printed card uses it (the only "attacks the monarch" cards
+        // are The Spear of Bashenga and Okoye, Mighty and Adored, both bare).
+        (AttackedPlayerLeaf::Monarch, Some(_)) => return Err(oracle_err(input)),
+        // CR 508.3a: both a player and a planeswalker are named.
+        (_, Some(_)) => AttackTargetFilter::PlayerOrPlaneswalker,
+        (_, None) => player_leaf_scope(leaf),
+    };
+    Ok((
+        rest,
+        AttackTargetScope {
+            scope,
+            // CR 506.2: the player leaf is authoritative for the
+            // defending-player axis. The planeswalker's controller relation
+            // must NOT be promoted here — "attacks a player or a planeswalker
+            // they control" restricts the planeswalker half only, and promoting
+            // it would wrongly narrow the player half.
+            defender: player_leaf_defender(leaf),
+            player_leaf: Some(leaf),
+        },
+    ))
+}
+
+/// CR 508.3a: parse "[a player, planeswalker, or battle]" after an attack verb,
+/// with no leading space (see `parse_attack_target_scope` for the spaced form).
+///
+/// Composed by DIMENSION rather than enumerated as a product: player-leaf axis
+/// × optional disjunction × planeswalker noun/plurality axis × optional
+/// controller-relation axis. Combining rule per CR 508.3a: a phrase naming both
+/// a player and a planeswalker yields `PlayerOrPlaneswalker`; naming only one
+/// yields that one.
+fn parse_attack_target_scope_bare(input: &str) -> OracleResult<'_, AttackTargetScope> {
+    alt((
+        // CR 310.5: battles can be attacked — a standalone leaf with no player side.
+        map(tag("a battle"), |_| AttackTargetScope {
+            scope: AttackTargetFilter::Battle,
+            defender: None,
+            player_leaf: None,
+        }),
+        // Player side, optionally disjoined with a planeswalker side.
+        parse_attack_target_player_arm,
+        // Planeswalker-only (Mila, Crafty Companion; Oath of Kaya).
+        map(parse_attacked_planeswalker_side, |relation| {
+            AttackTargetScope {
+                scope: AttackTargetFilter::Planeswalker,
+                defender: relation,
+                player_leaf: None,
+            }
+        }),
+    ))
+    .parse(input)
+}
+
+/// CR 508.3a: `parse_attack_target_scope_bare` applied to the space-separated
+/// remainder that follows an attack verb ("attacks| you or a planeswalker you
+/// control").
+fn parse_attack_target_scope(input: &str) -> OracleResult<'_, AttackTargetScope> {
+    preceded(tag(" "), parse_attack_target_scope_bare).parse(input)
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -10737,56 +10948,28 @@ fn try_parse_event(
     if let Some(after) = attacks_result {
         let (attacks_and_unblocked, after) = strip_attack_unblocked_qualifier(after);
         let (attacks_alone, after) = strip_attack_alone_qualifier(after);
-        // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
-        fn parse_attack_target(input: &str) -> OracleResult<'_, AttackTargetFilter> {
-            alt((
-                value(
-                    AttackTargetFilter::PlayerOrPlaneswalker,
-                    alt((
-                        tag(" you or a planeswalker you control"),
-                        tag(" you and/or one or more planeswalkers you control"),
-                    )),
-                ),
-                value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
-                value(AttackTargetFilter::Player, tag(" one of your opponents")),
-                value(AttackTargetFilter::Player, tag(" a player")),
-                value(AttackTargetFilter::Player, tag(" you")),
-                // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
-                // scoped to the player this permanent is attached to (whose
-                // controller is separate from the Aura's controller). The type axis
-                // is Player; the player-identity scope is set below via
-                // `valid_target = AttachedTo` (Curse of Predation, Curse of Chaos,
-                // Curse of Inertia).
-                value(AttackTargetFilter::Player, tag(" enchanted player")),
-                // CR 508.1a + CR 725.1: "attacks the monarch" — a Player-type
-                // attack whose defending player must currently hold the monarch
-                // designation. The monarch-identity check is stateful and lives
-                // in `attack_target_matches`, not in this pure type parse (The
-                // Spear of Bashenga).
-                value(AttackTargetFilter::Monarch, tag(" the monarch")),
-                value(AttackTargetFilter::Battle, tag(" a battle")),
-            ))
-            .parse(input)
-        }
-        let attack_target_filter = parse_attack_target.parse(after).ok().map(|(_, f)| f);
-        let attacks_one_of_your_opponents = tag::<_, _, OracleError<'_>>(" one of your opponents")
-            .parse(after)
-            .is_ok();
+        // CR 508.3a: decompose the attack-target qualifier ("attacks a
+        // planeswalker you control" etc.) into its two independent axes in one
+        // traversal — the attacked-object type and the defending-player
+        // identity. Both are read from the typed result below; nothing rescans
+        // `after`.
+        let attack_scope = parse_attack_target_scope.parse(after).ok().map(|(_, s)| s);
+        let attack_target_filter = attack_scope.as_ref().map(|s| s.scope.clone());
         let mut def = make_base();
         // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
         // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,
         // Cunning Rhetoric) where the subject is an opponent and the target is "you".
-        let is_opponent_attacks_you =
-            matches!(
-                subject,
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::Opponent),
-                    ..
-                })
-            ) && matches!(
-                attack_target_filter,
-                Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
-            ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok();
+        let is_opponent_attacks_you = matches!(
+            subject,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })
+        ) && matches!(
+            attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
+        ) && attack_scope.as_ref().and_then(|s| s.player_leaf)
+            == Some(AttackedPlayerLeaf::You);
         def.mode = if attacks_and_unblocked && matches!(subject, TargetFilter::SelfRef) {
             TriggerMode::AttackerUnblocked
         } else if attacks_and_unblocked {
@@ -10805,29 +10988,14 @@ fn try_parse_event(
             def.valid_card = Some(subject.clone());
         }
         def.attack_target_filter = attack_target_filter;
-        if attacks_one_of_your_opponents {
-            def.valid_target = Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            ));
-        } else if tag::<_, _, OracleError<'_>>(" enchanted player")
-            .parse(after)
-            .is_ok()
-        {
-            // CR 303.4e: "attacks enchanted player" scopes the trigger to the
-            // player this Curse Aura is attached to (whose controller is distinct
-            // from the Aura's controller). `AttachedTo` resolves to
-            // `source.attached_to.as_player()` in `player_matches_filter`
-            // (`game/trigger_matchers.rs`), so the trigger fires only when the
-            // enchanted player is the defender (Curse of Predation, Curse of Chaos,
-            // Curse of Inertia). Without this the trigger has no defender scope and
-            // fires on every attack, anywhere.
-            def.valid_target = Some(TargetFilter::AttachedTo);
-        } else if matches!(
-            def.attack_target_filter,
-            Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
-        ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok()
-        {
-            def.valid_target = Some(TargetFilter::Controller);
+        // CR 506.2 + CR 109.4: the defending-player identity axis, stored
+        // relative to the trigger source's controller and re-evaluated live on
+        // every attack by `valid_player_matches` (`game/trigger_matchers.rs`).
+        // Without it a scoped attack trigger has no defender restriction and
+        // fires on every attack, anywhere (Mila, Crafty Companion; Oath of
+        // Kaya; the Curse Aura class).
+        if let Some(defender) = attack_scope.as_ref().and_then(|s| s.defender.clone()) {
+            def.valid_target = Some(defender);
         }
         if attacks_alone {
             // CR 506.5: attacks alone — zero same-controller co-attackers.
