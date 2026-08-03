@@ -527,6 +527,20 @@ fn a_copy_granted_static_ability_applies_in_the_pass_that_applied_the_copy() {
         "the original 1/1 lord must get +1/+1 from the token's copied anthem \
          (\"other creatures\", so its own anthem does not pump it)"
     );
+    // The third recipient class, and the only one where the two anthem instances
+    // must disagree about the SAME object: the token is excluded from the anthem
+    // it copied (`FilterProp::Another`) and pumped by the original lord's, so a
+    // bug that swapped which instance excludes which recipient would move this
+    // total while leaving the two above plausible.
+    assert_eq!(
+        (
+            runner.state().objects[&token].power,
+            runner.state().objects[&token].toughness
+        ),
+        (Some(2), Some(2)),
+        "the 1/1 token must get +1/+1 from the ORIGINAL lord's anthem only — its \
+         own copied anthem says \"other creatures\" and cannot pump itself"
+    );
 }
 
 /// CR 613.2a + CR 613.2c: sublayer 1a must reach a FIXED POINT before layer 2.
