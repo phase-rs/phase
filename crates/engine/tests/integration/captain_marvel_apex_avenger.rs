@@ -368,6 +368,37 @@ fn multi_kind_single_creature_fires_exactly_once() {
     );
 }
 
+/// PRODUCTION FRAME (CR 603.2c + CR 608.2): Captain Marvel's optional ("may")
+/// reproduction suspends into an `OptionalEffectFrame`; on accept, the frame's
+/// PLURAL `trigger_events` batch is restored to `current_trigger_events`
+/// (`engine_payment_choices.rs`) so the resumed reproduction folds EVERY captured
+/// `CounterAdded` occurrence. A multi-kind placement produces a multi-event batch;
+/// reverting the plural restoration leaves the resumed resolution with only the
+/// singular event, so at most one kind reproduces and the assertions below fail.
+/// (The frame unit tests use `trigger_events: Vec::new()` and cannot catch this.)
+#[test]
+fn optional_frame_restores_full_multi_event_batch_on_accept() {
+    // Multi-event batch: a +1/+1 (count 2) event AND a shield (count 1) event.
+    let (outcome, cm, recipient) = cast_at_recipient(
+        &[],
+        "Put two +1/+1 counters and a shield counter on target creature.",
+        true,
+    );
+    // Reach guard: the whole batch landed on the recipient.
+    outcome.assert_counters(recipient, CounterType::Plus1Plus1, 2);
+    outcome.assert_counters(recipient, CounterType::Shield, 1);
+    // After suspend+accept, EVERY captured event reproduced onto Captain Marvel —
+    // both the +1/+1 (count 2) and the shield (count 1). Dropping the plural
+    // restoration would lose one of these.
+    outcome.assert_counters(cm, CounterType::Plus1Plus1, 2);
+    outcome.assert_counters(cm, CounterType::Shield, 1);
+    assert_eq!(
+        reproduction_firings(&outcome),
+        1,
+        "one recipient → one 'may' decision → one reproduction folding the whole batch",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #13 — multi-RECIPIENT placement fires ONCE PER RECIPIENT (per-recipient
 // grouping vs. the all-in-one batched arm).
