@@ -29,6 +29,7 @@ type TriggerTargetSelectionWaitingFor = Extract<
   { type: "TriggerTargetSelection" }
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
+type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
@@ -176,6 +177,20 @@ export const buildManaPaymentWaitingFor = (
   overrides: Partial<ManaPaymentWaitingFor> = {},
 ): ManaPaymentWaitingFor => {
   return manaPaymentWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class UntapChoiceWaitingForFactory extends PlayerWaitingForFactory<UntapChoiceWaitingFor> {}
+
+export const untapChoiceWaitingForFactory =
+  UntapChoiceWaitingForFactory.define((): UntapChoiceWaitingFor => ({
+    type: "UntapChoice",
+    data: { player: 0, candidates: [1] },
+  }));
+
+export const buildUntapChoiceWaitingFor = (
+  overrides: Partial<UntapChoiceWaitingFor> = {},
+): UntapChoiceWaitingFor => {
+  return untapChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export const pendingCastFactory = Factory.define<PendingCast>(() => ({
@@ -357,6 +372,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
 
   manaPayment(player: PlayerId = 0) {
     return this.variant(manaPaymentWaitingForFactory.forPlayer(player).build());
+  }
+
+  untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
+    return this.variant(untapChoiceWaitingForFactory.withData(data).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
@@ -596,6 +615,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   manaPayment(player: PlayerId = 0) {
     return this.waitingFor(waitingForFactory.manaPayment(player).build());
+  }
+
+  untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.untapChoice(data).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {

@@ -586,9 +586,9 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
-                    provenance: None,
+                    provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
                 };
-                crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
+                crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
             }
             state.last_created_token_ids.push(object_id);
             true

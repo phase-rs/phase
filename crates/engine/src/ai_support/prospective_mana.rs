@@ -11,7 +11,10 @@ use std::cmp::Ordering;
 use crate::ai_support::{
     validated_candidate_actions_for_semantic_owner, CandidateAction, TacticalClass,
 };
-use crate::game::engine::apply_interaction_for_simulation;
+use crate::game::engine::{
+    apply_actionless_priority_pass_for_prospective, apply_interaction_for_prospective_simulation,
+    apply_interaction_for_simulation, ProspectiveSimulationOutcome,
+};
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,
@@ -21,11 +24,10 @@ use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{
-    DelayedTriggerProvenance, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TriggerFiring,
+    DelayedTriggerOrigin, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TriggerFiring,
 };
 use crate::types::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use crate::types::player::PlayerId;
-use crate::types::resolved_commands::ResolvedRulesCommand;
 use crate::types::zones::Zone;
 
 /// The one supported prospective route request. `cast` is a pre-existing hand
@@ -111,7 +113,7 @@ pub struct CertifiedPactPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PactReceipt {
-    provenance: DelayedTriggerProvenance,
+    provenance: DelayedTriggerOrigin,
     payer: PlayerId,
     source_id: ObjectId,
 }
@@ -166,24 +168,26 @@ impl CertifiedPactPlan {
             return PactPlanState::Dormant;
         }
         if state.delayed_triggers.iter().any(|trigger| {
-            trigger.provenance == Some(self.receipt.provenance)
+            trigger.provenance.origin() == Some(self.receipt.provenance)
                 && trigger.controller == self.receipt.payer
                 && trigger.source_id == self.receipt.source_id
+        }) || state.deferred_triggers.iter().any(|trigger| {
+            trigger.firing() == TriggerFiring::ReceiptEligible(self.receipt.provenance)
         }) || state.pending_trigger_order.as_ref().is_some_and(|order| {
             order.groups.iter().any(|group| {
                 group.triggers.iter().any(|trigger| {
-                    trigger.firing == TriggerFiring::Delayed(Some(self.receipt.provenance))
+                    trigger.firing == TriggerFiring::ReceiptEligible(self.receipt.provenance)
                 })
             })
         }) || state.pending_trigger_firing
-            == Some(TriggerFiring::Delayed(Some(self.receipt.provenance)))
+            == Some(TriggerFiring::ReceiptEligible(self.receipt.provenance))
             || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
                 && state.resolving_trigger_firing
-                    == Some(TriggerFiring::Delayed(Some(self.receipt.provenance))))
+                    == Some(TriggerFiring::ReceiptEligible(self.receipt.provenance)))
             || state
                 .stack_trigger_firings
                 .values()
-                .any(|firing| *firing == TriggerFiring::Delayed(Some(self.receipt.provenance)))
+                .any(|firing| *firing == TriggerFiring::ReceiptEligible(self.receipt.provenance))
         {
             PactPlanState::Dormant
         } else {
@@ -192,9 +196,9 @@ impl CertifiedPactPlan {
     }
 }
 
-/// Derive a Pact certificate only from the exact delayed-trigger-install
-/// journal command produced by reducing this root, then confirm that the live
-/// delayed trigger carries the same private provenance.
+/// Derive a Pact certificate from the exact delayed-install observation emitted
+/// by each successful frozen reducer boundary, then confirm the matching live
+/// delayed trigger still carries that private provenance.
 pub fn certify_pact_plan(state: &GameState, root: &CandidateAction) -> Option<CertifiedPactPlan> {
     let GameAction::CastSpell { object_id, .. } = root.action else {
         return None;
@@ -206,19 +210,22 @@ pub fn certify_pact_plan(state: &GameState, root: &CandidateAction) -> Option<Ce
     if frozen.tactical_class != TacticalClass::Spell {
         return None;
     }
-    let journal_start = state.resolved_rules_journal.entries().len();
     let mut projected = state.clone();
-    let events = frozen.clone().apply(&mut projected).ok()?;
-    if draws_are_opaque(&projected, &events) {
+    let outcome = frozen.clone().apply_with_lifecycle(&mut projected).ok()?;
+    if draws_are_opaque(&projected, &outcome.action.events) {
         return None;
     }
-    let receipt = advance_pact_to_install(
-        &mut projected,
-        frozen.semantic_owner,
-        object_id,
-        journal_start,
-    )?;
-    pact_payment_survives(&mut projected, frozen.semantic_owner, receipt).then(|| {
+    let mut budget = ProspectiveBudget::default();
+    let receipt = receipt_installed_by(&projected, object_id, frozen.semantic_owner, &outcome)
+        .or_else(|| {
+            advance_pact_to_install(
+                &mut projected,
+                frozen.semantic_owner,
+                object_id,
+                &mut budget,
+            )
+        })?;
+    pact_payment_survives(&mut projected, frozen.semantic_owner, receipt, &mut budget).then(|| {
         CertifiedPactPlan {
             root: frozen,
             receipt,
@@ -299,8 +306,12 @@ fn delayed_trigger_is_mandatory_mana_payment_or_loss_definition(
 /// is installed. The engine owns Pact's resolution-time mana payment: it
 /// auto-taps legal sources and either completes the mandatory payment or takes
 /// the loss branch without exposing a `ManaPayment` interaction to the AI.
-fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactReceipt) -> bool {
-    let mut observed_receipt = false;
+fn pact_payment_survives(
+    state: &mut GameState,
+    owner: PlayerId,
+    receipt: PactReceipt,
+    budget: &mut ProspectiveBudget,
+) -> bool {
     for _ in 0..PROSPECTIVE_MAX_PACT_TRANSITIONS {
         if let WaitingFor::GameOver { winner } = &state.waiting_for {
             // CR 104.2: a completed game is a successful prospective terminal
@@ -319,30 +330,17 @@ fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactRe
             // group is a strategic choice even while another group is prompted.
             return false;
         }
-        let receipt_is_live = pact_receipt_is_live(state, receipt);
-        observed_receipt |= receipt_is_live;
-        if observed_receipt && !receipt_is_live && pact_payment_completed(state, owner, receipt) {
-            return true;
-        }
         match &state.waiting_for {
             WaitingFor::Priority { player } => {
-                let player = *player;
-                let candidates = frozen_candidates(state, player);
-                if player != owner
-                    && candidates
-                        .iter()
-                        .any(|candidate| !matches!(candidate.action, GameAction::PassPriority))
-                {
-                    return false;
-                }
-                let Some(pass) = candidates
-                    .iter()
-                    .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
-                    .and_then(|candidate| FrozenCandidate::capture(state, candidate))
-                else {
+                let Some(outcome) = advance_priority_for_route(state, owner, *player) else {
                     return false;
                 };
-                if pass.apply(state).is_err() {
+                if outcome.receipt_finished_normally(receipt.provenance)
+                    && pact_payment_completed(state, owner, receipt)
+                {
+                    return true;
+                }
+                if outcome.receipt_terminalized(receipt.provenance) {
                     return false;
                 }
             }
@@ -361,11 +359,21 @@ fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactRe
                 if order_candidates.len() != 1 {
                     return false;
                 }
-                let action = FrozenCandidate::capture(state, &order_candidates[0]);
-                let Some(action) = action else {
+                let Some(action) = FrozenCandidate::capture(state, &order_candidates[0]) else {
                     return false;
                 };
-                if action.apply(state).is_err() {
+                let Some(permit) = budget.issue_forced_progress(action) else {
+                    return false;
+                };
+                let Ok(outcome) = permit.apply(state) else {
+                    return false;
+                };
+                if outcome.receipt_finished_normally(receipt.provenance)
+                    && pact_payment_completed(state, owner, receipt)
+                {
+                    return true;
+                }
+                if outcome.receipt_terminalized(receipt.provenance) {
                     return false;
                 }
             }
@@ -399,7 +407,15 @@ fn pact_payment_survives(state: &mut GameState, owner: PlayerId, receipt: PactRe
                 else {
                     return false;
                 };
-                if action.apply(state).is_err() {
+                let Ok(outcome) = action.apply_with_lifecycle(state) else {
+                    return false;
+                };
+                if outcome.receipt_finished_normally(receipt.provenance)
+                    && pact_payment_completed(state, owner, receipt)
+                {
+                    return true;
+                }
+                if outcome.receipt_terminalized(receipt.provenance) {
                     return false;
                 }
             }
@@ -425,68 +441,46 @@ fn pact_payment_completed(state: &GameState, owner: PlayerId, receipt: PactRecei
             .any(|entry| entry.source_id == receipt.source_id)
 }
 
-fn pact_receipt_is_live(state: &GameState, receipt: PactReceipt) -> bool {
-    state.delayed_triggers.iter().any(|trigger| {
-        trigger.provenance == Some(receipt.provenance)
-            && trigger.controller == receipt.payer
-            && trigger.source_id == receipt.source_id
-    }) || state.pending_trigger_order.as_ref().is_some_and(|order| {
-        order.groups.iter().any(|group| {
-            group
-                .triggers
-                .iter()
-                .any(|trigger| trigger.firing == TriggerFiring::Delayed(Some(receipt.provenance)))
-        })
-    }) || state.pending_trigger_firing == Some(TriggerFiring::Delayed(Some(receipt.provenance)))
-        || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
-            && matches!(
-                state.resolving_trigger_firing,
-                Some(TriggerFiring::Delayed(Some(provenance))) if provenance == receipt.provenance
-            ))
-        || state
-            .stack_trigger_firings
-            .values()
-            .any(|firing| *firing == TriggerFiring::Delayed(Some(receipt.provenance)))
+/// Advance a real priority pass during a reducer-certified prospective route.
+/// The route owner may deliberately choose their own ordinary pass through the
+/// existing candidate/boundary path. A non-owner's pass is never candidate
+/// forced: it must be admitted by the engine's complete actionless preflight.
+fn advance_priority_for_route(
+    state: &mut GameState,
+    route_owner: PlayerId,
+    holder: PlayerId,
+) -> Option<ProspectiveSimulationOutcome> {
+    if holder != route_owner {
+        return apply_actionless_priority_pass_for_prospective(state).ok();
+    }
+    let pass = frozen_candidates(state, holder)
+        .into_iter()
+        .find(|candidate| matches!(candidate.action, GameAction::PassPriority))?;
+    FrozenCandidate::capture(state, &pass)?
+        .apply_with_lifecycle(state)
+        .ok()
 }
 
 fn advance_pact_to_install(
     state: &mut GameState,
     owner: PlayerId,
     source_id: ObjectId,
-    journal_start: usize,
+    budget: &mut ProspectiveBudget,
 ) -> Option<PactReceipt> {
     let mut priority_beats = 0;
-    let mut forced_transitions = 0;
     while priority_beats < PROSPECTIVE_MAX_PRIORITY_BEATS {
-        if let Some(receipt) = pact_receipt_since(state, source_id, owner, journal_start) {
-            return Some(receipt);
-        }
         match &state.waiting_for {
             WaitingFor::Priority { player } => {
-                let player = *player;
-                let candidates = frozen_candidates(state, player);
-                if player != owner
-                    && candidates
-                        .iter()
-                        .any(|candidate| !matches!(candidate.action, GameAction::PassPriority))
-                {
+                let outcome = advance_priority_for_route(state, owner, *player)?;
+                if draws_are_opaque(state, &outcome.action.events) {
                     return None;
                 }
-                let pass = candidates
-                    .into_iter()
-                    .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
-                    .and_then(|candidate| FrozenCandidate::capture(state, &candidate))?;
-                let events = pass.apply(state).ok()?;
-                if draws_are_opaque(state, &events) {
-                    return None;
+                if let Some(receipt) = receipt_installed_by(state, source_id, owner, &outcome) {
+                    return Some(receipt);
                 }
                 priority_beats += 1;
             }
             waiting if waiting.acting_player() == Some(owner) => {
-                if forced_transitions == PROSPECTIVE_MAX_FORCED_TRANSITIONS {
-                    return None;
-                }
-                forced_transitions += 1;
                 let mut continuations =
                     frozen_candidates(state, owner)
                         .into_iter()
@@ -501,56 +495,58 @@ fn advance_pact_to_install(
                     return None;
                 }
                 let continuation = FrozenCandidate::capture(state, &continuation)?;
-                let events = continuation.apply(state).ok()?;
-                if draws_are_opaque(state, &events) {
+                let permit = budget.issue_forced_progress(continuation)?;
+                let outcome = permit.apply(state).ok()?;
+                if draws_are_opaque(state, &outcome.action.events) {
                     return None;
+                }
+                if let Some(receipt) = receipt_installed_by(state, source_id, owner, &outcome) {
+                    return Some(receipt);
                 }
             }
             _ => return None,
         }
     }
-    pact_receipt_since(state, source_id, owner, journal_start)
+    None
 }
 
-fn pact_receipt_since(
+fn receipt_installed_by(
     state: &GameState,
     source_id: ObjectId,
     payer: PlayerId,
-    journal_start: usize,
+    outcome: &ProspectiveSimulationOutcome,
 ) -> Option<PactReceipt> {
-    state
-        .resolved_rules_journal
-        .entries()
-        .iter()
-        .skip(journal_start)
-        .filter_map(|entry| entry.command.as_ref())
-        .filter_map(|command| match command {
-            ResolvedRulesCommand::DelayedTriggerInstall(command) => Some(command),
-            _ => None,
-        })
-        .find_map(|command| {
-            let trigger = &command.trigger;
-            let provenance = trigger.provenance?;
-            (command.token == provenance.token
-                && trigger.source_id == source_id
-                && provenance.source_id == source_id
-                && trigger.controller == payer
-                && trigger.one_shot
-                && matches!(
-                    &trigger.condition,
-                    DelayedTriggerCondition::AtNextPhaseForPlayer {
-                        phase: crate::types::phase::Phase::Upkeep,
-                        player,
-                        ..
-                    } if *player == payer
-                )
-                && delayed_trigger_is_mandatory_mana_payment_or_loss(&trigger.ability))
-            .then_some(PactReceipt {
-                provenance,
-                payer,
-                source_id,
-            })
-        })
+    if !outcome.has_outer_lifecycle_facts() {
+        return None;
+    }
+    outcome.delayed_installations().find_map(
+        |(provenance, installed_source, installed_controller)| {
+            state
+                .delayed_triggers
+                .iter()
+                .find(|trigger| {
+                    trigger.provenance.origin() == Some(provenance)
+                        && trigger.source_id == source_id
+                        && trigger.controller == payer
+                        && trigger.one_shot
+                        && matches!(
+                            &trigger.condition,
+                            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                                phase: crate::types::phase::Phase::Upkeep,
+                                player,
+                                ..
+                            } if *player == payer
+                        )
+                        && delayed_trigger_is_mandatory_mana_payment_or_loss(&trigger.ability)
+                })
+                .filter(|_| installed_source == source_id && installed_controller == payer)
+                .map(|_| PactReceipt {
+                    provenance,
+                    payer,
+                    source_id,
+                })
+        },
+    )
 }
 
 fn delayed_trigger_is_mandatory_mana_payment_or_loss(
@@ -613,9 +609,7 @@ const PROSPECTIVE_MAX_PRIORITY_BEATS: usize = 2;
 const PROSPECTIVE_MAX_PACT_TRANSITIONS: usize = 96;
 const PROSPECTIVE_MAX_PAYMENT_APPLICATIONS: usize = 64;
 const PROSPECTIVE_MAX_SEARCH_BRANCHES: usize = 12;
-// Kept private because forced actionless progress is not yet part of the
-// fetch grammar.  A future route may consume it only through the engine-owned
-// one-unit transition seam, never by invoking `auto_advance` directly.
+// Only a fully bound, deterministic continuation can consume this allowance.
 const PROSPECTIVE_MAX_FORCED_TRANSITIONS: usize = 16;
 
 impl Default for ProspectiveManaDecision {
@@ -632,8 +626,15 @@ struct ProspectiveBudget {
     strategic_actions_remaining: usize,
     priority_beats_remaining: usize,
     payment_applications_remaining: usize,
-    #[allow(dead_code)]
     forced_transitions_remaining: usize,
+}
+
+/// A move-only grant to apply one already captured deterministic continuation.
+/// It is issued only after candidate selection has proved that no player choice
+/// remains; the grant owns that exact capability and burns its budget on issue.
+#[derive(Debug)]
+struct ForcedProgressPermit {
+    continuation: FrozenCandidate,
 }
 
 impl Default for ProspectiveBudget {
@@ -644,6 +645,25 @@ impl Default for ProspectiveBudget {
             payment_applications_remaining: PROSPECTIVE_MAX_PAYMENT_APPLICATIONS,
             forced_transitions_remaining: PROSPECTIVE_MAX_FORCED_TRANSITIONS,
         }
+    }
+}
+
+impl ProspectiveBudget {
+    fn issue_forced_progress(
+        &mut self,
+        continuation: FrozenCandidate,
+    ) -> Option<ForcedProgressPermit> {
+        if self.forced_transitions_remaining == 0 {
+            return None;
+        }
+        self.forced_transitions_remaining -= 1;
+        Some(ForcedProgressPermit { continuation })
+    }
+}
+
+impl ForcedProgressPermit {
+    fn apply(self, state: &mut GameState) -> Result<ProspectiveSimulationOutcome, ()> {
+        self.continuation.apply_with_lifecycle(state)
     }
 }
 
@@ -746,6 +766,29 @@ impl FrozenCandidate {
             self.action,
         )
         .map(|result| result.events)
+        .map_err(|_| ())
+    }
+
+    fn apply_with_lifecycle(
+        self,
+        state: &mut GameState,
+    ) -> Result<ProspectiveSimulationOutcome, ()> {
+        if !self.capability.matches(state) {
+            return Err(());
+        }
+        let current = frozen_candidates(state, self.semantic_owner);
+        if !current
+            .iter()
+            .any(|candidate| self.matches_candidate(candidate))
+        {
+            return Err(());
+        }
+        apply_interaction_for_prospective_simulation(
+            state,
+            self.authenticated_actor,
+            self.semantic_owner,
+            self.action,
+        )
         .map_err(|_| ())
     }
 }
@@ -1063,31 +1106,18 @@ fn advance_fetch_to_search(
                 owner,
             }));
         }
-        let WaitingFor::Priority { player } = state.waiting_for else {
-            return ProspectiveManaResult::Indeterminate;
+        let holder = match &state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            _ => return ProspectiveManaResult::Indeterminate,
         };
         if budget.priority_beats_remaining == 0 {
             return ProspectiveManaResult::Indeterminate;
         }
-        let candidates = frozen_candidates(state, player);
-        let mut non_pass = candidates
-            .iter()
-            .filter(|candidate| !matches!(candidate.action, GameAction::PassPriority));
-        if player != owner && non_pass.next().is_some() {
-            return ProspectiveManaResult::Indeterminate;
-        }
-        let Some(pass) = candidates
-            .into_iter()
-            .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
-            .and_then(|candidate| FrozenCandidate::capture(state, &candidate))
-        else {
+        let Some(outcome) = advance_priority_for_route(state, owner, holder) else {
             return ProspectiveManaResult::Indeterminate;
         };
         budget.priority_beats_remaining -= 1;
-        let Ok(events) = pass.apply(state) else {
-            return ProspectiveManaResult::Indeterminate;
-        };
-        if draws_are_opaque(state, &events) {
+        if draws_are_opaque(state, &outcome.action.events) {
             return ProspectiveManaResult::Indeterminate;
         }
     }
@@ -1209,7 +1239,25 @@ fn draws_are_opaque(state: &GameState, events: &[GameEvent]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProspectiveManaDecision, PROSPECTIVE_MAX_SEARCH_BRANCHES};
+    use super::{
+        advance_priority_for_route, CertifiedPactPlan, FrozenCandidate, PactPlanState, PactReceipt,
+        ProspectiveBudget, ProspectiveManaDecision, StateCapabilityBinding,
+        PROSPECTIVE_MAX_SEARCH_BRANCHES,
+    };
+    use crate::ai_support::TacticalClass;
+    use crate::game::engine::apply_actionless_priority_pass_for_prospective;
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+    use crate::game::zones;
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::{
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
+    };
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     #[test]
     fn terminal_search_branches_share_the_precharged_route_allowance_but_not_each_other() {
@@ -1232,5 +1280,168 @@ mod tests {
             assert!(decision.terminal_branch_budget().is_some());
         }
         assert!(decision.terminal_branch_budget().is_none());
+    }
+
+    #[test]
+    fn forced_progress_permit_burns_its_budget_before_a_stale_apply_fails() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let candidate = |state: &GameState| FrozenCandidate {
+            action: GameAction::PassPriority,
+            semantic_owner: player,
+            authenticated_actor: player,
+            tactical_class: TacticalClass::Selection,
+            capability: StateCapabilityBinding::capture(state, player)
+                .expect("a complete state yields a capability binding"),
+        };
+        let mut budget = ProspectiveBudget {
+            forced_transitions_remaining: 1,
+            ..Default::default()
+        };
+
+        let permit = budget
+            .issue_forced_progress(candidate(&state))
+            .expect("the final allowance issues one bound permit");
+        assert_eq!(budget.forced_transitions_remaining, 0);
+        state.state_revision += 1;
+
+        assert!(
+            permit.apply(&mut state).is_err(),
+            "a capability change blocks the already-issued continuation"
+        );
+        assert!(
+            budget.issue_forced_progress(candidate(&state)).is_none(),
+            "a failed post-issue apply still burns the one forced-transition allowance"
+        );
+    }
+
+    #[test]
+    fn actionless_pact_priority_pass_uses_the_normal_interaction_boundary() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let outcome = apply_actionless_priority_pass_for_prospective(&mut state)
+            .expect("an actionless Priority window can take its normal pass route");
+
+        assert!(matches!(
+            outcome.action.waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_ne!(state.priority_player, player);
+    }
+
+    #[test]
+    fn pact_plan_remains_dormant_while_matching_trigger_is_deferred() {
+        let payer = PlayerId(0);
+        let source = ObjectId(99);
+        let provenance = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(7),
+            instance: DelayedTriggerInstanceId(11),
+            source_id: source,
+        };
+        let mut state = GameState::new_two_player(42);
+        let plan = CertifiedPactPlan {
+            root: FrozenCandidate {
+                action: GameAction::PassPriority,
+                semantic_owner: payer,
+                authenticated_actor: payer,
+                tactical_class: TacticalClass::Selection,
+                capability: StateCapabilityBinding::capture(&state, payer)
+                    .expect("a complete state yields a capability binding"),
+            },
+            receipt: PactReceipt {
+                provenance,
+                payer,
+                source_id: source,
+            },
+        };
+        let pending = PendingTrigger::ordinary(
+            source,
+            payer,
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                payer,
+            )),
+            state.turn_number,
+        );
+        state
+            .deferred_triggers
+            .push(PendingTriggerContext::delayed_for_test(pending, provenance));
+
+        assert_eq!(plan.state_for(&state, payer), PactPlanState::Dormant);
+    }
+
+    #[test]
+    fn route_owner_may_submit_its_own_normal_pass_without_forcing_an_opponent() {
+        let owner = PlayerId(0);
+        let opponent = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = owner;
+        state.priority_player = owner;
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player: owner };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[owner.0 as usize].hand.push_back(land);
+
+        let outcome = advance_priority_for_route(&mut state, owner, owner)
+            .expect("the route owner may make its normal PassPriority decision");
+
+        assert!(matches!(
+            outcome.action.waiting_for,
+            WaitingFor::Priority { player } if player == opponent
+        ));
+        assert_eq!(state.priority_player, opponent);
+    }
+
+    #[test]
+    fn route_never_forces_an_opponents_actionable_priority_window() {
+        let owner = PlayerId(1);
+        let opponent = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.active_player = opponent;
+        state.priority_player = opponent;
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player: opponent };
+        let land = zones::create_object(
+            &mut state,
+            CardId(1),
+            opponent,
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("new hand object exists")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[opponent.0 as usize].hand.push_back(land);
+        let before = state.clone();
+
+        assert!(advance_priority_for_route(&mut state, owner, opponent).is_none());
+        assert_eq!(state, before);
     }
 }

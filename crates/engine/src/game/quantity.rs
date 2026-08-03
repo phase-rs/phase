@@ -11,7 +11,8 @@ use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
-    spell_record_matches_filter, type_filter_matches, FilterContext,
+    shared_quality_characteristic_reads, spell_record_matches_filter,
+    target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -996,6 +997,267 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
+    }
+}
+
+/// CR 613.1: Which layer-writable characteristic kinds does this magnitude read?
+///
+/// Structural twin of `quantity_expr_uses_object_count`: that predicate answers
+/// "can board MEMBERSHIP change this magnitude"; this one answers "which
+/// layer-writable CHARACTERISTICS does it read". Both are needed — a count of
+/// tapped permanents is population-sensitive but reads no layer-written kind.
+pub(crate) fn quantity_expr_characteristic_reads_at(
+    expr: &QuantityExpr,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match expr {
+        QuantityExpr::Fixed { .. } => CharacteristicKinds::EMPTY,
+        QuantityExpr::Ref { qty } => quantity_ref_characteristic_reads(qty, depth),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            quantity_expr_characteristic_reads_at(inner, depth)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().fold(CharacteristicKinds::EMPTY, |acc, e| {
+                if acc.is_all() {
+                    acc
+                } else {
+                    acc.union(quantity_expr_characteristic_reads_at(e, depth))
+                }
+            })
+        }
+        QuantityExpr::UpTo { max } => quantity_expr_characteristic_reads_at(max, depth),
+        QuantityExpr::Power { exponent, .. } => {
+            quantity_expr_characteristic_reads_at(exponent, depth)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_characteristic_reads_at(left, depth)
+                .union(quantity_expr_characteristic_reads_at(right, depth))
+        }
+    }
+}
+
+/// CR 613.1: Leaf classification for [`quantity_expr_characteristic_reads_at`].
+/// EXHAUSTIVE and wildcard-free over `QuantityRef`, arm-for-arm with
+/// `quantity_ref_uses_object_count`, so a new variant forces both decisions.
+///
+/// Two payload rules apply on top of each arm's intrinsic reads:
+/// 1. every arm whose count is taken over a LIVE object filter recurses into
+///    that filter, because the filter's own predicates read characteristics;
+/// 2. every arm carrying a `ControllerRef` unions
+///    [`CharacteristicKinds::CONTROLLER`], because CR 613.1b can move objects
+///    across the scope the reference is asking about.
+///
+/// Arms that read a FROZEN per-turn history record (sacrificed / attacked /
+/// zone-change / damage / token-creation journals) read no live characteristic:
+/// those records store the object's characteristics as of the recorded event, so
+/// no later layer write can change the tally. They classify EMPTY, and their
+/// embedded filters are deliberately NOT recursed.
+fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> CharacteristicKinds {
+    match qty {
+        // ---- Live object censuses: recurse the counted filter. ----
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        // CR 403.3: the tally is a per-turn journal, but its filter is matched
+        // against LIVE objects, so the filter's reads count.
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        // CR 122.1: counter kinds are not layer-written; only the filter reads.
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 608.2c: tracked-set members are addressed by identity and matched live.
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 201.2 + CR 603.4: dedupe key is a characteristic read of its own.
+        QuantityRef::ObjectCountDistinct { filter, qualities } => qualities
+            .iter()
+            .fold(
+                target_filter_characteristic_reads_at(filter, depth),
+                |acc, q| acc.union(shared_quality_characteristic_reads(q)),
+            ),
+        // CR 109.3 + CR 205.3m: grouping key is a characteristic read.
+        QuantityRef::ObjectCountBySharedQuality {
+            filter, quality, ..
+        } => target_filter_characteristic_reads_at(filter, depth)
+            .union(shared_quality_characteristic_reads(quality)),
+        // CR 202.3: aggregated object property plus the scanned filter.
+        QuantityRef::Aggregate {
+            property, filter, ..
+        } => object_property_characteristic_reads(property)
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 109.5 + CR 613.1b: per-player partition of a live census.
+        QuantityRef::ControlledByEachPlayer { filter, .. } => CharacteristicKinds::CONTROLLER
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 106.1 + CR 109.1: distinct colors over a live census.
+        QuantityRef::DistinctColorsAmongPermanents { filter } => CharacteristicKinds::COLOR
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 205.2a / CR 205.3: the object-filter source scans live objects; the
+        // zone / linked-exile / tracked-set sources do not read a live filter.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. } => {
+            CharacteristicKinds::CARD_TYPES.union(match source {
+                CardTypeSetSource::Objects { filter, .. } => {
+                    target_filter_characteristic_reads_at(filter, depth)
+                }
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
+            })
+        }
+        // CR 604.3: a zone census, filtered by typeline and by an optional
+        // filter, scoped by controller.
+        QuantityRef::ZoneCardCount {
+            card_types, filter, ..
+        } => {
+            let mut kinds = CharacteristicKinds::CONTROLLER;
+            if !card_types.is_empty() {
+                kinds = kinds.union(CharacteristicKinds::CARD_TYPES);
+            }
+            filter.as_ref().map_or(kinds, |f| {
+                kinds.union(target_filter_characteristic_reads_at(f, depth))
+            })
+        }
+        // CR 700.8: party reads Cleric/Rogue/Warrior/Wizard creature types among
+        // the scoped player's creatures — CR 702.73a Changeling applies.
+        QuantityRef::PartySize { .. } => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
+        // CR 305.6: distinct basic land types among the referenced player's
+        // lands. Carries a `ControllerRef` (payload rule 2).
+        QuantityRef::BasicLandTypeCount { .. } => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 700.5: devotion counts mana symbols in the mana costs of the
+        // permanents the scoped player controls.
+        QuantityRef::Devotion { .. } => {
+            CharacteristicKinds::MANA_COST.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 903.3d: mana value of a commander, scoped by a `ControllerRef`.
+        QuantityRef::CommanderManaValue { .. } => {
+            CharacteristicKinds::MANA_COST.union(CharacteristicKinds::CONTROLLER)
+        }
+
+        // ---- Single-object characteristic reads. ----
+        // CR 208.1 / CR 209.1.
+        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => {
+            CharacteristicKinds::POWER_TOUGHNESS
+        }
+        // CR 607.2b: power of a card in exile, read the same way.
+        QuantityRef::ExiledCardPower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
+        // CR 202.3 / CR 107.4a.
+        QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue => CharacteristicKinds::MANA_COST,
+        // CR 202.3 + CR 115.1: mana value of the object chosen for this ref's own
+        // target slot, whose candidates are `filter`.
+        QuantityRef::TargetObjectManaValue { filter } => CharacteristicKinds::MANA_COST
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 105.1 + CR 105.2.
+        QuantityRef::ObjectColorCount { .. } => CharacteristicKinds::COLOR,
+        // CR 201.1 + CR 201.2.
+        QuantityRef::ObjectNameWordCount { .. } => CharacteristicKinds::NAME_TEXT,
+        // CR 205.4a + CR 205.2a + CR 205.3: supertypes + card types + subtypes.
+        QuantityRef::ObjectTypelineComponentCount { .. } => CharacteristicKinds::CARD_TYPES,
+        // CR 608.2c: aggregates an object property over an identity-addressed set.
+        QuantityRef::TrackedSetAggregate { property, .. } => {
+            object_property_characteristic_reads(property)
+        }
+        // CR 122.1f + CR 109.4: reads the controller of the parent target.
+        QuantityRef::TargetControllerCounter { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
+        // by a `ControllerRef` (payload rule 2).
+        QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+
+        // ---- Reads no layer-writable characteristic. ----
+        // Player-level totals, counters (CR 122.1 — counters are not
+        // characteristics), payments, choices, and the FROZEN per-turn /
+        // per-game history journals described in the doc comment. Enumerated
+        // explicitly (no wildcard).
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        // Digital-only Alchemy counter-like value; no layer writes it.
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        // CR 117.1: spell-cast journals store each spell's cast-time
+        // characteristics.
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        // CR 701.16a: sacrifice-time characteristics.
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        // CR 400.7 + CR 700.4: zone-change records store last-known information.
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        // CR 120.1: damage records store the amount actually dealt.
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        // CR 508.1: declaration-time attacker snapshots.
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        // CR 122.1: counter-addition journal.
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        // CR 111.2: creation-time token characteristics.
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        // CR 903.4: color identity is fixed by the printed card.
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::VoteCount { .. } => CharacteristicKinds::EMPTY,
+    }
+}
+
+/// CR 208.1 + CR 209.1 + CR 202.3 + CR 107.4a: which characteristic an
+/// aggregated object property reads.
+fn object_property_characteristic_reads(property: &ObjectProperty) -> CharacteristicKinds {
+    match property {
+        ObjectProperty::Power | ObjectProperty::Toughness => CharacteristicKinds::POWER_TOUGHNESS,
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            CharacteristicKinds::MANA_COST
+        }
     }
 }
 

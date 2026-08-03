@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
+import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -25,9 +26,9 @@ import { OpponentSeatPane } from "./OpponentSeatPane.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 import { PlanechasePanel } from "./PlanechasePanel.tsx";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 
 interface GameBoardProps {
+  effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
   showOpponentCards?: boolean;
@@ -36,6 +37,7 @@ interface GameBoardProps {
 }
 
 export const GameBoard = memo(function GameBoard({
+  effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
   showOpponentCards = false,
@@ -46,7 +48,6 @@ export const GameBoard = memo(function GameBoard({
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const localPlayerId = usePlayerId();
   const myId = usePerspectivePlayerId();
@@ -76,7 +77,7 @@ export const GameBoard = memo(function GameBoard({
       ]),
     );
   }, [gameState, opponents]);
-  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, getSeatCount(gameState));
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, getSeatCount(gameState));
 
   const sortedPlayerCreatures = useMemo(() => {
     if (splitBoardActive || !focusedBattlefieldView) return undefined;

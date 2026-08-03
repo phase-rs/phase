@@ -5474,6 +5474,11 @@ fn build_create_trigger_until(
     Ok(Effect::CreateDelayedTrigger {
         condition: DelayedTriggerCondition::WheneverEvent {
             trigger: Box::new(trigger_def),
+            // CR 603.7b: only `Expiration::UntilEndOfTurn` reaches here (others
+            // strict-fail above), so the trigger ends at cleanup — the default
+            // `EndOfTurn` expiry. Mapping other mtgish expirations onto the new
+            // `UntilControllersNextTurn` slot is deferred mtgish-coverage work.
+            expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
         },
         effect: Box::new(body_ability),
         uses_tracked_set: false,

@@ -12,7 +12,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
 import {
@@ -82,6 +82,8 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "HarmonizeTapChoice":
     case "KeepWithinTotalPowerChoice":
     case "KeepExactPermanentsChoice":
+    case "UntapChoice":
+    case "ChooseUntapSubset":
       return waitingFor.data.player;
     default:
       return null;
@@ -98,6 +100,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const [pickerOpen, setPickerOpen] = useState(false);
   const collapsedAnchorRef = useRef<HTMLDivElement | null>(null);
   const playerId = usePlayerId();
+  const canActForWaitingState = useCanActForWaitingState();
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const combatMode = useUiStore((s) => s.combatMode);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
@@ -127,15 +130,16 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
   const pickerContext = useMemo<PickerContext | null>(() => {
     if (renderMode !== "collapsed") return null;
-    if (waitingForPlayer(waitingFor) !== playerId) return null;
 
     const boardChoice = getBoardChoiceView(waitingFor, gameObjects);
-    if (boardChoice) {
+    if (boardChoice && canActForWaitingState) {
       const eligibleIds = group.ids.filter((id) => boardChoiceObjectIds.has(id));
       return eligibleIds.length > 0
         ? { mode: "boardChoice", eligibleIds, choice: boardChoice }
         : null;
     }
+
+    if (waitingForPlayer(waitingFor) !== playerId) return null;
 
     if (combatMode === "attackers") {
       const eligibleIds = group.ids.filter((id) => validAttackerIds.has(id));
@@ -177,6 +181,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   }, [
     blockerAssignments,
     boardChoiceObjectIds,
+    canActForWaitingState,
     combatClickHandler,
     combatMode,
     gameObjects,
@@ -685,7 +690,7 @@ function BoardChoiceGroupControls({
       </div>
       <button
         type="button"
-        className="w-full rounded bg-sky-700 px-2 py-1 font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
+        className="w-full rounded bg-sky-700 px-2 py-1 font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-white/50"
         disabled={!canConfirm}
         onClick={() => {
           dispatchAction(buildBoardChoiceAction(choice, selectedForChoice));

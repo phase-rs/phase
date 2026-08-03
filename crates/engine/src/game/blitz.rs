@@ -48,6 +48,7 @@ pub(crate) fn install_blitz_riders(
     state: &mut GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    events: &mut Vec<crate::types::events::GameEvent>,
 ) {
     // CR 702.152a: the permanent gains haste. A transient continuous effect
     // scoped to this object (Layer 6 keyword grant) — present for as long as the
@@ -81,8 +82,9 @@ pub(crate) fn install_blitz_riders(
             controller,
             source_id: object_id,
             one_shot: true,
-            provenance: None,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
+        events,
     );
 }
 

@@ -42,6 +42,132 @@ fn setup_game_at_main_phase() -> GameState {
     state
 }
 
+#[test]
+fn play_land_rejects_an_occupied_stack() {
+    let mut state = setup_game_at_main_phase();
+    let land = create_object(
+        &mut state,
+        CardId(9_001),
+        PlayerId(0),
+        "Island".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&land)
+        .expect("new hand land exists")
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    state.stack.push_back(StackEntry {
+        id: ObjectId(9_002),
+        source_id: ObjectId(9_002),
+        controller: PlayerId(1),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(9_002),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: land,
+            card_id: CardId(9_001),
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "a land cannot be played with a stack entry"
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Hand);
+}
+
+#[test]
+fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(9_003),
+        PlayerId(1),
+        "Land Play Restriction".to_string(),
+        Zone::Battlefield,
+    );
+    let land = create_object(
+        &mut state,
+        CardId(9_004),
+        PlayerId(0),
+        "Exiled Island".to_string(),
+        Zone::Exile,
+    );
+    {
+        let land_object = state.objects.get_mut(&land).expect("new exile land exists");
+        land_object.card_types.core_types.push(CoreType::Land);
+        land_object
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::Permanent,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                invalidation: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            });
+    }
+    state.restrictions.push(GameRestriction::ProhibitActivity {
+        source,
+        affected_players: RestrictionPlayerScope::AllPlayers,
+        expiry: RestrictionExpiry::EndOfTurn,
+        activity: ProhibitedActivity::PlayLands { land_filter: None },
+    });
+
+    let principal = super::super::engine::priority_principal_for_preflight(&state)
+        .expect("the synchronized priority window has a principal");
+
+    assert!(
+        priority_play_land_announcements(&state, &principal).is_empty(),
+        "per-object land-play restrictions must apply to permission-granted exile lands"
+    );
+}
+
+#[test]
+fn priority_offers_an_opponents_ability_when_its_activator_filter_allows_it() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(9_005),
+        PlayerId(1),
+        "Publicly Activatable Permanent".to_string(),
+        Zone::Battlefield,
+    );
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    );
+    ability.activator_filter = Some(crate::types::ability::PlayerFilter::All);
+    Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+    let principal = super::super::engine::priority_principal_for_preflight(&state)
+        .expect("the synchronized priority window has a principal");
+
+    assert_eq!(
+        priority_activate_ability_announcements(&state, &principal).len(),
+        1,
+        "Priority must offer an ability to a player explicitly allowed to activate it"
+    );
+}
+
 fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
     let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
     for _ in 0..count {

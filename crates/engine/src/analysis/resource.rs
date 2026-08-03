@@ -2926,7 +2926,7 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
                 .get(&entry.id)
                 .copied()
                 .map(|firing| match firing {
-                    TriggerFiring::Delayed(Some(_)) => TriggerFiring::Delayed(None),
+                    TriggerFiring::ReceiptEligible(_) => TriggerFiring::LegacyDelayed,
                     firing => firing,
                 });
             let mut norm = entry.clone();
@@ -3844,7 +3844,7 @@ fn project_out_resources(state: &GameState) -> GameState {
         entry.id = canonical_id;
         if let Some(firing) = trigger_firings.remove(&original_id) {
             let firing = match firing {
-                TriggerFiring::Delayed(Some(_)) => TriggerFiring::Delayed(None),
+                TriggerFiring::ReceiptEligible(_) => TriggerFiring::LegacyDelayed,
                 firing => firing,
             };
             s.stack_trigger_firings.insert(canonical_id, firing);
@@ -4099,7 +4099,7 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
     use crate::types::identifiers::{
-        CardId, DelayedTriggerInstanceId, DelayedTriggerProvenance, DelayedTriggerToken,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::zones::Zone;
 
@@ -5014,11 +5014,11 @@ mod tests {
         a.stack.push_back(trigger_entry(10, 500, 0));
         a.stack_trigger_firings.insert(
             ObjectId(10),
-            TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+            TriggerFiring::ReceiptEligible(DelayedTriggerOrigin {
                 token: DelayedTriggerToken(1),
                 instance: DelayedTriggerInstanceId(1),
                 source_id: ObjectId(500),
-            })),
+            }),
         );
         let mut b = a.clone();
         b.stack.clear();
@@ -5026,11 +5026,11 @@ mod tests {
         b.stack_trigger_firings.remove(&ObjectId(10));
         b.stack_trigger_firings.insert(
             ObjectId(11),
-            TriggerFiring::Delayed(Some(DelayedTriggerProvenance {
+            TriggerFiring::ReceiptEligible(DelayedTriggerOrigin {
                 token: DelayedTriggerToken(2),
                 instance: DelayedTriggerInstanceId(2),
                 source_id: ObjectId(500),
-            })),
+            }),
         );
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
@@ -5324,7 +5324,7 @@ mod tests {
 
         current
             .stack_trigger_firings
-            .insert(ObjectId(21), TriggerFiring::Delayed(None));
+            .insert(ObjectId(21), TriggerFiring::LegacyDelayed);
         assert!(
             !loop_states_cover_modulo_growth(&prior, &current),
             "ordinary and delayed firing classes must not cover each other"
@@ -9076,10 +9076,11 @@ mod tests {
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
         let envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
-        let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-            .expect("the real 4p gameState must deserialize into the current GameState");
-        let state =
-            crate::types::game_state::PersistedGameState::Raw(Box::new(raw)).into_game_state();
+        let state = serde_json::from_value::<crate::types::game_state::PersistedGameState>(
+            envelope["gameState"].clone(),
+        )
+        .expect("the real 4p gameState restores through the persisted ingress")
+        .into_game_state();
 
         // ── reach-guards: the X4 subject really is present, in a never-cast-from zone ──
         let spear = state

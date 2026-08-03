@@ -286,6 +286,77 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("maps battlefield untap effects to board card selection", () => {
+    const choice = getBoardChoiceView({
+      type: "EffectZoneChoice",
+      data: {
+        player: 1,
+        cards: [10, 11],
+        count: 2,
+        min_count: 1,
+        up_to: true,
+        source_id: 9,
+        effect_kind: "Untap",
+        zone: "Battlefield",
+      },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 1, max: 2 },
+      response: { type: "SelectCards" },
+    });
+  });
+
+  it("maps capped untap subsets to a zero-to-max board selection", () => {
+    const choice = getBoardChoiceView({
+      type: "ChooseUntapSubset",
+      data: { player: 1, group: [10, 11], max: 1 },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "untap",
+      selection: { type: "rangeCount", min: 0, max: 1 },
+      response: { type: "SelectCards" },
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("maps an untap decision to the first candidate and typed choose action", () => {
+    const choice = getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [10, 11] },
+    });
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [10],
+      intent: "untap",
+      selection: { type: "single", immediate: true },
+      response: { type: "ChooseUntap", objectId: 10 },
+      skipAction: { type: "ChooseUntap", data: { object_id: 10, untap: false } },
+      skipLabel: "keepTapped",
+    });
+    expect(choice && buildBoardChoiceAction(choice, [10])).toEqual({
+      type: "ChooseUntap",
+      data: { object_id: 10, untap: true },
+    });
+  });
+
+  it("does not surface an empty untap decision", () => {
+    expect(getBoardChoiceView({
+      type: "UntapChoice",
+      data: { player: 1, candidates: [] },
+    })).toBeNull();
+  });
+
   it("builds CrewVehicle actions and gates by selected total power", () => {
     const choice = getBoardChoiceView({
       type: "CrewVehicle",

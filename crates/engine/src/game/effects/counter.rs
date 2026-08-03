@@ -127,9 +127,13 @@ pub fn resolve(
                 // CR 701.6a: the removal IS the counter, so it goes through the
                 // single CR 405.2 removal authority, which journals it and drops
                 // both per-entry side tables.
-                let removed = crate::game::stack::remove_stack_entry_at(state, idx)
-                    .expect("rposition yielded a live stack index")
-                    .entry;
+                let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+                )
+                .expect("rposition yielded a live stack index")
+                .entry;
                 let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                 // Aftermath, and Harmonize exile when leaving the stack for
@@ -364,9 +368,13 @@ pub fn resolve_all(
         // CR 701.6a: the removal IS the counter, so it goes through the single
         // CR 405.2 removal authority, which journals it and drops both
         // per-entry side tables.
-        let removed = crate::game::stack::remove_stack_entry_at(state, idx)
-            .expect("position yielded a live stack index")
-            .entry;
+        let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("position yielded a live stack index")
+        .entry;
         let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
