@@ -2,8 +2,15 @@
 //! variant before handler dispatch and broker projection clones.
 //!
 //! Individual handlers still run their guards for defense in depth; this layer
-//! guarantees a single exhaustive match so new variants must declare wire policy
+//! guarantees that every wire policy is declared in an exhaustive, wildcard-free
+//! match, so a new `ClientMessage` variant cannot compile until it states one,
 //! and broker-projected frames are bounded before `to_lobby_client_message` clones.
+//!
+//! Three such matches live here, one per policy axis:
+//! [`guard_client_message_before_dispatch`] (payload bounding),
+//! [`wire_rejection_message`] (which channel a rejection is answered on), and
+//! [`guard_broker_projection_inbound`] (broker projection). A new variant must
+//! declare a policy in all three.
 
 use lobby_broker::inbound_guard::{
     guard_create_game_settings_inbound, guard_join_game_with_password_inbound,
