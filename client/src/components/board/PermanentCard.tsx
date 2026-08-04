@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AbilityBlockKind, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import type { AbilityBlockKind, GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -37,8 +37,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import {
   collectObjectActions,
-  isManaObjectAction,
-  resolveSingleActionDispatch,
+  resolveObjectActivation,
 } from "../../viewmodel/cardActionChoice.ts";
 
 interface PermanentCardProps {
@@ -687,61 +686,58 @@ export const PermanentCard = memo(function PermanentCard({
       // from the engine's current legal-target set.
       showAttachmentFan();
     } else if (isActivatable) {
-      const o = useGameStore.getState().gameState?.objects[objectId];
-      // Read the engine-provided action list for this permanent — the mapping
-      // from GameAction variant to source permanent is owned by the engine
-      // (GameAction::source_object), not reconstructed here. Partitioning by
-      // effect type (Mana vs other) is a display concern: mana abilities route
-      // through the mana-tap UI; everything else routes through the ability
-      // choice modal or auto-dispatches.
-      const objectActions = collectObjectActions(
-        useGameStore.getState().legalActionsByObject,
+      // THE single authority for "what does a click on this bucket do"
+      // (viewmodel/cardActionChoice.ts). Owns the CR 605.1a mana/non-mana
+      // partition and the #506 confirmation gate; this site never re-derives it.
+      const store = useGameStore.getState();
+      const verdict = resolveObjectActivation(
+        collectObjectActions(store.legalActionsByObject, objectId),
+        store.gameState?.objects[objectId],
+        { activatableObjectIds, manaTappableObjectIds },
         objectId,
       );
-      const abilityActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
-      const manaActions: GameAction[] = [];
-      const keywordActions: GameAction[] = [];
-      for (const action of objectActions) {
-        if (isManaObjectAction(action, o)) {
-          manaActions.push(action);
-        } else if (action.type === "ActivateAbility") {
-          abilityActions.push(action);
-        } else {
-          // CR 113.3b keyword activations (Crew/Station/Equip/Saddle) and any
-          // future per-permanent action are surfaced alongside activated
-          // abilities in the choice modal.
-          keywordActions.push(action);
-        }
-      }
-      const manaChoiceNeeded = manaActions.length > 1;
-
-      const nonManaActions: GameAction[] = [...abilityActions, ...keywordActions];
-      if (nonManaActions.length === 0 && canTapForMana) {
-        if (manaChoiceNeeded) {
-          setPendingAbilityChoice({ objectId, actions: manaActions });
-        } else if (manaActions.length === 1) {
-          dispatchAction(manaActions[0]);
-        }
-      } else {
-        // #506: lone-action auto-dispatch is gated through
-        // resolveSingleActionDispatch so a card-consuming ActivateAbility
-        // surfaces the choice modal instead of auto-firing. This merges the
-        // former `nonManaActions.length === 1 && !canTapForMana` branch — when
-        // canTapForMana is false, allActions === nonManaActions, so a lone
-        // non-mana action reproduces that branch exactly.
-        const allActions: GameAction[] = [...nonManaActions];
-        if (canTapForMana) {
-          allActions.push(...manaActions);
-        }
-        const auto = resolveSingleActionDispatch(allActions, o);
-        if (auto) {
-          dispatchAction(auto);
-        } else {
-          setPendingAbilityChoice({ objectId, actions: allActions });
+      switch (verdict.kind) {
+        case "dispatch":
+          dispatchAction(verdict.action);
+          return;
+        case "choose":
+          setPendingAbilityChoice({ objectId, actions: verdict.actions });
+          return;
+        case "none":
+          // Reachable only through the render→click staleness window: the ring
+          // was painted from a bucket this click no longer sees. Doing nothing
+          // is correct — and, as before, this branch does NOT fall through to
+          // select/inspect, because the chain already committed to it.
+          return;
+        default: {
+          // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+          // ObjectActivation variant is a compile error here, never a silent drop.
+          const _exhaustive: never = verdict;
+          return _exhaustive;
         }
       }
     } else if (isUndoableTap) {
       dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });
+    } else if (
+      obj.attachments.some(
+        (attachId) => activatableObjectIds.has(attachId) || manaTappableObjectIds.has(attachId),
+      )
+    ) {
+      // The host offers nothing, but an attached Aura/Equipment/Fortification does
+      // (CR 301.5 / CR 303.4 — it is its own object). Its only in-place affordance is
+      // a ~22px peek deliberately rendered BELOW the host (ATTACHMENT_PEEK_PX, zIndex
+      // 5 - i), under the 44px touch-target floor. Fall through to the full-card
+      // chooser. Same affordance sets the host's own ring uses, so this can never
+      // offer what the board would not; placed LAST so it can never pre-empt the
+      // host's target / activation / undo intent.
+      //
+      // Selection is set UNCONDITIONALLY, deliberately unlike the plain-click
+      // fallback below which TOGGLES (`selectObject(isSelected ? null : objectId)`).
+      // This branch always opens the fan, so a toggle would strand the fan open over
+      // a host that just lost its white ring, its attachment expansion and its
+      // exile-link expansion.
+      selectObject(objectId);
+      showAttachmentFan();
     } else if (isMobile) {
       inspectObject(objectId);
       setPreviewSticky(true);

@@ -7,7 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { sortCreaturesForBlockers } from "../../viewmodel/blockerSorting.ts";
-import { isManaObjectAction } from "../../viewmodel/cardActionChoice.ts";
+import { deriveActivationAffordances } from "../../viewmodel/cardActionChoice.ts";
 import {
   buildPlayerBattlefieldView,
   getBoardChoiceView,
@@ -89,11 +89,19 @@ export const GameBoard = memo(function GameBoard({
   }, [splitBoardActive, playerBattlefieldView, focusedBattlefieldView, blockerAssignments]);
 
   const boardInteractionState = useMemo(() => {
+    // THE single authority (viewmodel/cardActionChoice.ts). Computed BEFORE the
+    // `!gameState?.objects` early return so both returns spread the same value and
+    // no local shadow can exist: deleting the locals makes a stale shorthand key a
+    // compile error (TS18004) instead of a silent board-wide regression.
+    const affordances = deriveActivationAffordances(
+      waitingFor,
+      canActForWaitingState,
+      legalActionsByObject,
+      gameState?.objects,
+    );
     const validTargetObjectIds = new Set<number>();
     const validAttackerIds = new Set<number>();
-    const activatableObjectIds = new Set<number>();
     const boardChoiceObjectIds = new Set<number>();
-    const manaTappableObjectIds = new Set<number>();
     const selectableSacrificeObjectIds = new Set<number>();
     const selectableManaCostCreatureIds = new Set<number>();
     const undoableTapObjectIds = new Set<number>();
@@ -171,11 +179,10 @@ export const GameBoard = memo(function GameBoard({
 
     if (!gameState?.objects) {
       return {
-        activatableObjectIds,
+        ...affordances,
         boardChoiceObjectIds,
         committedAttackerIds,
         incomingAttackerCounts,
-        manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds,
         undoableTapObjectIds,
@@ -184,52 +191,11 @@ export const GameBoard = memo(function GameBoard({
       };
     }
 
-    const playerCanAct =
-      waitingFor != null
-      && (
-        (waitingFor.type === "Priority" && canActForWaitingState)
-        || (waitingFor.type === "ManaPayment" && canActForWaitingState)
-        || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
-        // CR 118.12a: Disjunctive unless-cost — same input enablement as
-        // UnlessPayment (player chooses among sub-costs).
-        || (waitingFor.type === "UnlessPaymentChooseCost" && canActForWaitingState)
-      );
-
-    if (waitingFor?.type === "Priority" && canActForWaitingState) {
-      // The engine owns the "which permanent does this action act on" mapping
-      // via GameAction::source_object(), exposed as `legalActionsByObject`.
-      // The cyan activatable ring surfaces battlefield permanents with at
-      // least one non-mana action; mana abilities are handled by the separate
-      // mana-tappable ring below. This iteration is variant-agnostic — adding
-      // a future keyword activation requires zero frontend changes.
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        const hasNonManaAction = actions.some((action) => !isManaObjectAction(action, object));
-        if (hasNonManaAction) {
-          activatableObjectIds.add(objectId);
-        }
-      }
-    }
-
-    if (playerCanAct) {
-      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
-        const objectId = Number(idStr);
-        const object = gameState.objects[objectId];
-        if (!object) continue;
-        if (actions.some((action) => isManaObjectAction(action, object))) {
-          manaTappableObjectIds.add(objectId);
-        }
-      }
-    }
-
     return {
-      activatableObjectIds,
+      ...affordances,
       boardChoiceObjectIds,
       committedAttackerIds,
       incomingAttackerCounts,
-      manaTappableObjectIds,
       selectableSacrificeObjectIds,
       selectableManaCostCreatureIds,
       undoableTapObjectIds,

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-03T00:00:00Z",
+  "updated": "2026-08-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -782,113 +782,85 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Bitter Triumph"
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 10,
+          "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Restless Reef"
+          "name": "Watery Grave"
+        },
+        {
+          "count": 3,
+          "name": "Bitter Triumph"
         },
         {
           "count": 2,
           "name": "Day of Black Sun"
         },
         {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 2,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
+          "count": 3,
+          "name": "Doomsday Excruciator"
         },
         {
           "count": 4,
           "name": "Requiting Hex"
         },
         {
-          "count": 4,
-          "name": "Duress"
-        },
-        {
           "count": 3,
           "name": "Stock Up"
         },
         {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Superior Spider-Man"
-        },
-        {
-          "count": 3,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 3,
-          "name": "Superior Spider-Man"
-        },
-        {
-          "count": 9,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Deceit"
         },
         {
           "count": 4,
-          "name": "Watery Grave"
-        }
-      ],
-      "sideboard": [
+          "name": "Restless Reef"
+        },
+        {
+          "count": 4,
+          "name": "Duress"
+        },
         {
           "count": 1,
           "name": "Deadly Cover-Up"
         },
         {
           "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 1,
           "name": "M.O.D.O.K."
         },
         {
+          "count": 3,
+          "name": "Hidden Lair"
+        },
+        {
+          "count": 4,
+          "name": "Superior Spider-Man"
+        }
+      ],
+      "sideboard": [
+        {
           "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 2,
-          "name": "Malcolm, Alluring Scoundrel"
-        },
-        {
-          "count": 1,
           "name": "Negate"
         },
         {
@@ -896,12 +868,32 @@
           "name": "Preacher of the Schism"
         },
         {
-          "count": 2,
-          "name": "Oildeep Gearhulk"
+          "count": 1,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 1,
           "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 3,
+          "name": "Malcolm, Alluring Scoundrel"
         }
       ]
     },
@@ -1093,12 +1085,8 @@
       ],
       "sideboard": [
         {
-          "count": 3,
+          "count": 2,
           "name": "Three Steps Ahead"
-        },
-        {
-          "count": 4,
-          "name": "Price of Freedom"
         },
         {
           "count": 1,
@@ -1119,6 +1107,18 @@
         {
           "count": 2,
           "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 2,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Return the Favor"
         }
       ]
     },
@@ -1247,7 +1247,7 @@
       ]
     },
     {
-      "name": "Izzet Self-Bounce",
+      "name": "Izzet Spells",
       "author": "MTGGoldfish",
       "colors": [
         "U",
@@ -1282,15 +1282,11 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Get Out"
         },
         {
-          "count": 4,
-          "name": "Colorstorm Stallion"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Roaring Furnace // Steaming Sauna"
         },
         {
@@ -1298,15 +1294,19 @@
           "name": "Flow State"
         },
         {
-          "count": 1,
-          "name": "Impractical Joke"
+          "count": 2,
+          "name": "Secret Identity"
         },
         {
           "count": 2,
           "name": "Multiversal Passage"
         },
         {
-          "count": 2,
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
           "name": "Spell Pierce"
         },
         {
@@ -1324,16 +1324,24 @@
         {
           "count": 4,
           "name": "Sleight of Hand"
+        },
+        {
+          "count": 1,
+          "name": "Vibrant Outburst"
+        },
+        {
+          "count": 4,
+          "name": "Slickshot Show-Off"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
+          "count": 2,
           "name": "Disdainful Stroke"
         },
         {
-          "count": 1,
-          "name": "Flashfreeze"
+          "count": 2,
+          "name": "Slagstorm"
         },
         {
           "count": 1,
@@ -1341,19 +1349,15 @@
         },
         {
           "count": 1,
+          "name": "Sear"
+        },
+        {
+          "count": 1,
           "name": "Ghost Vacuum"
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
+          "name": "Sunspine Lynx"
         },
         {
           "count": 1,
@@ -1361,19 +1365,23 @@
         },
         {
           "count": 1,
-          "name": "Spell Pierce"
+          "name": "Ral, Crackling Wit"
         },
         {
           "count": 1,
-          "name": "Negate"
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Sunderflock"
         },
         {
           "count": 1,
           "name": "Spell Snare"
         },
         {
-          "count": 3,
-          "name": "Sunderflock"
+          "count": 1,
+          "name": "Broadside Barrage"
         }
       ]
     }

@@ -5,11 +5,13 @@ import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   collectObjectActions,
-  resolveSingleActionDispatch,
+  deriveActivationAffordances,
+  resolveObjectActivation,
 } from "../../viewmodel/cardActionChoice.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
@@ -26,8 +28,19 @@ interface CommandZoneProps {
 interface GroupedEmblem {
   description: string;
   sourceName: string | null;
-  count: number;
-  representative: GameObject;
+  /**
+   * EVERY emblem in the group, in command-zone order — never a lone
+   * representative plus a tally.
+   *
+   * CR 114.1: an emblem is a marker representing its OWN object; CR 114.4: its
+   * abilities function in the command zone. `legalActionsByObject` is keyed by
+   * exact object id, so a group that remembered only a representative could ask
+   * the activation authority about one id while the engine had published the
+   * legal action against a sibling — the chip rendered inert and the action was
+   * unreachable. The stack is a DISPLAY grouping; activation identity stays
+   * per-object. `.length` is the display count.
+   */
+  members: GameObject[];
 }
 
 /** The emblem's granted rules text ("what it does"). The engine attaches it to
@@ -80,9 +93,11 @@ export function CommandZone({ playerId }: CommandZoneProps) {
       const key = `${sourceName ?? ""}|${desc}`;
       const existing = byKey.get(key);
       if (existing) {
-        existing.count++;
+        // Retain the member, never just a tally — the chip needs its id to reach
+        // an action the engine published against this exact emblem.
+        existing.members.push(emblem);
       } else {
-        byKey.set(key, { description: desc, sourceName, count: 1, representative: emblem });
+        byKey.set(key, { description: desc, sourceName, members: [emblem] });
       }
     }
 
@@ -94,7 +109,7 @@ export function CommandZone({ playerId }: CommandZoneProps) {
   return (
     <div className="flex items-center gap-1.5">
       {groups.map((group) => (
-        <EmblemCard key={group.representative.id} group={group} label={t("zone.emblem")} />
+        <EmblemCard key={group.members[0].id} group={group} label={t("zone.emblem")} />
       ))}
     </div>
   );
@@ -112,7 +127,11 @@ export function CommandZone({ playerId }: CommandZoneProps) {
  */
 function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
   const isCompactHeight = useIsCompactHeight();
-  const emblem = group.representative;
+  // DISPLAY identity only. Art, source and rules text are group-invariant by
+  // construction of the grouping key (`source | description`), so any member
+  // renders the same chip — but activation identity is resolved per-object
+  // below, never from this one.
+  const emblem = group.members[0];
   const printedRef = emblem.emblem_source?.printed_ref ?? null;
   const { src: artSrc } = useCardImage(group.sourceName ?? "", {
     size: "art_crop",
@@ -129,25 +148,65 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
   // no client-side legality inference. Static/triggered emblems never report
   // actions here, so they stay display-only as before.
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const emblemActions = useMemo(
-    () => collectObjectActions(legalActionsByObject, emblem.id),
-    [legalActionsByObject, emblem.id],
+  // THE single authority. `emblemActions.length > 0` had NEITHER a WaitingFor
+  // gate nor a seat gate, so an opponent's chip was clickable from this viewer's
+  // seat (D4); membership in the shared sets closes both at once.
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
   );
-  const isActivatable = emblemActions.length > 0;
+  // WHICH id the authority is asked about — not a second decision site. CR
+  // 114.1: each emblem is its own object, and `legalActionsByObject` is keyed by
+  // exact id, so a display group must offer whichever MEMBER the shared sets
+  // name. Asking about the representative alone hid a legal action whenever the
+  // engine published it against a sibling. `find` takes the first offered
+  // member, so one chip can never dispatch twice; class-general for any group
+  // size and any member position.
+  const activeMember =
+    group.members.find(
+      (member) =>
+        affordances.activatableObjectIds.has(member.id)
+        || affordances.manaTappableObjectIds.has(member.id),
+    ) ?? null;
+  const isActivatable = activeMember !== null;
 
   const handleActivate = useCallback(() => {
-    if (emblemActions.length === 0) return;
-    // Reuse the shared single-authority dispatch helper (issue #506): a
-    // card-consuming ability surfaces the confirmation modal; otherwise the
-    // lone action auto-fires, kicking off the engine's X / discard prompts.
-    const auto = resolveSingleActionDispatch(emblemActions, emblem);
-    if (auto) {
-      dispatchAction(auto);
-    } else {
-      setPendingAbilityChoice({ objectId: emblem.id, actions: emblemActions });
+    // Re-checked rather than assumed: the DOM only wires this when a member is
+    // offered, and `activeMember` is the one id this chip may act on.
+    if (!activeMember) return;
+    // #506 stays where it always was — inside the authority. The bucket is read
+    // at click, so this chip keeps no per-render projection of its own.
+    const verdict = resolveObjectActivation(
+      collectObjectActions(useGameStore.getState().legalActionsByObject, activeMember.id),
+      activeMember,
+      affordances,
+      activeMember.id,
+    );
+    switch (verdict.kind) {
+      case "dispatch":
+        dispatchAction(verdict.action);
+        return;
+      case "choose":
+        setPendingAbilityChoice({ objectId: activeMember.id, actions: verdict.actions });
+        return;
+      case "none":
+        // Reachable only through the render→click staleness window: the chip's
+        // ring was painted from a bucket this click no longer sees. Doing
+        // nothing is correct, and is exactly what the old if/else chain did.
+        return;
+      default: {
+        // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+        // ObjectActivation variant is a compile error here, never a silent drop.
+        const _exhaustive: never = verdict;
+        return _exhaustive;
+      }
     }
-  }, [emblemActions, emblem, setPendingAbilityChoice]);
+  }, [activeMember, affordances, setPendingAbilityChoice]);
 
   return (
     <div
@@ -240,14 +299,16 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
         </div>
       </div>
 
-      {/* Count badge (CR 114: identical emblems stacked) */}
-      {group.count > 1 && (
+      {/* Count badge (CR 114: identical emblems stacked). The count is now the
+          retained member list's length rather than a separate tally, so it
+          cannot drift from the ids the chip can actually act on. */}
+      {group.members.length > 1 && (
         <div
           className={`absolute -bottom-[3px] -right-[3px] z-20 inline-flex items-center justify-center rounded-full border border-black/80 bg-amber-600 px-1 font-bold text-black shadow-[0_2px_4px_rgba(0,0,0,0.8)] ${
             isCompactHeight ? "h-3.5 min-w-3.5 text-[8px]" : "h-4 min-w-4 text-[9px]"
           }`}
         >
-          ×{group.count}
+          ×{group.members.length}
         </div>
       )}
     </div>

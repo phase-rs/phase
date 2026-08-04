@@ -5,15 +5,15 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-03T00:00:00Z",
+  "updated": "2026-08-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "R"
+        "R",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -28,24 +28,36 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 1,
-          "name": "Island"
+          "count": 3,
+          "name": "Sleight of Hand"
         },
         {
-          "count": 4,
-          "name": "Monastery Swiftspear"
+          "count": 2,
+          "name": "Quantum Riddler"
         },
         {
           "count": 4,
           "name": "Flow State"
         },
         {
-          "count": 4,
-          "name": "Sleight of Hand"
+          "count": 3,
+          "name": "Shivan Reef"
         },
         {
-          "count": 3,
-          "name": "Emberheart Challenger"
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
         },
         {
           "count": 3,
@@ -56,20 +68,24 @@
           "name": "Riverglide Pathway"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Riverpyre Verge"
         },
         {
-          "count": 3,
-          "name": "Burst Lightning"
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 4,
-          "name": "Spirebluff Canal"
+          "count": 3,
+          "name": "Burst Lightning"
         },
         {
           "count": 4,
@@ -80,26 +96,26 @@
           "name": "Stormchaser's Talent"
         },
         {
-          "count": 3,
-          "name": "Shivan Reef"
+          "count": 1,
+          "name": "Sleight of Hand"
         },
         {
-          "count": 2,
-          "name": "Screaming Nemesis"
+          "count": 1,
+          "name": "Spell Pierce"
         },
         {
-          "count": 2,
-          "name": "Mountain"
+          "count": 1,
+          "name": "Riverpyre Verge"
         },
         {
-          "count": 2,
-          "name": "Monstrous Rage"
+          "count": 4,
+          "name": "Emberheart Challenger"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Spell Pierce"
+          "count": 1,
+          "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
@@ -107,19 +123,11 @@
         },
         {
           "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
           "name": "Firebending Lesson"
         },
         {
           "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Soul-Guide Lantern"
         },
         {
           "count": 1,
@@ -130,6 +138,10 @@
           "name": "Octopus Form"
         },
         {
+          "count": 1,
+          "name": "Quantum Riddler"
+        },
+        {
           "count": 2,
           "name": "Redcap Melee"
         },
@@ -138,8 +150,20 @@
           "name": "Scorching Shot"
         },
         {
-          "count": 2,
-          "name": "Quantum Riddler"
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -291,8 +315,7 @@
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "G",
-        "B"
+        "G"
       ],
       "tags": [
         "metagame"
@@ -304,15 +327,19 @@
         },
         {
           "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 4,
           "name": "Thoughtseize"
         },
         {
-          "count": 4,
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 3,
           "name": "Cache Grab"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
         },
         {
           "count": 1,
@@ -323,8 +350,8 @@
           "name": "Esika's Chariot"
         },
         {
-          "count": 4,
-          "name": "Temple Garden"
+          "count": 1,
+          "name": "Plains"
         },
         {
           "count": 4,
@@ -335,12 +362,8 @@
           "name": "Greasefang, Okiba Boss"
         },
         {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Multiversal Passage"
         },
         {
           "count": 1,
@@ -351,94 +374,82 @@
           "name": "Parhelion II"
         },
         {
-          "count": 4,
-          "name": "Multiversal Passage"
+          "count": 1,
+          "name": "Forest"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Professor of Symbology"
         },
         {
           "count": 4,
-          "name": "Blooming Marsh"
+          "name": "Concealed Courtyard"
         },
         {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 2,
-          "name": "Collective Brutality"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Thundering Broodwagon"
-        },
-        {
-          "count": 1,
-          "name": "Yathan Roadwatcher"
-        },
-        {
-          "count": 1,
-          "name": "Jennifer Walters"
+          "count": 4,
+          "name": "Agadeem's Awakening"
         },
         {
           "count": 1,
           "name": "Caves of Koilos"
         },
         {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 3,
+          "name": "Thundering Broodwagon"
+        },
+        {
           "count": 1,
-          "name": "Darkbore Pathway"
+          "name": "Yathan Roadwatcher"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Ral Zarek, Guest Lecturer"
+          "name": "Decorum Dissertation"
         },
         {
           "count": 1,
           "name": "Beza, the Bounding Spring"
         },
         {
+          "count": 3,
+          "name": "Collective Brutality"
+        },
+        {
+          "count": 1,
+          "name": "Severance Priest"
+        },
+        {
           "count": 1,
           "name": "Enter the Avatar State"
         },
         {
-          "count": 2,
-          "name": "Duress"
+          "count": 3,
+          "name": "Abrupt Decay"
         },
         {
           "count": 1,
-          "name": "Loran of the Third Path"
+          "name": "Tear Asunder"
         },
         {
           "count": 1,
           "name": "Origin of Metalbending"
         },
         {
-          "count": 2,
-          "name": "Abrupt Decay"
-        },
-        {
           "count": 1,
-          "name": "Remorseful Cleric"
-        },
-        {
-          "count": 1,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 3,
           "name": "Pest Control"
         },
         {
           "count": 1,
-          "name": "Vanishing Verse"
+          "name": "Witherbloom Command"
+        },
+        {
+          "count": 1,
+          "name": "True Ancestry"
         }
       ]
     },

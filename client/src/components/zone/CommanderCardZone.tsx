@@ -9,12 +9,13 @@ import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { getPlayerId } from "../../hooks/usePlayerId.ts";
+import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   collectObjectActions,
+  deriveActivationAffordances,
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
@@ -96,8 +97,31 @@ function CommanderCard({
     [commanderActions],
   );
 
-  const canCast = castAction !== null;
-  const canNinjutsu = ninjutsuActions.length > 0;
+  // THE single authority — the same one the emblem chip adopts one file over.
+  // `castAction !== null` / `ninjutsuActions.length > 0` were raw-bucket tests
+  // with NEITHER a `WaitingFor` gate NOR a seat gate, and `PlayerArea` renders a
+  // `<CommanderCardZone playerId={opponentId}/>` from the same `CommandDock`
+  // subtree for every seat. In local/AI mode `legalActionsByObject` is computed
+  // for the STATE's priority player rather than the viewer, so an opponent's
+  // commander chip was clickable — and dispatched — from this seat.
+  //
+  // Only the non-mana ring is consulted: CastSpell and ActivateNinjutsu are both
+  // non-mana, so CR 113.3b ("whenever they have priority") is the whole gate.
+  // The mana ring would be dead weight here — a command-zone card publishes no
+  // mana action — and consulting it would re-open the cast affordance during a
+  // cost-payment prompt.
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const activationOffered = affordances.activatableObjectIds.has(commander.id);
+
+  const canCast = activationOffered && castAction !== null;
+  const canNinjutsu = activationOffered && ninjutsuActions.length > 0;
 
   // CR 702.49d: commander ninjutsu returns an unblocked attacker and puts this
   // commander onto the battlefield tapped and attacking. The engine emits one

@@ -6795,17 +6795,10 @@ fn apply_action(
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (WaitingFor::Priority { player }, GameAction::PassPriority) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            if super::precast_copy_shortcut::blocks_pass(state, *player) {
-                return Err(EngineError::ActionNotAllowed(
-                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
-                        .to_string(),
-                ));
-            }
+            // CR 117.3d + CR 723.5 + CR 732.2a-c: single authority, shared with the
+            // AI candidate-legality hatch and the projection fast path so the
+            // three cannot drift.
+            super::priority::pass_priority_legality(state, *player)?;
             let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
                 events,
@@ -15233,7 +15226,22 @@ mod stage2_injector_tests {
                 // is the producer this row NAMES below. The old coordinate now holds
                 // copy-target-slot code that mints nothing. The OTHER FOUR entries did not
                 // move, which is the same set-preservation evidence as the previous rebases.
-                "game/engine.rs:11427".to_string(),
+                //
+                // `PassPriority` structural-legality unit: `:11427 ⇒ :11420`, −7. UNLIKE every
+                // drift above, this one is LOCAL, not upstream — the CI-vs-local diagnosis in
+                // the header does not apply, because the shift originates in this same diff.
+                // The `(Priority, PassPriority)` reducer arm's two inline guards were extracted
+                // into `game::priority::pass_priority_legality`, replacing 11 lines with 4.
+                // That is engine.rs's only hunk ABOVE this producer — `@@ -6798,11 +6798,4 @@`,
+                // net -7, exactly accounting for the shift. The unit's only other engine.rs
+                // hunk is THIS drift-log comment, which sits below the producer and therefore
+                // cannot move it. Identity re-established at the new
+                // coordinate rather than assumed: the line is byte-identical by sha256 to
+                // `93da0ca15:engine.rs:11427`, and it is still inside
+                // `begin_pending_trigger_target_selection` (fn now opens at :11271, itself −7).
+                // The OTHER FOUR entries live in `game/effects/`, which this unit does not
+                // touch at all, and did not move — the same set-preservation evidence.
+                "game/engine.rs:11420".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

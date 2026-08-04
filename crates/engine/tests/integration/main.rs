@@ -811,6 +811,7 @@ mod ozolith_leaves_battlefield_counters;
 mod painters_servant_multi_zone_additive_color;
 mod palisade_giant_redirect;
 mod panther_habit_equipped_prevention_scope;
+mod pass_priority_structural_legality;
 mod peer_into_the_abyss;
 mod peerless_recycling_gift_recipient;
 mod pendrell_flux_unless_pay_own_cost;

@@ -4,11 +4,17 @@ import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
-import { dispatchInteraction } from "../../game/dispatch.ts";
+import { dispatchAction, dispatchInteraction } from "../../game/dispatch.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useAppNotificationStore } from "../../stores/appToastStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import {
+  collectObjectActions,
+  deriveActivationAffordances,
+  resolveObjectActivation,
+} from "../../viewmodel/cardActionChoice.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { fanGeometry, spreadFactor } from "../card/fanGeometry.ts";
 
@@ -52,8 +58,11 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
  * independent object), and the fan lets the player choose which one without
  * hunting the peek.
  *
- * The fan NEVER invents a choice — each card lights up (cyan) and dispatches
- * only what the engine's live prompt actually offers for that object. Terminal
+ * The fan NEVER invents a choice. It has exactly two engine-owned sources: an
+ * open interaction's projection (mode 1), and — when no prompt is open — the
+ * permanent's own legal-action bucket read through `deriveActivationAffordances`
+ * (mode 2, the same authority the battlefield ring uses). Each card lights up
+ * (cyan) and dispatches only what one of those two offers for that object. Terminal
  * One-step picks close the fan. Multi-step decisions stay in their dedicated
  * engine-authored interaction surfaces instead of asking this display to build
  * a response payload.
@@ -69,6 +78,24 @@ export function AttachmentFan() {
 
   const objects = useGameStore((s) => s.gameState?.objects);
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const canActForWaitingState = useCanActForWaitingState();
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  // Mode 2's gate: THE same affordance sets the battlefield ring uses, so the fan
+  // can never offer what the board would not. `AttachmentFan` is a single portaled
+  // overlay (GamePage.tsx:1885), not a per-permanent component — one subscription,
+  // not an O(board) cost.
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const canActivate = useCallback(
+    (id: ObjectId) =>
+      affordances.activatableObjectIds.has(id) || affordances.manaTappableObjectIds.has(id),
+    [affordances],
+  );
   const host = hostId != null ? objects?.[hostId] : undefined;
   const interactionFan = useMemo(
     () =>
@@ -108,18 +135,74 @@ export function AttachmentFan() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hostId, close]);
 
-  const handlePick = useCallback(
-    (id: ObjectId) => {
-      const child = interactionFan?.children.find((candidate) => candidate.objectId === id);
-      if (!child || !viewerInteraction?.canSubmit) return;
-      void dispatchInteraction(child.submission).then(close).catch((error: unknown) => {
-        showNotification({
-          title: t("actionError.title", { action: t("permanent.fanPick") }),
-          description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
-        });
+  const notifyFailure = useCallback(
+    (error: unknown) => {
+      showNotification({
+        title: t("actionError.title", { action: t("permanent.fanPick") }),
+        description: error instanceof Error ? error.message : t("actionError.unknownEngineError"),
       });
     },
-    [close, interactionFan, showNotification, t, viewerInteraction?.canSubmit],
+    [showNotification, t],
+  );
+
+  const handlePick = useCallback(
+    (id: ObjectId) => {
+      // Mode 1 — an engine interaction owns the prompt: the projection is the sole
+      // authority and the fan only forwards its opaque submission. UNCHANGED.
+      if (interactionFan !== null) {
+        const child = interactionFan.children.find((candidate) => candidate.objectId === id);
+        if (!child || !viewerInteraction?.canSubmit) return;
+        void dispatchInteraction(child.submission).then(close).catch(notifyFailure);
+        return;
+      }
+      // Mode 2 — no prompt is open, so the fan is a reachability surface for the
+      // permanent's OWN legal actions. Gate and dispatch both come from the shared
+      // authority the battlefield uses. CR 301.5 / CR 303.4: an attached permanent
+      // is its own object.
+      if (!canActivate(id)) return;
+      const store = useGameStore.getState();
+      const verdict = resolveObjectActivation(
+        collectObjectActions(store.legalActionsByObject, id),
+        store.gameState?.objects[id],
+        affordances,
+        id,
+      );
+      // `close()` MUST precede opening the modal: the fan is a `fixed inset-0
+      // z-[120]` backdrop with an `onClick={close}` catcher and DialogHost anchors
+      // at z-40, so a fan left mounted would both paint over and swallow clicks for
+      // the modal it just opened. It stays inside the two acting arms because
+      // `kind: "none"` must leave the fan exactly as it was.
+      switch (verdict.kind) {
+        case "dispatch":
+          close();
+          void dispatchAction(verdict.action).catch(notifyFailure);
+          return;
+        case "choose":
+          close();
+          setPendingAbilityChoice({ objectId: id, actions: verdict.actions });
+          return;
+        case "none":
+          // Reachable only through the render→click staleness window: the ring was
+          // painted from a bucket this click no longer sees. Doing nothing (and
+          // leaving the fan open) is correct.
+          return;
+        default: {
+          // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+          // ObjectActivation variant is a compile error here, never a silent drop.
+          const _exhaustive: never = verdict;
+          return _exhaustive;
+        }
+      }
+    },
+    [
+      affordances,
+      canActivate,
+      close,
+      interactionFan,
+      notifyFailure,
+      setPendingAbilityChoice,
+      viewerInteraction?.canSubmit,
+    ],
   );
 
   if (hostId == null || !host || cardIds.length === 0) return null;
@@ -155,7 +238,7 @@ export function AttachmentFan() {
             rotation={fan.rotation(i)}
             arcOffset={fan.arc(i)}
             zIndex={i}
-            selectable={interactionFan !== null && id !== host.id}
+            selectable={id !== host.id && (interactionFan !== null || canActivate(id))}
             onPick={handlePick}
           />
         ))}
