@@ -20860,6 +20860,52 @@ pub mod tests {
             Some(source),
             None,
         ));
+
+        // CR 120.1 multi-authority: a SECOND source also damaged the same dying
+        // creature this turn. The trigger source's own record must still be found
+        // among multiple records — this is the `source_id`-identity binding, not
+        // mere presence of any damage record on the dying creature.
+        let other_source = ObjectId(30);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: other_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(dying_creature),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        // A different dying creature was damaged ONLY by the other source, never by
+        // the trigger source → false, even though a damage record for that dying
+        // creature exists. Distinguishes identity binding from bare presence.
+        let other_only_victim = ObjectId(77);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: other_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(other_only_victim),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        let other_only_event = GameEvent::CreatureDestroyed {
+            object_id: other_only_victim,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&other_only_event),
+        ));
     }
 
     /// CR 701.26 + CR 603.4: `FirstTimeObjectTappedThisTurn` holds only when the

@@ -4842,6 +4842,36 @@ mod tests {
         );
     }
 
+    /// CR 603.4 + CR 700.4 + CR 120.1: Hawkeye, Avenging Archer's death-trigger
+    /// intervening-if "if Hawkeye dealt damage to it this turn" is now hoisted to
+    /// a `TriggerCondition::DealtDamageBySourceThisTurn`. Detector G (Condition_If)
+    /// clears because the trigger's `condition` slot is populated
+    /// (`has_slot("condition")`), and Detector J (Duration_ThisTurn) clears via
+    /// the damage-history whitelist. Both fired before the parser arm existed —
+    /// the audit-flagged DroppedCondition — so reverting the arm re-surfaces both.
+    #[test]
+    fn hawkeye_dealt_damage_intervening_if_not_swallowed() {
+        let parsed = parse_named(
+            "Reach\nWhenever a creature an opponent controls dies, if Hawkeye dealt \
+             damage to it this turn, draw a card.\n{T}: Hawkeye deals 1 damage to any \
+             target.",
+            "Hawkeye, Avenging Archer",
+            &["Legendary", "Creature"],
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Hawkeye's hoisted intervening-if must not surface as a swallowed \
+             Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_ThisTurn"),
+            "Hawkeye's hoisted 'this turn' clause must not surface as a swallowed \
+             Duration_ThisTurn: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {
         if matches!(&*def.effect, Effect::SearchOutsideGame { .. }) {
             return Some(&def.effect);
