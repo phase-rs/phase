@@ -7683,6 +7683,40 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         );
     }
 
+    // CR 605.1b + CR 605.4a: Two simultaneous triggered mana abilities
+    // reproduce the ordering-shaped group from Leyline of Abundance /
+    // Badgermole Cub boards. They must resolve immediately, not pause the
+    // in-flight payment on OrderTriggers.
+    let multiplier = create_object(
+        &mut state,
+        CardId(102),
+        PlayerId(0),
+        "Mana Multiplier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&multiplier).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.entered_battlefield_turn = Some(1);
+        let trigger = || {
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::TriggerEventManaType,
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .valid_target(TargetFilter::Controller)
+        };
+        obj.trigger_definitions.push(trigger());
+        obj.trigger_definitions.push(trigger());
+    }
+
     let result = apply_as_current(
         &mut state,
         GameAction::ActivateAbility {
@@ -7707,6 +7741,11 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     assert!(state.stack.is_empty());
     // Object should be tapped
     assert!(state.objects.get(&obj_id).unwrap().tapped);
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "the base mana plus both triggered mana abilities must resolve inline"
+    );
 }
 
 #[test]

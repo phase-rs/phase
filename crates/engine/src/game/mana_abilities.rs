@@ -2580,6 +2580,7 @@ fn finish_mana_ability_cost_payment(
         }
     }
 
+    let production_events_start = events.len();
     produce_mana_from_ability(
         state,
         pending.source_id,
@@ -2599,6 +2600,10 @@ fn finish_mana_ability_cost_payment(
             events,
         );
     }
+    // CR 605.4a: A triggered mana ability resolves immediately after the mana
+    // ability that triggered it, before the enclosing payment path collects
+    // ordinary triggers or resumes its payment prompt.
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, production_events_start);
     if let Some(parent) = parent {
         let mut parent_cursor = *parent.cursor;
         // CR 603.2 + CR 603.3b: The child now owns the complete old batch;
