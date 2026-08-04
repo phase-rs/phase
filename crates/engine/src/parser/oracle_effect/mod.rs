@@ -23102,11 +23102,16 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 // those cards" would reach any revealed card.
                 let and_leg = match parse_cast_type_gate(rest) {
                     // Single typed gate: graft its atoms onto the hand binding,
-                    // replacing the bare `Card` head noun. Unchanged behaviour.
-                    Some(TargetFilter::Typed(typed)) => {
+                    // replacing the bare `Card` head noun. A typed gate with
+                    // a controller or properties must stay whole: copying only
+                    // its type atoms drops predicates such as a mana-value bound.
+                    Some(TargetFilter::Typed(typed))
+                        if typed.controller.is_none() && typed.properties.is_empty() =>
+                    {
                         hand_filter.type_filters = typed.type_filters;
                         None
                     }
+                    Some(TargetFilter::Typed(typed)) => Some(TargetFilter::Typed(typed)),
                     // CR 205.2b: a gate whose legs are per-object conjunctions
                     // ("a Vehicle or artifact creature spell") cannot collapse
                     // into one `type_filters` vector — AND it beside the hand

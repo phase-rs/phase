@@ -391,7 +391,7 @@ pub fn resolve(
         }
     }
 
-    // CR 601.3 + CR 607.2a: The exile-set anaphor ("… from among them", "…
+    // CR 601.3: The exile-set anaphor ("… from among them", "…
     // from among the exiled cards") is a LINKED reference, never a targeted
     // one — its object ids reach this effect implicitly, forwarded by the
     // chain seam that resolved the exile step (`Effect::ExileTop`'s sub-ability
@@ -421,7 +421,7 @@ pub fn resolve(
     // populates `target_ids` from the live exile links and has already applied
     // the whole filter to them, so re-testing the residual here is idempotent.
     if !target_ids.is_empty() && target_filter.references_exiled_by_source() {
-        // CR 607.2a: apply the clause's OWN legs only. `without_exile_anaphor`
+        // Apply the clause's OWN legs only. `without_exile_anaphor`
         // discharges the `ExiledBySource` leg the seam already satisfied and
         // returns what is left of the tree, preserving its `And`/`Or` structure
         // (Sanwell's `And[Or[Vehicle, artifact creature], ExiledBySource]`
@@ -433,7 +433,7 @@ pub fn resolve(
         // *but* the anaphor (Hellcarver Demon, Improvisation Capstone, and every
         // other bare-`ExiledBySource` row) — those keep the full forwarded set.
         if let Some(own_filter) = target_filter.without_exile_anaphor() {
-            // CR 607.2a: bind the residual's object-scope reads to exactly the
+            // Bind the residual's object-scope reads to exactly the
             // forwarded set, mirroring the no-target fallback's scoped context.
             let mut scoped_ability = ability.clone();
             scoped_ability.targets = target_ids.iter().copied().map(TargetRef::Object).collect();

@@ -1103,6 +1103,7 @@ const HELLCARVER_DEMON: &str = "Flying\nWhenever this creature deals combat dama
 /// has no production card. This fixture drives the real `parse_oracle_text`
 /// path to reach it. Called out as synthetic in the PR body.
 const SYNTHETIC_HAND_BOUND_VEHICLE: &str = "When this creature enters, target opponent reveals their hand. You may cast a Vehicle or artifact creature spell from among those cards without paying its mana cost.";
+const SYNTHETIC_HAND_BOUND_CMC: &str = "When this creature enters, target opponent reveals their hand. You may cast a creature spell with mana value 2 or less from among those cards without paying its mana cost.";
 
 fn instant_or_sorcery() -> TypeFilter {
     TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery])
@@ -1384,6 +1385,41 @@ fn hand_bound_or_shaped_gate_ands_rather_than_grafts() {
     assert!(hand
         .properties
         .contains(&FilterProp::InZone { zone: Zone::Hand }));
+}
+
+/// A typed cast gate can carry property predicates as well as type atoms. Those
+/// predicates cannot be grafted into the hand binding's type vector; the whole
+/// gate must remain an `And` leg beside the revealed-hand binding.
+#[test]
+fn hand_bound_cast_keeps_rich_typed_gate_as_a_complete_predicate() {
+    let target = cast_target_of(
+        SYNTHETIC_HAND_BOUND_CMC,
+        "Synthetic Hand Reveal CMC",
+        &["Creature"],
+    );
+    let TargetFilter::And { filters } = &target else {
+        panic!("expected And {{ typed gate, hand binding }}, got {target:?}");
+    };
+    assert!(
+        filters.iter().any(|filter| {
+            matches!(filter, TargetFilter::Typed(typed)
+            if typed.type_filters == vec![TypeFilter::Creature]
+                && typed.properties.contains(&FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 2 },
+                }))
+        }),
+        "the complete creature + mana-value gate must survive, got {filters:?}"
+    );
+    let hand = typed_leg_of(filters, "Synthetic Hand Reveal CMC");
+    assert_eq!(hand.type_filters, vec![TypeFilter::Card]);
+    assert_eq!(hand.controller, Some(ControllerRef::Opponent));
+    assert!(
+        hand.properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }),
+        "the hand binding must remain alongside the rich gate, got {:?}",
+        hand.properties
+    );
 }
 
 /// R2 — the semantic trap, documented executably rather than in a comment.

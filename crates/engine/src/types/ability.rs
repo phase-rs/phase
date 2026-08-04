@@ -14551,7 +14551,7 @@ impl TargetFilter {
         }
     }
 
-    /// CR 601.3 + CR 607.2a: This filter with the exile-set anaphor
+    /// CR 601.3: This filter with the exile-set anaphor
     /// (`TargetFilter::ExiledBySource`) removed — i.e. the clause's OWN
     /// restrictions, expressed against a set of objects whose membership in the
     /// exile link has *already* been established by whoever produced the set.
@@ -24223,7 +24223,7 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
-    /// CR 601.3 + CR 607.2a: `without_exile_anaphor` is the residual of a cast
+    /// CR 601.3: `without_exile_anaphor` is the residual of a cast
     /// filter once the exile-set anaphor is discharged. The three shapes that
     /// matter to the chain-forwarded grant path:
     ///
@@ -24280,7 +24280,7 @@ mod tests {
         );
     }
 
-    /// CR 601.3 + CR 607.2a: the `Not` invariant documented on
+    /// CR 601.3: the `Not` invariant documented on
     /// `without_exile_anaphor`. Neither that helper nor
     /// `references_exiled_by_source` descends into `Not`; zero production cast
     /// filters put the anaphor under a negation, so the two agree today. These
@@ -24318,7 +24318,7 @@ mod tests {
         );
     }
 
-    /// CR 607.2a + CR 608.2c: a tracked-set membership ("cards exiled this way")
+    /// CR 608.2c: a tracked-set membership ("cards exiled this way")
     /// is its own restriction on a chain-forwarded set, so it survives the
     /// discharge; only the filter nested under it residualizes.
     #[test]
