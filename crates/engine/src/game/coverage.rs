@@ -9417,6 +9417,30 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         && (effective_lower.contains('+') || effective_lower.contains('-'))
                         && effective_lower.contains('/')
                 }
+                // CR 113.6m: "The same is true if the effect of that ability
+                // creates a delayed triggered ability whose effect moves the
+                // object out of a particular zone." Instants/sorceries in the
+                // graveyard-recursion class ("Whenever <event>, [you may pay
+                // <cost>. If you do,] return this card from your graveyard to
+                // your hand." — Spit Flame, Reach of Branches, Asgardian
+                // Inspiration, Endless Ranks of HYDRA) lower to a
+                // descriptionless CreateDelayedTrigger whose nested effect chain
+                // returns SelfRef from the graveyard to hand. `ability_tree_any`
+                // already recurses into the delayed trigger's `effect` and its
+                // `sub_ability`, so crediting this ChangeZone leaf covers the
+                // whole class and clears the false SilentDrop — the AST fully
+                // represents the line; only the per-line description-association
+                // heuristic failed (the delayed trigger carries no description).
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => {
+                    effective_lower.contains("return")
+                        && effective_lower.contains("graveyard")
+                        && effective_lower.contains("hand")
+                }
                 _ => false,
             };
             let ability_matches = face
@@ -12760,6 +12784,214 @@ mod tests {
                     || matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
             }),
             "Descriptionless delayed trigger should credit nested pump/duration: {findings:?}"
+        );
+    }
+
+    /// Build a graveyard-recursion `ChangeZone` leaf ability with no description
+    /// string, mirroring the class shape (Spit Flame / Reach of Branches /
+    /// Endless Ranks of HYDRA): return an object from one zone to another.
+    fn recursion_change_zone(
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+    ) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
+    /// Wrap an inner ability in a descriptionless "Whenever your commander
+    /// enters or attacks" delayed trigger — the exact lowering the parser emits
+    /// for the non-permanent graveyard-recursion class (CR 113.6m).
+    fn recursion_delayed_trigger(inner: AbilityDefinition) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::EntersOrAttacks)),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    /// Endless Ranks of HYDRA line 2 and the whole "[you may pay <cost>. If you
+    /// do,] return this card from your graveyard to your hand" class. The
+    /// delayed trigger carries no description, so the per-line audit can only
+    /// credit the line through the nested `ChangeZone(Graveyard -> Hand,
+    /// SelfRef)` leaf. Reverting the new CR 113.6m arm makes this fail (the
+    /// recursion line is reported as SilentDrop). The control line proves the
+    /// audit machinery is live, so the recursion line's clean result is not
+    /// vacuous.
+    #[test]
+    fn test_audit_credits_descriptionless_delayed_trigger_graveyard_recursion_to_hand() {
+        let mut face = make_face();
+        let recursion_line = "Whenever your commander enters or attacks, you may pay {1}{B}. If you do, return this card from your graveyard to your hand.";
+        let control_line = "Draw seven cards and then discard three cards at random.";
+        let oracle = format!("{recursion_line}\n{control_line}");
+        face.oracle_text = Some(oracle.clone());
+
+        let pay = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(
+            recursion_change_zone(Some(Zone::Graveyard), Zone::Hand, TargetFilter::SelfRef)
+                .condition(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+        );
+        face.abilities.push(recursion_delayed_trigger(pay));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("return this card from your graveyard")
+            )),
+            "graveyard-recursion delayed trigger must not be flagged as SilentDrop: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("Draw seven cards")
+            )),
+            "control line with no parsed element must still surface as SilentDrop (reach guard): {findings:?}"
+        );
+    }
+
+    /// Reach of Branches sub-shape: the delayed trigger's effect IS the
+    /// `ChangeZone` directly (no `PayCost` wrapper). Exercises `ability_tree_any`
+    /// recursion into `effect` (vs. the `sub_ability` path of the with-cost
+    /// class), proving both sub-shapes of the class are covered.
+    #[test]
+    fn test_audit_credits_delayed_trigger_direct_graveyard_return_without_cost() {
+        let mut face = make_face();
+        let oracle = "Whenever a Forest enters the battlefield, you may return this card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "direct (no-cost) graveyard-recursion delayed trigger must be credited: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (destination axis): a reanimation delayed trigger
+    /// that returns the card to the BATTLEFIELD is a larger, different effect.
+    /// The oracle line here contains all three text-guard words (return /
+    /// graveyard / hand), so only the structural `destination: Hand` pattern
+    /// keeps it from being credited — dropping that pattern would regress this.
+    #[test]
+    fn test_audit_still_flags_delayed_trigger_return_to_battlefield() {
+        let mut face = make_face();
+        let oracle = "Whenever this dies, you may return this card from your graveyard to the battlefield rather than to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Battlefield,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "return-to-battlefield delayed trigger must NOT be credited by the graveyard-to-hand arm: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (target axis): targeted graveyard recovery ("return
+    /// target creature card from your graveyard to your hand") does not return
+    /// the object the ability is on, so CR 113.6m does not apply. The text guard
+    /// passes here; only the `target: SelfRef` pattern keeps it uncredited.
+    #[test]
+    fn test_audit_still_flags_targeted_graveyard_to_hand_return() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, return target creature card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::Typed(TypedFilter::creature()),
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "targeted (non-SelfRef) graveyard-to-hand return must NOT be credited by the SelfRef arm: {findings:?}"
+        );
+    }
+
+    /// Conjunctivity guard (text axis): the structural match alone must not
+    /// credit a line — the return/graveyard/hand text guard is required. An
+    /// unrelated oracle line paired with the recursion effect shape is still
+    /// reported, proving the heuristic is a conservative confirmation.
+    #[test]
+    fn test_audit_graveyard_recursion_text_guard_is_conjunctive() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, exile the top three cards of your library.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "structural match without the text-guard words must remain a SilentDrop: {findings:?}"
         );
     }
 
