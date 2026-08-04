@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 186,
+      "date": "2026-08-04",
+      "title": "Lady Loki joins the chaos",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Lady Loki, Agent of Chaos and T’Chaka, Venerable King are now fully playable, including their damage, card-type, and commander-specific abilities\n\n🛠️ Cards That Now Work Right\n• Epic Experiment and similar ‘cast from among them’ cards now enforce their printed spell-type restrictions, including Ral Leyline Prodigy, Kylox, Collected Conjuring, Sanwell, Wand of Wonder, and Scarlet Witch\n• Compound subjects now fail closed instead of affecting every permanent when their recipients cannot be bound; targeting compound subjects keep both players distinct (Life at Stake and Infernal Offering)\n• Shared-X chains now preserve real zero results and relay values correctly, fixing stale ‘that much’ outcomes such as Thorna and Twigtooth\n\n⚔️ Combat & Gameplay\n• Bounded loop shortcuts can now safely fast-forward multiplayer drain loops using their measured cycle span, while refusing loops with unresolved player choices\n\n🖥️ Interface\n• Attachment fans now use the same activation path as the rest of the battlefield, making attached-permanent interactions consistent\n• Library-search choice prompts prioritize cards that can actually be selected\n\n🤖 AI\n• AI answers from the engine-issued candidate set, preventing stalls on impossible selection prompts and improving long library-search choices",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1534342702106149076"
+    },
+    {
       "id": 185,
       "date": "2026-08-03",
       "title": "Jetfire takes flight",
