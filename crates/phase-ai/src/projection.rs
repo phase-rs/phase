@@ -17,6 +17,7 @@ use engine::ai_support::{
 };
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_for_simulation, EngineError};
+use engine::game::priority;
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
@@ -311,6 +312,35 @@ fn resolve_choice(
         .ok_or_else(|| BailReason::NoLegalAction {
             waiting_for: format!("{:?}", state.waiting_for),
         })?;
+
+    // CR 117.3d: at a priority window whose pass the engine can decide without
+    // simulating the boundary, the projection's only policy is "pass if you can"
+    // (`pick_pass_or_first`). That is an O(1) question the engine answers
+    // directly, so skip the full `legal_actions` enumeration — which builds a
+    // `PriorityCastProbe` (a `GameState` clone + `flush_layers` + auto-tap
+    // cache), validates every castable spell, activatable ability and land
+    // drop, and discards a grouped per-object map.
+    //
+    // `pass_priority_structurally_legal` is the SAME predicate the engine's
+    // `SimulationFilter` pass hatch uses. Do not substitute a local
+    // approximation: in particular a `classify_payment_continuation(state) ==
+    // NotAffiliated` test is strictly WEAKER — that verdict is compatible with
+    // `pending_deferred_life_cost_resume` / `pending_cost_move_resume` still
+    // being `Some`, which is exactly when the pass boundary runs a fallible
+    // continuation drain.
+    //
+    // CR 601.2g-h ordering is preserved without hoisting
+    // `classify_payment_continuation`: at a `Priority` window with both parked
+    // fields `None`, that classifier necessarily returns `NotAffiliated`
+    // (its deferred-life short-circuit needs a parked root, `Priority` matches
+    // none of its `waiting_for` arms, and its parked-cost-move fallback returns
+    // `NotAffiliated` when no root is parked), so this fast path can never steal
+    // a window the payment witness below owns.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if priority::pass_priority_structurally_legal(state, player) {
+            return Ok((acting, GameAction::PassPriority, false, None));
+        }
+    }
 
     let actions = legal_actions(state);
     if actions.is_empty() {
@@ -630,8 +660,12 @@ pub fn threat_velocity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
+    use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use engine::types::game_state::{DeferredLifeCostResume, PendingCast, PendingCostMoveResume};
     use engine::types::identifiers::CardId;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::zones::Zone;
 
     #[test]
@@ -721,6 +755,197 @@ mod tests {
             is_policy_choice,
             "declining an optional shortcut is a policy choice"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Priority fast path (CR 117.3d).
+    //
+    // Every assertion below is an exact `perf_counters` integer. Nothing here
+    // measures time: a wall-clock assertion is the defect class this change
+    // exists to remove.
+    // ------------------------------------------------------------------
+
+    /// A `Priority` window on P0 with a wide, fully-enumerable board: three
+    /// untapped lands and three castable instants. Mirrors the engine's own
+    /// `legal_actions_priority_cast_probe_reuses_one_flushed_state_and_one_auto_tap_cache`
+    /// fixture, so a full enumeration here demonstrably builds a
+    /// `PriorityCastProbe` and its auto-tap source cache.
+    fn wide_priority_board() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for i in 0..3 {
+            scenario
+                .add_spell_to_hand(P0, &format!("Blue Spell {i}"), true)
+                .with_ability(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                })
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                });
+        }
+        scenario.build().state().clone()
+    }
+
+    /// An empty `Priority` window on P0 outside a main phase.
+    ///
+    /// **Fixture pin (i) + (ii):** empty hand AND a non-main-phase window, so
+    /// `candidates::priority_actions_with_probe` cannot enumerate a `PlayLand`
+    /// candidate. `PlayLand` has no structural hatch, so each one would reach
+    /// `fallback_simulation` and inflate `state_clone_for_legality` even with a
+    /// correct implementation. Never relax the exact counter assertions below to
+    /// inequalities; repin the fixture instead.
+    fn bare_priority_window() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        scenario.build().state().clone()
+    }
+
+    /// T9. The fast path removes both clones AND the whole enumeration.
+    ///
+    /// The three action assertions pass either way and are reach-guards; the
+    /// three exact zero counters are the evidence. No fixture pin is needed —
+    /// the fast path returns before enumeration, so the lands and spells on this
+    /// board only make the test stronger.
+    #[test]
+    fn priority_fast_path_skips_enumeration_entirely() {
+        let state = wide_priority_board();
+
+        engine::game::perf_counters::reset();
+        let (_actor, action, is_policy_choice, successor) =
+            resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("a bare pass is available");
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert_eq!(action, GameAction::PassPriority);
+        assert!(!is_policy_choice);
+        assert!(successor.is_none());
+        assert_eq!(
+            counters.priority_cast_probe_builds, 0,
+            "the fast path must not build a PriorityCastProbe"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "the fast path must not pay a legality clone"
+        );
+        assert_eq!(
+            counters.auto_tap_source_cache_builds, 0,
+            "the fast path must not build the auto-tap source cache"
+        );
+    }
+
+    /// T7p. The fast path's gate is a test on the two parked-continuation
+    /// FIELDS, not on `classify_payment_continuation`'s verdict.
+    ///
+    /// `DeferredLifeCostResume::PayAmount` is exactly the divergence: the
+    /// classifier reports `NotAffiliated` while the field is still `Some`, which
+    /// is the state in which the pass boundary would run a fallible continuation
+    /// drain. The explicit `NotAffiliated` assertion is the non-vacuity guard —
+    /// without it the test would not be exercising the divergence at all.
+    ///
+    /// Both counters go to `0` if the fast path is gated on the classifier's
+    /// verdict instead of on `pass_priority_structurally_legal`. The returned
+    /// action is deliberately NOT asserted: a successful drain legitimately
+    /// yields `PassPriority` with `is_policy_choice == false` and no successor,
+    /// which is indistinguishable from a fast-path return by shape alone.
+    #[test]
+    fn priority_fast_path_declines_on_a_parked_deferred_life_root() {
+        let mut state = bare_priority_window();
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 0,
+            resume_at_resolution_depth: 0,
+        });
+        assert_eq!(
+            classify_payment_continuation(&state),
+            PaymentContinuationState::NotAffiliated,
+            "non-vacuity: this fixture must be one where the verdict gate and the field gate disagree"
+        );
+
+        engine::game::perf_counters::reset();
+        let _ = resolve_choice(&state, PlayerId(0), PlayerId(1));
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert_eq!(
+            counters.priority_cast_probe_builds, 1,
+            "the fast path must have declined, so the full enumeration ran"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 1,
+            "the hatch must also have declined, deferring the pass to one simulation"
+        );
+    }
+
+    /// T10. The fallback path does not drift when the fast path declines.
+    ///
+    /// Passes either way by construction — a no-drift guard, not evidence of the
+    /// fix. Assertion (i) goes red if the fast path is made unconditional;
+    /// assertion (ii) goes red if the enumeration path is removed.
+    ///
+    /// Asserted on the whole `Result`: with `priority_player` desynced every
+    /// candidate is refused by the reducer, so `Err(NoLegalAction)` is a
+    /// legitimate outcome and must not be unwrapped.
+    #[test]
+    fn priority_fallback_path_runs_when_the_fast_path_declines() {
+        let mut state = wide_priority_board();
+        state.priority_player = PlayerId(1);
+
+        engine::game::perf_counters::reset();
+        let result = resolve_choice(&state, PlayerId(0), PlayerId(1));
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert!(
+            !matches!(result, Ok((_, GameAction::PassPriority, ..))),
+            "the fast path must not fire when `pass_priority_legality` refuses"
+        );
+        assert_eq!(
+            counters.priority_cast_probe_builds, 1,
+            "the enumeration path must actually have run"
+        );
+    }
+
+    /// T11. A parked payment carrier at a `Priority` window still routes to the
+    /// payment witness, not to the fast path.
+    ///
+    /// Passes on the unfixed tree — a no-drift guard. It is what fails if the
+    /// `waiting_for` dispatch is hoisted above `classify_payment_continuation`.
+    /// Under this change it is doubly protected (the field gate refuses this
+    /// state before the classifier is consulted), but it stays because it pins
+    /// the observable contract rather than the implementation route.
+    #[test]
+    fn parked_payment_carrier_still_routes_to_the_payment_witness() {
+        let mut state = bare_priority_window();
+        let pending = PendingCast::new(
+            ObjectId(9200),
+            CardId(9200),
+            ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(9200), PlayerId(0)),
+            ManaCost::NoCost,
+        );
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player: PlayerId(0),
+            pending: Box::new(pending),
+        });
+        assert!(
+            matches!(
+                classify_payment_continuation(&state),
+                PaymentContinuationState::Affiliated(_)
+            ),
+            "non-vacuity: the fixture must actually reach the witness branch"
+        );
+
+        match resolve_choice(&state, PlayerId(0), PlayerId(1)) {
+            Ok((_, action, _, successor)) => {
+                assert!(
+                    successor.is_some(),
+                    "an affiliated payment window must return a witnessed successor, got {action:?}"
+                );
+            }
+            Err(BailReason::NoLegalManaPayment) => {}
+            other => panic!("expected the payment-witness branch, got {other:?}"),
+        }
     }
 
     #[test]
