@@ -8,9 +8,10 @@
 # check with MEASURED numbers rather than asserted estimates.
 #
 # Runs the SERVER-RELEASE binary — the authoritative gate profile CI runs
-# (`cargo ai-perf-gate`). The parent's current_exe() resolves to
-# target/server-release/ai-perf-gate, so the K spawned children are
-# server-release too (profile-consistent parent and children).
+# (`cargo ai-perf-gate`). This script isolates CARGO_TARGET_DIR to target/ai, so
+# the parent's current_exe() resolves to target/ai/server-release/ai-perf-gate
+# and the K spawned children are server-release too (profile-consistent parent
+# and children).
 #
 # The profile here is load-bearing and must track the `cargo ai-perf-gate` alias:
 # this script hardcodes a target/<profile>/ path while the binary re-spawns ITSELF

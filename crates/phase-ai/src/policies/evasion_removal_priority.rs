@@ -241,6 +241,7 @@ mod tests {
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
+    use web_time::{Duration, Instant};
 
     const BEAST_WITHIN_ORACLE: &str =
         "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
@@ -865,14 +866,34 @@ mod tests {
         );
 
         // Measurement arm — kills `Deadline::after(0)` and `Deadline::after(15)`.
+        // Timed, because this is the same traversal run with NO cap — i.e. exactly the
+        // cost the 15 ms cap must beat for the interactive arm below to discriminate.
         let ai_ctx = crate::context::AiContext::empty(&measurement.weights);
+        let uncapped_start = Instant::now();
         let _ = policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
+        let uncapped_cost = uncapped_start.elapsed();
         assert_eq!(
             ai_ctx.session.projection_cache.read().unwrap().len(),
             1,
             "under a measurement config the projection deadline must not expire, so this \
              traversal completes and caches (revert-failing: any finite budget passed here bails \
              a traversal that costs several times the 15 ms interactive cap)"
+        );
+
+        // Fixture-drift guard for the interactive arm. That arm discriminates by wall
+        // clock — it asserts the 15 ms cap BAILS this traversal — which is a statement
+        // about deadline wiring only while the uncapped traversal costs materially more
+        // than the cap. Should the fixture get cheaper (fewer filler cards in
+        // `seed_opponent_begin_combat_horizon`, a cheaper `auto_advance_once` or
+        // `project_to`) or the host get fast enough that it fits inside 15 ms, the arm
+        // silently stops testing anything and its `is_empty` assertion fails as though
+        // the wiring had broken. Fail here instead, naming the real cause.
+        assert!(
+            uncapped_cost >= Duration::from_millis(45),
+            "T7b interactive arm can no longer discriminate: the uncapped traversal costs \
+             {uncapped_cost:?}, which is not comfortably above the 15 ms interactive cap. \
+             Re-seed the fixture so the traversal is expensive again, or rewrite the arm to \
+             observe the deadline `velocity_score` hands `get_or_project` directly."
         );
 
         // Interactive arm — kills `ctx.context.deadline`.
