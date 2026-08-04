@@ -271,9 +271,11 @@ fn hand_reveal_cast_respects_the_mana_value_gate() {
     for _ in 0..40 {
         match runner.state().waiting_for {
             WaitingFor::OptionalEffectChoice { .. } => break,
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("PassPriority should drain the combat trigger"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should drain the combat trigger");
+            }
             ref other => panic!("unexpected waiting state while draining: {other:?}"),
         }
     }
