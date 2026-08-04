@@ -1134,6 +1134,22 @@ fn typed_leg_of(filters: &[TargetFilter], name: &str) -> TypedFilter {
         .unwrap_or_else(|| panic!("{name}: expected a typed gate leg, got {filters:?}"))
 }
 
+fn hand_bound_typed_leg_of(filters: &[TargetFilter], name: &str) -> TypedFilter {
+    filters
+        .iter()
+        .find_map(|filter| match filter {
+            TargetFilter::Typed(typed)
+                if typed
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Hand }) =>
+            {
+                Some(typed.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name}: expected a hand-bound typed leg, got {filters:?}"))
+}
+
 /// R1 — CR 601.3 + CR 205.2b: the connector spelling `" and "` enumerates
 /// ALTERNATIVE members of the permission's candidate set, so it lowers to
 /// `TypeFilter::AnyOf`, exactly like `" or "`.
@@ -1375,7 +1391,7 @@ fn hand_bound_or_shaped_gate_ands_rather_than_grafts() {
         filters.iter().any(|f| matches!(f, TargetFilter::Or { .. })),
         "the Or-shaped gate must be AND-ed beside the hand binding, got {filters:?}"
     );
-    let hand = typed_leg_of(filters, "Synthetic Hand Reveal Pilot");
+    let hand = hand_bound_typed_leg_of(filters, "Synthetic Hand Reveal Pilot");
     assert_eq!(
         hand.type_filters,
         vec![TypeFilter::Card],
@@ -1411,7 +1427,7 @@ fn hand_bound_cast_keeps_rich_typed_gate_as_a_complete_predicate() {
         }),
         "the complete creature + mana-value gate must survive, got {filters:?}"
     );
-    let hand = typed_leg_of(filters, "Synthetic Hand Reveal CMC");
+    let hand = hand_bound_typed_leg_of(filters, "Synthetic Hand Reveal CMC");
     assert_eq!(hand.type_filters, vec![TypeFilter::Card]);
     assert_eq!(hand.controller, Some(ControllerRef::Opponent));
     assert!(
