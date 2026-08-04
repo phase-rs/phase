@@ -3326,26 +3326,88 @@ fn is_player_scope_local_continuation(
         return true;
     }
 
-    // CR 608.2c + CR 701.24a: "Each player shuffles the cards from their hand
-    // into their library" is one per-player move/shuffle instruction only for
-    // an all-player scope. Keep the terminal shuffle with its immediately
-    // preceding ChangeZoneAll; a following Draw remains the detached
-    // all-player instruction.
-    matches!(scope, PlayerFilter::All)
-        && matches!(
-            (parent, child),
-            (
-                Effect::ChangeZoneAll {
-                    origin: Some(Zone::Hand),
-                    destination: Zone::Library,
-                    target: TargetFilter::ScopedPlayer,
-                    ..
-                },
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer,
-                }
-            )
+    // CR 608.2c + CR 701.24a: "<each subject> shuffles the cards from their hand
+    // into their library" is ONE per-player move/shuffle instruction. Keep the
+    // terminal shuffle with its immediately preceding ChangeZoneAll; a following
+    // Draw remains the detached post-loop instruction.
+    let is_scoped_whole_hand_shuffle = matches!(
+        (parent, child),
+        (
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                ..
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
         )
+    );
+    is_scoped_whole_hand_shuffle && scope_keeps_scoped_whole_hand_shuffle_local(scope)
+}
+
+/// CR 115.10 + CR 608.2c + CR 701.24a: Does this `player_scope` filter keep the
+/// scoped whole-hand-move/shuffle pair inside its own per-player iteration?
+///
+/// EXHAUSTIVE BY DESIGN — no `_` arm, no `matches!`, and it must stay that way.
+/// The predecessor form was `matches!(scope, PlayerFilter::All)`: a
+/// hand-maintained allowlist that silently answered "detach" for every filter it
+/// did not name (#6957). That answer is structural, not inert — the caller
+/// (`detach_after_player_scope_local_chain`) uses it to pull the shuffle out of
+/// the loop and run it ONCE as an unscoped tail, where `ScopedPlayer` has no
+/// iteration player to bind to. Compiler exhaustiveness cannot see inside a
+/// `matches!`, so a new SCOPE-position filter joined the wrong side for free.
+/// This form makes the compiler demand an answer, exactly as
+/// `player_filter_references_tracked_set` does for the publication allowlist.
+///
+/// The answer is the same for every filter, and that uniformity is the finding:
+/// the discriminator is the `TargetFilter::ScopedPlayer` recipient on BOTH halves
+/// of the pair, never the identity of the player set. Whichever players the
+/// filter selects, each one moves their OWN hand (CR 115.10 — the iteration
+/// player is bound as the effect resolves) and must therefore shuffle their OWN
+/// library as part of that same instruction (CR 701.24a). A filter that selects
+/// no player at all (CR 104.5 `HasLostTheGame`, CR 506.2 + CR 508.6
+/// `OpponentOfTriggeringPlayerNotAttacked` — both count-position-only, matching
+/// no live recipient) runs the pair zero times, which is also correct; detaching
+/// there would instead run one unbound shuffle after an empty loop.
+///
+/// Adding a variant to a `false` group must therefore be a deliberate decision
+/// backed by a rule, not the accident this predicate used to make.
+fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
+    match scope {
+        // Plain relations and whole-table scopes.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::All
+        | PlayerFilter::AllExcept { .. }
+        // Event-context and trigger anchors.
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        // Turn/combat ledgers.
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::HighestSpeed
+        // Resolution-local ledgers ("… this way") and linked-exile piles.
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        // Per-candidate board / scalar comparisons.
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => true,
+    }
 }
 
 /// CR 109.5 + CR 115.10 + CR 119.3: Detect that an effect's recipient is bound
@@ -27730,14 +27792,31 @@ mod tests {
             &PlayerFilter::All,
         ));
 
-        assert!(
-            !is_player_scope_local_continuation(
-                &scoped_move,
-                &scoped_shuffle,
-                &PlayerFilter::Opponent,
-            ),
-            "a non-All player scope must not enter the all-player hand shuffle continuation"
-        );
+        // CR 701.24a + #6957: the `ScopedPlayer` recipients on BOTH halves are
+        // the discriminator, not the identity of the player set. A SCOPE-position
+        // filter other than `All` must reach the SAME decision — the predecessor
+        // `matches!(scope, PlayerFilter::All)` silently detached these, running
+        // one unbound shuffle after the loop instead of one shuffle per player.
+        for scope in [
+            PlayerFilter::Opponent,
+            PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::Controller),
+            },
+            PlayerFilter::TrackedSetPossessor {
+                relation: crate::types::ability::PlayerRelation::Opponent,
+                possession: crate::types::ability::PossessionAxis::Controller,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                caused_by: None,
+            },
+        ] {
+            assert!(
+                is_player_scope_local_continuation(&scoped_move, &scoped_shuffle, &scope),
+                "{scope:?} in SCOPE position must keep the scoped shuffle inside its iteration"
+            );
+        }
 
         let non_hand_move = zone_to_library_effect(Zone::Graveyard, TargetFilter::ScopedPlayer);
         assert!(
@@ -27893,5 +27972,158 @@ mod tests {
             last_shuffle < first_draw,
             "the draw tail must start only after every scoped move/shuffle pass"
         );
+    }
+
+    /// CR 608.2c + CR 701.24a + CR 115.10 (#6957): a NON-`All` SCOPE-position
+    /// `PlayerFilter` keeps the scoped whole-hand shuffle inside each iteration.
+    ///
+    /// Deliberately run with TWO matching opponents. With a single iteration the
+    /// aggregate "a shuffle happened" is indistinguishable between "kept in
+    /// scope" and "detached and run once"; with two, the detached form can only
+    /// produce ONE shuffle, after BOTH hand moves, so both the shuffle count and
+    /// the move/shuffle interleaving flip when the fix is reverted.
+    #[test]
+    fn opponent_scoped_hand_shuffle_stays_inside_each_iteration() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = ObjectId(901);
+        let controller = PlayerId(0);
+        let opponents = [PlayerId(1), PlayerId(2)];
+        for (player, hand_count) in [(PlayerId(0), 4), (PlayerId(1), 3), (PlayerId(2), 5)] {
+            for card in 0..hand_count {
+                create_object(
+                    &mut state,
+                    CardId(4_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} hand {card}", player.0),
+                    Zone::Hand,
+                );
+            }
+            for card in 0..10 {
+                create_object(
+                    &mut state,
+                    CardId(5_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} library {card}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut move_hand = ResolvedAbility::new(
+            hand_to_library_effect(TargetFilter::ScopedPlayer),
+            vec![],
+            source,
+            controller,
+        );
+        move_hand.player_scope = Some(PlayerFilter::Opponent);
+        let mut shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        shuffle.sub_ability = Some(Box::new(draw));
+        move_hand.sub_ability = Some(Box::new(shuffle));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &move_hand, &mut events, 0).unwrap();
+
+        // `Effect::Shuffle` stamps exactly one `EffectResolved { Shuffle }` per
+        // invocation, so this counts INSTRUCTION runs — unlike the raw
+        // `ShuffledLibrary` action, which a whole-hand library insertion also
+        // emits per card.
+        let shuffle_instruction_indices: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                } => Some(index),
+                _ => None,
+            })
+            .collect();
+        // Discriminator: the shuffle instruction runs ONCE PER SCOPED OPPONENT.
+        // The detached form runs the tail exactly once, so this count drops to 1.
+        assert_eq!(
+            shuffle_instruction_indices.len(),
+            2,
+            "each of the two scoped opponents must run the shuffle instruction once"
+        );
+        for opponent in opponents {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == opponent
+                )),
+                "P{} must shuffle their own library",
+                opponent.0
+            );
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == controller
+            )),
+            "the controller is outside an Opponent scope and must not shuffle"
+        );
+
+        // Interleaving discriminator: the FIRST shuffle must land before the LAST
+        // opponent's hand move. A detached tail runs after every move, so this
+        // inequality inverts when the scope gate is narrowed back to `All`.
+        let hand_move_indices: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::ZoneChanged { record, .. }
+                    if record.from_zone == Some(Zone::Hand)
+                        && record.to_zone == Zone::Library
+                        && opponents.contains(&record.owner) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hand_move_indices.len(),
+            8,
+            "both opponents' whole hands must move (3 + 5 cards)"
+        );
+        assert!(
+            shuffle_instruction_indices[0]
+                < *hand_move_indices.last().expect("hand moves occurred"),
+            "the first opponent's shuffle must precede the second opponent's hand move"
+        );
+
+        for (opponent, expected_draws) in opponents.into_iter().zip([3, 5]) {
+            assert_eq!(
+                state.players[opponent.0 as usize].cards_drawn_this_turn, expected_draws,
+                "P{} must draw exactly the number of cards they moved",
+                opponent.0
+            );
+        }
     }
 }
