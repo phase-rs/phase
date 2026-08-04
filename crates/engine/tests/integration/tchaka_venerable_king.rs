@@ -67,8 +67,10 @@ enum CommanderSetup {
 }
 
 /// Build a scenario with T'Chaka in P0's graveyard, `{3}` funded, and P0's
-/// commander positioned per `setup`. Returns the runner and T'Chaka's id.
-fn graveyard_scenario(setup: CommanderSetup) -> (GameRunner, ObjectId) {
+/// commander positioned per `setup`. Returns `(runner, tchaka_id, commander_id)`
+/// — the commander id is returned in every case so tests can reach-guard that the
+/// fixture staged the commander it claims (owner, zone) before asserting the gate.
+fn graveyard_scenario(setup: CommanderSetup) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -79,27 +81,25 @@ fn graveyard_scenario(setup: CommanderSetup) -> (GameRunner, ObjectId) {
 
     scenario.with_mana_pool(P0, floating_colorless(3));
 
-    // Stage the commander. The command-zone case is fully configured before
-    // build; the battlefield cases are flagged after build (the commander flag /
-    // stolen ownership are not builder-exposed).
-    let battlefield_commander = match setup {
-        CommanderSetup::OwnOnBattlefield | CommanderSetup::StolenOnly => {
-            Some(scenario.add_creature(P0, "Regal Vanguard", 3, 3).id())
-        }
+    // Stage the commander (always owned by P0 initially). The command-zone case is
+    // moved before build; the battlefield cases are flagged after build (the
+    // commander flag / stolen ownership are not builder-exposed).
+    let commander = scenario.add_creature(P0, "Regal Vanguard", 3, 3).id();
+    let on_battlefield = match setup {
+        CommanderSetup::OwnOnBattlefield | CommanderSetup::StolenOnly => true,
         CommanderSetup::OwnInCommandZone => {
-            let cmd = scenario.add_creature(P0, "Regal Vanguard", 3, 3).id();
-            scenario.with_commander(cmd); // moves it to the command zone
-            None
+            scenario.with_commander(commander); // moves it to the command zone
+            false
         }
     };
 
     let mut runner = scenario.build();
 
-    if let Some(cmd) = battlefield_commander {
+    if on_battlefield {
         let obj = runner
             .state_mut()
             .objects
-            .get_mut(&cmd)
+            .get_mut(&commander)
             .expect("commander object exists");
         obj.is_commander = true;
         if matches!(setup, CommanderSetup::StolenOnly) {
@@ -109,7 +109,7 @@ fn graveyard_scenario(setup: CommanderSetup) -> (GameRunner, ObjectId) {
         }
     }
 
-    (runner, tchaka)
+    (runner, tchaka, commander)
 }
 
 /// Whether the AI candidate generator offers T'Chaka's graveyard activation.
@@ -131,7 +131,18 @@ fn tchaka_monarch_activation_gated_on_owning_commander() {
     // (a) POSITIVE reach-guard: own commander on the battlefield. The gate can
     // pass and the ability resolves — proving the negative cases below are not
     // vacuous.
-    let (mut runner, tchaka) = graveyard_scenario(CommanderSetup::OwnOnBattlefield);
+    let (mut runner, tchaka, commander) = graveyard_scenario(CommanderSetup::OwnOnBattlefield);
+    // Fixture reach-guard: P0's own commander really is a battlefield permanent.
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "fixture: the own commander must be on the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&commander].owner,
+        P0,
+        "fixture: the own commander must be owned by P0"
+    );
     assert!(
         activation_offered(&runner, tchaka),
         "own commander on the battlefield: the graveyard activation must be legal"
@@ -149,7 +160,19 @@ fn tchaka_monarch_activation_gated_on_owning_commander() {
     // (b) THE DISCRIMINATOR: only a stolen opponent's commander. "your commander"
     // (CR 109.5) is not satisfied — fails if the runtime arm uses
     // `controls_any_commander`, or if the restriction reverted to Unimplemented.
-    let (mut runner, tchaka) = graveyard_scenario(CommanderSetup::StolenOnly);
+    let (mut runner, tchaka, commander) = graveyard_scenario(CommanderSetup::StolenOnly);
+    // Fixture reach-guard: the commander is on the battlefield but OWNED by P1, so
+    // "your commander" (owner-scoped) must be the thing failing — not a mis-stage.
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Battlefield,
+        "fixture: the stolen commander must be on the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&commander].owner,
+        P1,
+        "fixture: the stolen commander must be owned by the opponent (P1)"
+    );
     assert!(
         !activation_offered(&runner, tchaka),
         "stolen commander (owned by opponent): 'your commander' is owner-scoped — must be illegal"
@@ -165,7 +188,20 @@ fn tchaka_monarch_activation_gated_on_owning_commander() {
     );
 
     // (c) Own commander in the command zone (not a controlled permanent).
-    let (mut runner, tchaka) = graveyard_scenario(CommanderSetup::OwnInCommandZone);
+    let (mut runner, tchaka, commander) = graveyard_scenario(CommanderSetup::OwnInCommandZone);
+    // Fixture reach-guard: P0's OWN commander really is sitting in the command zone
+    // (CR 903.3d requires the battlefield), so the negative below tests the gate,
+    // not a fixture that silently failed to place the commander.
+    assert_eq!(
+        runner.state().objects[&commander].zone,
+        Zone::Command,
+        "fixture: the commander must be in the command zone"
+    );
+    assert_eq!(
+        runner.state().objects[&commander].owner,
+        P0,
+        "fixture: the command-zone commander must be P0's own"
+    );
     assert!(
         !activation_offered(&runner, tchaka),
         "commander in the command zone: not a permanent you control — must be illegal"
@@ -449,5 +485,25 @@ fn tchaka_etb_mill_then_decline_keeps_all_milled_cards() {
             .iter()
             .any(|&c| c == artifact || c == land || c == dud),
         "no milled card may reach hand when the optional put is declined"
+    );
+
+    // Prove the decline COMPLETED the cast/ETB flow rather than stalling on the
+    // consumed prompt: the ETB choice was drained (priority, no lingering choice),
+    // the stack is empty, and T'Chaka actually entered the battlefield. A stalled
+    // continuation would leave the graveyard assertions above true while failing
+    // here.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "after declining, the ETB choice must be consumed and priority restored, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "after declining, T'Chaka's spell/ETB must have fully resolved off the stack"
+    );
+    assert_eq!(
+        runner.state().objects[&tchaka].zone,
+        Zone::Battlefield,
+        "T'Chaka must have entered the battlefield once its cast/ETB completed"
     );
 }
