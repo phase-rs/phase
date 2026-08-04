@@ -18653,11 +18653,11 @@ fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter)
 /// `player_scope_from_parent_target_subject`), reused here rather than
 /// duplicated.
 ///
-/// Total and FAIL-CLOSED: only a recipient an existing `PlayerFilter` can name
-/// is bound. A recipient naming a TARGETED player ("target opponent") or an
-/// object ("that creature") returns `false`, so the caller falls through to
-/// `Effect::Unimplemented` instead of silently letting the printed controller
-/// act in someone else's place.
+/// Total and FAIL-CLOSED on BOTH sides of the binding. A recipient naming a
+/// TARGETED player ("target opponent") or an object ("that creature") returns
+/// `false`; so does a body that already carries its own scope. Either way the
+/// caller falls through to `Effect::Unimplemented` instead of silently letting
+/// the printed controller act in someone else's place.
 fn bind_recipient_without_recipient_slot(
     def: &mut AbilityDefinition,
     filter: &TargetFilter,
@@ -18667,6 +18667,15 @@ fn bind_recipient_without_recipient_slot(
     // redundant single-player fan-out.
     if matches!(filter, TargetFilter::OriginalController) {
         return true;
+    }
+    // The body may already carry a printed iteration scope of its own. Both
+    // halves are rewritten from clones of ONE parsed body, so an unguarded
+    // stamp would replace that fan-out with a single recipient — and with a
+    // DIFFERENT one on each half, since each half binds its own conjunct. The
+    // printed per-player iteration would be silently lost. Refuse instead: an
+    // honest gap beats resolving for the wrong set of players.
+    if def.player_scope.is_some() {
+        return false;
     }
     let Some(scope) = distribution_recipient_player_scope(filter) else {
         return false;

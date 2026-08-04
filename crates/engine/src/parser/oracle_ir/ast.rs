@@ -193,11 +193,15 @@ pub(crate) struct SubjectPhraseAst {
     /// BOARD-WIDE effect — the grant landed on every permanent, lands and
     /// artifacts included, while coverage still reported the card as supported.
     /// Encoding the unbound state in the type makes that fail-open
-    /// unrepresentable: every consumer must say what it does with `None`, and
-    /// the one consumer that actually reads this field
-    /// (`lower_subject_predicate_ast`'s `ImperativeFallback` arm, the only
-    /// predicate kind that applies the subject filter) fails closed to
-    /// `Effect::unimplemented`. Same shape, same reason, as
+    /// unrepresentable: every consumer must say what it does with `None`.
+    /// `lower_subject_predicate_ast`'s `ImperativeFallback` arm — the only
+    /// predicate kind that applies the subject filter — is the only consumer
+    /// that treats `None` as a coverage GAP, failing closed to
+    /// `Effect::unimplemented`. The other readers
+    /// (`sync_subject_into_nested_shuffle_sub`, `inject_subject_target`) reach
+    /// it through `target.or(affected)` and treat `None` as "nothing to
+    /// rebind", returning early. `None` is therefore reachable in all three —
+    /// do not assume otherwise when editing them. Same shape, same reason, as
     /// [`EntersUnderSpec::UnboundAnaphor`].
     pub(crate) affected: Option<TargetFilter>,
     pub(crate) target: Option<TargetFilter>,

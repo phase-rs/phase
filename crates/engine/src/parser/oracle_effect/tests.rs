@@ -559,11 +559,13 @@ fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
     );
 }
 
-/// CR 109.4 + CR 608.2d: the recipient-less binding channel generalizes past the
+/// CR 608.2d: the recipient-less binding channel generalizes past the
 /// possessive axis. Infernal Offering's "You and that player each sacrifice a
 /// creature" has no `TargetFilter` recipient slot on `Effect::Sacrifice` either,
 /// and its second conjunct is the opponent a preceding "Choose an opponent."
-/// picked — so the second half binds `player_scope: ChosenPlayer`.
+/// picked — a choice announced while applying the effect, not an object whose
+/// controller is being read — so the second half binds
+/// `player_scope: ChosenPlayer`.
 #[test]
 fn recipient_less_body_binds_a_chosen_player_conjunct_by_scope() {
     let parsed = parse_oracle_text(
@@ -602,23 +604,55 @@ fn recipient_less_body_binds_a_chosen_player_conjunct_by_scope() {
     );
 }
 
-/// CR 109.4: FAIL-CLOSED contract for the recipient-less binding channel. No
-/// `PlayerFilter` can name a TARGETED player, so "you and target opponent each
+/// CR 115.1: FAIL-CLOSED contract for the recipient-less binding channel. The
+/// second conjunct is a TARGETED player — declared as the spell goes on the
+/// stack — and no `PlayerFilter` names one, so "you and target opponent each
 /// flip a coin" (Mana Clash) / "… each secretly choose 1, 2, or 3"
-/// (Expert-Level Safe) must stay an honest `Unimplemented` — binding the body to
+/// (Expert-Level Safe) must stay an honest `Unimplemented`. Binding the body to
 /// `PlayerFilter::Opponent` would make EVERY opponent act in a multiplayer game,
 /// and leaving it unbound would make the caster act twice.
 #[test]
 fn recipient_less_body_with_a_targeted_player_conjunct_fails_closed() {
+    // Positive reach guard: the SAME grammar with a NAMEABLE conjunct must still
+    // parse. Without it, every assertion below would also hold if the
+    // compound-subject distributor had stopped running altogether — a dead path
+    // fails closed on everything, including cases it should bind.
+    //
+    // "that player" needs its antecedent: the binding comes from the preceding
+    // "Choose an opponent.", so the guard has to carry that sentence. A bare
+    // "You and that player each …" is itself an unbound subject, which is why
+    // this guard uses the full Infernal Offering text.
+    let reachable = parse_oracle_text(
+        "Choose an opponent. You and that player each sacrifice a creature.",
+        "Infernal Offering",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let bound_half = reachable
+        .abilities
+        .first()
+        .and_then(|ability| ability.sub_ability.as_deref())
+        .expect("reach-guard: the caster half must exist after the Choose");
+    assert!(
+        matches!(&*bound_half.effect, Effect::Sacrifice { .. }),
+        "reach-guard: the compound-subject distributor must still bind a nameable \
+         conjunct, else the fail-closed assertions below are vacuous, got {:#?}",
+        bound_half.effect
+    );
+
     for text in [
         "You and target opponent each flip a coin.",
         "You and target opponent each secretly choose 1, 2, or 3.",
     ] {
         let ability = parse_effect_chain(text, AbilityKind::Spell);
-        assert!(
-            matches!(&*ability.effect, Effect::Unimplemented { .. }),
-            "{text:?} must fail closed, got {:#?}",
-            ability.effect
+        let Effect::Unimplemented { name, .. } = &*ability.effect else {
+            panic!("{text:?} must fail closed, got {:#?}", ability.effect);
+        };
+        assert_eq!(
+            name, "unbound_subject",
+            "{text:?} must fail closed AT THE SUBJECT — any other gap name means the \
+             clause died earlier and this case stopped covering the targeted-player path"
         );
         assert_eq!(
             ability.player_scope, None,
