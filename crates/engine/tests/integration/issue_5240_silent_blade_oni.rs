@@ -242,7 +242,7 @@ fn silent_blade_oni_offers_free_cast_from_damaged_players_hand() {
 
 /// The hand-bound branch must retain property predicates from its typed cast
 /// gate. This drives the combat trigger through the production reveal and cast
-/// pipeline: both candidates reach the revealed hand, but only the creature at
+/// pipeline: all candidates reach the revealed hand, but only the creature at
 /// or below the printed mana-value ceiling reaches the cast-choice prompt.
 #[test]
 fn hand_reveal_cast_respects_the_mana_value_gate() {
@@ -259,6 +259,10 @@ fn hand_reveal_cast_respects_the_mana_value_gate() {
     let over_limit_creature = scenario
         .add_creature_to_hand(P1, "Over-Limit Hand Creature", 3, 3)
         .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let noncreature_inside_ceiling = scenario
+        .add_spell_to_hand(P1, "Noncreature Hand Instant", true)
+        .with_mana_cost(ManaCost::generic(2))
         .id();
 
     let mut runner = scenario.build();
@@ -297,5 +301,10 @@ fn hand_reveal_cast_respects_the_mana_value_gate() {
     assert!(
         !cards.contains(&over_limit_creature),
         "the mana-value-3 creature must not be offered; offered = {cards:?}"
+    );
+    assert!(
+        !cards.contains(&noncreature_inside_ceiling),
+        "the mana-value-2 instant must not be offered by a creature-only permission; \
+         offered = {cards:?}"
     );
 }
