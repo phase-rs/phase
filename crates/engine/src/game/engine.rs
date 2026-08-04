@@ -15194,6 +15194,14 @@ mod stage2_injector_tests {
                 //     and the other two did NOT move, which located the insertion below them.
                 //   #6961 (2ead7aab1) + v0.44.0: `:5918/:5995/:8970 ⇒ :5996/:6073/:9048`,
                 //     uniform +78 above all three (whole-file delta +153/-15).
+                //   #6958 (Conduit of Worlds): `:5996/:6073/:9048 ⇒ :6009/:6086/:9061`,
+                //     uniform +13 above all three. This PR's ONLY effects/mod.rs hunk inserts
+                //     13 lines at `:2957` (`effect_manages_own_outcome_flag`, the paid
+                //     graveyard-cast support), entirely above these producers, and adds zero
+                //     new census needles. Producers re-read at their new coordinates are
+                //     byte-identical to `origin/main` at the old ones, the other two entries
+                //     (scoped_library_search:452, engine.rs:11427) are UNMOVED, and the total
+                //     stays 37 with the partition 5/7/25 — same set, new coordinates.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -15206,9 +15214,9 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:5996".to_string(),
-                "game/effects/mod.rs:6073".to_string(),
-                "game/effects/mod.rs:9048".to_string(),
+                "game/effects/mod.rs:6009".to_string(),
+                "game/effects/mod.rs:6086".to_string(),
+                "game/effects/mod.rs:9061".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
