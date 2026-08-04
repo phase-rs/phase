@@ -838,7 +838,10 @@ fn restriction_scope_matches_player(
         // `SourceController` to `SpecificPlayer` at creation so the ban stays with
         // the activator even after the source leaves play or changes controller —
         // reading it live here would silently drop the ban when the source is
-        // gone (`source_controller == None`). An unresolved scope here is a bug.
+        // gone (`source_controller == None`). An unresolved scope here is a bug:
+        // a corrupt/forged snapshot is scrubbed of it on restore by
+        // `GameState::drop_unresolved_source_controller_restrictions`, so a raw
+        // scope reaching this arm means the invariant was violated in a live state.
         RestrictionPlayerScope::SourceController => {
             debug_assert!(
                 false,

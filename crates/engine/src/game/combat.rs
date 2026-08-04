@@ -3777,7 +3777,9 @@ fn attack_passes_temporary_prohibition(
             // by `add_restriction` at creation, so it is enforced by the
             // `SpecificPlayer` arm above and never reaches here as a raw scope —
             // the same lower-at-creation contract as the sibling placeholder
-            // scopes below.
+            // scopes below. A corrupt/forged snapshot is additionally scrubbed of
+            // any raw `SourceController` restriction on restore by
+            // `GameState::drop_unresolved_source_controller_restrictions`.
             crate::types::ability::RestrictionPlayerScope::TargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::DefendingPlayer

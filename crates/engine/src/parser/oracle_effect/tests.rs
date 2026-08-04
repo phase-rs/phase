@@ -31615,14 +31615,18 @@ fn cant_cast_you_arm_does_not_shadow_opponents_or_typed_filter() {
     );
 }
 
-/// CR 608.2c + CR 608.2g + CR 601.2a + CR 101.2: Conduit of Worlds' full line-2
-/// effect chain (verbatim, minus the `{T}` cost and "Activate only as a sorcery"
-/// which are cost/timing metadata parsed elsewhere). The chain is:
-///   TargetOnly{nonland permanent card in graveyard}
-///     → CastFromZone{ParentTarget, DuringResolution, paid, normal mana}
-///        gated on "if you haven't cast a spell this turn"
-///        → AddRestriction{CastSpells{None}, SourceController, EndOfTurn}
-///           gated on "if you do".
+/// Conduit of Worlds' full line-2 effect chain (verbatim, minus the `{T}` cost
+/// and "Activate only as a sorcery" which are cost/timing metadata parsed
+/// elsewhere). Each clause and the CR rule that governs it:
+///   CR 601.2c: TargetOnly{nonland permanent card in graveyard} — choose target.
+///     → CR 608.2g (+ CR 601.2a–i): CastFromZone{ParentTarget, DuringResolution,
+///        paid, normal mana} — an effect that allows casting a spell during
+///        resolution — gated on "if you haven't cast a spell this turn".
+///        → CR 608.2c + CR 101.2: AddRestriction{CastSpells{None},
+///           SourceController, EndOfTurn} — a later "if you do" instruction whose
+///           meaning depends on the earlier optional cast (608.2c: apply the
+///           instructions in written order), imposing a "can't" that takes
+///           precedence (101.2).
 /// Reverting Step 5 leaves the cast at `LingeringPermission`; reverting Step 4
 /// leaves the rider unimplemented. Both surface here.
 #[test]
@@ -31667,11 +31671,23 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
         cast.effect
     );
     // The "if you haven't cast a spell this turn" resolution gate is present (not
-    // swallowed) — a QuantityCheck on spells cast this turn.
+    // swallowed). Assert the concrete check — spells cast this turn by the
+    // controller (untyped) equal to zero — mirroring the rider-gate precision
+    // below, so a regression that flips the comparator or retargets the quantity
+    // is caught rather than passing on the variant alone.
     assert!(
         matches!(
             cast.condition.as_ref(),
-            Some(crate::types::ability::AbilityCondition::QuantityCheck { .. })
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Controller,
+                        filter: None,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
         ),
         "cast condition got {:?}",
         cast.condition
