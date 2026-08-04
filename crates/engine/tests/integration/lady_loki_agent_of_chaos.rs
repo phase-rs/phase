@@ -164,10 +164,18 @@ fn lady_loki_x_spell_reads_off_stack_mana_value() {
         });
         b.id()
     };
-    let _ = hit;
 
     let mut runner = scenario.build();
     let outcome = runner.cast(spell).x(3).resolve();
+
+    // Reach guard: the dig exiled the nonland hit, so MV(hit) = 1 was the value
+    // read for the |MV(spell) − MV(hit)| difference below. The free cast is not
+    // accepted here, so the hit stays in Exile.
+    assert_eq!(
+        outcome.zone_of(hit),
+        engine::types::zones::Zone::Exile,
+        "the nonland hit must be exiled by the dig"
+    );
 
     // CR 202.3e: off the stack X = 0, so MV(spell) = 3, and |3 − 1| = 2.
     assert_eq!(

@@ -3079,12 +3079,12 @@ mod tests {
         // FULL difference |4 − 1| = 3. Reverting the targets-threading at site 2200
         // drops the hit and yields |4 − 0| = 4.
         let summary = collect_chain_summary(&cont.chain);
-        assert!(
-            summary.iter().any(
-                |(_, target, amount)| *target == TargetRef::Player(PlayerId(2)) && *amount == 3
-            ),
-            "remaining opponent must be stashed with |MV(spell) − MV(hit)| = 3 (a \
-             target-dropped pre-resolve gives 4): {summary:?}"
+        assert_eq!(
+            summary,
+            vec![(source, TargetRef::Player(PlayerId(2)), 3)],
+            "only the remaining opponent (P2) must be stashed, with \
+             |MV(spell) − MV(hit)| = 3 — an extra re-stashed paused P1 entry, or a \
+             target-dropped pre-resolve of 4, must fail this"
         );
 
         // Finding 2: the re-parented free-cast tail carries the injected hit.
@@ -3102,6 +3102,166 @@ mod tests {
             Some(vec![TargetRef::Object(hit)]),
             "the stashed CastFromZone tail must carry the exile-until hit as its \
              ParentTarget referent (reverting the guarded pre-bind leaves it empty)"
+        );
+    }
+
+    /// CR 608.2c + CR 616.1e: the FALSE-branch pair for the propagation test above.
+    /// `cast_tail_with_parent_targets` gates on `should_propagate_parent_targets`,
+    /// which returns false for a `Resolution`-timed sub. When it does, the stashed
+    /// tail must NOT inherit the parent's object targets — otherwise a plain
+    /// multi-target `DealDamage` tail would silently gain the parent's referents on
+    /// a pause path and damage the wrong recipients. The parent carries TWO object
+    /// targets so a leak of either one fails the `is_empty()` assertion.
+    #[test]
+    fn damage_each_player_replacement_pause_does_not_leak_targets_to_resolution_sub() {
+        use crate::types::ability::{
+            CardPlayMode, CastFromZoneDriver, PlayerFilter, TargetChoiceTiming,
+        };
+        use crate::types::format::FormatConfig;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lady Loki".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The exiled triggering spell — EventSource, mana value 4 ({3}{R}).
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Chaos Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(11),
+            controller: PlayerId(0),
+            object_id: spell,
+        });
+
+        // Two exile-until hits — both bound as object targets on the parent, so the
+        // guard has two referents that must NOT leak into the Resolution-timed sub.
+        let hit_a = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Nonland Hit A".to_string(),
+            Zone::Exile,
+        );
+        let hit_b = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Nonland Hit B".to_string(),
+            Zone::Exile,
+        );
+        for id in [hit_a, hit_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+
+        // Force the first opponent (P1) to pause on an optional damage replacement.
+        install_optional_damage_replacement(&mut state);
+
+        // A Resolution-timed tail: the guard returns false, so its own (empty)
+        // targets must survive the stash. Marked as CastFromZone only so the chain
+        // walk below can pick it out from the remaining-opponent DealDamage nodes.
+        let mut cast_tail = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        cast_tail.target_choice_timing = TargetChoiceTiming::Resolution;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                },
+                player_filter: PlayerFilter::Opponent,
+            },
+            vec![TargetRef::Object(hit_a), TargetRef::Object(hit_b)],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cast_tail));
+
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+
+        // Positive reach-guard: the pause fired and the remaining-opponent + tail
+        // chain was stashed, so the stashed-tail path was actually exercised.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "first opponent must pause on the optional damage replacement, got {:?}",
+            state.waiting_for
+        );
+        let cont = state
+            .active_ability_continuation()
+            .expect("the remaining opponent + Resolution-timed tail must be stashed");
+        let summary = collect_chain_summary(&cont.chain);
+        assert_eq!(
+            summary,
+            vec![(source, TargetRef::Player(PlayerId(2)), 3)],
+            "reach guard: the remaining opponent (P2) must be stashed with \
+             |MV(spell) − MV(hit)| = 3, proving the stashed-tail path ran"
+        );
+
+        // Negative assertion: the Resolution-timed tail keeps its own empty targets
+        // — the guard blocked propagation, so neither hit leaked into it.
+        let mut cursor = Some(cont.chain.as_ref());
+        let mut cast_tail_targets = None;
+        while let Some(node) = cursor {
+            if matches!(node.effect, Effect::CastFromZone { .. }) {
+                cast_tail_targets = Some(node.targets.clone());
+                break;
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        assert_eq!(
+            cast_tail_targets,
+            Some(Vec::new()),
+            "a Resolution-timed sub must NOT inherit the parent's object targets on \
+             the pause path (should_propagate_parent_targets returns false)"
         );
     }
 
