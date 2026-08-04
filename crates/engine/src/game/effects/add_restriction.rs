@@ -161,16 +161,16 @@ fn fill_runtime_fields(
                         *affected_players = RestrictionPlayerScope::SpecificPlayer(controller);
                     }
                 }
-                // CR 109.5 + CR 611.2a + CR 611.2c: `SourceController` (the "you"
-                // in "you can't cast additional spells this turn" — Conduit of
-                // Worlds) comes from the resolution of an ACTIVATED ability, so
-                // "you" is the player who activated it (CR 109.5), fixed at
-                // resolution. The resulting rules-modifying continuous effect
-                // exists independently of its source (CR 611.2c) and lasts until
-                // end of turn (CR 611.2a): it must keep affecting the original
-                // activator even if the source later changes controller or leaves
-                // play. Lower to `SpecificPlayer` now to lock that player, exactly
-                // like the other affected-player scopes above.
+                // CR 109.5 + CR 611.2a: `SourceController` (the "you" in "you
+                // can't cast additional spells this turn" — Conduit of Worlds)
+                // comes from the resolution of an ACTIVATED ability, so "you" is
+                // the player who activated it (CR 109.5), fixed at resolution. The
+                // resulting rules-modifying continuous effect lasts until end of
+                // turn (CR 611.2a), a source-independent turn-based duration: it
+                // must keep affecting the original activator even if the source
+                // later changes controller or leaves play. Lower to
+                // `SpecificPlayer` now to lock that player, exactly like the other
+                // affected-player scopes above.
                 RestrictionPlayerScope::SourceController => {
                     *affected_players = RestrictionPlayerScope::SpecificPlayer(original_controller);
                 }

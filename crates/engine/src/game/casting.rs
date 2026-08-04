@@ -832,9 +832,11 @@ fn restriction_scope_matches_player(
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
-        // CR 109.5 + CR 611.2c: the affected "you" ("you can't cast additional
+        // CR 109.5 + CR 611.2a: the affected "you" ("you can't cast additional
         // spells this turn" — Conduit of Worlds) is the player who activated the
-        // ability, fixed at resolution. `add_restriction` lowers
+        // ability (CR 109.5: an activated ability's "you" is the activator), fixed
+        // at resolution, and the resulting continuous effect lasts until end of
+        // turn independent of its source (CR 611.2a). `add_restriction` lowers
         // `SourceController` to `SpecificPlayer` at creation so the ban stays with
         // the activator even after the source leaves play or changes controller —
         // reading it live here would silently drop the ban when the source is

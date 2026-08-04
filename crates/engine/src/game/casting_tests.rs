@@ -27624,15 +27624,15 @@ fn cast_only_from_zones_allows_hand_casts_for_affected_player() {
 
 #[test]
 fn source_controller_scope_is_locked_to_activator_not_source() {
-    // CR 109.5 + CR 611.2a + CR 611.2c: a `CastSpells` prohibition scoped to
+    // CR 109.5 + CR 611.2a: a `CastSpells` prohibition scoped to
     // `SourceController` (Conduit of Worlds' "you can't cast additional spells
     // this turn") comes from the resolution of an ACTIVATED ability, so "you" is
     // the player who activated it (CR 109.5), fixed at resolution. The resulting
-    // rules-modifying continuous effect exists independently of its source
-    // (CR 611.2c) and lasts until end of turn (CR 611.2a): it must keep affecting
-    // the original activator even after the source changes controller or leaves
-    // play. `add_restriction` lowers `SourceController` to `SpecificPlayer` at
-    // creation to lock that activator.
+    // rules-modifying continuous effect lasts until end of turn (CR 611.2a) — a
+    // source-independent turn-based duration — so it must keep affecting the
+    // original activator even after the source changes controller or leaves play.
+    // `add_restriction` lowers `SourceController` to `SpecificPlayer` at creation
+    // to lock that activator.
     let mut state = setup_game_at_main_phase();
     let next_id = state.next_object_id;
     let source = create_object(
@@ -27674,14 +27674,15 @@ fn source_controller_scope_is_locked_to_activator_not_source() {
     assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
     assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
 
-    // CR 611.2c: the effect is locked to the activator. Changing the source's
-    // controller does NOT move the ban to the new controller.
+    // CR 109.5: the "you" is the activator, fixed at resolution. Changing the
+    // source's controller does NOT move the ban to the new controller.
     state.objects.get_mut(&source).unwrap().controller = PlayerId(1);
     assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
     assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
 
-    // CR 611.2a + CR 611.2c: the effect also survives the source leaving play —
-    // Conduit is a fragile 1/1 artifact creature that can be sacrificed / bounced
+    // CR 611.2a: the effect also survives the source leaving play — its
+    // turn-based duration is independent of the source. Conduit is a fragile 1/1
+    // artifact creature that can be sacrificed / bounced
     // / killed the same turn, but the ban on the activator persists this turn.
     state.objects.remove(&source);
     assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
@@ -49672,7 +49673,7 @@ fn activate_conduit_to_offer(
 }
 
 fn has_source_controller_cant_cast(state: &GameState) -> bool {
-    // CR 109.5 + CR 611.2c: Conduit's self-scoped "you can't cast additional
+    // CR 109.5: Conduit's self-scoped "you can't cast additional
     // spells this turn" rider is lowered to `SpecificPlayer(activator)` at
     // creation (the activator is PlayerId(0) in this fixture), so the installed
     // ban carries that concrete player — not the parse-time `SourceController`
