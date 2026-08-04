@@ -840,6 +840,58 @@ mod tests {
 
         let measurement = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
 
+        // Guard 3 — fixture-drift guard for the interactive arm. That arm discriminates
+        // by wall clock: it asserts the 15 ms cap BAILS this traversal, which is a claim
+        // about deadline wiring only while the traversal costs materially more than the
+        // cap. Should the fixture get cheaper (fewer filler cards in
+        // `seed_opponent_begin_combat_horizon`, a cheaper `auto_advance_once` or
+        // `project_to`) or the host get fast enough that it fits inside 15 ms, the arm
+        // silently stops testing anything and its `is_empty` assertion fails as though
+        // the wiring had broken. Fail here instead, naming the real cause.
+        //
+        // Timed on `get_or_project` DIRECTLY, with the same coordinates Guard 2 pinned
+        // and `velocity_score` passes, under an unbounded deadline. Timing
+        // `policy_score_in_context` instead would fold in `candidate_for` and the
+        // policy's other gates, so a slow wrapper could satisfy this guard while the
+        // projection — the only thing that actually reads the deadline — finished well
+        // inside the cap. The probe uses its own session so it cannot warm either arm's
+        // cache.
+        //
+        // MEASURED, and narrower than this test used to claim: the uncapped projection
+        // costs ~29 ms on an M-series debug build, i.e. it clears the 15 ms cap by about
+        // 1.9x — NOT the "several times" the measurement arm's message asserted before
+        // this guard existed. That is the whole reason to time the projection rather
+        // than the wrapper: the wrapper cleared 45 ms comfortably and hid how thin the
+        // real margin is. The threshold sits just above the cap because the arm's actual
+        // precondition is `uncapped > 15 ms` — anything less and it stops discriminating
+        // entirely. A host ~2x faster than this one will trip this guard, which is the
+        // intended outcome: it names the fixture, instead of the arm reporting a wiring
+        // regression that never happened.
+        let probe = crate::context::AiContext::empty(&measurement.weights);
+        let uncapped_start = Instant::now();
+        let uncapped = probe.session.get_or_project(
+            &state,
+            P0,
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentBeginCombat,
+            engine::util::Deadline::none(),
+        );
+        let uncapped_cost = uncapped_start.elapsed();
+        assert!(
+            uncapped.is_ok(),
+            "reach-guard: the uncapped projection must complete, else this measures a bail \
+             rather than the traversal cost"
+        );
+        assert!(
+            uncapped_cost >= Duration::from_millis(20),
+            "T7b interactive arm can no longer discriminate: the uncapped projection costs \
+             {uncapped_cost:?}, which no longer clears the 15 ms interactive cap with any \
+             margin (it measured ~29 ms when this guard was written). Re-seed the fixture so \
+             the traversal is expensive again, or rewrite the arm to observe the deadline \
+             `velocity_score` hands `get_or_project` directly. Do NOT lower this threshold \
+             below the cap — under it the arm asserts nothing."
+        );
+
         // Control — the policy's non-velocity gates pass on THIS fixture.
         // `Deadline::after(0)` is expired, so `can_afford_projection` is false
         // and `velocity_score` returns before `get_or_project`. A non-zero total
@@ -866,34 +918,14 @@ mod tests {
         );
 
         // Measurement arm — kills `Deadline::after(0)` and `Deadline::after(15)`.
-        // Timed, because this is the same traversal run with NO cap — i.e. exactly the
-        // cost the 15 ms cap must beat for the interactive arm below to discriminate.
         let ai_ctx = crate::context::AiContext::empty(&measurement.weights);
-        let uncapped_start = Instant::now();
         let _ = policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
-        let uncapped_cost = uncapped_start.elapsed();
         assert_eq!(
             ai_ctx.session.projection_cache.read().unwrap().len(),
             1,
             "under a measurement config the projection deadline must not expire, so this \
              traversal completes and caches (revert-failing: any finite budget passed here bails \
-             a traversal that costs several times the 15 ms interactive cap)"
-        );
-
-        // Fixture-drift guard for the interactive arm. That arm discriminates by wall
-        // clock — it asserts the 15 ms cap BAILS this traversal — which is a statement
-        // about deadline wiring only while the uncapped traversal costs materially more
-        // than the cap. Should the fixture get cheaper (fewer filler cards in
-        // `seed_opponent_begin_combat_horizon`, a cheaper `auto_advance_once` or
-        // `project_to`) or the host get fast enough that it fits inside 15 ms, the arm
-        // silently stops testing anything and its `is_empty` assertion fails as though
-        // the wiring had broken. Fail here instead, naming the real cause.
-        assert!(
-            uncapped_cost >= Duration::from_millis(45),
-            "T7b interactive arm can no longer discriminate: the uncapped traversal costs \
-             {uncapped_cost:?}, which is not comfortably above the 15 ms interactive cap. \
-             Re-seed the fixture so the traversal is expensive again, or rewrite the arm to \
-             observe the deadline `velocity_score` hands `get_or_project` directly."
+             a traversal Guard 3 measured at ~29 ms against the 15 ms interactive cap)"
         );
 
         // Interactive arm — kills `ctx.context.deadline`.
