@@ -119,37 +119,50 @@ fn parker_luck_lose_parses_to_other_revealed_card_mana_value() {
     );
 }
 
-/// §6.5 HONEST-RED PIN (Daretti-INVERSE): Keen Duelist's reveal is single-subject
-/// (`RevealTop { player: Any }`, no `multi_target`), so the B3 anchor-precondition
-/// gate rewrites its `OtherRevealedCard`-bearing lose back to `Effect::Unimplemented`
-/// (coverage `supported == false`) EVEN after the §2.5 combinator lands. Revert-red:
-/// remove the §2.6 gate → the combinator makes this lose parse to `LoseLife` → KD
-/// flips supported → this test reds. Reach-guards: the root is a RevealTop with NO
-/// multi_target and the lose still chains the `put`, so the Unimplemented assertion
-/// is not vacuous on a parse failure.
+/// §6.5 HONEST-RED PIN, deepened by #6965. This test previously asserted that KD's
+/// reveal parsed to a `RevealTop` root and only its lose clause was gapped. That root
+/// parsed solely because the subject `you and target opponent each` fell open to
+/// `RevealTop { player: Any }` — a filter that matches unconditionally, i.e. the exact
+/// unsound binding #6965 removes. The old assertion named that filter in its own doc
+/// comment, so it was pinning the fail-open, not surviving it.
+///
+/// `target opponent` is a TARGETED player, and no `PlayerFilter` names one:
+/// `PlayerFilter::Opponent` would make EVERY opponent reveal in multiplayer. So the
+/// subject now fails closed and the whole trigger is an honest `unbound_subject` gap,
+/// which is strictly more truthful than a reveal bound to "anyone". The lose clause is
+/// unreachable behind it, so this no longer goes through `lose_node`.
+///
+/// Forward-red: whoever teaches the parser to bind a targeted player (giving KD a real
+/// `RevealTop` again) will red this test, which is the intended prompt to revisit the
+/// §2.6 lose gate that the old assertion guarded.
 #[test]
-fn keen_duelist_lose_stays_unimplemented_without_multiplayer_reveal() {
+fn keen_duelist_targeted_opponent_subject_fails_closed() {
     let parsed = parse_keen_duelist();
-    let root = parsed.triggers[0].execute.as_ref().unwrap();
+    let root = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("reach-guard: KD's upkeep trigger must still carry an execute chain");
     assert!(
         root.multi_target.is_none(),
         "reach-guard: Keen Duelist's single-subject reveal carries no multi_target"
     );
-    let lose = lose_node(&parsed);
-    assert!(
-        matches!(&*lose.effect, Effect::Unimplemented { name, .. } if name == "lose"),
-        "the gate must keep KD's lose an honest Unimplemented gap, got {:?}",
-        lose.effect
+    let Effect::Unimplemented { name, description } = &*root.effect else {
+        panic!(
+            "`you and target opponent each ...` must fail closed rather than bind a \
+             reveal to an unconditional filter, got {:?}",
+            root.effect
+        );
+    };
+    assert_eq!(
+        name, "unbound_subject",
+        "the gap must name the SUBJECT as the unbound part — a different name means the \
+         clause failed somewhere else and this test stopped covering the fail-closed path"
     );
     assert!(
-        matches!(
-            &*lose.sub_ability.as_ref().unwrap().effect,
-            Effect::ChangeZone {
-                destination: Zone::Hand,
-                ..
-            }
-        ),
-        "reach-guard: the chain still parsed the 'put into hand' sub (only the lose is gapped)"
+        description
+            .as_deref()
+            .is_some_and(|text| text.contains("target opponent")),
+        "reach-guard: the gap must quote the targeting conjunct that caused it, got {description:?}"
     );
 }
 
