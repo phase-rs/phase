@@ -10,7 +10,10 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
+import {
+  playOrCastActionsForObject,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
 import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
 
 interface LibraryPileProps {
@@ -108,13 +111,14 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
 
   const handlePlay = useCallback(() => {
     if (playActions.length === 0 || topObjectId == null) return;
-    if (playActions.length === 1) {
-      void dispatchAction(playActions[0]);
-    } else {
-      // Multiple options (e.g., cast normal + alt-cost) — defer to the shared
-      // ability-choice modal so the player can pick.
-      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
-    }
+    // #506: one authority for the lone-action decision. Multiple options (e.g.
+    // cast normal + alt-cost) defer to the shared ability-choice modal.
+    const auto = resolveSingleActionDispatch(
+      playActions,
+      useGameStore.getState().gameState?.objects[topObjectId],
+    );
+    if (auto) void dispatchAction(auto);
+    else setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
   }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;

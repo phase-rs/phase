@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
-    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
-    TypeFilter,
+    CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1635,6 +1635,15 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 903.3 / CR 903.3d: owner-scoped ("your commander") vs any-owner ("a
+        // commander") control. Delegates to the single `game::commander` authority —
+        // the same helpers `layers.rs` uses for `StaticCondition::ControlsCommander` —
+        // so a live re-evaluation at every activation-legality query correctly
+        // distinguishes owning your commander from merely controlling a stolen one.
+        ParsedCondition::ControlsCommander { ownership } => match ownership {
+            CommanderOwnership::Own => super::commander::controls_own_commander(state, player),
+            CommanderOwnership::Any => super::commander::controls_any_commander(state, player),
+        },
         // CR 102.1: "The active player is the player whose turn it is."
         ParsedCondition::IsYourTurn => state.active_player == player,
         // CR 102.3 / CR 805.4a: the active player is on a team other than
