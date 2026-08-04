@@ -14139,6 +14139,17 @@ declare_game_state! {
     /// attacked this turn" (Militant Angel).
     #[serde(default)]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 514.2: For each player, the defending players they declared
+    /// attackers against during that player's MOST RECENT completed turn.
+    /// Snapshotted from `attacked_defenders_this_turn` at cleanup
+    /// (`execute_cleanup`), keyed by the ending active player, overwriting so a
+    /// no-attack turn clears that player's entry while every other player's entry
+    /// persists (a skipped player never reaches cleanup, so it keeps its genuine
+    /// last-turn record). The "last turn" analog of `attacked_defenders_this_turn`
+    /// powering "attacked you during their last turn"
+    /// (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attacked_defenders_last_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
     /// turn, the defending players it attacked. This is the source-specific
     /// counterpart to `attacked_defenders_this_turn` for text like "each player
@@ -18296,6 +18307,16 @@ impl GameState {
             .is_some_and(|defenders| defenders.contains(&defender))
     }
 
+    /// CR 508.6: True if `attacker` declared one or more creatures attacking
+    /// `defender` during `attacker`'s most recent completed turn. Reads the
+    /// cleanup-time snapshot (`attacked_defenders_last_turn`); the "last turn"
+    /// analog of `has_attacked`.
+    pub fn player_attacked_player_last_turn(&self, attacker: PlayerId, defender: PlayerId) -> bool {
+        self.attacked_defenders_last_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// CR 508.6: True if `attacker` was declared attacking `defender` this turn.
     pub fn creature_attacked_player_this_turn(
         &self,
@@ -18557,6 +18578,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            attacked_defenders_last_turn: HashMap::new(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             end_steps_started_this_turn: 0,
@@ -20135,6 +20157,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_attacked_this_turn: _,
         attacking_creatures_this_turn: _,
         attacked_defenders_this_turn: _,
+        attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
         combat_phases_started_this_turn: _,
         end_steps_started_this_turn: _,
@@ -20429,6 +20452,7 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn

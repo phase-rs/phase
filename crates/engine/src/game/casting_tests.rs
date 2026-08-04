@@ -2766,6 +2766,141 @@ fn visions_of_ruin_flashback_commander_mv_reduces_flashback_cost() {
     }
 }
 
+/// CR 508.6 + CR 109.5: Avenge — "This spell costs {2} less to cast if a player
+/// attacked you during their last turn." The self-spell `ModifyCost` reduction
+/// must fire ONLY when the revenge gate holds. Drives the real cost pipeline
+/// (`prepare_spell_cast` → `collect_self_spell_cost_modifiers` →
+/// `self_spell_cost_condition_matches` → `layers::evaluate_condition`). The
+/// empty-snapshot assertion below is the revert guard: with the fix reverted the
+/// dropped condition would make the reduction unconditional and this case would
+/// wrongly report generic 2 instead of 4.
+#[test]
+fn avenge_cost_reduction_gated_on_attacked_you_last_turn() {
+    use crate::types::ability::Effect;
+
+    // Build an Avenge-shaped Sorcery ({4}{W}{W}) in hand whose self-spell
+    // `ModifyCost` reduces the generic cost by {2}, gated on the revenge predicate.
+    fn setup_avenge() -> (GameState, ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Avenge".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 4,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(2),
+                spell_filter: None,
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::AnyPlayerAttackedYouLastTurn);
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
+            obj.static_definitions.push(def);
+        }
+        (state, spell)
+    }
+
+    // Total generic cost the caster (P0) would pay for the prepared spell; the two
+    // white shards are asserted invariant so only the {2} generic reduction moves.
+    fn prepared_generic(state: &GameState, spell: ObjectId) -> u32 {
+        match prepare_spell_cast(state, PlayerId(0), spell)
+            .unwrap()
+            .mana_cost
+        {
+            ManaCost::Cost { generic, shards } => {
+                assert_eq!(shards, vec![ManaCostShard::White, ManaCostShard::White]);
+                generic
+            }
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    // Positive: an opponent (P1) attacked you (P0) last turn ⇒ {2} reduction fires.
+    let (mut state, spell) = setup_avenge();
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+    assert_eq!(
+        prepared_generic(&state, spell),
+        2,
+        "gate holds ⇒ reduced to {{2}}{{W}}{{W}}"
+    );
+
+    // Empty (paired negative / revert guard): no attack recorded ⇒ full cost.
+    let (state, spell) = setup_avenge();
+    assert_eq!(
+        prepared_generic(&state, spell),
+        4,
+        "no attack last turn ⇒ full {{4}}{{W}}{{W}} (reduction must be gated)"
+    );
+
+    // Direction / self-exclusion: YOU (P0) attacking an opponent last turn does
+    // NOT satisfy "a player attacked YOU" — the controller is skipped by the
+    // `p.id != controller` guard.
+    let (mut state, spell) = setup_avenge();
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(0), [PlayerId(1)].into_iter().collect());
+    assert_eq!(
+        prepared_generic(&state, spell),
+        4,
+        "you attacked an opponent ⇒ still full cost"
+    );
+}
+
+/// CR 508.6: the "attacked you during their last turn" gate is existential over
+/// players — true when ANY non-controller player attacked you, false when none
+/// did, and false when opponents attacked only each other. Multi-authority
+/// (3-player) coverage that `layers::evaluate_condition` neither over- nor
+/// under-matches.
+#[test]
+fn attacked_you_last_turn_condition_is_existential_over_players() {
+    use crate::game::layers::evaluate_condition_for_test;
+    use crate::types::format::FormatConfig;
+
+    let cond = StaticCondition::AnyPlayerAttackedYouLastTurn;
+    let you = PlayerId(0);
+    let src = ObjectId(0); // unused by this nullary, source-agnostic condition
+
+    // No one attacked you ⇒ false.
+    let state = GameState::new(FormatConfig::standard(), 3, 7);
+    assert!(!evaluate_condition_for_test(&state, &cond, you, src));
+
+    // Only P2 attacked you (P1 attacked no one) ⇒ true (existential over players).
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(2), [you].into_iter().collect());
+    assert!(evaluate_condition_for_test(&state, &cond, you, src));
+
+    // Opponents attacked each other but not you ⇒ false (the defender must be you).
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [PlayerId(2)].into_iter().collect());
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
+    assert!(!evaluate_condition_for_test(&state, &cond, you, src));
+}
+
 #[test]
 fn grant_next_spell_without_paying_casts_for_free() {
     use super::super::engine::apply_as_current;

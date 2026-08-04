@@ -4820,6 +4820,11 @@ pub(crate) fn static_condition_to_ability_condition(
         // no `AbilityCondition` counterpart yet. Return `None` rather than
         // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
         | StaticCondition::DuringOpponentsTurn
+        // CR 508.6: the existential "a player attacked you during their last turn"
+        // gate drives a self-spell cost reduction (Avenge), not an
+        // effect-resolution rider; no `AbilityCondition` equivalent — lowering
+        // returns `None`.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::None => None,
     }
 }

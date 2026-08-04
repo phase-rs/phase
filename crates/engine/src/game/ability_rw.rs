@@ -1952,6 +1952,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsTapped
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
@@ -6280,6 +6281,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         }
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             reads_player_of(StateKind::JournalCast)
+        }
+        // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
+        // (`attacked_defenders_last_turn`), which changes only at turn boundaries.
+        // `TurnStructure` is the sequencing kind written by cleanup/turn advance;
+        // conservatively depending on it invalidates the cached gate whenever the
+        // turn sequence changes.
+        StaticCondition::AnyPlayerAttackedYouLastTurn => {
+            reads_player_of(StateKind::TurnStructure)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
         // CR 401/402: reads the controller's library top card (contents + order).

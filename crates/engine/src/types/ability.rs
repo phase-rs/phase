@@ -7725,6 +7725,16 @@ pub enum StaticCondition {
     SpellCastWithVariantThisTurn {
         variant: crate::types::game_state::CastingVariant,
     },
+    /// CR 508.6 + CR 514.2 + CR 109.5: True when any (non-eliminated) player
+    /// declared a creature attacking the ability's controller ("you") during
+    /// that player's most recent COMPLETED turn. Existential over players; the
+    /// defender is the source controller (CR 109.5). Backed by the
+    /// `attacked_defenders_last_turn` snapshot taken at each turn's cleanup step
+    /// (CR 514.2). Shared "attacked you during their last turn" revenge
+    /// predicate: Avenge (this self-spell cost reduction), with O-Kagachi and
+    /// Weathered Sentinels as future adopters via
+    /// `GameState::player_attacked_player_last_turn`.
+    AnyPlayerAttackedYouLastTurn,
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,

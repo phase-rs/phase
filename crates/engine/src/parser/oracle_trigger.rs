@@ -4606,6 +4606,13 @@ pub(crate) fn static_condition_to_trigger_condition(
         // predicate; no intervening-if (`TriggerCondition`) equivalent — lowering
         // returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
+        // CR 508.6: the existential "a player attacked you during their last turn"
+        // gate is a self-spell cost-reduction / continuous-static predicate
+        // (Avenge). No card uses this existential form as an intervening-if today
+        // (O-Kagachi's source-referential "that player" form is a distinct
+        // variant), so there is no `TriggerCondition` equivalent — lowering
+        // returns `None`.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
