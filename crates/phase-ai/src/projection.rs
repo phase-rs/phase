@@ -329,7 +329,11 @@ fn resolve_choice(
     // being `Some`, which is exactly when the pass boundary runs a fallible
     // continuation drain.
     //
-    // CR 601.2g-h ordering is preserved without hoisting
+    // Each parked field carries its own CR annotation on `GameState`, and they
+    // are not the same rule: `pending_cost_move_resume` is CR 601.2h (a cost
+    // that moves objects, paid in a defined order), `pending_deferred_life_cost_resume`
+    // is CR 118.3b + CR 119.4 (a life payment already committed). That ordering,
+    // together with CR 601.2g's mana-ability window, is preserved without hoisting
     // `classify_payment_continuation`: at a `Priority` window with both parked
     // fields `None`, that classifier necessarily returns `NotAffiliated`
     // (its deferred-life short-circuit needs a parked root, `Priority` matches

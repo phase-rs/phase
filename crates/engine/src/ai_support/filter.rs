@@ -232,9 +232,13 @@ impl SimulationFilter {
 ///
 /// Conservative by design, mirroring `structurally_valid_search_selection`: this
 /// returns `false` — costing one simulation, never a wrong verdict — for every
-/// shape it does not fully model. CR 117.4: the pass boundary's own post-reducer
-/// pipeline (stack resolution, continuation drains, trigger-target selection) is
-/// deliberately NOT modelled; that is the same boundary the four sibling hatches
+/// shape it does not fully model. CR 117.4 is what puts a boundary here at all:
+/// an all-pass succession resolves the top of the stack, or ends the phase or
+/// step when the stack is empty. What that boundary then runs is deliberately
+/// NOT modelled — the CR 608.2 resolution steps, the continuation drains hanging
+/// off them, and CR 603.3d target selection for any ability that triggers. Only
+/// the first of those is CR 117.4's own subject; the rest are consequences of
+/// the resolution it starts. That is the same boundary the four sibling hatches
 /// already draw.
 fn structurally_valid_pass_priority(state: &GameState, candidate: &CandidateAction) -> bool {
     let (WaitingFor::Priority { player }, GameAction::PassPriority) =
@@ -1527,9 +1531,19 @@ mod tests {
     }
 
     /// The authoritative oracle: `SimulationFilter::fallback_simulation`'s body,
-    /// with the same actor / semantic-owner resolution, minus the perf counter.
+    /// with the same actor / semantic-owner resolution and the same
+    /// `SimulationProbeGuard` window, minus the perf counter.
+    ///
+    /// The guard is load-bearing, not ceremony. It suppresses top-level loop
+    /// reconciliation (`reconcile_terminal_result` §3) and ring accumulation
+    /// (`pass_priority_once_with_pipeline` §2) for the duration of the probe, so
+    /// an oracle that omits it can return a verdict production legality
+    /// filtering never produces. Every soundness assertion below is a comparison
+    /// against this function; if it stops being `fallback_simulation`, those
+    /// assertions stop constraining the hatch, and they do so silently.
     fn pass_oracle_accepts(state: &GameState, candidate: &CandidateAction) -> bool {
         let mut sim = state.clone();
+        let _probe = SimulationProbeGuard::enter();
         let actor = candidate
             .metadata
             .actor
