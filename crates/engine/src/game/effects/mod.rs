@@ -28611,4 +28611,196 @@ mod tests {
              from an absent producer; see `amount_channel`'s PayCost arm"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // #6957 — CR 107.3i: every instance of a co-anchored X reads the SAME
+    // value. A consumer that is not the direct successor of the anchor must
+    // still read the anchor, not whatever the intervening RELAY clause
+    // happened to produce.
+    // ---------------------------------------------------------------------
+
+    /// Three players so the `player_scope: Opponent` relay fans out twice —
+    /// that fan-out is what makes the relay's own total (life lost across ALL
+    /// opponents) differ from the shared X it was reading.
+    fn state_for_shared_x_probe() -> (GameState, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        for card in 0..40u64 {
+            create_object(
+                &mut state,
+                CardId(7_000 + card),
+                PlayerId(0),
+                format!("P0 library {card}"),
+                Zone::Library,
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(7_900),
+            PlayerId(0),
+            "Shared X Source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    /// NOT CLOSED (#6957): CR 107.3c + CR 107.3i — Thorna and Twigtooth,
+    /// "remove all counters from target creature you control. Each opponent
+    /// loses X life, you gain X life, … where X is the number of counters
+    /// removed this way."
+    ///
+    /// X is anchored to the `RemoveCounter` clause and read by TWO later
+    /// clauses. Both lower to `PreviousEffectAmount`, which reads the
+    /// *immediately preceding* chain step, so the second consumer reads the
+    /// intervening relay's own total instead of X. With two opponents that
+    /// total is the SUMMED life loss (2 × X), so the second consumer reads
+    /// 4 where CR 107.3i requires 2 — "normally, all instances of X on an
+    /// object have the same value at any given time."
+    ///
+    /// Pinned at the CURRENT (wrong) value so the gap is a visible asserted
+    /// fact rather than an untested assumption, exactly as
+    /// `zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer`
+    /// pins its own open arm. **Flipping this expectation from 4 to 2 is the
+    /// acceptance test for the fix.** The fix cannot be made at this stamp
+    /// site — see
+    /// `a_relay_that_re_anchors_x_must_keep_publishing_its_own_result` for the
+    /// counter-shape that makes a stamp-time policy undecidable; it belongs in
+    /// the parser, binding one X into the single `chosen_x` channel the way
+    /// `ability_utils::publish_announced_x` already does for CR 601.2b
+    /// announce-time binders.
+    ///
+    /// `Draw` stands in for the "you gain X life" clause so the observation is
+    /// a clean scalar (`cards_drawn_this_turn`); the defect is in what the
+    /// consumer READS, which is independent of which effect consumes it.
+    #[test]
+    fn second_consumer_of_a_shared_x_reads_the_relay_not_the_anchor() {
+        let (mut state, source) = state_for_shared_x_probe();
+        let controller = PlayerId(0);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("probe source exists")
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+
+        // Clause 1 (anchor): remove all counters — X := 2.
+        let mut anchor = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        // Clause 2 (relay): each opponent loses X life. Two opponents, so the
+        // instruction's own total is 4 while the X it read is 2.
+        let mut relay = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        relay.player_scope = Some(PlayerFilter::Opponent);
+        // Clause 3 (second consumer of the SAME X).
+        let consumer = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        relay.sub_ability = Some(Box::new(consumer));
+        anchor.sub_ability = Some(Box::new(relay));
+
+        resolve_ability_chain(&mut state, &anchor, &mut Vec::new(), 0).unwrap();
+
+        // Reach guard: the relay must actually have fanned out over both
+        // opponents, otherwise its total would coincide with X and the test
+        // would pass vacuously.
+        for opponent in [PlayerId(1), PlayerId(2)] {
+            assert_eq!(
+                state.players[opponent.0 as usize].life, 18,
+                "reach guard: P{} must have lost exactly X = 2 life",
+                opponent.0
+            );
+        }
+        assert_eq!(
+            state.players[controller.0 as usize].cards_drawn_this_turn, 4,
+            "pinned gap: the second consumer reads the relay's summed life loss \
+             (2 opponents × X) instead of the anchor's X. CR 107.3i requires 2 \
+             — flipping this to 2 is the acceptance test for the fix"
+        );
+    }
+
+    /// The counter-shape that makes a stamp-time fix for
+    /// `second_consumer_of_a_shared_x_reads_the_relay_not_the_anchor`
+    /// UNDECIDABLE, and therefore the regression guard any such attempt must
+    /// clear.
+    ///
+    /// Magma Pummeler — "prevent that damage and remove that many +1/+1
+    /// counters from it. When one or more counters are removed from this
+    /// creature this way, it deals that much damage to any target." Here the
+    /// middle clause is a relay (its own count reads the prevented damage) AND
+    /// is itself the anchor for the third clause: "that much damage" is the
+    /// number of counters actually REMOVED, which is capped by how many
+    /// counters were on the object. CR 122.1.
+    ///
+    /// That is byte-identical in the AST to Thorna's co-anchored
+    /// `RemoveCounter -> relay -> consumer` shape, but demands the opposite
+    /// answer: here the consumer MUST read the relay's own result, there it
+    /// must reach past it. So "a relay never redefines the shared slot" — the
+    /// tempting generalization of `effect_relays_the_shared_amount` from the
+    /// zero case to every case — is wrong, and no runtime policy keyed on the
+    /// resolved AST can separate the two. The binding has to be recorded when
+    /// the parser lowers X, not recovered at resolution.
+    ///
+    /// The relay reads 7 but the object carries only 2 counters, so the two
+    /// candidate answers are far apart: 2 (correct, the relay's own result)
+    /// vs 7 (what declining to overwrite would leak).
+    #[test]
+    fn a_relay_that_re_anchors_x_must_keep_publishing_its_own_result() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        state
+            .objects
+            .get_mut(&source)
+            .expect("probe source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        // `previous_effect_amount_seen_by_next_clause` prefixes `GainLife 7`,
+        // so the relay's own quantity resolves to 7 while only 2 counters
+        // exist to remove.
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 2,
+            "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
+             read the 2 actually removed — not the 7 the relay asked for"
+        );
+    }
 }
