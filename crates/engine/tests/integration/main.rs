@@ -41,6 +41,7 @@ mod balance_equalization;
 mod baleful_mastery_regression;
 mod banding_combat;
 mod batched_trigger_subject_count;
+mod batroc_the_leaper_multikicker_counters;
 mod battle_of_wits;
 mod bbfu10_entered_this_turn_snapshot;
 mod bbfu7_attacks_if_able_not_goad;

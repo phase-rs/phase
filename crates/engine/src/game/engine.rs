@@ -15142,7 +15142,10 @@ mod stage2_injector_tests {
                 .strip_prefix(&root)
                 .expect("under src")
                 .display()
-                .to_string();
+                .to_string()
+                // The pinned coordinates below use `/`; normalize the OS-native
+                // separator so this census compares equal on Windows too.
+                .replace('\\', "/");
             let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
             for (n, line) in lines.iter().enumerate() {
                 if !line.contains(&needle) || line.contains("..") {

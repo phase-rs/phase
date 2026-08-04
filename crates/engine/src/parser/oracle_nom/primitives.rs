@@ -183,6 +183,27 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("an "), tag("a ")))).parse(input)
 }
 
+/// Parse a bare anaphoric object pronoun that names a previously-referenced
+/// object: `it`, `them`, `him`, or `her`. Returns the matched pronoun slice.
+///
+/// CR 608.2c + CR 608.2k: these pronouns are anaphors that bind to an object
+/// established earlier in the same ability (its trigger, cost, or an earlier
+/// clause) rather than a newly-parsed target. Gendered singulars (`him`/`her`)
+/// appear on named creatures that self-reference (e.g. Batroc the Leaper's
+/// "a +1/+1 counter on him"); `them` covers a distributive subject or a
+/// gender-neutral singular. The engine never inspects which pronoun was used —
+/// it only needs the anaphoric binding — so the whole set maps to one referent.
+///
+/// This is the single authority for the object-recipient pronoun set. Every
+/// site that matches "… on it/them/him/her" (enters-with counter replacements,
+/// `has … counter on <pronoun>` conditions, begin-game battlefield placement,
+/// the `is_it_pronoun` classifier) routes through this combinator so the set
+/// cannot drift between modules. Callers that also accept the self-reference
+/// token `~` compose it as an outer `alt((tag("~"), parse_object_recipient_pronoun))`.
+pub fn parse_object_recipient_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("it"), tag("them"), tag("him"), tag("her"))).parse(input)
+}
+
 /// Parse a number OR "x" (as 0). Use for costs, P/T, counter amounts where
 /// X represents a variable that resolves to 0 at parse time.
 ///

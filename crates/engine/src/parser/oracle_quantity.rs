@@ -3507,9 +3507,27 @@ fn add_filter_property(filter: TargetFilter, property: FilterProp) -> TargetFilt
 
 fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("time ").parse(clause).ok()?;
+    // CR 702.33c-d: Multikicker lets a spell be kicked any number of times, and
+    // a spell has been "kicked" once its controller pays a kicker cost; "for
+    // each time [subject] was kicked" therefore scales by that kick count
+    // (`QuantityRef::KickerCount`). The subject is parsed permissively so any
+    // self-reference is accepted — "it was kicked", "this spell was kicked", or
+    // a named creature's gendered/singular pronoun (Batroc the Leaper: "for each
+    // time he was kicked") — requiring only the "was"/"were kicked" verb anchor
+    // with full consumption so the match cannot over-reach a non-kicker clause.
+    // Mirrors the permissive subject match already used by
+    // `oracle_effect::lower::parse_where_x_kicker_count` for the "where X is the
+    // number of times … was kicked" trigger form, so the two kicker-count
+    // recognizers accept the same subject surface.
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it was kicked"),
-        tag("this spell was kicked"),
+        preceded(
+            take_until::<_, _, OracleError<'_>>(" was kicked"),
+            tag(" was kicked"),
+        ),
+        preceded(
+            take_until::<_, _, OracleError<'_>>(" were kicked"),
+            tag(" were kicked"),
+        ),
     ))
     .parse(rest)
     .ok()?;
@@ -4127,6 +4145,49 @@ mod tests {
             parse_for_each_clause("time this spell was kicked"),
             Some(QuantityRef::KickerCount)
         );
+    }
+
+    #[test]
+    fn for_each_time_gendered_pronoun_was_kicked_maps_to_kicker_count() {
+        // CR 702.33c-d + CR 201.5: named creatures that self-reference with a
+        // gendered/singular pronoun (Batroc the Leaper: "he was kicked") name
+        // the same kicker count as the neuter "it was kicked" form.
+        for subject in ["he", "she", "they"] {
+            assert_eq!(
+                parse_for_each_clause(&format!("time {subject} was kicked")),
+                Some(QuantityRef::KickerCount),
+                "'{subject} was kicked' should map to KickerCount"
+            );
+        }
+        // Plural verb agreement ("were kicked") is accepted for distributive
+        // subjects.
+        assert_eq!(
+            parse_for_each_clause("time they were kicked"),
+            Some(QuantityRef::KickerCount)
+        );
+    }
+
+    #[test]
+    fn for_each_time_not_kicked_is_not_kicker_count() {
+        // The verb anchor is mandatory: a "time …" clause without
+        // "was/were kicked" must not be misread as a kicker count. Tests the
+        // changed recognizer directly so the guard is exercised without
+        // coupling to unrelated for-each branches.
+        assert_eq!(parse_for_each_kicker_count("time he was kissed"), None);
+        assert_eq!(parse_for_each_kicker_count("time it dealt damage"), None);
+        // A trailing tail after "was kicked" is not full consumption, so the
+        // clause is not a bare kicker count either.
+        assert_eq!(
+            parse_for_each_kicker_count("time it was kicked this turn, draw"),
+            None
+        );
+        // Positive reach-guard: a genuine non-kicker for-each still resolves to
+        // its own quantity through the full dispatch, proving the negatives
+        // above are not vacuously failing on unrelated grounds.
+        assert!(matches!(
+            parse_for_each_clause("creature you control"),
+            Some(QuantityRef::ObjectCount { .. })
+        ));
     }
 
     #[test]

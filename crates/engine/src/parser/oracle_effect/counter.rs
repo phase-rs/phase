@@ -43,24 +43,27 @@ fn is_self_ref(text: &str) -> bool {
 /// through the same resolver so ETB-self triggers like "put X counters on
 /// him" bind to `SelfRef` when the trigger subject is the source permanent.
 fn is_it_pronoun(text: &str) -> bool {
-    matches!(text, "it" | "him" | "her" | "them")
-        || nom_on_lower(text, text, |i| {
-            value(
-                (),
-                alt((
-                    tag("itself"),
-                    tag("himself"),
-                    tag("herself"),
-                    tag("themselves"),
-                    tag("it "),
-                    tag("him "),
-                    tag("her "),
-                    tag("them "),
-                )),
-            )
-            .parse(i)
-        })
-        .is_some()
+    nom_on_lower(text, text, |i| {
+        value(
+            (),
+            alt((
+                // Bare object pronoun as the whole token or immediately followed
+                // by a space, routed through the shared recipient-pronoun
+                // combinator (single authority for the it/them/him/her set).
+                terminated(
+                    nom_primitives::parse_object_recipient_pronoun,
+                    alt((eof, peek(tag(" ")))),
+                ),
+                // Reflexive "*self" forms — a distinct set, matched here directly.
+                tag("itself"),
+                tag("himself"),
+                tag("herself"),
+                tag("themselves"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
 }
 
 /// CR 608.2c + CR 111.10 + CR 122.1: a same-chain counter anaphor placed AFTER a
