@@ -5573,16 +5573,26 @@ fn extract_if_condition_with_card_name(
     // Gated on a PROVEN dies head: the resolver reads the dying creature from
     // the death event, so on any other head the clause must stay honestly
     // swallowed (a `Condition_If` diagnostic) rather than mis-parse.
+    //
+    // CR 603.4: an intervening-if IMMEDIATELY follows the trigger condition, so
+    // the clause must be in the LEADING effect position. A trailing form
+    // ("draw a card if ~ dealt damage to it this turn") is a resolution-time
+    // conditional, not an intervening-if, and must stay in the effect chain to
+    // be evaluated on resolution — never hoisted to `condition`. Requiring the
+    // scan's `before` to be blank enforces the leading position (the earlier
+    // "then if" / sentence-boundary guards above only reject cross-clause ifs).
     if trigger_zone_change == Some((Zone::Battlefield, Zone::Graveyard)) {
         if let Some((before, condition, rest)) =
             scan_preceded(&lower, parse_dealt_damage_to_it_intervening_if)
         {
-            let pos = before.len();
-            let clause_len = lower.len() - before.len() - rest.len();
-            return (
-                strip_condition_clause(text, pos, clause_len),
-                Some(condition),
-            );
+            if before.trim().is_empty() {
+                let pos = before.len();
+                let clause_len = lower.len() - before.len() - rest.len();
+                return (
+                    strip_condition_clause(text, pos, clause_len),
+                    Some(condition),
+                );
+            }
         }
     }
 

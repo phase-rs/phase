@@ -734,12 +734,19 @@ pub(crate) fn apply_damage_after_replacement(
         // source as it was when the damage was dealt — the source may later
         // change type, leave the battlefield (CR 113.7a LKI), or be removed.
         let src = state.objects.get(&ctx.source_id);
+        // CR 400.7: Snapshot the source's incarnation at damage time so an
+        // exact-source look-back (`DealtDamageBySourceThisTurn`) does not credit
+        // a re-entered permanent (same ObjectId, bumped incarnation — a new
+        // object) with damage its prior incarnation dealt. `None` when the
+        // source is already gone (CR 113.7a): no live incarnation to snapshot.
+        let source_incarnation = src.map(|object| object.incarnation);
         let mut record = DamageRecord {
             source_id: ctx.source_id,
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
             target_incarnation,
+            source_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
             amount: primary_amount,

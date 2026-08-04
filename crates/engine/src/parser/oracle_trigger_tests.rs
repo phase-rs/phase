@@ -18590,6 +18590,35 @@ fn trigger_non_dies_head_does_not_capture_dealt_damage_if() {
 }
 
 #[test]
+fn trigger_dies_trailing_if_dealt_damage_stays_resolution_time() {
+    // CR 603.4: an intervening-if IMMEDIATELY follows the trigger condition. The
+    // TRAILING form "draw a card if ~ dealt damage to it this turn" is a
+    // resolution-time conditional, NOT an intervening-if, so it must stay in the
+    // effect chain (condition None) rather than be hoisted to the trigger-level
+    // `condition`. Paired with `trigger_dies_if_source_dealt_damage_intervening_if`
+    // (same clause + same dies head in LEADING position -> condition Some), so
+    // this negative is non-vacuous: it proves the leading-position guard blocks
+    // the hoist for the trailing form, on the very head where the leading form
+    // DOES hoist. The `Draw` execute assertion is the reach-guard proving the
+    // clause reached the extract path with the draw preserved.
+    let def = parse_trigger_line(
+        "Whenever a creature an opponent controls dies, draw a card if Hawkeye dealt damage to it this turn.",
+        "Hawkeye, Avenging Archer",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition, None,
+        "a trailing resolution-time `if` must NOT be hoisted to an intervening-if (CR 603.4)"
+    );
+    assert!(matches!(
+        def.execute.as_deref().map(|a| a.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
 fn trigger_you_dealt_damage() {
     // CR 120.1: "whenever you're dealt damage" — player damage received.
     let def = parse_trigger_line(
