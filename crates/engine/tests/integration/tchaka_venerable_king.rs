@@ -197,6 +197,10 @@ fn tchaka_monarch_activation_gated_on_owning_commander() {
         Zone::Command,
         "fixture: the commander must be in the command zone"
     );
+    assert!(
+        runner.state().objects[&commander].is_commander,
+        "fixture: the command-zone object must be flagged as a commander"
+    );
     assert_eq!(
         runner.state().objects[&commander].owner,
         P0,
