@@ -16,7 +16,8 @@ use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
-    parse_article, parse_color, parse_counter_type_typed, parse_keyword_name, parse_number,
+    parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
+    parse_number,
 };
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
@@ -4613,6 +4614,46 @@ fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult
     ))
 }
 
+/// CR 202.3 + CR 400.7: The type word between "that " and "card('s)"
+/// (e.g. "that nonland card's mana value" — Lady Loki, Agent of Chaos) is purely
+/// grammatical: the referent is already fixed to the exile-until hit and the
+/// nonland constraint is enforced upstream by the producer
+/// (`ExileFromTopUntil { until: NextMatches { nonland } }`). So the qualifier is
+/// consumed and DISCARDED (`value((), ...)`), never folded into a `TargetFilter`.
+///
+/// The qualifier is REQUIRED by its callers — a bare, unqualified "that card" is
+/// deliberately NOT bound to the `Target` scope (see the caller comments in
+/// `parse_object_possessive_scope` / `parse_object_prepositional_scope`). The type
+/// word is the grammatical marker that the anaphor names the type-constrained
+/// produced object the engine threads into `ability.targets`; without it the
+/// anaphor is ambiguous (O-Kagachi Made Manifest's "that card" is a card the
+/// defending player CHOSE from a graveyard, not a threaded target).
+///
+/// The `non` prefix is an independent grammatical axis composed over the type word
+/// via `opt(tag("non"))`, so every "non<type>" qualifier (`nonland`, `noncreature`,
+/// `nonartifact`, `nonenchantment`, …) is covered by the same node set rather than
+/// enumerated as separate literals. The card-type words (CR 300.1) are delegated to
+/// the canonical `parse_core_type` building block so this stays in sync with the
+/// supported `CoreType` vocabulary with no local drift; `permanent` is the one
+/// non-core grammatical qualifier added alongside it. Coverage is exactly what
+/// `parse_core_type` accepts — CR 300.1's `vanguard` is intentionally NOT covered
+/// here because `CoreType` models no Vanguard variant (see `parse_core_type`), and
+/// this PR does not add it. A trailing `tag(" ")` supplies the word boundary
+/// `parse_core_type` intentionally omits.
+fn parse_card_type_qualifier(input: &str) -> OracleResult<'_, ()> {
+    terminated(
+        value(
+            (),
+            (
+                opt(tag("non")),
+                alt((value((), tag("permanent")), value((), parse_core_type))),
+            ),
+        ),
+        tag(" "),
+    )
+    .parse(input)
+}
+
 fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
         value(ObjectScope::Recipient, tag("its")),
@@ -4622,6 +4663,23 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("target creature's")),
         value(ObjectScope::Target, tag("target permanent's")),
         value(ObjectScope::EventSource, tag("that spell's")),
+        // CR 202.3 + CR 608.2c: "that <type> card's" — the type-qualified anaphor
+        // for the exile-until hit ("that nonland card's mana value", Lady Loki).
+        // The type qualifier is REQUIRED, not optional: a bare "that card's" is
+        // deliberately NOT bound here. O-Kagachi Made Manifest's "the mana value of
+        // that card" names a card the DEFENDING PLAYER chose from a graveyard — not
+        // a threaded target — so binding bare "that card" to `Target` would mint a
+        // dishonest `Pump (+target's mana value)` for a referent the engine never
+        // wired as a target. Requiring the qualifier keeps the anaphor tied to the
+        // type-constrained producer the target-threading actually supports. Placed
+        // AFTER the "that spell's" → EventSource arm so it cannot shadow it: for
+        // "that spell's", `tag("that ")` matches, `parse_card_type_qualifier` fails
+        // on "spell's" (not a card type), so `alt` falls through to the earlier
+        // EventSource arm.
+        value(
+            ObjectScope::Target,
+            (tag("that "), parse_card_type_qualifier, tag("card's")),
+        ),
         value(ObjectScope::Target, tag("that creature's")),
         value(ObjectScope::Target, tag("that permanent's")),
         value(ObjectScope::Target, tag("that planeswalker's")),
@@ -4651,6 +4709,16 @@ fn parse_object_prepositional_scope(input: &str) -> OracleResult<'_, ObjectScope
         value(ObjectScope::Target, tag("target permanent")),
         value(ObjectScope::EventSource, tag("the triggering spell")),
         value(ObjectScope::EventSource, tag("that spell")),
+        // CR 202.3 + CR 608.2c: prepositional "of that <type> card" — the "of"-form
+        // sibling of the possessive "that <type> card's" arm. The type qualifier is
+        // REQUIRED here too: bare "of that card" is left unbound so O-Kagachi Made
+        // Manifest's defending-player-chosen graveyard card is not mis-bound to a
+        // `Target` referent (see the possessive arm above). Placed AFTER "that
+        // spell" so it cannot shadow the EventSource referent.
+        value(
+            ObjectScope::Target,
+            (tag("that "), parse_card_type_qualifier, tag("card")),
+        ),
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that planeswalker")),
@@ -10801,6 +10869,106 @@ mod tests {
                     ))
                 ),
             "\"that creature\" must not become a cost-paid demonstrative: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_that_typed_cards_mana_value_is_target_scope() {
+        // CR 202.3 + CR 608.2c: Lady Loki, Agent of Chaos — "that nonland card's
+        // mana value" refers to the exile-until hit (injected into
+        // `ability.targets`), so it lowers to the `Target` object scope. The type
+        // word between "that " and "card's" is grammatical only and is DISCARDED,
+        // so every type-qualified phrase lowers to the identical
+        // `ObjectManaValue { scope: Target }` node. The `non` prefix is composed
+        // over the core-type set, so "nonartifact"/"noncreature"/… are covered by
+        // the same node set as "nonland" — reverting the type-word set in
+        // `parse_card_type_qualifier` makes these phrases fail to bind here.
+        //
+        // This is also the positive reach-guard paired with
+        // `bare_that_card_mana_value_is_not_target_scope`: it proves the arm is
+        // live, so the negative case there is a real exclusion, not a vacuous miss.
+        for phrase in [
+            "that nonland card's mana value",
+            "that noncreature card's mana value",
+            "that nonartifact card's mana value",
+            "that creature card's mana value",
+            "that instant card's mana value",
+            "that sorcery card's mana value",
+            "that planeswalker card's mana value",
+            "that battle card's mana value",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|e| panic!("{phrase:?} must bind: {e:?}"));
+            assert_eq!(rest, "", "{phrase:?} must fully consume");
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+                "{phrase:?} -> {q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_of_that_card_mana_value_is_not_target_scope() {
+        // CR 202.3: honesty guard for the O-Kagachi Made Manifest parse blast
+        // radius. O-Kagachi's "…where X is the mana value of that card" names a card
+        // the defending player CHOSE from a graveyard — NOT a threaded target — so
+        // the bare, UNQUALIFIED prepositional "of that card" must not lower to the
+        // `Target` object scope. This is the exact form the PR's prepositional
+        // `that <type> card` arm widened; requiring the type qualifier reverts it so
+        // O-Kagachi stays an honest `where_x_binding` gap rather than a dishonest
+        // `Pump (+target's mana value)`.
+        //
+        // Scope note: the POSSESSIVE bare "that card's mana value" is deliberately
+        // NOT asserted here — it binds to `Target` through a separate, pre-existing
+        // path (`oracle_target::parse_mana_value_reference_qty`) that this PR does
+        // not touch and O-Kagachi does not use, and is correct in a genuinely
+        // targeted context. Paired positive reach-guard:
+        // `parse_that_typed_cards_mana_value_is_target_scope`.
+        let parsed = parse_quantity_ref("mana value of that card");
+        assert!(
+            !matches!(
+                parsed,
+                Ok((
+                    "",
+                    QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    }
+                ))
+            ),
+            "bare \"mana value of that card\" must NOT bind to a Target-scope mana \
+             value: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_that_spells_mana_value_stays_event_source() {
+        // Regression guard: the new "that <type?> card's" arm is placed AFTER the
+        // "that spell's" → EventSource arm and must not shadow it.
+        let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_of_form_that_nonland_card_is_target_scope() {
+        // CR 202.3: the prepositional "of that (nonland) card" mirror binds the
+        // same `Target` scope as the possessive form.
+        let (rest, q) = parse_quantity_ref("mana value of that nonland card")
+            .unwrap_or_else(|e| panic!("of-form must bind: {e:?}"));
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Target,
+            }
         );
     }
 

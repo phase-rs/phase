@@ -15206,9 +15206,9 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:5996".to_string(),
-                "game/effects/mod.rs:6073".to_string(),
-                "game/effects/mod.rs:9048".to_string(),
+                "game/effects/mod.rs:5999".to_string(),
+                "game/effects/mod.rs:6076".to_string(),
+                "game/effects/mod.rs:9051".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
