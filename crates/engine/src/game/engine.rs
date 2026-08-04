@@ -15197,11 +15197,19 @@ mod stage2_injector_tests {
                 //   #6956 (same branch, second unit): `:9113 ⇒ :9243`, +130, and ONLY that
                 //     entry moved — the other four stayed byte-identical AND in place, which is
                 //     the set-preservation evidence. The +109 is the
-                //     `zero_amount_is_this_effects_result` / `effect_instruction_completed`
-                //     pair inserted at `:7030` (+131, minus a 1-line comment reflow at
-                //     `:7020`), i.e. below `:6061`/`:6138` and above `:9113`. The only other
-                //     hunks are in `mod tests`, at `:12417`/`:28259`. Producer
-                //     sha256-identical at its new coordinate.
+                //     zero-policy pair inserted at `:7030` (+131, minus a 1-line comment
+                //     reflow at `:7020`), i.e. below `:6061`/`:6138` and above `:9113`. The
+                //     only other hunks are in `mod tests`. Producer sha256-identical at its
+                //     new coordinate.
+                //   #6956 fix round (review round 1): `:6061/:6138/:9243 ⇒ :6065/:6142/:9324`,
+                //     +4 above the first two and +81 above the third. The +4 is the
+                //     `AllExcept` recursion arm added to
+                //     `scope_keeps_scoped_whole_hand_shuffle_local`; the further +77 is the
+                //     `amount_channel` classifier that collapses the twin `_ => 0` / `_ => false`
+                //     registry, plus the relay guard. All three producers sha256-identical at
+                //     their new coordinates AND still inside the same enclosing functions
+                //     (`drive_sequential_repeated_optional_payment` ×2, `resolve_chain_body`),
+                //     which is stronger evidence than the coordinate alone.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -15214,9 +15222,9 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:6061".to_string(),
-                "game/effects/mod.rs:6138".to_string(),
-                "game/effects/mod.rs:9243".to_string(),
+                "game/effects/mod.rs:6065".to_string(),
+                "game/effects/mod.rs:6142".to_string(),
+                "game/effects/mod.rs:9324".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

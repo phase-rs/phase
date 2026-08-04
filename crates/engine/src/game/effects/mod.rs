@@ -3380,7 +3380,6 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::All
-        | PlayerFilter::AllExcept { .. }
         // Event-context and trigger anchors.
         | PlayerFilter::DefendingPlayer
         | PlayerFilter::TriggeringPlayer
@@ -3407,6 +3406,11 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         // Per-candidate board / scalar comparisons.
         | PlayerFilter::ControlsCount { .. }
         | PlayerFilter::PlayerAttribute { .. } => true,
+        // The negation wrapper inherits its inner filter's decision, matching
+        // `player_filter_references_tracked_set`'s treatment of the same variant.
+        // Behaviour-identical while every arm above is `true`; recursing keeps it
+        // from silently disagreeing with its anchor the moment one is not.
+        PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
     }
 }
 
@@ -6929,24 +6933,168 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     }
 }
 
+/// CR 608.2c: What a chain step reports into `state.last_effect_amount` for a
+/// following "that many" / "that much" clause.
+///
+/// SINGLE AUTHORITY. Both the summing rule and the zero-result rule are derived
+/// from ONE match over `Effect` (`amount_channel`), so a new arm cannot join one
+/// and miss the other. The predecessor shipped a `_ => 0` summing arm paired to
+/// a separate `_ => false` zero-policy arm — a twin registry, and adding a
+/// summing arm without the matching zero arm would have silently restored #6956
+/// with no compile error. That is the same hand-maintained-registry mechanism
+/// #6957 exists to remove, so it is not reintroduced here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AmountChannel {
+    events: AmountEvents,
+    zero: ZeroSemantics,
+}
+
+/// Which event channel an effect's scalar result is summed from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmountEvents {
+    /// CR 120.1: `DamageDealt.amount`, every recipient.
+    DamageDealt,
+    /// CR 120.10: `DamageDealt.excess`, scoped to the fought creature.
+    FightExcessOnFoughtCreature,
+    /// CR 119.3: the negative side of `LifeChanged`.
+    LifeLost,
+    /// CR 119.3: the positive side of `LifeChanged`.
+    LifeGained,
+    /// CR 122.1: `CounterRemoved.count`.
+    CountersRemoved,
+}
+
+/// What a ZERO total on that channel means for the effect that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroSemantics {
+    /// The effect owns this channel outright, so a zero total is a REAL zero
+    /// result once the instruction completed and must overwrite the slot.
+    MeasuredResult,
+    /// A zero total on this channel cannot be told apart from "this effect
+    /// produced nothing here", so it is pinned at the predecessor behaviour and
+    /// leaves the slot alone. Every use names why below.
+    Indistinguishable,
+}
+
+/// CR 608.2c: The one classifier. `None` means the effect has no scalar channel
+/// at all — the predecessor's `_ => 0` summing arm, which always filtered back
+/// out to `None`, so this is exactly equivalent.
+fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
+    let (events, zero) = match effect {
+        // CR 120.8 + CR 614.7a: "If a source would deal 0 damage, it does not
+        // deal damage at all" — and CR 615.1 prevention likewise leaves no
+        // damage event behind. In both cases the damage DEALT this way is zero,
+        // which is what a following "that much" back-references. Reading an
+        // earlier step's amount instead is never correct.
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
+            (AmountEvents::DamageDealt, ZeroSemantics::MeasuredResult)
+        }
+        // NOT CLOSED — deliberately pinned at the predecessor behaviour (#6956).
+        //
+        // CR 120.10: unlike every other arm, `Fight` sums the EXCESS channel into
+        // the TOTAL slot, and scopes that sum to the fought creature resolved by
+        // `fight::resolve_fight_fighters`. That gives it a genuine THIRD state:
+        // a zero for want of a resolvable subject is neither "zero excess was
+        // dealt" nor "no fight ran". Settling it needs its own CR determination.
+        //
+        // Nothing on the current card pool can observe the difference: the only
+        // card chaining a `PreviousEffectAmount` consumer off a `Fight` is The
+        // Last Agni Kai, whose rider is gated on `PreviousEffectAmount { GT 0,
+        // channel: Excess }` — the EXCESS slot, written unconditionally by
+        // `previous_effect_excess_amount_from_events` and read via
+        // `.unwrap_or(0)`. The rider never runs in the zero case, so no
+        // production-path test can discriminate this arm today.
+        Effect::Fight { .. } => (
+            AmountEvents::FightExcessOnFoughtCreature,
+            ZeroSemantics::Indistinguishable,
+        ),
+        // CR 119.3: "If an effect causes a player to gain life or lose life,
+        // that player's life total is adjusted accordingly." An effect that
+        // caused a loss of zero produced a zero. Note the CR has NO life-loss
+        // analogue of CR 119.9 — the "losing 0 life is not a life-loss event"
+        // premise cited in #6956 (as CR 118.2, which is the mana-payment rule)
+        // does not appear anywhere in the rules text.
+        Effect::LoseLife { .. } => (AmountEvents::LifeLost, ZeroSemantics::MeasuredResult),
+        // NOT CLOSED — deliberately pinned at the predecessor behaviour (#6956).
+        //
+        // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
+        // life payment emits the negative `LifeChanged` events this channel sums;
+        // a mana / sacrifice / discard payment owns no amount here at all.
+        // CR 119.4b makes paying 0 life a real, always-legal payment whose result
+        // is zero, so a life payment SHOULD report it — but `pay::resolve` pushes
+        // no events whatsoever, so it emits no `EffectResolved` terminal marker
+        // and the completion half of the zero rule cannot be established for it.
+        // Closing this arm means first giving cost payment a terminal marker,
+        // which is its own change with its own blast radius (the per-player
+        // counts helper, the trigger matchers and the game log all read that
+        // event class).
+        Effect::PayCost { .. } => (AmountEvents::LifeLost, ZeroSemantics::Indistinguishable),
+        // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
+        // "whenever you gain life" correctly does not trigger — but CR 119.9
+        // governs triggering and replacement, not the arithmetic back-reference.
+        // The amount gained is still zero, and that is what "that much" reads.
+        // `life::resolve` stamps its terminal marker on the `final_amount <= 0`
+        // and CR 119.7 "can't gain life" paths too, so both reach the zero rule.
+        Effect::GainLife { .. } => (AmountEvents::LifeGained, ZeroSemantics::MeasuredResult),
+        // CR 122.1: a counter is a marker placed ON an object; removing counters
+        // from an object that has none removes zero counters, so "for each
+        // counter removed this way" is zero.
+        Effect::RemoveCounter { .. } => {
+            (AmountEvents::CountersRemoved, ZeroSemantics::MeasuredResult)
+        }
+        _ => return None,
+    };
+    Some(AmountChannel { events, zero })
+}
+
 fn previous_effect_amount_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
-    let amount = match &ability.effect {
-        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    GameEvent::DamageDealt { amount, .. } => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
-                    }
-                    _ => None,
-                })
-                .sum()
-        }
-        Effect::Fight { .. } => {
+    // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
+    // authority for the scalar value a follow-up `PreviousEffectAmount` or
+    // `EventContextAmount` consumer reads. That avoids re-deriving from an
+    // event slice that may contain result-table branch effects or nested
+    // rolls interleaved with the outer dice.
+    if matches!(ability.effect, Effect::RollDie { .. }) {
+        return state.die_result_this_resolution;
+    }
+    // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
+    // single authority for how many cards a draw instruction delivered — it
+    // commits the whole instruction's post-replacement total to
+    // `state.last_effect_count` once the sequence completes (a unit replaced
+    // by something else contributes 0; one doubled by a count modifier
+    // contributes its post-replacement count). Read that committed total
+    // instead of re-summing draw events, exactly as the `RollDie` arm above
+    // defers to `die_result_this_resolution`, so "draw N cards, then discard
+    // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
+    // Laquatus's Creativity; Last Stand) reads the true total rather than a
+    // per-unit or pre-replacement count. The same stamp feeds the condition
+    // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
+    // "if you draw one or more cards this way, discard two cards".
+    //
+    // Returns before the zero policy below: a draw that delivered zero cards is
+    // a real zero result and must stamp `Some(0)`. "Draw a card for each Island
+    // you control, then discard that many cards" (Last Stand) controlling no
+    // Islands has to discard 0, not inherit the life-gain amount its preceding
+    // chain step left behind in `last_effect_amount`.
+    if matches!(ability.effect, Effect::Draw { .. }) {
+        return state.last_effect_count;
+    }
+
+    let channel = amount_channel(&ability.effect)?;
+    let amount: i32 = match channel.events {
+        AmountEvents::DamageDealt => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt { amount, .. } => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
+                }
+                _ => None,
+            })
+            .sum(),
+        AmountEvents::FightExcessOnFoughtCreature => {
             // CR 120.10 + CR 701.14a: "add that much {R}" (The Last Agni Kai)
             // reads the excess dealt to the *fought* creature — the fight's
             // damage recipient, which in a dual-target fight is the second
@@ -6974,21 +7122,21 @@ fn previous_effect_amount_from_events(
                 })
                 .sum()
         }
-        Effect::LoseLife { .. } | Effect::PayCost { .. } => events
+        AmountEvents::LifeLost => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
                 _ => None,
             })
             .sum(),
-        Effect::GainLife { .. } => events
+        AmountEvents::LifeGained => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
                 _ => None,
             })
             .sum(),
-        Effect::RemoveCounter { .. } => events
+        AmountEvents::CountersRemoved => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CounterRemoved { count, .. } => {
@@ -6997,34 +7145,6 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
-        // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
-        // authority for the scalar value a follow-up `PreviousEffectAmount` or
-        // `EventContextAmount` consumer reads. That avoids re-deriving from an
-        // event slice that may contain result-table branch effects or nested
-        // rolls interleaved with the outer dice.
-        Effect::RollDie { .. } => return state.die_result_this_resolution,
-        // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
-        // single authority for how many cards a draw instruction delivered — it
-        // commits the whole instruction's post-replacement total to
-        // `state.last_effect_count` once the sequence completes (a unit replaced
-        // by something else contributes 0; one doubled by a count modifier
-        // contributes its post-replacement count). Read that committed total
-        // instead of re-summing draw events, exactly as the `RollDie` arm above
-        // defers to `die_result_this_resolution`, so "draw N cards, then discard
-        // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
-        // Laquatus's Creativity; Last Stand) reads the true total rather than a
-        // per-unit or pre-replacement count. The same stamp feeds the condition
-        // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
-        // "if you draw one or more cards this way, discard two cards".
-        //
-        // Returns early rather than falling through the zero policy below: a
-        // draw that delivered zero cards is a real zero result and must stamp
-        // `Some(0)`. "Draw a card for each Island you control, then discard that
-        // many cards" (Last Stand) controlling no Islands has to discard 0, not
-        // inherit the life-gain amount its preceding chain step left behind in
-        // `last_effect_amount`.
-        Effect::Draw { .. } => return state.last_effect_count,
-        _ => 0,
     };
 
     // CR 608.2c (#6956): the predecessor tail was `(amount > 0).then_some(amount)`,
@@ -7042,101 +7162,45 @@ fn previous_effect_amount_from_events(
     if amount != 0 {
         return Some(amount);
     }
-    zero_amount_is_this_effects_result(ability, events).then_some(0)
+    let zero_is_this_effects_result = channel.zero == ZeroSemantics::MeasuredResult
+        // CR 608.2c: "…X…, …X…, and …X…, where X is <definition>" names ONE
+        // value that every clause reads. The engine approximates that with a
+        // single mutable slot plus chain-relative reads, so a clause whose OWN
+        // quantity is that shared X is a RELAY, not a fresh anchor: letting its
+        // outcome redefine the slot destroys the X its later siblings still need.
+        //
+        // Thorna and Twigtooth is the live case — "remove all counters from
+        // target creature you control. Each opponent loses X life, you gain X
+        // life, … where X is the number of counters removed this way" lowers to
+        // `RemoveCounter -> LoseLife{PreviousEffectAmount} -> GainLife{PreviousEffectAmount}`.
+        // With an opponent under CR 119.8 "can't lose life" the middle clause
+        // totals zero, and claiming that zero makes the gain clause read 0
+        // instead of the counters removed.
+        //
+        // Scoped to the ZERO case on purpose: this is exactly a restoration of
+        // the predecessor behaviour for relays, so it is provably no wider than
+        // the #6956 change itself. It does NOT fix the nonzero chain-relative
+        // divergence (a two-opponent Thorna still stamps the doubled life loss)
+        // — that is a pre-existing anchored-quantity gap, tracked separately.
+        && !effect_relays_the_shared_amount(&ability.effect)
+        && effect_instruction_completed(ability, events);
+    zero_is_this_effects_result.then_some(0)
 }
 
-/// CR 608.2c: Is a zero total a REAL zero result for this effect, or the absence
-/// of any result on the channel `previous_effect_amount_from_events` just summed?
-///
-/// Two independent conditions must hold, and each one alone is insufficient.
-///
-/// 1. The effect must OWN the channel. Every arm above sums one specific event
-///    class, and one arm can be reached by an effect that emits none of it:
-///    `Effect::PayCost` carries an arbitrary `AbilityCost`, so a mana, sacrifice
-///    or discard payment produces no `LifeChanged` event at all and has no amount
-///    to report. Likewise the `Fight` arm scopes its sum to the fought creature,
-///    so an unresolvable fighter pair yields zero for want of a subject rather
-///    than for want of excess.
-/// 2. The instruction must have COMPLETED. Every resolver pushes
-///    `EffectResolved { kind, source_id }` as its last act and returns BEFORE that
-///    push when it suspends for a player choice (`DamageResult::NeedsChoice`, the
-///    replacement-choice branch in `life::resolve`, the pending-counter drain).
-///    A suspended instruction has not produced its result yet, so its
-///    partial-window zero must not overwrite anything. This is the same anchor
-///    the sibling `previous_effect_counts_by_player_from_events` already uses to
-///    separate "producer ran and moved nothing" from "no producer".
-fn zero_amount_is_this_effects_result(ability: &ResolvedAbility, events: &[GameEvent]) -> bool {
-    let owns_channel = match &ability.effect {
-        // CR 120.8 + CR 614.7a: "If a source would deal 0 damage, it does not
-        // deal damage at all" — and CR 615.1 prevention likewise leaves no
-        // damage event behind. In both cases the damage DEALT this way is zero,
-        // which is precisely what a following "that much" back-references
-        // Reading an earlier step's amount instead is never correct.
-        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. }
-        // CR 119.3: "If an effect causes a player to gain life or lose life,
-        // that player's life total is adjusted accordingly." An effect that
-        // caused a loss of zero produced a zero. Note the CR has NO life-loss
-        // analogue of CR 119.9 — the "losing 0 life is not a life-loss event"
-        // premise cited in #6956 (as CR 118.2, which is the mana-payment rule)
-        // does not exist in the rules text; see FINDINGS.
-        | Effect::LoseLife { .. }
-        // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
-        // "whenever you gain life" correctly does not trigger — but CR 119.9
-        // governs triggering and replacement, not the arithmetic back-reference.
-        // The amount gained is still zero, and that is what "that much" reads.
-        // `life::resolve` stamps its terminal marker on the `final_amount <= 0`
-        // and CR 119.7 "can't gain life" paths too, so both reach here.
-        | Effect::GainLife { .. }
-        // CR 122.1: a counter is a marker placed ON an object; removing counters
-        // from an object that has none removes zero counters, so "for each
-        // counter removed this way" is zero.
-        | Effect::RemoveCounter { .. } => true,
-        // NOT CLOSED — deliberately left on the predecessor "zero is an absence"
-        // behaviour, not overlooked (#6956).
-        //
-        // CR 120.10: unlike every arm above, the `Fight` arm sums the EXCESS
-        // channel into the TOTAL slot, and it scopes that sum to the fought
-        // creature resolved by `fight::resolve_fight_fighters`. That gives it a
-        // genuine THIRD state the others do not have: a zero for want of a
-        // resolvable subject is neither "zero excess was dealt" nor "no fight
-        // ran". Settling it needs its own CR determination about what a fight
-        // with an unresolvable fighter pair reports.
-        //
-        // Nothing on the current card pool can observe the difference: the only
-        // card chaining a `PreviousEffectAmount` consumer off a `Fight` is The
-        // Last Agni Kai, whose rider is gated on `PreviousEffectAmount { GT 0,
-        // channel: Excess }` — the EXCESS slot, written unconditionally by
-        // `previous_effect_excess_amount_from_events` and read through
-        // `.unwrap_or(0)`. So the rider never runs in the zero case and no
-        // production-path test can discriminate this arm's behaviour today.
-        Effect::Fight { .. } => false,
-        // NOT CLOSED — deliberately left on the predecessor behaviour (#6956).
-        //
-        // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
-        // life payment emits the negative `LifeChanged` events the `LoseLife |
-        // PayCost` arm sums. A mana / sacrifice / discard payment owns NO amount
-        // on this channel and must leave the preceding step's value standing —
-        // that is the live mirror-bug case, not a hypothetical: 19 cards (the
-        // Extort cycle) chain a `PreviousEffectAmount` consumer behind a mana
-        // `PayCost`, and an unconditional `Some(0)` would zero the life-loss
-        // total they are meant to read.
-        //
-        // CR 119.4b makes paying 0 life a real, always-legal payment whose
-        // result is zero, so a `CostCategory::PaysLife` cost SHOULD stamp
-        // `Some(0)` — but `pay::resolve` pushes no events at all, so it emits no
-        // `EffectResolved` terminal marker and the completion half of this
-        // predicate cannot be established for it. Closing this arm means first
-        // giving cost payment a terminal marker, which is its own change with
-        // its own blast radius (`previous_effect_counts_by_player_from_events`,
-        // the trigger matchers, and the game log all read that event class).
-        // `mana_pay_cost_does_not_zero_the_previous_chain_steps_amount` pins the
-        // Extort direction so the mirror bug cannot be introduced meanwhile.
-        Effect::PayCost { .. } => false,
-        // Mirrors the `_ => 0` arm of the sum above: these effects have no
-        // scalar channel here, so their zero is an absence, never a result.
-        _ => false,
-    };
-    owns_channel && effect_instruction_completed(ability, events)
+/// CR 608.2c: Is this effect's OWN quantity the shared "X" of a co-anchored
+/// clause group, rather than a fresh value of its own? See the relay note in
+/// `previous_effect_amount_from_events`.
+fn effect_relays_the_shared_amount(effect: &Effect) -> bool {
+    let mut relays = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        relays |= quantity_expr_any_ref(quantity, &mut |qty| {
+            matches!(
+                qty,
+                QuantityRef::EventContextAmount | QuantityRef::PreviousEffectAmount { .. }
+            )
+        });
+    });
+    relays
 }
 
 /// CR 608.2c: Did THIS instruction complete within the supplied event window?
@@ -7146,6 +7210,14 @@ fn zero_amount_is_this_effects_result(ability: &ResolvedAbility, events: &[GameE
 /// so its presence is the authority for "the instruction finished". Matched on
 /// both the effect kind and the source so a same-window marker from another
 /// effect (a chained sub-ability, another permanent's ability) cannot stand in.
+///
+/// `previous_effect_counts_by_player_from_events` reads the same marker class,
+/// but not identically: it takes the LAST marker's index and then bounds its
+/// tally to `events[..=index]`, because events after the marker belong to later
+/// work. This predicate only asks whether the marker is present at all — the
+/// scalar sums above are not window-bounded, so there is nothing to bound. The
+/// two agree on every event slice the call sites produce today; tightening the
+/// scalar sums to the same window is a separate change.
 fn effect_instruction_completed(ability: &ResolvedAbility, events: &[GameEvent]) -> bool {
     let kind = EffectKind::from(&ability.effect);
     events.iter().any(|event| {
@@ -7327,28 +7399,37 @@ fn effect_consumes_event_context_amount(effect: &Effect) -> bool {
     consumes
 }
 
-fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
+/// Walks every `QuantityRef` reachable through `quantity`'s composition forms
+/// and reports whether any satisfies `pred`. Single traversal authority for the
+/// resolution-local back-reference predicates, so a new `QuantityExpr`
+/// composition form is threaded in exactly one place instead of once per
+/// predicate.
+fn quantity_expr_any_ref(
+    quantity: &QuantityExpr,
+    pred: &mut dyn FnMut(&QuantityRef) -> bool,
+) -> bool {
     match quantity {
-        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::EventContextAmount),
+        QuantityExpr::Ref { qty } => pred(qty),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. } => {
-            quantity_expr_references_event_context_amount(inner)
+        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_any_ref(inner, pred),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(|expr| quantity_expr_any_ref(expr, pred))
         }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .any(quantity_expr_references_event_context_amount),
-        QuantityExpr::UpTo { max } => quantity_expr_references_event_context_amount(max),
-        QuantityExpr::Power { exponent, .. } => {
-            quantity_expr_references_event_context_amount(exponent)
-        }
+        QuantityExpr::UpTo { max } => quantity_expr_any_ref(max, pred),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_any_ref(exponent, pred),
         QuantityExpr::Difference { left, right } => {
-            quantity_expr_references_event_context_amount(left)
-                || quantity_expr_references_event_context_amount(right)
+            quantity_expr_any_ref(left, pred) || quantity_expr_any_ref(right, pred)
         }
         QuantityExpr::Fixed { .. } => false,
     }
+}
+
+fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
+    quantity_expr_any_ref(quantity, &mut |qty| {
+        matches!(qty, QuantityRef::EventContextAmount)
+    })
 }
 
 fn mark_exile_choice_tracks_by_source(state: &mut GameState, source: ObjectId) {
@@ -28468,12 +28549,18 @@ mod tests {
         assert_eq!(drawn, 2, "the consumer must read this step's own amount");
     }
 
-    /// CR 118.1: THE MIRROR BUG. `Effect::PayCost` carries an arbitrary
-    /// `AbilityCost`, so a MANA payment emits no `LifeChanged` event and has no
-    /// amount on the life channel at all. Stamping `Some(0)` for it would zero
-    /// the value the next clause is meant to read — which is exactly the Extort
-    /// cycle's shape (19 cards chain a `PreviousEffectAmount` consumer behind a
-    /// mana `PayCost`). The preceding step's 7 must survive.
+    /// CR 118.1: `Effect::PayCost` carries an arbitrary `AbilityCost`, so a MANA
+    /// payment emits no `LifeChanged` event and owns no amount on the life
+    /// channel at all. Claiming a zero for it would overwrite a legitimately
+    /// standing earlier value — the mirror bug #6956 warns about.
+    ///
+    /// This pins the RULE, not a card. An earlier draft of this comment claimed
+    /// the Extort cycle as the live case; that is wrong and the census says so:
+    /// in `PayCost -> LoseLife -> GainLife{PreviousEffectAmount}` the consumer's
+    /// nearest stamping producer is `LoseLife`, which overwrites any `PayCost`
+    /// value before `GainLife` reads it (the stamp is written per node before
+    /// `sub_ability` recurses). ZERO cards on the pool have a `PayCost` as the
+    /// direct parent of such a consumer. The guard rests on CR 118.1 alone.
     #[test]
     fn mana_pay_cost_does_not_zero_the_previous_chain_steps_amount() {
         let (mut state, source) = state_for_previous_amount_probe();
@@ -28498,8 +28585,8 @@ mod tests {
     /// NOT CLOSED (#6956): CR 118.1 + CR 119.4b say paying 0 life is a real,
     /// always-legal payment whose result is zero, so this SHOULD read 0 — but
     /// `pay::resolve` emits no `EffectResolved` terminal marker, so the
-    /// completion half of `zero_amount_is_this_effects_result` cannot be
-    /// established for `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
+    /// completion half of the zero rule cannot be established for
+    /// `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
     /// (the preceding step's 7 survives) so the arm's status is a visible,
     /// asserted fact rather than an untested assumption. Flipping this
     /// expectation to 0 is the acceptance test for the follow-up.
@@ -28521,7 +28608,7 @@ mod tests {
         assert_eq!(
             drawn, 7,
             "PayCost has no terminal marker, so its zero cannot yet be told apart \
-             from an absent producer; see zero_amount_is_this_effects_result"
+             from an absent producer; see `amount_channel`'s PayCost arm"
         );
     }
 }
