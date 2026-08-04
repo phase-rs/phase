@@ -2352,6 +2352,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// - "that creature each" — the object-axis form (CR 115.1 parent-target
 ///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
 ///   +2/+0 and gain haste ... and attack this turn if able").
+/// - "target &lt;filter&gt;'s controller/owner each" — the possessive-actor form
+///   (CR 109.4; Life at Stake's "You and target creature's controller each
+///   secretly choose a number 0 or greater"), delegated to the shared axis
+///   combinator so the two sites cannot drift.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
     let result: nom::IResult<&str, (), OracleError<'_>> = alt((
@@ -2365,6 +2369,7 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
         return true;
     }
     controlled_creature_each_subject_starts(&lower)
+        || super::parse_possessive_actor_each_second_subject(&lower).is_some()
 }
 
 fn controlled_creature_each_subject_starts(lower: &str) -> bool {

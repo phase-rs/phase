@@ -413,25 +413,28 @@ fn two_target_fight_pump_keeps_both_slots_and_buffs_slot_zero() {
     }
 }
 
-/// #4751 review (matthewevans): part 1's sentence-bounding drops only a STRAY
-/// `Effect::unimplemented("you")` head from Life at Stake — it does NOT remove a
-/// functional chooser. "You and target creature's controller each secretly
-/// choose a number" is unimplemented on BOTH `main` and this branch: the real
-/// mechanic is a `Choose { NumberRange }` (with the exile + lose-life tail),
-/// byte-identical either way. On `main` the leading "You" was split off its "and"
-/// by a coincidental " loses " in a LATER sentence into a bare
-/// `Unimplemented { name: "you", description: "You" }`; bounding the verb scan to
-/// the first sentence stops that coincidental split, so the chain now heads at
-/// the real `Choose` node instead of the stray "you" fragment. This pins that the
-/// card's actual choose-a-number mechanic survives (no regression) — the
-/// controller was never a *parsed* chooser to lose (that stays a pre-existing gap
-/// on both, orthogonal to this PR).
+/// CR 109.4 + CR 115.1 + CR 608.2c + CR 608.2d: Life at Stake — "You and target
+/// creature's controller each secretly choose a number 0 or greater."
+///
+/// The compound subject's second conjunct names its player THROUGH an announced
+/// object target, so the parse must produce three things, not one:
+///   1. a `TargetOnly { creature }` head declaring the CR 115.1 target slot the
+///      possessive reference (and the later "exile that creature" anaphor) read;
+///   2. a `Choose { NumberRange }` whose chooser is the printed controller
+///      ("you", CR 109.5 — the unscoped resolver default);
+///   3. a SECOND `Choose { NumberRange }` bound to a DISTINCT chooser via
+///      `player_scope: ParentObjectTargetController` (CR 109.4).
+///
+/// The two choosers being distinct is the whole mechanic — one `Choose`, or two
+/// that both prompt the caster, is the bug. Predecessor of this test pinned a
+/// single `Choose` head while the controller was an unparsed chooser; that gap
+/// is now closed.
 #[test]
-fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
+fn life_at_stake_binds_both_number_choosers_to_distinct_players() {
     use crate::types::ability::ChoiceType;
 
-    fn collect(a: &AbilityDefinition, out: &mut Vec<Effect>) {
-        out.push((*a.effect).clone());
+    fn collect<'a>(a: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(a);
         if let Some(s) = a.sub_ability.as_deref() {
             collect(s, out);
         }
@@ -446,22 +449,47 @@ fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
     let parsed = parse_oracle_text(text, "Life at Stake", &[], &["Instant".to_string()], &[]);
     let ability = parsed.abilities.first().expect("expected a spell ability");
 
-    // The real mechanic — Choose a number — heads the chain (not a stray
-    // `Unimplemented("you")` fragment).
-    assert!(
-        matches!(
-            &*ability.effect,
-            Effect::Choose {
-                choice_type: ChoiceType::NumberRange { .. },
-                ..
-            }
-        ),
-        "Life at Stake must head at a NumberRange Choose, not a stray you-stub; got {:#?}",
-        ability.effect
+    // CR 115.1: the announced creature is the ability's target — declared by a
+    // slot-only head so the possessive chooser and the "that creature" exile
+    // anaphor both have something to resolve against.
+    let Effect::TargetOnly { target } = &*ability.effect else {
+        panic!(
+            "Life at Stake must head at a TargetOnly declaring the creature target, got {:#?}",
+            ability.effect
+        );
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature()),
+        "the declared target must be the announced creature"
     );
 
-    let mut effects = Vec::new();
-    collect(ability, &mut effects);
+    let mut links = Vec::new();
+    collect(ability, &mut links);
+
+    // Both halves of the compound subject choose a number, and their choosers
+    // are DIFFERENT players: the printed controller (no scope) and the targeted
+    // creature's controller (CR 109.4).
+    let choosers: Vec<Option<PlayerFilter>> = links
+        .iter()
+        .filter(|link| {
+            matches!(
+                &*link.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::NumberRange { .. },
+                    ..
+                }
+            )
+        })
+        .map(|link| link.player_scope.clone())
+        .collect();
+    assert_eq!(
+        choosers,
+        vec![None, Some(PlayerFilter::ParentObjectTargetController)],
+        "both conjuncts must choose a number, bound to distinct choosers"
+    );
+
+    let effects: Vec<&Effect> = links.iter().map(|link| &*link.effect).collect();
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -479,9 +507,124 @@ fn life_at_stake_keeps_choose_mechanic_and_drops_only_the_stray_you_stub() {
     assert!(
         !effects
             .iter()
-            .any(|e| matches!(e, Effect::Unimplemented { name, .. } if name == "you")),
-        "the stray Unimplemented(\"you\") head must be gone: {effects:#?}"
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "no clause of the choose-a-number sentence may fall back to Unimplemented: {effects:#?}"
     );
+}
+
+/// CR 109.4 + CR 115.1 + CR 608.2c: the possessive-actor second-subject axis is
+/// a CLASS, not Life at Stake's card. The same "you and target &lt;filter&gt;'s
+/// controller each &lt;body&gt;" shape must distribute a body that DOES carry a
+/// recipient slot, binding it through the effect's own field rather than
+/// `player_scope` — and the announced target must be declared exactly once.
+#[test]
+fn possessive_actor_compound_subject_distributes_a_recipient_bearing_body() {
+    let ability = parse_effect_chain(
+        "You and target creature's controller each draw a card.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::TargetOnly { target } = &*ability.effect else {
+        panic!(
+            "expected a TargetOnly target declaration, got {:#?}",
+            ability.effect
+        );
+    };
+    assert_eq!(*target, TargetFilter::Typed(TypedFilter::creature()));
+
+    let you = ability
+        .sub_ability
+        .as_deref()
+        .expect("expected the caster half");
+    match &*you.effect {
+        Effect::Draw { target, .. } => assert_eq!(*target, TargetFilter::OriginalController),
+        other => panic!("expected the caster half to Draw, got {other:?}"),
+    }
+    assert_eq!(
+        you.player_scope, None,
+        "a recipient-bearing body binds \"you\" on the effect, not as a fan-out"
+    );
+
+    let them = you
+        .sub_ability
+        .as_deref()
+        .expect("expected the possessive half");
+    match &*them.effect {
+        Effect::Draw { target, .. } => assert_eq!(*target, TargetFilter::ParentTargetController),
+        other => panic!("expected the possessive half to Draw, got {other:?}"),
+    }
+    assert_eq!(
+        them.player_scope, None,
+        "a recipient-bearing body must not ALSO fan out — that would double-apply"
+    );
+}
+
+/// CR 109.4 + CR 608.2d: the recipient-less binding channel generalizes past the
+/// possessive axis. Infernal Offering's "You and that player each sacrifice a
+/// creature" has no `TargetFilter` recipient slot on `Effect::Sacrifice` either,
+/// and its second conjunct is the opponent a preceding "Choose an opponent."
+/// picked — so the second half binds `player_scope: ChosenPlayer`.
+#[test]
+fn recipient_less_body_binds_a_chosen_player_conjunct_by_scope() {
+    let parsed = parse_oracle_text(
+        "Choose an opponent. You and that player each sacrifice a creature.",
+        "Infernal Offering",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    let you = ability
+        .sub_ability
+        .as_deref()
+        .expect("expected the caster half after the Choose");
+    assert!(
+        matches!(&*you.effect, Effect::Sacrifice { .. }),
+        "the caster half must sacrifice, got {:#?}",
+        you.effect
+    );
+    assert_eq!(you.player_scope, None, "\"you\" is the unscoped default");
+
+    let them = you
+        .sub_ability
+        .as_deref()
+        .expect("expected the chosen-player half");
+    assert!(
+        matches!(&*them.effect, Effect::Sacrifice { .. }),
+        "the chosen-player half must sacrifice, got {:#?}",
+        them.effect
+    );
+    assert_eq!(
+        them.player_scope,
+        Some(PlayerFilter::ChosenPlayer { index: 0 }),
+        "the chosen opponent must be the acting player of the second half"
+    );
+}
+
+/// CR 109.4: FAIL-CLOSED contract for the recipient-less binding channel. No
+/// `PlayerFilter` can name a TARGETED player, so "you and target opponent each
+/// flip a coin" (Mana Clash) / "… each secretly choose 1, 2, or 3"
+/// (Expert-Level Safe) must stay an honest `Unimplemented` — binding the body to
+/// `PlayerFilter::Opponent` would make EVERY opponent act in a multiplayer game,
+/// and leaving it unbound would make the caster act twice.
+#[test]
+fn recipient_less_body_with_a_targeted_player_conjunct_fails_closed() {
+    for text in [
+        "You and target opponent each flip a coin.",
+        "You and target opponent each secretly choose 1, 2, or 3.",
+    ] {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "{text:?} must fail closed, got {:#?}",
+            ability.effect
+        );
+        assert_eq!(
+            ability.player_scope, None,
+            "{text:?} must not fabricate a fan-out scope"
+        );
+    }
 }
 
 /// Recursively walk an ability chain (root effect + `sub_ability` + `else_ability`)

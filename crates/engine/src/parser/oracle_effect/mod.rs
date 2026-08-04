@@ -18302,17 +18302,77 @@ fn type_phrase_has_compound_conjunction(type_phrase: &str) -> bool {
         .is_ok()
 }
 
-fn parse_static_compound_subject_prefix(
-    lower: &str,
+/// CR 109.4 + CR 115.1 + CR 608.2c: Second-subject axis for a POSSESSIVE-ACTOR
+/// conjunct — "target &lt;filter&gt;'s controller each " / "target &lt;filter&gt;'s owner
+/// each " (Life at Stake: "You and target creature's controller each secretly
+/// choose a number 0 or greater"; Eye to Eye; the same conjunct shape over any
+/// object noun).
+///
+/// The conjunct is delegated to the single-subject grammar
+/// ([`subject::parse_subject_application`]), the established authority for this
+/// possessive form: it resolves the acting player to
+/// `ParentTargetController`/`ParentTargetOwner` (CR 109.4) while preserving the
+/// announced object as the ability's TARGET (CR 115.1). Both halves are
+/// load-bearing — an application with no announced target is a different
+/// subject class (a class filter, an anaphor) and is left to the other axes, so
+/// this axis never fabricates a target slot.
+///
+/// The declared target is returned to the caller, which emits it as a leading
+/// [`Effect::TargetOnly`] slot; without that slot the returned
+/// `ParentTargetController` recipient would have no target to read (CR 601.2c).
+pub(super) fn parse_possessive_actor_each_second_subject(
+    rest: &str,
 ) -> Option<(usize, TargetFilter, TargetFilter)> {
-    let (remaining, (first_filter, second_filter)) = (
-        alt((
-            value(
-                TargetFilter::OriginalController,
-                tag::<_, _, OracleError<'_>>("you and "),
-            ),
-            value(TargetFilter::SelfRef, tag("~ and ")),
-        )),
+    let (remaining, subject) = terminated(
+        take_until::<_, _, OracleError<'_>>(" each "),
+        tag::<_, _, OracleError<'_>>(" each "),
+    )
+    .parse(rest)
+    .ok()?;
+    let application =
+        subject::parse_subject_application(subject.trim(), &mut ParseContext::default())?;
+    if !matches!(
+        application.affected,
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+    ) {
+        return None;
+    }
+    let declared_target = application.target?;
+    Some((
+        rest.len() - remaining.len(),
+        application.affected,
+        declared_target,
+    ))
+}
+
+/// CR 109.5: First-subject axis shared by every compound-subject prefix form —
+/// "you" (the printed ability controller, CR 109.5) or "~" (the ability source
+/// itself, the object axis).
+fn parse_compound_first_subject(lower: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(
+            TargetFilter::OriginalController,
+            tag::<_, _, OracleError<'_>>("you and "),
+        ),
+        value(TargetFilter::SelfRef, tag("~ and ")),
+    ))
+    .parse(lower)
+}
+
+/// CR 109.5 + CR 115.1 + CR 608.2c: A parsed "&lt;A&gt; and &lt;B&gt; each " distribution
+/// prefix. `declares_target` is `Some` only for a second subject that ANNOUNCES
+/// its own object target (the possessive-actor axis); every other axis binds a
+/// recipient that needs no new target slot.
+struct CompoundSubjectPrefix {
+    consumed: usize,
+    first: TargetFilter,
+    second: TargetFilter,
+    declares_target: Option<TargetFilter>,
+}
+
+fn parse_static_compound_subject_prefix(lower: &str) -> Option<CompoundSubjectPrefix> {
+    let (remaining, (first, second)) = (
+        parse_compound_first_subject,
         alt((
             value(
                 TargetFilter::ScopedPlayer,
@@ -18328,34 +18388,47 @@ fn parse_static_compound_subject_prefix(
     )
         .parse(lower)
         .ok()?;
-    Some((lower.len() - remaining.len(), first_filter, second_filter))
+    Some(CompoundSubjectPrefix {
+        consumed: lower.len() - remaining.len(),
+        first,
+        second,
+        declares_target: None,
+    })
 }
 
-fn parse_dynamic_compound_subject_prefix(
-    lower: &str,
-) -> Option<(usize, TargetFilter, TargetFilter)> {
-    let (remaining, first_filter) = alt((
-        value(
-            TargetFilter::OriginalController,
-            tag::<_, _, OracleError<'_>>("you and "),
-        ),
-        value(TargetFilter::SelfRef, tag("~ and ")),
+fn parse_dynamic_compound_subject_prefix(lower: &str) -> Option<CompoundSubjectPrefix> {
+    let (remaining, first) = alt((
+        parse_compound_first_subject,
         value(TargetFilter::SelfRef, tag("it and ")),
     ))
     .parse(lower)
     .ok()?;
-    let (second_consumed, second_filter) = parse_controlled_creature_each_second_subject(remaining)
+    let (second_consumed, second) = parse_controlled_creature_each_second_subject(remaining)
         .or_else(|| parse_other_creatures_share_type_each_second_subject(remaining))?;
-    Some((
-        lower.len() - remaining.len() + second_consumed,
-        first_filter,
-        second_filter,
-    ))
+    Some(CompoundSubjectPrefix {
+        consumed: lower.len() - remaining.len() + second_consumed,
+        first,
+        second,
+        declares_target: None,
+    })
 }
 
-fn parse_compound_subject_prefix(lower: &str) -> Option<(usize, TargetFilter, TargetFilter)> {
+fn parse_possessive_actor_compound_subject_prefix(lower: &str) -> Option<CompoundSubjectPrefix> {
+    let (remaining, first) = parse_compound_first_subject(lower).ok()?;
+    let (second_consumed, second, declared_target) =
+        parse_possessive_actor_each_second_subject(remaining)?;
+    Some(CompoundSubjectPrefix {
+        consumed: lower.len() - remaining.len() + second_consumed,
+        first,
+        second,
+        declares_target: Some(declared_target),
+    })
+}
+
+fn parse_compound_subject_prefix(lower: &str) -> Option<CompoundSubjectPrefix> {
     parse_static_compound_subject_prefix(lower)
         .or_else(|| parse_dynamic_compound_subject_prefix(lower))
+        .or_else(|| parse_possessive_actor_compound_subject_prefix(lower))
 }
 
 /// CR 109.5 + CR 608.2c: True when `text` opens with a compound-subject
@@ -18377,8 +18450,12 @@ fn try_parse_compound_subject_each(
     // Compose the prefix through the shared grammar in
     // `parse_compound_subject_prefix` (kept in lockstep with the chunk-loop guard
     // `text_is_compound_subject_distribution`).
-    let (consumed_prefix, first_filter, second_filter) =
-        parse_compound_subject_prefix(lower.as_str())?;
+    let CompoundSubjectPrefix {
+        consumed: consumed_prefix,
+        first: first_filter,
+        second: second_filter,
+        declares_target,
+    } = parse_compound_subject_prefix(lower.as_str())?;
 
     // CR 109.4 + CR 608.2c (issue #6381): "that player" in "you and that
     // player each ..." is ambiguous prose with two distinct antecedents. The
@@ -18447,13 +18524,37 @@ fn try_parse_compound_subject_each(
     }
     tail.sub_ability = Some(Box::new(half_b));
 
-    Some(ParsedEffectClause {
+    let distributed = ParsedEffectClause {
         effect: *half_a.effect,
         duration: half_a.duration,
         sub_ability: half_a.sub_ability,
         distribute: None,
         multi_target: None,
         condition: half_a.condition,
+        optional: false,
+        unless_pay: None,
+    };
+
+    // CR 115.1 + CR 601.2c: a possessive-actor second subject ("target
+    // creature's controller") names its player THROUGH an announced object
+    // target. Declare that target with a leading `Effect::TargetOnly` — the
+    // same slot-only head the single-subject grammar emits for "target
+    // creature's controller <verb>s" — so the recipient's
+    // `ParentTargetController` reference (and any later "that creature"
+    // anaphor) has a target slot to resolve against.
+    let Some(target) = declares_target else {
+        return Some(distributed);
+    };
+    Some(ParsedEffectClause {
+        effect: Effect::TargetOnly { target },
+        duration: None,
+        sub_ability: Some(Box::new(ability_definition_from_clause(
+            AbilityKind::Spell,
+            distributed,
+        ))),
+        distribute: None,
+        multi_target: None,
+        condition: None,
         optional: false,
         unless_pay: None,
     })
@@ -18529,12 +18630,72 @@ fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter)
             }
             true
         }
-        // Any other effect family is out of scope for compound-subject
-        // distribution at this entry point. Returning false keeps the
-        // detector tight and prevents silent misparse on bodies whose
-        // recipient binding is encoded differently (e.g. nested filter props).
-        _ => false,
+        // No `TargetFilter`-typed recipient slot on this effect family. The
+        // acting player of such an effect is the resolving ability's
+        // controller, so the recipient binds on the ABILITY rather than the
+        // effect — see `bind_recipient_without_recipient_slot`. Recipients no
+        // `PlayerFilter` can name still return `false`, keeping the detector
+        // tight against bodies whose recipient binding is encoded differently
+        // (e.g. nested filter props).
+        _ => bind_recipient_without_recipient_slot(def, filter),
     }
+}
+
+/// CR 109.4 + CR 608.2d: Bind a distribution recipient on a link whose effect
+/// has NO `TargetFilter`-typed recipient slot — the "who decides / who acts"
+/// class (`Effect::Choose`, `Effect::Sacrifice`, …), where the acting player is
+/// the resolving ability's controller rather than a field on the effect.
+///
+/// The binding channel is `AbilityDefinition.player_scope`, whose fan-out
+/// rebinds the acting controller per matching player (`resolve_ability_chain`).
+/// This is the same lift the single-subject grammar already performs for a
+/// slot-less predicate ("its controller investigates" —
+/// `player_scope_from_parent_target_subject`), reused here rather than
+/// duplicated.
+///
+/// Total and FAIL-CLOSED: only a recipient an existing `PlayerFilter` can name
+/// is bound. A recipient naming a TARGETED player ("target opponent") or an
+/// object ("that creature") returns `false`, so the caller falls through to
+/// `Effect::Unimplemented` instead of silently letting the printed controller
+/// act in someone else's place.
+fn bind_recipient_without_recipient_slot(
+    def: &mut AbilityDefinition,
+    filter: &TargetFilter,
+) -> bool {
+    // CR 109.5: "you" — the printed controller already IS the acting player of
+    // an unscoped ability, so this half needs no scope. Stamping one would be a
+    // redundant single-player fan-out.
+    if matches!(filter, TargetFilter::OriginalController) {
+        return true;
+    }
+    let Some(scope) = distribution_recipient_player_scope(filter) else {
+        return false;
+    };
+    def.player_scope = Some(scope);
+    true
+}
+
+/// CR 109.4: Map a distribution recipient to the `PlayerFilter` iteration scope
+/// that names exactly that one player. Composed from the existing
+/// parent-target subject mapping plus the resolution-chosen player, the two
+/// recipient forms this distributor produces that a `PlayerFilter` can name.
+/// Everything else is `None` — see the fail-closed contract on
+/// `bind_recipient_without_recipient_slot`.
+fn distribution_recipient_player_scope(filter: &TargetFilter) -> Option<PlayerFilter> {
+    player_scope_from_parent_target_subject(filter).or_else(|| match filter {
+        // CR 608.2d: "that player" already rebound by `try_parse_compound_subject_each`
+        // to the opponent a preceding "Choose an opponent." picked (the Offering
+        // cycle) — a resolution-scoped single player, not a player class.
+        TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty() => {
+            match tf.controller {
+                Some(ControllerRef::ChosenPlayer { index }) => {
+                    Some(PlayerFilter::ChosenPlayer { index })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    })
 }
 
 /// CR 614.1a + CR 701.5 + CR 608.2c: Detect the "exile-after-cast/counter rider"
