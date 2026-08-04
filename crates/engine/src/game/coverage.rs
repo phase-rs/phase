@@ -1819,7 +1819,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{DamageKindFilter, PlayerRelation};
+    use crate::types::ability::{DamageKindFilter, PlayerRelation, PossessionAxis};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1895,6 +1895,25 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
                 PlayerRelation::All => "each player",
             };
             return format!("{who} whose {attr:?} {comparator:?} {value:?}");
+        }
+        // CR 608.2c + CR 109.4: "each [player class] who controlled/owned a
+        // [filter] this way"
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            ..
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let verb = match possession {
+                PossessionAxis::Controller => "controlled",
+                PossessionAxis::Owner => "owned",
+            };
+            return format!("{who} who {verb} a {filter:?} this way");
         }
     }
     .into()
@@ -7745,6 +7764,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
+        // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
+        // via both `resolve_player_count` and `matches_player_scope`.
+        PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
     }
 }
 

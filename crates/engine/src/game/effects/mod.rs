@@ -532,6 +532,28 @@ pub(crate) fn matches_player_scope(
                             && candidate_player_scalar_with_state(state, p, controller, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
+                    // CR 608.2c + CR 608.2h + CR 109.4: "each player who
+                    // controlled/owned a <filter> this way" — the candidate must
+                    // satisfy both `relation` and possession of a member of the
+                    // most recent tracked object set. Delegates to the single
+                    // authority shared with `quantity::resolve_player_count`.
+                    PlayerFilter::TrackedSetPossessor {
+                        relation,
+                        possession,
+                        filter,
+                        caused_by,
+                    } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && crate::game::quantity::possessed_tracked_set_member(
+                                state,
+                                p.id,
+                                *possession,
+                                filter,
+                                *caused_by,
+                                controller,
+                                source_id,
+                            )
+                    }
                 }
         })
 }
@@ -4651,21 +4673,26 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => {
-            matches!(
-                qty,
-                QuantityRef::TrackedSetSize
-                    | QuantityRef::FilteredTrackedSetSize { .. }
-                    | QuantityRef::TrackedSetAggregate { .. }
-                    | QuantityRef::DistinctCardTypes {
-                        source: CardTypeSetSource::TrackedSet { .. }
-                    }
-                    | QuantityRef::DistinctSubtypes {
-                        source: CardTypeSetSource::TrackedSet { .. },
-                        ..
-                    }
-            )
-        }
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::TrackedSetAggregate { .. }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+            }
+            | QuantityRef::DistinctSubtypes {
+                source: CardTypeSetSource::TrackedSet { .. },
+                ..
+            } => true,
+            // CR 608.2c: a player-count whose filter is keyed on the chain's
+            // tracked object set is a CONSUMER of that set — the preceding
+            // producer must publish it, or the count resolves to 0. This is the
+            // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
+            // reference is nested inside the PLAYER filter, not the quantity.
+            // Not every `PlayerCount` qualifies, so it must be asked per filter.
+            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
+            _ => false,
+        },
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -4679,6 +4706,57 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             quantity_expr_references_tracked_set(left)
                 || quantity_expr_references_tracked_set(right)
         }
+    }
+}
+
+/// CR 608.2c: Does this player filter read the chain's tracked object set?
+///
+/// EXHAUSTIVE BY DESIGN — no `_` arm, and it must stay that way. Its sibling
+/// predicates (`quantity_expr_references_tracked_set`,
+/// `filter_references_tracked_set`) are `matches!`/wildcard allowlists that a
+/// new variant joins silently and WRONGLY: a non-listed consumer compiles
+/// clean, its producer never publishes, and the quantity resolves to 0 instead
+/// of its real value. This one makes the compiler demand an answer. Grouped `|`
+/// arms keep it readable; adding a variant to the `false` group is a decision,
+/// not an accident.
+fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
+    match filter {
+        // Reads `tracked_object_sets` + `tracked_set_member_causes`, which are
+        // published only when `next_sub_needs_tracked_set` reports a consumer.
+        PlayerFilter::TrackedSetPossessor { .. } => true,
+        // Reads `last_zone_changed_ids` — a DIFFERENT ledger, unconditionally
+        // recomputed after every effect and needing no publication gate.
+        PlayerFilter::ZoneChangedThisWay
+        // Reads the CR 701.x `player_actions_this_way` ledger.
+        | PlayerFilter::PerformedActionThisWay { .. }
+        // Plain relations, turn/combat ledgers, event-context anchors, vote
+        // ballots, linked-exile piles and per-candidate board/scalar
+        // comparisons — none consults `tracked_object_sets`.
+        | PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => false,
+        // The negation wrapper inherits its inner filter's consumption: an
+        // "all except <tracked-set possessor>" scope still needs the set.
+        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
     }
 }
 
@@ -5661,7 +5739,7 @@ fn rebind_first_object_target(
 /// see the card's official ruling), so the up-front single-gate at the top of
 /// `resolve_chain_body` is suppressed for this shape and optionality is fired
 /// per-iteration inside the `repeat_for` loop instead.
-fn has_kind_driven_repeat(ability: &ResolvedAbility) -> bool {
+pub(crate) fn has_kind_driven_repeat(ability: &ResolvedAbility) -> bool {
     matches!(
         ability.repeat_for,
         Some(QuantityExpr::Ref {
@@ -5684,7 +5762,10 @@ fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
     ) && effect_iterates_over_parent_target(&ability.effect)
 }
 
-fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &ResolvedAbility) -> bool {
+pub(crate) fn has_member_driven_repeat_after_hydration(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
     has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
 }
 
@@ -5826,7 +5907,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
 /// continuation. Any repeated-optional ability whose cost pauses falls through to
 /// the generic `repeat_for` path and stays honestly unimplemented (no false
 /// green) until the driver gains pause-resume plumbing.
-fn is_repeated_optional_payment(ability: &ResolvedAbility) -> bool {
+pub(crate) fn is_repeated_optional_payment(ability: &ResolvedAbility) -> bool {
     ability.optional
         && is_synchronous_mana_pay_cost(&ability.effect)
         && matches!(ability.repeat_for, Some(QuantityExpr::Fixed { .. }))
@@ -6393,7 +6474,7 @@ pub(crate) fn resolve_player_for_context_ref(
 /// acting subject (the target permanent's controller). This mirrors the
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
-fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
     if let Effect::PayCost { payer, .. } = &ability.effect {
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
@@ -6860,6 +6941,27 @@ fn previous_effect_amount_from_events(
         // event slice that may contain result-table branch effects or nested
         // rolls interleaved with the outer dice.
         Effect::RollDie { .. } => return state.die_result_this_resolution,
+        // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
+        // single authority for how many cards a draw instruction delivered — it
+        // commits the whole instruction's post-replacement total to
+        // `state.last_effect_count` once the sequence completes (a unit replaced
+        // by something else contributes 0; one doubled by a count modifier
+        // contributes its post-replacement count). Read that committed total
+        // instead of re-summing draw events, exactly as the `RollDie` arm above
+        // defers to `die_result_this_resolution`, so "draw N cards, then discard
+        // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
+        // Laquatus's Creativity; Last Stand) reads the true total rather than a
+        // per-unit or pre-replacement count. The same stamp feeds the condition
+        // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
+        // "if you draw one or more cards this way, discard two cards".
+        //
+        // Returns early rather than falling through the `> 0` filter below: a
+        // draw that delivered zero cards is a real zero result and must stamp
+        // `Some(0)`. "Draw a card for each Island you control, then discard that
+        // many cards" (Last Stand) controlling no Islands has to discard 0, not
+        // inherit the life-gain amount its preceding chain step left behind in
+        // `last_effect_amount`.
+        Effect::Draw { .. } => return state.last_effect_count,
         _ => 0,
     };
 
@@ -11746,6 +11848,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::ChosenPlayer { .. }
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::PlayerAttribute { .. } => false,
     }
 }
@@ -12861,6 +12964,65 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 608.2c — issue #6943 (Faerie Slumber Party). The Seasoned Pyromancer
+    /// shape ONE LAYER UP: the tracked-set reference is nested inside the PLAYER
+    /// filter of a `PlayerCount`, not in the quantity itself.
+    ///
+    /// This is the cheapest layer at which the de-registration regression is
+    /// detectable, and its signature here is unique. `PlayerCount` is not
+    /// intrinsically a tracked-set consumer, so the enclosing predicate must ask
+    /// `player_filter_references_tracked_set` per filter. If it does not, the
+    /// producing `BounceAll` never publishes, the set selection returns `None`,
+    /// every player is rejected, and the count silently resolves to 0 — the card
+    /// creates ZERO tokens instead of six, with nothing failing to compile.
+    ///
+    /// Revert discriminator: dropping the `QuantityRef::PlayerCount` arm from
+    /// `quantity_expr_references_tracked_set` (i.e. restoring the `matches!`
+    /// allowlist) makes the first assertion fail.
+    #[test]
+    fn repeat_for_player_count_over_tracked_set_possessors_references_tracked_set() {
+        let mut ability = optional_gain_life(ObjectId(1), PlayerId(0), 1);
+        ability.optional = false;
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "baseline ability must not reference a tracked set"
+        );
+
+        // Faerie Slumber Party's repeat_for: "for each opponent who controlled a
+        // creature returned this way".
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }),
+                    caused_by: None,
+                },
+            },
+        });
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "repeat_for: PlayerCount over TrackedSetPossessor is a tracked-set CONSUMER — \
+             without this the producer never publishes and the count resolves to 0"
+        );
+
+        // Paired negative: the arm must be FILTER-discriminating, not a blanket
+        // `PlayerCount => true` that would make every existing player-count card
+        // force a spurious tracked-set publication.
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        });
+        assert!(
+            !ability_or_branch_references_tracked_set(&ability),
+            "a plain PlayerCount{{Opponent}} reads no tracked set and must NOT force publication"
         );
     }
 
@@ -22008,6 +22170,59 @@ mod tests {
         state.current_trigger_event = None;
         ability.context.optional_effect_performed = true;
         assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 701.30b: "Choose an opponent. You and that opponent each clash." — a CHOICE,
+    /// not a target (CR 115.10a), so the offered list must exclude seats that cannot be
+    /// chosen at all while still offering every seat that can.
+    ///
+    /// Board: 5 seats. P0 clashes; **P1 phased out** through the production API;
+    /// **P2 eliminated**; P3/P4 valid.
+    ///
+    /// REACH-GUARD, and the reason the board is 5 seats rather than 3: `clash::resolve`
+    /// publishes `ClashChooseOpponent` only at `candidates.len() >= 2`. With one surviving
+    /// opponent it takes the immediate-clash path and publishes NOTHING, so an
+    /// exclusion-only assertion would pass vacuously on a narrower board.
+    ///
+    /// REVERT-PROBE: restore HEAD's `.filter(|p| p.id != controller && !p.is_eliminated)`
+    /// at this site ⇒ candidates become `[P1, P3, P4]` ⇒ the total-equality assertion
+    /// FAILS. That isolates exactly the conjunct this change adds.
+    #[test]
+    fn clash_offer_excludes_a_phased_out_opponent_and_still_offers_the_rest() {
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut events = Vec::new();
+
+        // Anti-vacuity on the SETUP, asserted FIRST: `phase_out_player` returns the ids it
+        // transitioned, so a setup that silently no-opped fails loudly here.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(state.players[1].is_phased_out());
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(state.players[2].is_eliminated);
+
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash resolves");
+
+        match &state.waiting_for {
+            WaitingFor::ClashChooseOpponent {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                // TOTAL EQUALITY, not `contains`: exclusion AND identity in one assertion.
+                assert_eq!(
+                    candidates,
+                    &vec![PlayerId(3), PlayerId(4)],
+                    "phased-out P1 and eliminated P2 are out; both valid opponents are in"
+                );
+            }
+            other => panic!("expected ClashChooseOpponent, got {other:?}"),
+        }
     }
 
     /// CR 701.30b: "Clash with an opponent" lets the clashing player CHOOSE the

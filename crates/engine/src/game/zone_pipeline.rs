@@ -1891,7 +1891,11 @@ fn legal_aura_attachment_targets(
         .collect();
 
     targets.extend(state.players.iter().filter_map(|player| {
-        if player.is_eliminated || player.is_phased_out() {
+        // Hygiene routing, behaviour-neutral by construction: `is_eliminated ||
+        // is_phased_out()` on an iterated member is the negation of what
+        // `players::player_exists_for_choice` spells for a member already known to be in
+        // `state.players`. Routed so an existence fix propagates here for free.
+        if !crate::game::players::player_exists_for_choice(state, player.id) {
             return None;
         }
         if crate::game::filter::player_matches_target_filter_in_state(

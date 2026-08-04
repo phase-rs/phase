@@ -39,7 +39,7 @@ use crate::planner::{
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::strategy_helpers::{cmp_sacrifice, sacrifice_key};
-use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
+use crate::policies::tutor::score_search_choice_selection;
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::session::AiSession;
 use crate::tactical_gate::gate_candidates;
@@ -169,8 +169,55 @@ fn choose_action_with_session_inner(
     durable_pact_routes: bool,
 ) -> Option<GameAction> {
     let contract = AiDecisionContract::issue(state, ai_player);
-    let exact_contract_action =
-        |action: GameAction| contract.contains_action(state, &action).then_some(action);
+    // `AiDecisionContract` holds the finite domain the action boundary accepts.
+    // A heuristic's pick is usable only if the engine's enumerator issued it —
+    // `build_decision_context` states the rule: "the tactical layer must receive
+    // the same finite, engine-issued domain as the action boundary."
+    let in_contract = |action: &GameAction| contract.contains_action(state, action);
+    // Binding for the specialist heuristics that answer ahead of the scored
+    // path. A miss must NOT end the decision: `None` from `choose_action` is how
+    // the AI controller learns this seat owes nothing, so using it to also mean
+    // "my specialist picked something the engine never issued" is
+    // indistinguishable at the call site, and the controller halts after three
+    // of them (`ai-controller-stuck:<prompt>`). A miss therefore falls through
+    // to the domain-derived paths below — a worse decision, never a stopped
+    // game. The assertion makes the miss loud in debug and test builds so a
+    // heuristic that drifts off the issued domain is caught here rather than in
+    // a bug report.
+    //
+    // Scoped to a seat that actually owes this decision. `choose_action` is
+    // polled per AI seat, so a specialist that reads only `state` answers for
+    // every seat at the prompt — `tribute_eval::decide` takes no `PlayerId` at
+    // all. For a seat that owes nothing the contract is empty by construction
+    // and refusal is the CORRECT outcome, so asserting there would fire on
+    // healthy play (any AI-vs-AI Tribute creature). The assertion is about
+    // heuristics drifting off a domain that exists, not about seats that have
+    // no domain.
+    // A closure, not a `let`: `acting_players` allocates a `Vec`, and only the
+    // *condition* of a `debug_assert!` is elided in release — a binding hoisted
+    // above it would allocate on every `choose_action`, hot `Priority` path
+    // included, to feed an assertion that is not compiled in.
+    let owes_decision = || state.waiting_for.acting_players().contains(&ai_player);
+    let bind_specialist = |action: GameAction| -> Option<GameAction> {
+        let issued = in_contract(&action);
+        debug_assert!(
+            issued || !owes_decision(),
+            "AI specialist answered {} with an action outside the engine-issued \
+             domain: {action:?}",
+            state.waiting_for.variant_name()
+        );
+        issued.then_some(action)
+    };
+    // Materialized only by the specialist arms that need the domain as a slice.
+    // Those prompts all have small candidate sets, while `Priority` — the hot
+    // path, and the largest set — needs none of them.
+    let issued_domain = || -> Vec<GameAction> {
+        contract
+            .candidates
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect()
+    };
     // CR 103.5: For simultaneous mulligan states, the AI controller's only
     // job is to act on behalf of `ai_player`. If `ai_player` is not in the
     // pending set, there is nothing to choose — return None so the WASM
@@ -193,18 +240,27 @@ fn choose_action_with_session_inner(
         retain_live_pact_route(state, ai_player, session);
     }
 
-    if let Some(action) = random_card_predicate_guess(state, ai_player, rng) {
-        return exact_contract_action(action);
+    // Gated on the variant so the hot `Priority` path never materializes the
+    // domain slice for a guess that cannot apply.
+    if matches!(state.waiting_for, WaitingFor::NamedChoice { .. }) {
+        if let Some(action) = random_card_predicate_guess(state, ai_player, &issued_domain(), rng)
+            .and_then(&bind_specialist)
+        {
+            return Some(action);
+        }
     }
 
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
     // dedicated simple-eval heuristic rather than going through the tactical
     // policy registry. Punishment value vs counter value.
     if matches!(state.waiting_for, WaitingFor::TributeChoice { .. }) {
-        if let Some(decision) = crate::tribute_eval::decide(state) {
-            return exact_contract_action(GameAction::DecideOptionalEffect {
+        if let Some(action) = crate::tribute_eval::decide(state)
+            .map(|decision| GameAction::DecideOptionalEffect {
                 accept: decision.accept(),
-            });
+            })
+            .and_then(&bind_specialist)
+        {
+            return Some(action);
         }
     }
 
@@ -219,17 +275,23 @@ fn choose_action_with_session_inner(
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
         if let Ok(mut pending) = session.prospective_fetch_prompt.write() {
             if let Some(prompt) = pending.remove(&ai_player) {
-                if let Some(action) = prompt.action_for(state, ai_player) {
+                if let Some(action) = prompt
+                    .action_for(state, ai_player)
+                    .and_then(&bind_specialist)
+                {
                     if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
                         follow_ups.insert(ai_player, prompt.follow_up());
                     }
-                    return exact_contract_action(action);
+                    return Some(action);
                 }
             }
         }
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
-            return exact_contract_action(action);
+        if let Some(action) =
+            deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
+                .and_then(&bind_specialist)
+        {
+            return Some(action);
         }
     }
 
@@ -238,8 +300,11 @@ fn choose_action_with_session_inner(
         WaitingFor::MulliganDecision { .. } | WaitingFor::OpeningHandBottomCards { .. }
     ) {
         let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[], Some(&context)) {
-            return exact_contract_action(action);
+        if let Some(action) =
+            deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
+                .and_then(&bind_specialist)
+        {
+            return Some(action);
         }
     }
 
@@ -251,19 +316,28 @@ fn choose_action_with_session_inner(
     // optimum, and uses the caller-owned RNG so seeded measurement runs remain
     // reproducible. Parallel to the TributeChoice / SearchChoice / ChooseManaColor
     // pre-emptions above.
-    if let WaitingFor::OpponentGuess { ref options, .. } = state.waiting_for {
+    if matches!(state.waiting_for, WaitingFor::OpponentGuess { .. }) {
         use rand::seq::IndexedRandom;
-        if let Some(choice) = options.choose(rng) {
-            return exact_contract_action(GameAction::ChooseOption {
-                choice: choice.clone(),
-            });
+        // Sampled from the issued actions rather than the prompt's raw
+        // `options`, so the guess is inside the domain the action boundary
+        // accepts. Uniformity — the property that makes this rules-fair — is
+        // preserved: the enumerator issues one `ChooseOption` per legal answer.
+        let guesses: Vec<GameAction> = issued_domain()
+            .into_iter()
+            .filter(|action| matches!(action, GameAction::ChooseOption { .. }))
+            .collect();
+        if let Some(action) = guesses.choose(rng).cloned().and_then(&bind_specialist) {
+            return Some(action);
         }
     }
 
     if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
         if let Some(follow_up) = follow_ups.remove(&ai_player) {
-            if let Some(action) = follow_up.action_for(state, ai_player) {
-                return exact_contract_action(action);
+            if let Some(action) = follow_up
+                .action_for(state, ai_player)
+                .and_then(&bind_specialist)
+            {
+                return Some(action);
             }
         }
     }
@@ -280,7 +354,9 @@ fn choose_action_with_session_inner(
             );
             arm_certified_pact_route(state, &action, ai_player, session);
         }
-        return exact_contract_action(action);
+        if let Some(action) = bind_specialist(action) {
+            return Some(action);
+        }
     }
 
     let mut scored = score_candidates_with_session(state, ai_player, config, session);
@@ -292,12 +368,12 @@ fn choose_action_with_session_inner(
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
-        return fallback_action(state, config)
+        return fallback_action(state, config, &contract)
             .filter(|action| root_action_is_allowed(state, ai_player, action))
             .filter(|action| {
                 durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
             })
-            .and_then(exact_contract_action);
+            .filter(&in_contract);
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
@@ -314,14 +390,17 @@ fn choose_action_with_session_inner(
         }
         emit_decision_trace(state, ai_player, config, action, session);
     }
-    chosen.and_then(exact_contract_action)
+    chosen.filter(&in_contract)
 }
 
 fn random_card_predicate_guess(
     state: &GameState,
     ai_player: PlayerId,
+    issued: &[GameAction],
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    use rand::seq::IndexedRandom;
+
     let WaitingFor::NamedChoice {
         player,
         choice_type,
@@ -338,17 +417,30 @@ fn random_card_predicate_guess(
     if source.prompt.controller == ai_player || options.is_empty() {
         return None;
     }
-    let index = rng.random_range(0..options.len());
-    let choice = options[index].clone();
-    tracing::info!(
-        target: "phase_ai::choice",
-        ai_player = ai_player.0,
-        source_id = source.prompt.identity.reference.object_id.0,
-        source_name = %source.prompt.display_name,
-        guess = %choice,
-        "AI randomly guessed card predicate"
-    );
-    Some(GameAction::ChooseOption { choice })
+    // CR 608.2d: the guess is drawn from the actions the engine issued, not from
+    // the prompt's raw `options`, so it lands inside the domain the action
+    // boundary accepts. Uniformity is what makes this rules-fair — the AI has no
+    // legal access to the committed value, and scoring the branches would read
+    // it (eval and search run on the UNFILTERED `GameState`) — and the
+    // enumerator issues one `ChooseOption` per legal answer, so sampling the
+    // issued set is the same distribution over the same answers.
+    let guesses: Vec<GameAction> = issued
+        .iter()
+        .filter(|action| matches!(action, GameAction::ChooseOption { .. }))
+        .cloned()
+        .collect();
+    let action = guesses.choose(rng)?.clone();
+    if let GameAction::ChooseOption { choice } = &action {
+        tracing::info!(
+            target: "phase_ai::choice",
+            ai_player = ai_player.0,
+            source_id = source.prompt.identity.reference.object_id.0,
+            source_name = %source.prompt.display_name,
+            guess = %choice,
+            "AI randomly guessed card predicate"
+        );
+    }
+    Some(action)
 }
 
 fn fast_priority_action(
@@ -851,6 +943,42 @@ pub fn emit_trace_for_candidate(
     );
 }
 
+/// Pick a `SelectCards` answer out of the contract that will gate it.
+///
+/// `AiDecisionContract::contains_action` tests exact set membership, not
+/// cardinality (`engine/src/ai_support/context.rs:77-105`), and the enumeration
+/// behind it is capped at `SELECTION_CANDIDATE_CAP` in lexicographic order
+/// (`ai_support/candidates.rs:5083-5096`). A synthesized selection can therefore
+/// satisfy the resolution handler and STILL be refused by the contract, which
+/// degrades to "the AI has no action" (#6942). Taking the answer from the
+/// caller's own contract makes membership hold by identity.
+///
+/// This is also the single authority for cardinality: the enumerator emits size
+/// 0 only where the prompt's runtime `up_to` / `optional` / `allows_partial_find`
+/// / `min_count` fields permit it, so no second table is kept here.
+///
+/// Prefers the smallest issued selection, preserving the previous arm's
+/// conservative "choose as little as legally possible" intent for the windows
+/// where an empty pick genuinely is legal. That preference is sound only where
+/// the enumerator does not over-issue; congruence was audited per call site and
+/// the one known divergence (`PayCost { kind: Sacrifice, resume: ManaAbility }`,
+/// whose enumerator issues `min_count..=count` against a handler that demands
+/// exactly `count`) leaves this arm byte-identical to its previous behaviour
+/// rather than making it worse.
+fn issued_selection(contract: &AiDecisionContract) -> Option<GameAction> {
+    contract
+        .candidates
+        .iter()
+        .filter_map(|candidate| match &candidate.action {
+            GameAction::SelectCards { cards } => Some((cards.len(), &candidate.action)),
+            _ => None,
+        })
+        .min_by(|(left_len, left), (right_len, right)| {
+            left_len.cmp(right_len).then_with(|| left.cmp_stable(right))
+        })
+        .map(|(_, action)| action.clone())
+}
+
 /// Produce a safe action when the AI has no scored candidates.
 /// During combat, submit empty declarations. During active play, pass priority.
 /// Returns None only for terminal states (GameOver) where no action is possible.
@@ -862,16 +990,33 @@ pub fn emit_trace_for_candidate(
 /// pending-cast branch here means that authority has a gap: the AI entered a
 /// cast it cannot complete. Fix the gate, not the recovery.
 ///
-/// In release builds we still emit `CancelCast` to keep the match running, but
-/// debug builds panic so the gap surfaces during testing instead of silently
-/// degrading AI play into cast/cancel churn.
+/// Reaching it is REPORTED, not asserted: the branch emits `CancelCast` and a
+/// `tracing::error!` in every profile. A `debug_assert!(false, …)` used to live
+/// there, which made the two profiles disagree about the game *result* — both AI
+/// gates run the dev profile (`.cargo/config.toml`: `ai-gate = "run --bin
+/// ai-gate --"`), `duel_suite::run`'s per-game `catch_unwind` scored the panic
+/// `(None, 0)`, and the committed win-rate baseline is generated by
+/// `scripts/ai-gate.sh`, which builds `--release`. Same code, different verdict,
+/// depending on the profile. The gap it guarded is still a real bug — grep the
+/// error event, don't reintroduce the panic.
+///
 /// Deadlock-safe escape hatch when tactical scoring cannot produce an action.
 /// The WASM bridge exposes this for client AI-controller escape — callers must
 /// not invent actions from legal-action enumeration order (#6393).
 ///
 /// `config` supplies policy penalties used by selection escapes (e.g. sacrifice
 /// value ordering); difficulty/search knobs are unused here.
-pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameAction> {
+///
+/// `contract` is the engine-issued action domain for this decision — the SAME
+/// instance that will gate whatever this function returns. Selection escapes
+/// answer out of it via [`issued_selection`] rather than synthesizing a
+/// cardinality of their own (#6942), and its `semantic_owner` is the authority
+/// for which pending seat a multi-seat prompt is being answered for.
+pub fn fallback_action(
+    state: &GameState,
+    config: &AiConfig,
+    contract: &AiDecisionContract,
+) -> Option<GameAction> {
     // CR 605.3b: A sacrificial mana prompt is an explicit payment decision,
     // not a generic pending-cast failure. Pick only an engine-issued source or
     // the exact BackToManaPayment escape; never synthesize CancelCast here.
@@ -918,16 +1063,26 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
             .or(state.pending_cast.as_deref())
             .and_then(|pc| state.objects.get(&pc.object_id))
             .map_or("<none>", |obj| obj.name.as_str());
-        debug_assert!(
-            false,
-            "AI fallback reached during pending cast (variant {variant}, spell {spell}) — \
-             can_cast_object_now has a gap that allowed an uncompletable cast through. \
-             Tighten the pre-cast check rather than relying on CancelCast recovery."
-        );
+        // Reported, never asserted. This branch is a HANDLED condition: the
+        // recovery below (CancelCast, CR 601.2) is the correct behavior and is
+        // what every release build has always done. A `debug_assert!(false, …)`
+        // here made the two profiles disagree about the *game result*, not just
+        // about diagnostics: both AI gates run the dev profile
+        // (`.cargo/config.toml`: `ai-gate = "run --bin ai-gate --"`, no profile
+        // flag), the panic unwound into `duel_suite::run`'s per-game
+        // `catch_unwind`, and that seed was scored `(None, 0)` — a DRAW that
+        // release would have played out. The committed `suite-baseline.json` is
+        // release-generated (`scripts/refresh-ai-baseline.sh` → `scripts/ai-gate.sh`,
+        // `cargo build --release`) and contains no such artifact (checked: zero
+        // `turns == 0` games), so this removal makes the CI run agree with the
+        // baseline's own profile rather than the other way round. The diagnostic
+        // value is preserved verbatim in the error event below.
         tracing::error!(
             variant,
             spell,
-            "AI fallback cancelled an uncompletable cast — can_cast_object_now gap"
+            "AI fallback cancelled an uncompletable cast — can_cast_object_now has a gap \
+             that allowed an uncompletable cast through. Tighten the pre-cast check rather \
+             than relying on CancelCast recovery."
         );
         return Some(GameAction::CancelCast);
     }
@@ -1068,7 +1223,18 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
             cards: pick_lowest_value_sacrifices(state, cards, *count, &config.policy_penalties),
         }),
 
-        // Selection states: empty selection is a valid "choose nothing".
+        // CR 608.2d: a selection prompt's legal cardinality is a RUNTIME
+        // property, not a property of the variant — "the player can't choose an
+        // option that's illegal or impossible". `DiscardToHandSize` (CR 514.1)
+        // and `ConniveDiscard` (CR 701.50a) admit no empty pick at all;
+        // `ChooseFromZoneChoice` / `DiscardChoice` / `EffectZoneChoice` /
+        // `SearchChoice` / `DigChoice` depend on `up_to` / `min_count` /
+        // `allows_partial_find`; `RevealChoice` depends on `optional`;
+        // `ManifestDreadChoice` (CR 701.62a), `WardDiscardChoice` /
+        // `WardSacrificeChoice` (CR 702.21a) and `UnlessBounceChoice` require
+        // exactly one. The previous blanket empty selection was rejected for
+        // nine of these fourteen and softlocked the AI controller (#6942).
+        // Take the engine's own issued answer instead of restating the rule.
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -1082,9 +1248,7 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
-        | WaitingFor::UnlessBounceChoice { .. } => {
-            Some(GameAction::SelectCards { cards: Vec::new() })
-        }
+        | WaitingFor::UnlessBounceChoice { .. } => issued_selection(contract),
         // CR 701.4a + CR 608.2d: Behold requires EXACTLY one beholdable object —
         // an empty selection is illegal. Take the first candidate (any legal pick
         // resolves the prompt; the evaluated candidate enumerator picks properly).
@@ -1243,10 +1407,21 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
 
         // CR 103.5 + 103.5b: Mulligan default. In `Declare`, keep unless the AI
         // has a Serum Powder in hand, in which case use it first (auto-heuristic
-        // — see `first_serum_powder_in_hand`). In `BottomCards`, submit an empty
-        // `SelectCards` as the deadlock-safe escape hatch.
+        // — see `first_serum_powder_in_hand`). In `BottomCards`, the owed count
+        // is per-seat (`mulligan.rs:433`, `:490`) and `validate_bottom_selection`
+        // (`mulligan.rs:534-547`) rejects any selection whose length differs from
+        // it — an empty pick is NOT a deadlock-safe escape, it is an
+        // unconditional rejection (#6942). Take the engine's issued answer, which
+        // is already scoped to this contract's seat.
         WaitingFor::MulliganDecision { pending, .. } => {
-            let entry = pending.first()?;
+            // CR 103.5: `pending` may hold several seats at once and their
+            // phases advance independently (`mulligan.rs:286` removes a settled
+            // entry, `:295` moves only `pending[idx]` to `BottomCards`), so the
+            // first entry is not this contract's entry. Select by seat,
+            // mirroring `deterministic_choice` at search.rs:3017.
+            let entry = pending
+                .iter()
+                .find(|entry| entry.player == contract.semantic_owner)?;
             match &entry.phase {
                 MulliganDecisionPhase::Declare => {
                     Some(match first_serum_powder_in_hand(state, entry.player) {
@@ -1258,14 +1433,12 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
                         },
                     })
                 }
-                MulliganDecisionPhase::BottomCards { .. } => {
-                    Some(GameAction::SelectCards { cards: Vec::new() })
-                }
+                MulliganDecisionPhase::BottomCards { .. } => issued_selection(contract),
             }
         }
-        WaitingFor::OpeningHandBottomCards { .. } => {
-            Some(GameAction::SelectCards { cards: Vec::new() })
-        }
+        // TL:R 906.6a/e + CR 103.5: same per-seat owed count, same shared
+        // `validate_bottom_selection` rejection of an empty pick.
+        WaitingFor::OpeningHandBottomCards { .. } => issued_selection(contract),
 
         // Named choice: prefer an engine-legal ChooseOption. CardName prompts
         // intentionally keep `options` empty and synthesize candidates from
@@ -1763,12 +1936,21 @@ pub fn fallback_action(state: &GameState, config: &AiConfig) -> Option<GameActio
         }
 
         // Mana ability sub-costs: these are not pending-cast states but
-        // carry PendingManaAbility. Empty eligible lists shouldn't normally
-        // happen but CancelCast is not valid here. Use empty selection.
+        // carry PendingManaAbility, so CancelCast is not valid here.
+        //
+        // CR 605.1a names the CLASS this arm matches (what makes an activated
+        // ability a mana ability); it is NOT the reason the cost must be paid.
+        // CR 118.1 + CR 118.3 are: "to pay a cost, a player carries out the
+        // instructions specified", and "a player can't pay a cost without
+        // having the necessary resources to pay it FULLY". So a mana ability's
+        // cost is not optional, and every mana-ability cost handler demands
+        // exactly `count` (`mana_abilities.rs:1130` tap / `:1161` exile /
+        // `:1215` sacrifice / `:1267` discard) — an empty selection is rejected
+        // in all four (#6942). Answer out of the contract instead.
         WaitingFor::PayCost {
             resume: CostResume::ManaAbility { .. },
             ..
-        } => Some(GameAction::SelectCards { cards: Vec::new() }),
+        } => issued_selection(contract),
         WaitingFor::PayCost {
             resume: CostResume::Resolution,
             ..
@@ -3210,65 +3392,38 @@ pub(crate) fn deterministic_choice(
         }
     }
 
-    if let WaitingFor::SearchChoice {
-        cards,
-        count,
-        up_to,
-        constraint,
-        ..
-    } = &state.waiting_for
-    {
-        if *count == 1 {
-            let mut scored = score_search_choice_cards(state, ai_player, cards);
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((best, _)) = scored.first() {
-                return Some(GameAction::SelectCards { cards: vec![*best] });
-            }
-        } else {
-            // CR 608.2c: Multi-card library searches are *combinatorial* — an
-            // opponent may pick the worst card from the chosen set (Gifts
-            // Ungiven). Per-card greedy scoring is wrong; we must score whole
-            // selections via `score_search_choice_selection`. To bound cost
-            // when the pool is large, beam-restrict to the top BEAM_K cards
-            // by per-card score and enumerate `C(BEAM_K, count)` combinations
-            // locally — three orders of magnitude smaller than `C(|cards|,
-            // count)` for typical Commander libraries (C(12, 4) = 495 ≪
-            // C(88, 4) ≈ 2.4M). The engine's candidate list has already been
-            // filtered against the selection constraint at this point; we
-            // re-apply it after enumerating beam combinations because the
-            // beam itself is computed in AI-local space.
-            const BEAM_K: usize = 12;
-            let beam_ids: Vec<_> = if cards.len() <= BEAM_K {
-                cards.clone()
-            } else {
-                let mut per_card = score_search_choice_cards(state, ai_player, cards);
-                per_card.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                per_card.iter().take(BEAM_K).map(|(id, _)| *id).collect()
-            };
-            let sizes: Vec<usize> = if *up_to {
-                (0..=*count).collect()
-            } else {
-                vec![*count]
-            };
-            let mut scored: Vec<(Vec<_>, f64)> = sizes
-                .into_iter()
-                .flat_map(|size| local_combinations(&beam_ids, size))
-                .filter(|combo| {
-                    engine::game::effects::search_library::selection_satisfies_constraint(
-                        state, combo, constraint,
-                    )
-                })
-                .map(|combo| {
-                    let score = score_search_choice_selection(state, ai_player, &combo);
-                    (combo, score)
-                })
-                .collect();
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((chosen, _)) = scored.first() {
-                return Some(GameAction::SelectCards {
-                    cards: chosen.clone(),
-                });
-            }
+    // CR 608.2c + CR 701.23: A library search is answered from the engine's
+    // issued `SelectCards` domain, never from a pool re-derived off the prompt
+    // payload. `build_decision_context` states the rule this arm now obeys —
+    // "the tactical layer must receive the same finite, engine-issued domain as
+    // the action boundary" — because a scorer that ranks ids the enumerator did
+    // not offer yields an argmax `AiDecisionContract` refuses, and a refusal
+    // reaches the AI controller as `None`, which it cannot tell apart from "no
+    // decision owed" (Praetor's Grasp: the AI ranked all 88 library cards and
+    // picked one the issued set did not contain, so the game halted).
+    //
+    // Whole-selection scoring is still required rather than per-card greedy
+    // ranking: a multi-card search is combinatorial because an opponent may pick
+    // the worst card of the chosen set (Gifts Ungiven). The enumerator has
+    // already produced every legal combination and already applied the CR 608.2c
+    // selection constraint, so ranking its output covers both the single-card
+    // and combinatorial cases without a second local beam.
+    if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+        let mut scored: Vec<_> = issued_selections(actions)
+            .map(|cards| {
+                (
+                    cards,
+                    score_search_choice_selection(state, ai_player, cards),
+                )
+            })
+            .collect();
+        // Issue #4878: the enumerator hands these over in `cmp_stable` order and
+        // `sort_by` is stable, so equal scores resolve identically across runs.
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        if let Some((chosen, _)) = scored.first() {
+            return Some(GameAction::SelectCards {
+                cards: chosen.to_vec(),
+            });
         }
     }
 
@@ -3474,6 +3629,52 @@ pub(crate) fn deterministic_choice(
         } else {
             scored.sort_by(|a, b| cmp_keep(&a.1, &b.1));
         }
+
+        // #6942: rank the engine's OWN issued selections rather than
+        // synthesizing one. `AiDecisionContract::contains_action` is exact set
+        // membership (`ai_support/context.rs:100-105`) and the enumeration is
+        // capped at 64 combinations in lexicographic order
+        // (`ai_support/candidates.rs:5083-5096`), so a `cmp_keep`-optimal triple
+        // synthesized from `cards` can be outside the contract — and this path
+        // populates `scored` at search.rs:2657, which SKIPS the `fallback_action`
+        // escape entirely, so the whole decision degrades to "no action".
+        // Scoring the issued actions by their `cmp_keep` rank vector keeps the
+        // give-up order above (including the CR 723.5 inversion) while making
+        // membership hold by construction: the ideal pick, when it is issued,
+        // has rank vector `[0, 1, .., count-1]` and still wins.
+        let rank_vector = |cards: &[ObjectId]| {
+            let mut ranks: Vec<_> = cards
+                .iter()
+                .map(|card| {
+                    scored
+                        .iter()
+                        .position(|(id, _)| id == card)
+                        .unwrap_or(usize::MAX)
+                })
+                .collect();
+            ranks.sort_unstable();
+            ranks
+        };
+        let best_issued = actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::SelectCards { cards } => Some((rank_vector(cards), action)),
+                _ => None,
+            })
+            .min_by(|(left_ranks, left), (right_ranks, right)| {
+                left_ranks
+                    .cmp(right_ranks)
+                    .then_with(|| left.cmp_stable(right))
+            })
+            .map(|(_, action)| action.clone());
+        if let Some(action) = best_issued {
+            return Some(action);
+        }
+
+        // No issued `SelectCards` to rank — the rollout quiescence loop
+        // (`planner/mod.rs:1112-1125`) passes a possibly-empty candidate list and
+        // has no contract gate, so the synthesized pick is the best available
+        // answer there and is validated by the caller's own apply probe.
         let to_discard: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
         return Some(GameAction::SelectCards { cards: to_discard });
     }
@@ -3746,31 +3947,18 @@ fn is_plan_payoff_name(features: &DeckFeatures, name: &str) -> bool {
             .any(|n| n == name)
 }
 
-/// AI-local combination enumerator. Mirrors `engine::ai_support::candidates::combinations`
-/// but lives in `phase-ai` so the beam in `deterministic_choice` can build
-/// `C(BEAM_K, count)` tuples without paying the cost of the engine's full
-/// candidate enumeration. Empty `k` yields a single empty combination so
-/// `up_to` searches naturally include the "select zero" option.
-fn local_combinations(
-    items: &[engine::types::identifiers::ObjectId],
-    k: usize,
-) -> Vec<Vec<engine::types::identifiers::ObjectId>> {
-    if k == 0 {
-        return vec![Vec::new()];
-    }
-    if items.len() < k {
-        return Vec::new();
-    }
-    if items.len() == k {
-        return vec![items.to_vec()];
-    }
-    let mut result = Vec::new();
-    for mut combo in local_combinations(&items[1..], k - 1) {
-        combo.insert(0, items[0]);
-        result.push(combo);
-    }
-    result.extend(local_combinations(&items[1..], k));
-    result
+/// The card selections the engine issued for the current prompt.
+///
+/// This is the AI's entire legal answer domain for a selection window:
+/// `AiDecisionContract` gates submissions against exactly this list, so a
+/// heuristic that ranks anything else can only ever produce an action the
+/// action boundary refuses. Ranking *these* is what keeps the tactical layer
+/// and the boundary on one list instead of two that can disagree.
+fn issued_selections(actions: &[GameAction]) -> impl Iterator<Item = &Vec<ObjectId>> {
+    actions.iter().filter_map(|action| match action {
+        GameAction::SelectCards { cards } => Some(cards),
+        _ => None,
+    })
 }
 
 /// Select a non-Pact action from scored `(GameAction, f64)` pairs using
@@ -4692,7 +4880,26 @@ mod tests {
         fallback_action(
             state,
             &create_config(AiDifficulty::VeryHard, Platform::Native),
+            &test_contract(state),
         )
+    }
+
+    /// Issue the decision contract for the seat a test state is prompting.
+    ///
+    /// Test-harness seat selector ONLY. Production has exactly one caller
+    /// (`choose_action_with_session_inner`), which passes the contract it
+    /// already issued for `ai_player`; nothing derives a seat there. This
+    /// mirrors `build_decision_context`'s derivation
+    /// (`ai_support/context.rs:155-158`) so single-seat fixtures need no
+    /// per-test plumbing; multi-seat rows (T5, T11) issue their own contract
+    /// for the seat under test instead of using this.
+    fn test_contract(state: &GameState) -> AiDecisionContract {
+        let owner = state
+            .waiting_for
+            .acting_player()
+            .or_else(|| state.waiting_for.acting_players().first().copied())
+            .unwrap_or(P0);
+        AiDecisionContract::issue(state, owner)
     }
 
     fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
@@ -4714,6 +4921,7 @@ mod tests {
                 win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
         };
@@ -6279,7 +6487,7 @@ mod tests {
             count: 1,
         };
         assert_eq!(
-            fallback_action(&state, &config),
+            fallback_action(&state, &config, &test_contract(&state)),
             Some(expected.clone()),
             "the fallback consumes the same resolving-effect chooser"
         );
@@ -6394,7 +6602,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
         assert_eq!(
-            fallback_action(&state, &config),
+            fallback_action(&state, &config, &test_contract(&state)),
             Some(expected.clone()),
             "the direct fallback selects WB, rather than repeating the higher raw black demand"
         );
@@ -7571,7 +7779,7 @@ mod tests {
         );
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         assert_eq!(
-            fallback_action(&state, &config),
+            fallback_action(&state, &config, &test_contract(&state)),
             Some(mana_product(&[ManaType::Red])),
             "mana-ability fallback follows the engine prompt order; exact-payment reachability remains the engine candidate path's authority"
         );
@@ -8373,20 +8581,24 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a
-    /// large library (80 cards), a count-4 search must complete via the
-    /// BEAM_K-bounded path rather than the pre-fix Cartesian enumerator
-    /// (~C(80, 4) ≈ 1.5M combos × per-combo scoring) that stalled the AI.
-    /// The beam reduces this to C(BEAM_K, 4) ≈ 794 scored selections.
+    /// large library (80 cards), a count-4 search must complete against the
+    /// engine's constraint-aware candidate set rather than the pre-fix
+    /// Cartesian enumerator (~C(80, 4) ≈ 1.5M combos × per-combo scoring) that
+    /// stalled the AI. The engine collapses the 80 ids to 8 unique names and
+    /// issues Σ C(8, k) for k = 0..=4 = 163 selections; the AI ranks exactly
+    /// those.
     ///
     /// The ceiling is a *blowup* guard, not a tight micro-benchmark: the
-    /// healthy beam path runs in ~60–130 ms (machine- and load-dependent —
-    /// this runs in CI and alongside concurrent Tilt rebuilds), while a
-    /// reversion to Cartesian enumeration costs *tens of seconds*. A 1 s
-    /// ceiling cleanly separates the two — ~8× headroom over the loaded
-    /// healthy path, ~1000× below a Cartesian regression — so it catches the
-    /// regression it exists to catch without flaking on contention. The
-    /// DistinctNames constraint is honored by the engine candidate filter and
-    /// re-checked inside the AI beam, so the returned selection must contain
+    /// healthy path runs in tens of ms (machine- and load-dependent — this runs
+    /// in CI and alongside concurrent Tilt rebuilds), while a reversion to
+    /// Cartesian enumeration costs *tens of seconds*. A 1 s ceiling cleanly
+    /// separates the two without flaking on contention.
+    ///
+    /// This is also the PAIRED POSITIVE guard for ranking the issued domain: it
+    /// proves the AI still returns a real multi-card selection (not the empty
+    /// one, and not `None`) when the enumerator's set is combinatorial. The
+    /// DistinctNames constraint is applied by the engine candidate filter, so
+    /// every issued combination — and therefore the ranked winner — contains
     /// only uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
@@ -8440,8 +8652,8 @@ mod tests {
         assert!(
             elapsed.as_millis() < 1000,
             "AI search-choice took {elapsed:?}; a Cartesian-enumeration regression \
-             (C(80,4) ≈ 1.5M combos) costs tens of seconds — the BEAM_K path must \
-             stay well under the 1s blowup ceiling"
+             (C(80,4) ≈ 1.5M combos) costs tens of seconds — ranking the engine's \
+             163 issued selections must stay well under the 1s blowup ceiling"
         );
 
         match action {
@@ -8647,8 +8859,12 @@ mod tests {
         };
         let mut rng = SmallRng::seed_from_u64(1);
 
+        // The issued domain is deliberately empty: this row exercises the
+        // `is_card_predicate_guess` guard, which must refuse before the sampler
+        // ever looks at a candidate. A non-empty domain would let a broken guard
+        // pass by returning a legal-but-wrong random pick.
         assert!(
-            random_card_predicate_guess(&state, PlayerId(1), &mut rng).is_none(),
+            random_card_predicate_guess(&state, PlayerId(1), &[], &mut rng).is_none(),
             "ordinary land/nonland kind choices are strategic choices, not random guesses"
         );
     }
@@ -10988,7 +11204,7 @@ mod tests {
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
 
         assert_eq!(
-            fallback_action(&state, &config),
+            fallback_action(&state, &config, &test_contract(&state)),
             Some(GameAction::SelectCards {
                 cards: vec![creature]
             }),
@@ -11034,5 +11250,1108 @@ mod tests {
             ),
             other => panic!("expected SelectCards from the DigChoice arm, got {other:?}"),
         }
+    }
+
+    // ======================================================================
+    // Issue #6942 — selection escapes must answer out of the issued contract.
+    //
+    // Every row below drives `fallback_action` (or `deterministic_choice`) —
+    // the real decision entry points — and asserts against
+    // `AiDecisionContract::contains_action`, the gate that actually refused the
+    // synthesized answer in production, plus `apply_as_current` where the
+    // prompt's handler is reachable from a hand-built state.
+    // ======================================================================
+
+    /// A resolution-time `SelectCards` prompt with a hand-sized pool.
+    fn hand_pool(state: &mut GameState, player: PlayerId, count: usize) -> Vec<ObjectId> {
+        (0..count).map(|_| vanilla_in_hand(state, player)).collect()
+    }
+
+    /// A minimal resolved ability to hang a `pending_effect` off.
+    fn stub_pending_effect(source: ObjectId, controller: PlayerId) -> Box<ResolvedAbility> {
+        Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            controller,
+        ))
+    }
+
+    /// T1. MAIN TEST, and the reporter's captured shape: a cleanup discard
+    /// (CR 514.1) owing 3 from a 10-card hand.
+    ///
+    /// FAILS AT `base + Step 1 + Step 2`: the arm literally constructs
+    /// `SelectCards { cards: Vec::new() }`, which `engine_resolution_choices`
+    /// rejects with "Must discard exactly 3 cards, got 0".
+    ///
+    /// The `contains_action` assertion is the one the 64-candidate cap makes
+    /// non-trivial: a cardinality-only fix can satisfy `apply` and still be
+    /// refused by the contract, which is what degrades to "no action".
+    #[test]
+    fn fallback_discard_to_hand_size_is_accepted_by_the_engine() {
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        hand_pool(&mut state, ai, 10);
+        state.waiting_for = discard_waiting_for(&state, ai, 3);
+
+        let contract = AiDecisionContract::issue(&state, ai);
+        let action = fallback_action_default(&state)
+            .expect("a cleanup discard the engine will accept must exist");
+        match &action {
+            GameAction::SelectCards { cards } => assert_eq!(
+                cards.len(),
+                3,
+                "CR 514.1 owes exactly 3; an empty or short pick is rejected"
+            ),
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+        assert!(
+            contract.contains_action(&state, &action),
+            "the answer must be inside the contract that gates it (#6942)"
+        );
+        assert!(
+            engine::game::engine::apply_as_current(&mut state, action).is_ok(),
+            "the engine must accept the fallback's cleanup discard"
+        );
+    }
+
+    /// Build one minimal state per `SelectCards`-answering variant: the 14 in
+    /// the shared arm, the two mulligan siblings, and a wide-pool `SearchChoice`
+    /// that exercises the engine's combinatorial cap.
+    ///
+    /// Shared by the `fallback_action` census (T2) and the `choose_action`
+    /// census, so a variant added here is covered at both altitudes at once.
+    ///
+    /// `EffectZoneChoice` deliberately pins a NON-`Sacrifice` `effect_kind`:
+    /// the earlier `pick_lowest_value_sacrifices` arm intercepts
+    /// `Sacrifice && !cards.is_empty() && !up_to && count > 0`, so a `Sacrifice`
+    /// fixture never reaches the delegating arm and the row would pass
+    /// vacuously.
+    fn contract_membership_rows() -> Vec<(&'static str, GameState, PlayerId)> {
+        use engine::types::game_state::{
+            MulliganBottomEntry, MulliganDecisionEntry, OpeningHandBottomReason,
+        };
+
+        let ai = PlayerId(0);
+        let mut rows: Vec<(&'static str, GameState, PlayerId)> = Vec::new();
+
+        let mut push = |name: &'static str, build: &dyn Fn(&mut GameState) -> WaitingFor| {
+            let mut state = make_state();
+            let waiting_for = build(&mut state);
+            state.waiting_for = waiting_for;
+            rows.push((name, state, ai));
+        };
+
+        push("ScryChoice", &|state| WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: hand_pool(state, PlayerId(0), 2),
+        });
+        push("DigChoice", &|state| {
+            let pool = hand_pool(state, PlayerId(0), 3);
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: pool.clone(),
+                // Filter matched one of three while `keep_count` is 2 — the
+                // shape Step 6's handler clamp makes answerable at all.
+                keep_count: 2,
+                up_to: false,
+                selectable_cards: vec![pool[0]],
+                kept_destination: None,
+                rest_destination: None,
+                source_id: None,
+                enter_tapped: false,
+            }
+        });
+        push("SurveilChoice", &|state| WaitingFor::SurveilChoice {
+            player: PlayerId(0),
+            cards: hand_pool(state, PlayerId(0), 2),
+        });
+        push("RevealChoice", &|state| WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: hand_pool(state, PlayerId(0), 2),
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        });
+        push("SearchChoice", &|state| WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: None,
+            cards: hand_pool(state, PlayerId(0), 3),
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: engine::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        });
+        // The row above cannot discriminate the tutor defect: a 3-card pool is
+        // under the engine's combinatorial cap, so it is issued whole and ANY
+        // ranking of it is in-contract by accident. This pool is deliberately
+        // wider than the cap, which is the reported shape — an unrestricted
+        // search against an 88-card opponent library, where the AI ranked all
+        // 88 and picked outside the 12 the enumerator had issued.
+        push("SearchChoice::pool_wider_than_cap", &|state| {
+            let cards = hand_pool(state, PlayerId(0), 40);
+            // The pool must also be heterogeneous, with its single best card
+            // well past the cap. A uniform pool ties every score; the stable
+            // sort then keeps index 0, index 0 is inside any prefix cap, and the
+            // row passes while proving nothing — verified, this row was green on
+            // a fully reverted tree until the prize was added. This is also the
+            // reported shape: the strongest card of an 88-card library is not in
+            // its first 12.
+            let prize = cards[30];
+            let object = state.objects.get_mut(&prize).expect("prize is in pool");
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(6);
+            object.toughness = Some(6);
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                library_owner: None,
+                cards,
+                count: 1,
+                reveal: false,
+                up_to: false,
+                allows_partial_find: false,
+                constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
+            }
+        });
+        push("ChooseFromZoneChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            WaitingFor::ChooseFromZoneChoice {
+                player: PlayerId(0),
+                cards: hand_pool(state, PlayerId(0), 3),
+                count: 1,
+                up_to: false,
+                constraint: None,
+                source_id: source,
+            }
+        });
+        push("DiscardChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            WaitingFor::DiscardChoice {
+                player: PlayerId(0),
+                count: 1,
+                cards: hand_pool(state, PlayerId(0), 3),
+                source_id: source,
+                effect_kind: EffectKind::DiscardCard,
+                up_to: false,
+                unless_filter: None,
+            }
+        });
+        push("EffectZoneChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                cards: hand_pool(state, PlayerId(0), 3),
+                count: 1,
+                min_count: 1,
+                up_to: false,
+                source_id: source,
+                // NOT Sacrifice — see the doc comment above.
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Hand,
+                destination: Some(Zone::Battlefield),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_under_player: None,
+                enters_attacking: false,
+                owner_library: false,
+                track_exiled_by_source: false,
+                face_down_profile: None,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                count_param: 0,
+                library_position: None,
+                is_cost_payment: false,
+                enters_modified_if: None,
+                duration: None,
+            }
+        });
+        push("ConniveDiscard", &|state| {
+            let conniver_card = CardId(state.next_object_id);
+            let conniver_id = create_object(
+                state,
+                conniver_card,
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            );
+            let conniver = state
+                .capture_connive_subject(conniver_id)
+                .expect("a battlefield object yields a connive subject");
+            WaitingFor::ConniveDiscard {
+                player: PlayerId(0),
+                conniver,
+                source_id: conniver_id,
+                cards: hand_pool(state, PlayerId(0), 3),
+                count: 1,
+            }
+        });
+        push("DiscardToHandSize", &|state| {
+            let cards = hand_pool(state, PlayerId(0), 3);
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                count: 1,
+                cards,
+            }
+        });
+        push("ManifestDreadChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            WaitingFor::ManifestDreadChoice {
+                player: PlayerId(0),
+                cards: hand_pool(state, PlayerId(0), 2),
+                source_id: source,
+            }
+        });
+        push("WardDiscardChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            WaitingFor::WardDiscardChoice {
+                player: PlayerId(0),
+                cards: hand_pool(state, PlayerId(0), 3),
+                pending_effect: stub_pending_effect(source, PlayerId(1)),
+                remaining: 1,
+                filter: None,
+            }
+        });
+        push("WardSacrificeChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            let permanents: Vec<_> = (0..3)
+                .map(|_| add_creature(state, PlayerId(0), 1, 1))
+                .collect();
+            WaitingFor::WardSacrificeChoice {
+                player: PlayerId(0),
+                permanents,
+                pending_effect: stub_pending_effect(source, PlayerId(1)),
+                remaining: 1,
+                min_total_power: None,
+            }
+        });
+        push("UnlessBounceChoice", &|state| {
+            let source = vanilla_in_hand(state, PlayerId(0));
+            let permanents: Vec<_> = (0..3)
+                .map(|_| add_creature(state, PlayerId(0), 1, 1))
+                .collect();
+            WaitingFor::UnlessBounceChoice {
+                player: PlayerId(0),
+                permanents,
+                pending_effect: stub_pending_effect(source, PlayerId(1)),
+                remaining: 1,
+            }
+        });
+        push("MulliganDecision::BottomCards", &|state| {
+            hand_pool(state, PlayerId(0), 7);
+            WaitingFor::MulliganDecision {
+                pending: vec![MulliganDecisionEntry {
+                    player: PlayerId(0),
+                    mulligan_count: 2,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 2,
+                        then: PendingMulliganAction::Keep,
+                    },
+                }],
+                free_first_mulligan: false,
+            }
+        });
+        push("OpeningHandBottomCards", &|state| {
+            hand_pool(state, PlayerId(0), 7);
+            WaitingFor::OpeningHandBottomCards {
+                pending: vec![MulliganBottomEntry {
+                    player: PlayerId(0),
+                    count: 2,
+                }],
+                reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+            }
+        });
+
+        rows
+    }
+
+    /// The converted arms that do NOT answer with `SelectCards`, and so cannot
+    /// live in [`contract_membership_rows`] — T2 requires every row there to
+    /// reach the selection arm.
+    ///
+    /// These four are the ones whose heuristics still *construct* an action
+    /// instead of ranking the issued list, which makes them the arms most able
+    /// to drift back off the domain: `random_card_predicate_guess` and the
+    /// `OpponentGuess` sampler are safe only because they now draw from the
+    /// issued set, `tribute_eval` builds a bare `DecideOptionalEffect`, and
+    /// `fast_priority_action` builds `PassPriority` out of
+    /// `flat_priority_actions` — a different enumerator than the contract's.
+    fn specialist_arm_rows() -> Vec<(&'static str, GameState, PlayerId)> {
+        let mut rows: Vec<(&'static str, GameState, PlayerId)> = Vec::new();
+
+        // `fast_priority_action` — the hot path and the only arm whose action
+        // comes from a second enumerator.
+        rows.push(("Priority", make_state(), PlayerId(0)));
+
+        // CR 702.104a: the tribute chooser is an opponent of the creature's
+        // controller, so the prompted seat is PlayerId(1).
+        let mut tribute = make_state();
+        let source_id = create_object(
+            &mut tribute,
+            CardId(0x7B01),
+            PlayerId(0),
+            "Tribute creature".to_string(),
+            Zone::Battlefield,
+        );
+        tribute.waiting_for = WaitingFor::TributeChoice {
+            player: PlayerId(1),
+            source_id,
+            count: 2,
+        };
+        rows.push(("TributeChoice", tribute, PlayerId(1)));
+
+        // CR 608.2d: a card-predicate guess. The source must be controlled by
+        // someone OTHER than the prompted seat or `random_card_predicate_guess`
+        // declines it as a strategic choice rather than a guess.
+        let mut guess = make_state();
+        let guess_source = create_object(
+            &mut guess,
+            CardId(0x7B02),
+            PlayerId(0),
+            "Gollum, Scheming Guide".to_string(),
+            Zone::Battlefield,
+        );
+        guess.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: ChoiceType::land_or_nonland_card_predicate_options(),
+            },
+            options: ChoiceType::card_predicate_labels(
+                &ChoiceType::land_or_nonland_card_predicate_options(),
+            ),
+            source: Some(resolution_choice_source(&guess, guess_source)),
+            persist_player: None,
+        };
+        rows.push(("NamedChoice::card_predicate_guess", guess, PlayerId(1)));
+
+        let mut opponent_guess = make_state();
+        let opponent_guess_source = create_object(
+            &mut opponent_guess,
+            CardId(0x7B03),
+            PlayerId(1),
+            "Guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &opponent_guess,
+            opponent_guess
+                .objects
+                .get(&opponent_guess_source)
+                .expect("guess source exists"),
+        );
+        let labels = vec!["greater".to_string(), "not greater".to_string()];
+        opponent_guess.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: labels.clone(),
+            choice_type: ChoiceType::Labeled {
+                options: labels.clone(),
+            },
+            source: OpponentGuessSource {
+                prompt: PromptSourceBinding::from_trigger_source(&context),
+            },
+            owner: Some(OpponentGuessOwner {
+                context,
+                committed_choice: Some(ChosenAttribute::Number(7)),
+            }),
+            proposition_truth: Some(true),
+        };
+        rows.push(("OpponentGuess", opponent_guess, PlayerId(0)));
+
+        rows
+    }
+
+    /// REACH-GUARD for [`specialist_arm_rows`]. The census below asserts an
+    /// invariant about `choose_action`'s *output*, which a row keeps satisfying
+    /// even after it stops reaching the arm it was added for — it would simply
+    /// fall through to the scored path and pass while covering nothing.
+    ///
+    /// Only the two arms with a named entry point can be probed directly, and
+    /// they are also the two with a real guard chain to fall out of:
+    /// `random_card_predicate_guess` refuses any choice type that is not a
+    /// `CardPredicateGuess` and any prompt whose source the seat controls.
+    #[test]
+    fn specialist_rows_reach_the_arms_they_cover() {
+        // Counted, because the arm selector below is a name match: renaming a
+        // row would otherwise skip its probe and leave this green while
+        // guarding nothing.
+        let mut probed = 0;
+        for (name, state, seat) in specialist_arm_rows() {
+            match name {
+                "TributeChoice" => {
+                    probed += 1;
+                    assert!(
+                        crate::tribute_eval::decide(&state).is_some(),
+                        "the tribute row no longer reaches `tribute_eval::decide`"
+                    );
+                }
+                "NamedChoice::card_predicate_guess" => {
+                    probed += 1;
+                    let issued: Vec<GameAction> = AiDecisionContract::issue(&state, seat)
+                        .candidates
+                        .iter()
+                        .map(|candidate| candidate.action.clone())
+                        .collect();
+                    let mut rng = SmallRng::seed_from_u64(7);
+                    assert!(
+                        random_card_predicate_guess(&state, seat, &issued, &mut rng).is_some(),
+                        "the guess row no longer reaches `random_card_predicate_guess` — \
+                         it is now covering the scored path instead"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            probed, 2,
+            "both probeable arms must still be present in `specialist_arm_rows`"
+        );
+    }
+
+    /// T2. Structural invariant across every converted arm: the escape never
+    /// emits a selection the gating contract refuses.
+    ///
+    /// FAILS AT `base + Step 1 + Step 2` for 11 of the 16 rows — the 6
+    /// unconditional-rejection prompts, the 3 constructed with `up_to: false`,
+    /// and both mulligan rows, all of which issue no empty candidate.
+    ///
+    /// Post-fix this is definitional for the delegating arms rather than a
+    /// proof; its standing value is catching a 17th variant added to the arm
+    /// that bypasses the helper, and the `count_from_contract` check below is
+    /// what keeps each row non-vacuous.
+    #[test]
+    fn fallback_never_emits_a_selection_the_contract_refuses() {
+        // Collect every offending row rather than aborting on the first. A
+        // parameterized guard that stops at row 1 reports a SAMPLE; the point of
+        // this row is the CENSUS, both when it goes red on a reverted tree and
+        // when a future 17th variant bypasses the helper.
+        let mut refused = Vec::new();
+        for (name, state, seat) in contract_membership_rows() {
+            let contract = AiDecisionContract::issue(&state, seat);
+            assert!(
+                !contract.candidates.is_empty(),
+                "{name}: fixture premise broken — the engine issued no candidate \
+                 at all, so this row cannot discriminate"
+            );
+            let action = fallback_action_default(&state)
+                .unwrap_or_else(|| panic!("{name}: the escape must produce an action"));
+            assert!(
+                matches!(action, GameAction::SelectCards { .. }),
+                "{name}: expected the selection arm, got {action:?} — the fixture \
+                 is being intercepted by an earlier arm"
+            );
+            if !contract.contains_action(&state, &action) {
+                refused.push(format!("{name} emitted {action:?}"));
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "the escape emitted selections the gating contract refuses (#6942), \
+             in {} of {} rows:\n  {}",
+            refused.len(),
+            contract_membership_rows().len(),
+            refused.join("\n  ")
+        );
+    }
+
+    /// The gate T2 could not provide: the same invariant asserted at
+    /// `choose_action` altitude rather than `fallback_action`.
+    ///
+    /// `fallback_action` is the last-resort arm. Seven specialist heuristics
+    /// answer *before* it and return directly, so a gate mounted on the fallback
+    /// is structurally blind to every one of them. That is how the Praetor's
+    /// Grasp softlock shipped past T2: the SearchChoice specialist ranked all 88
+    /// cards of an opponent's library, picked one the enumerator had not issued,
+    /// and `choose_action` returned `None` two frames before `fallback_action`
+    /// would have run.
+    ///
+    /// The invariant is the whole defect class in one line — when the seat owes
+    /// a decision, `choose_action` must answer, and its answer must be one the
+    /// engine issued. `None` is reserved for "this seat owes nothing"; the AI
+    /// controller cannot read any other meaning out of it and halts after three
+    /// (`ai-controller-stuck:<prompt>`).
+    ///
+    /// Covers both row sets: the `SelectCards`-answering variants shared with
+    /// T2, plus [`specialist_arm_rows`] for the four arms that answer with
+    /// something else. A new specialist arm belongs in the latter.
+    ///
+    /// Both premise assertions are load-bearing. Without the non-empty-domain
+    /// check a row whose enumerator issues nothing would pass while proving
+    /// nothing; without the owed-decision check a row where the seat is not the
+    /// acting player would accept `None` as correct — that case is the subject
+    /// of `choose_action_declines_silently_for_a_seat_that_owes_no_decision`.
+    #[test]
+    fn choose_action_never_answers_outside_the_engine_issued_domain() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        // Collect every offending row rather than aborting on the first: a guard
+        // that stops at row 1 reports a SAMPLE, and the point of this row is the
+        // CENSUS across all the specialist arms.
+        let rows: Vec<_> = contract_membership_rows()
+            .into_iter()
+            .chain(specialist_arm_rows())
+            .collect();
+        let row_count = rows.len();
+        let mut offenders = Vec::new();
+        for (name, state, seat) in rows {
+            let contract = AiDecisionContract::issue(&state, seat);
+            assert!(
+                !contract.candidates.is_empty(),
+                "{name}: fixture premise broken — the engine issued no candidate \
+                 at all, so this row cannot discriminate"
+            );
+            assert!(
+                state.waiting_for.acting_players().contains(&seat),
+                "{name}: fixture premise broken — the seat owes no decision here, \
+                 so `None` would be the correct answer and the row is vacuous"
+            );
+            let mut rng = SmallRng::seed_from_u64(42);
+            match choose_action(&state, seat, &config, &mut rng) {
+                None => offenders.push(format!("{name}: answered None while owing a decision")),
+                Some(action) if !contract.contains_action(&state, &action) => {
+                    offenders.push(format!("{name}: answered with unissued {action:?}"));
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "choose_action must answer every owed decision from the engine's issued \
+             domain; {} of {} rows did not:\n  {}",
+            offenders.len(),
+            row_count,
+            offenders.join("\n  ")
+        );
+    }
+
+    /// The inverse half of the invariant, and the case the assertion inside
+    /// `bind_specialist` originally got wrong: for a seat that owes NOTHING,
+    /// refusing is correct and must stay silent.
+    ///
+    /// `choose_action` is polled per AI seat, and `tribute_eval::decide` reads
+    /// only `state.waiting_for` — it takes no `PlayerId` — so it hands back a
+    /// `DecideOptionalEffect` for the creature's controller too, whose contract
+    /// at this prompt is empty. Asserting membership unconditionally turned that
+    /// correct `None` into a debug-build panic on any AI-vs-AI board with a
+    /// Tribute creature. Both assertions below are load-bearing: the empty
+    /// contract is the premise that makes this the non-owing seat, and the
+    /// `is_none()` is the behavior.
+    #[test]
+    fn choose_action_declines_silently_for_a_seat_that_owes_no_decision() {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let (_, state, chooser) = specialist_arm_rows()
+            .into_iter()
+            .find(|(name, _, _)| *name == "TributeChoice")
+            .expect("the tribute row exists");
+        let bystander = PlayerId(0);
+        assert_ne!(
+            bystander, chooser,
+            "premise: the bystander must not be the prompted seat"
+        );
+        assert!(
+            AiDecisionContract::issue(&state, bystander)
+                .candidates
+                .is_empty(),
+            "premise: the bystander owes no decision, so its issued domain is empty"
+        );
+        assert!(
+            crate::tribute_eval::decide(&state).is_some(),
+            "premise: the specialist answers regardless of seat — that is what \
+             makes the bystander reach `bind_specialist` at all"
+        );
+
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert!(
+            choose_action(&state, bystander, &config, &mut rng).is_none(),
+            "a seat that owes no decision must be declined, not asserted on"
+        );
+    }
+
+    /// T3. PAIRED POSITIVE REACH-GUARD for T1/T2. `up_to: true` genuinely
+    /// admits the empty pick, and the enumerator issues sizes `0..=count`, so
+    /// prefer-smallest must still return it. Green in BOTH directions: this is
+    /// what proves the fix did not convert a softlock into a wrong-decision bug
+    /// by always taking the maximum.
+    #[test]
+    fn fallback_choose_from_zone_up_to_still_prefers_the_empty_selection() {
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        let source = vanilla_in_hand(&mut state, ai);
+        let cards = hand_pool(&mut state, ai, 3);
+        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+            player: ai,
+            cards,
+            count: 2,
+            up_to: true,
+            constraint: None,
+            source_id: source,
+        };
+
+        assert_eq!(
+            fallback_action_default(&state),
+            Some(GameAction::SelectCards { cards: Vec::new() }),
+            "an `up_to` prompt legally admits nothing, and the conservative pick \
+             is still nothing"
+        );
+    }
+
+    /// T4. Hostile sibling for the "exactly one" sub-family. `WardDiscardChoice`
+    /// admits no empty pick (`engine_payment_choices` rejects `0 != 1`), and the
+    /// enumerator emits one size-1 candidate per eligible card.
+    ///
+    /// FAILS AT `base + Step 1 + Step 2`: the arm returns the empty selection.
+    #[test]
+    fn fallback_ward_discard_selects_exactly_one() {
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        let source = vanilla_in_hand(&mut state, ai);
+        let cards = hand_pool(&mut state, ai, 3);
+        state.waiting_for = WaitingFor::WardDiscardChoice {
+            player: ai,
+            cards: cards.clone(),
+            pending_effect: stub_pending_effect(source, PlayerId(1)),
+            remaining: 1,
+            filter: None,
+        };
+
+        let contract = AiDecisionContract::issue(&state, ai);
+        let action = fallback_action_default(&state).expect("ward discard must be answerable");
+        match &action {
+            GameAction::SelectCards { cards: chosen } => {
+                assert_eq!(chosen.len(), 1, "CR 702.21a ward cost owes exactly one");
+                assert!(
+                    cards.contains(&chosen[0]),
+                    "the discard must come from the eligible set"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+        assert!(
+            contract.contains_action(&state, &action),
+            "the ward discard must be inside the gating contract"
+        );
+    }
+
+    /// T5. THE MULTI-AUTHORITY HOSTILE FIXTURE. Two seats are pending
+    /// simultaneously with disjoint hands and different owed counts; the
+    /// contract is issued for P0.
+    ///
+    /// FAILS AT `base + Step 1 + Step 2`: the arm returns an empty selection,
+    /// which is in NEITHER seat's domain (`bottom_card_actions` emits the empty
+    /// candidate only when `count == 0 || hand.is_empty()`). It also fails
+    /// against any design that derives the seat from
+    /// `acting_players().first()`, which would build P1's domain here.
+    #[test]
+    fn fallback_opening_hand_bottom_answers_the_contracts_seat() {
+        let mut state = make_state();
+        let p1_vanilla = two_player_bottom_fixture(&mut state, 5, 2);
+        state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![
+                engine::types::game_state::MulliganBottomEntry {
+                    player: P0,
+                    count: 1,
+                },
+                engine::types::game_state::MulliganBottomEntry {
+                    player: P1,
+                    count: 2,
+                },
+            ],
+            reason: engine::types::game_state::OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let p0_contract = AiDecisionContract::issue(&state, P0);
+        let p1_contract = AiDecisionContract::issue(&state, P1);
+        assert!(
+            !p1_contract.candidates.is_empty(),
+            "fixture premise: P1's domain must be non-empty, or the 'not in P1' \
+             assertion below is vacuous"
+        );
+
+        let action = fallback_action(&state, &config, &p0_contract)
+            .expect("P0 owes a bottom and must be answerable");
+        match &action {
+            GameAction::SelectCards { cards } => {
+                assert_eq!(cards.len(), 1, "P0 owes 1, not P1's 2");
+                let p0_hand = &state.players[P0.0 as usize].hand;
+                assert!(
+                    cards.iter().all(|id| p0_hand.contains(id)),
+                    "every bottomed card must come from P0's own hand"
+                );
+                assert!(
+                    !cards.iter().any(|id| p1_vanilla.contains(id)),
+                    "P0's answer must not reach into P1's hand"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+        assert!(
+            p0_contract.contains_action(&state, &action),
+            "the answer must be in the seat's own issued domain"
+        );
+        assert!(
+            !p1_contract.contains_action(&state, &action),
+            "the answer must NOT be legal for the other pending seat — that is \
+             the seat axis this fixture exists to discriminate"
+        );
+    }
+
+    /// A 10-card `DiscardToHandSize` hand whose two lexicographically-first
+    /// cards are the two the give-up order wants to KEEP.
+    ///
+    /// `combinations` is strict-lexicographic and the enumeration stops at
+    /// `SELECTION_CANDIDATE_CAP` (64), and C(10,3) = 120. The first 64 combos
+    /// are C(9,2) = 36 (containing `cards[0]`) + C(8,2) = 28 (containing
+    /// `cards[1]`) — i.e. exactly the combos touching one of the first two
+    /// cards. So the `cmp_keep`-optimal triple `{cards[2], cards[3], cards[4]}`
+    /// is provably OUTSIDE the contract.
+    fn out_of_contract_discard_state() -> (GameState, Vec<ObjectId>) {
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        let mut cards = vec![fatty_in_hand(&mut state, ai), fatty_in_hand(&mut state, ai)];
+        // Distinct, strictly increasing intrinsic values (generic cost i * 0.5)
+        // so the give-up ranking is total and the assertions are unambiguous.
+        for generic in 2..10u32 {
+            let id = junk_instant_in_hand(&mut state, ai);
+            set_cost(&mut state, id, Vec::new(), generic);
+            cards.push(id);
+        }
+        state.waiting_for = discard_waiting_for(&state, ai, 3);
+        (state, cards)
+    }
+
+    /// T6. The SECOND softlock path, distinct from `fallback_action`: a
+    /// `deterministic_choice` result becomes `vec![(action, 1.0)]`, so `scored`
+    /// is non-empty and the fallback escape is SKIPPED entirely — the whole
+    /// decision then degrades to `None` at the contract gate.
+    ///
+    /// OBSERVABLE RED AT BARE BASE: it calls `deterministic_choice`, whose
+    /// signature no step changes.
+    #[test]
+    fn deterministic_discard_choice_stays_within_the_issued_candidates() {
+        let (state, cards) = out_of_contract_discard_state();
+        let ai = PlayerId(0);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, ai);
+
+        // Fixture premise: the ideal synthesized pick is genuinely unreachable
+        // through the contract. Without this the test cannot discriminate.
+        let ideal = GameAction::SelectCards {
+            cards: vec![cards[2], cards[3], cards[4]],
+        };
+        assert!(
+            !contract.contains_action(&state, &ideal),
+            "fixture premise broken: the cap no longer excludes the optimal \
+             triple, so this row would pass on base"
+        );
+
+        let actions: Vec<GameAction> = validated_candidate_actions_for_semantic_owner(&state, ai)
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        assert!(
+            !actions.is_empty(),
+            "fixture premise: the pipeline must offer candidates to rank"
+        );
+
+        let action = deterministic_choice(&state, ai, &config, &actions, None)
+            .expect("the discard prompt is always answerable");
+        assert!(
+            contract.contains_action(&state, &action),
+            "the discard pick must be a member of the issued domain (#6942)"
+        );
+
+        // Not merely *a* member — the BEST-ranked member, so Step 5 cannot
+        // degenerate into "take the first candidate".
+        //
+        // The give-up order is derived here from `intrinsic_value` rather than
+        // from `cmp_keep`, so the expectation is INDEPENDENT of the code under
+        // test rather than a restatement of it. That is sound and not a second
+        // authority: `deterministic_choice` is called with `context: None`, so
+        // no plan exists, every card is `KeepTier::Ordinary`, and `card_value`
+        // documents that the `(Ordinary, intrinsic)` key then orders identically
+        // to `intrinsic` alone. `sort_by` is stable in both places, so the two
+        // 15.5-valued creatures keep their fixture order on both sides.
+        let mut give_up_order = cards.clone();
+        give_up_order.sort_by(|left, right| {
+            crate::card_value::intrinsic_value(&state, *left)
+                .partial_cmp(&crate::card_value::intrinsic_value(&state, *right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let rank = |id: &ObjectId| {
+            give_up_order
+                .iter()
+                .position(|card| card == id)
+                .expect("every pick comes from the fixture hand")
+        };
+        let rank_of = |cards: &[ObjectId]| {
+            let mut ranks: Vec<_> = cards.iter().map(&rank).collect();
+            ranks.sort_unstable();
+            ranks
+        };
+        let best = actions
+            .iter()
+            .filter_map(|candidate| match candidate {
+                GameAction::SelectCards { cards } => Some(rank_of(cards)),
+                _ => None,
+            })
+            .min()
+            .expect("the pipeline offers SelectCards candidates");
+        match &action {
+            GameAction::SelectCards { cards: chosen } => assert_eq!(
+                rank_of(chosen),
+                best,
+                "the ranked pick must be the best `cmp_keep` member of the issued \
+                 set, not merely inside it"
+            ),
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+    }
+
+    /// T8. REACH-GUARD, green in both directions. When the engine issues no
+    /// selection at all, `None` is the honest answer.
+    ///
+    /// The second assertion is what makes this non-vacuous: it proves the
+    /// `None` came from an empty issued domain rather than from an upstream
+    /// short-circuit that never reached the arm.
+    #[test]
+    fn fallback_returns_none_when_the_contract_issues_no_selection() {
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        // Owes 3 with nothing to give: `bounded_combinations_for_sizes` skips
+        // every size larger than the item pool, so the domain is empty.
+        state.waiting_for = WaitingFor::DiscardToHandSize {
+            player: ai,
+            count: 3,
+            cards: Vec::new(),
+        };
+
+        assert!(
+            AiDecisionContract::issue(&state, ai).candidates.is_empty(),
+            "reach-guard premise: the engine must issue nothing here"
+        );
+        assert_eq!(
+            fallback_action_default(&state),
+            None,
+            "with no issued selection the escape must decline rather than \
+             fabricate one"
+        );
+    }
+
+    /// T9. The `PayCost { resume: ManaAbility }` sibling. `PayCostKind::Discard`
+    /// is chosen deliberately over `Sacrifice`: the `Sacrifice` enumerator arm
+    /// issues `min_count..=count` against a handler demanding exactly `count`,
+    /// so that one shape is inert under this change (disclosed, not fixed here).
+    ///
+    /// FAILS AT `base + Step 1 + Step 2`: the arm returns an empty selection and
+    /// `handle_discard_for_mana_ability` rejects "Must discard exactly 1
+    /// card(s), got 0".
+    #[test]
+    fn fallback_pay_cost_mana_ability_discard_selects_exactly_count() {
+        use engine::types::game_state::{ManaAbilityResume, PayCostKind, PendingManaAbility};
+
+        let mut state = make_state();
+        let ai = PlayerId(0);
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card,
+            ai,
+            "Discard Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Black],
+                    contribution: engine::types::ability::ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        ability.cost = Some(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::default(),
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability.clone());
+
+        let hand = hand_pool(&mut state, ai, 3);
+        state.waiting_for = WaitingFor::PayCost {
+            player: ai,
+            kind: PayCostKind::Discard,
+            choices: hand.clone(),
+            count: 1,
+            min_count: 0,
+            resume: CostResume::ManaAbility {
+                mana_ability: Box::new(PendingManaAbility {
+                    player: ai,
+                    source_id: source,
+                    ability_index: Some(0),
+                    rules_execution_node: None,
+                    ability_snapshot: Some(ability),
+                    color_override: None,
+                    resume: ManaAbilityResume::Priority,
+                    cost_move_resume: None,
+                    chosen_tappers: Vec::new(),
+                    chosen_discards: Vec::new(),
+                    chosen_mana_payment: None,
+                    chosen_counter_count: None,
+                    chosen_x: None,
+                    collected_evidence: Vec::new(),
+                    chosen_exiled: Vec::new(),
+                    chosen_sacrificed_battlefield: Vec::new(),
+                    cost_paid_object: None,
+                    batch_siblings: Vec::new(),
+                }),
+            },
+        };
+
+        let contract = AiDecisionContract::issue(&state, ai);
+        let action =
+            fallback_action_default(&state).expect("a mana-ability cost must be answerable");
+        match &action {
+            GameAction::SelectCards { cards } => {
+                assert_eq!(
+                    cards.len(),
+                    1,
+                    "CR 118.3: the cost is paid in full or not at all"
+                );
+                assert!(
+                    hand.contains(&cards[0]),
+                    "the discard must come from the offered choices"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+        assert!(
+            contract.contains_action(&state, &action),
+            "the cost payment must be inside the gating contract"
+        );
+        assert!(
+            engine::game::engine::apply_as_current(&mut state, action).is_ok(),
+            "the engine must accept the fallback's mana-ability cost payment"
+        );
+    }
+
+    /// T10. The single-seat mulligan-bottom row.
+    ///
+    /// FAILS AT `base + Step 1 + Step 2`: the arm returns empty and
+    /// `validate_bottom_selection` rejects "Expected 2 cards to bottom, got 0".
+    ///
+    /// With one pending entry, `pending.first()` and the seat lookup are the
+    /// same entry by construction, so this row is deliberately BLIND to the
+    /// seat-source defect — that axis belongs to T11.
+    #[test]
+    fn fallback_mulligan_bottom_cards_selects_the_owed_count() {
+        let mut state = make_state();
+        let hand = hand_pool(&mut state, P1, 7);
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                player: P1,
+                mulligan_count: 2,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 2,
+                    then: PendingMulliganAction::Keep,
+                },
+            }],
+            free_first_mulligan: false,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, P1);
+        let action = fallback_action(&state, &config, &contract)
+            .expect("the owed bottom must be answerable");
+        match &action {
+            GameAction::SelectCards { cards } => {
+                assert_eq!(cards.len(), 2, "CR 103.5: the owed count is per-seat");
+                assert!(
+                    cards.iter().all(|id| hand.contains(id)),
+                    "every bottomed card must come from that seat's hand"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+        assert!(
+            contract.contains_action(&state, &action),
+            "the bottom selection must be inside the gating contract"
+        );
+    }
+
+    /// T11. THE SEAT-SOURCE FIXTURE — a MIXED-PHASE `MulliganDecision`
+    /// (`[{P0, Declare}, {P1, BottomCards}]`) with the contract issued for P1.
+    ///
+    /// Reachable, not merely constructible: `mulligan.rs` removes a settled
+    /// entry and moves only `pending[idx]` to `BottomCards`, so phases advance
+    /// per-seat and P1 declaring before P0 leaves exactly this shape.
+    ///
+    /// REVERT BASELINE: `base + Steps 1, 2 and 3b-WITHOUT-the-seat-fix`. On that
+    /// tree `pending.first()?` binds P0's entry, the match takes `Declare`, and
+    /// the arm returns `MulliganDecision { choice: Keep }` — a wrong-seat,
+    /// wrong-KIND action that never reaches the delegation at all. Observing
+    /// this row red at `base + 1 + 2` would prove nothing except that Step 3b is
+    /// absent.
+    ///
+    /// T10 cannot discriminate here: its single-entry fixture makes positional
+    /// and semantic seat selection agree by construction.
+    #[test]
+    fn fallback_mulligan_bottom_answers_the_contracts_seat_not_the_first_pending() {
+        let mut state = make_state();
+        let p0_hand = hand_pool(&mut state, P0, 7);
+        let p1_hand = hand_pool(&mut state, P1, 7);
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![
+                engine::types::game_state::MulliganDecisionEntry {
+                    player: P0,
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                },
+                engine::types::game_state::MulliganDecisionEntry {
+                    player: P1,
+                    mulligan_count: 2,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 2,
+                        then: PendingMulliganAction::Keep,
+                    },
+                },
+            ],
+            free_first_mulligan: false,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, P1);
+        let action = fallback_action(&state, &config, &contract)
+            .expect("P1 owes a bottom and must be answerable");
+        match &action {
+            GameAction::SelectCards { cards } => {
+                assert_eq!(cards.len(), 2, "P1's own owed count");
+                assert!(
+                    cards.iter().all(|id| p1_hand.contains(id)),
+                    "every bottomed card must come from P1's hand"
+                );
+                assert!(
+                    !cards.iter().any(|id| p0_hand.contains(id)),
+                    "no card may come from the FIRST pending seat's hand"
+                );
+            }
+            other => panic!(
+                "expected a SelectCards for P1's BottomCards phase, got {other:?} \
+                 — the arm dispatched on the first pending entry's phase instead \
+                 of the contract's seat"
+            ),
+        }
+        assert!(
+            contract.contains_action(&state, &action),
+            "the answer must be in P1's issued domain"
+        );
     }
 }

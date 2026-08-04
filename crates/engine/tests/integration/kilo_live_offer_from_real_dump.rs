@@ -62,8 +62,12 @@ fn load_migrated_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
+    // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
+    // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
+    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
-        .expect("the real 4p gameState restores through the persisted ingress")
+        .expect("gameState deserializes through the production decoder")
         .into_game_state()
 }
 
@@ -165,6 +169,20 @@ fn drive_one_live_cycle(state: &mut GameState) {
 ///   unreplayable.
 /// - FIX-2 (counter-growth cover disjunct) — the completed drive's +1-charge frames fail
 ///   `loop_states_equal_modulo_resources`.
+///
+/// R4c — NAMED ACCEPTANCE ARM for the player-choice legality authority (CR 115.10a). Routing
+/// `resolve_target`'s `TargetPin::Player` arm through the CHOICE authority
+/// (`players::player_exists_for_choice`) rather than the TARGET one must not suppress a
+/// shipped offer on a REAL dump, and this row is what says so: if a later change routes that
+/// arm through `targeting::player_is_legal_target`, the over-veto class returns and this row
+/// must still pass — so it is the acceptance side of the pair whose refusal side is
+/// `analysis::decision_template::tests::a_shrouded_seat_is_untargetable_yet_still_choosable_
+/// at_the_pin_recheck`.
+///
+/// ⚠ WHAT THIS ROW DOES NOT WITNESS, stated so nobody credits it with more than it covers:
+/// this dump's pins are `ByIdentity` and `ManaColor`, NOT `TargetPin::Player`, so the Player
+/// arm is not on its path at all. It is an acceptance arm for the offer PIPELINE, not a
+/// witness for the Player-pin seam; that witness is R2b.
 #[test]
 fn kilo_migrated_dump_fires_object_growth_offer() {
     let mut state = load_migrated_dump();

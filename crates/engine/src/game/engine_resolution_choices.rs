@@ -2988,12 +2988,25 @@ pub(super) fn handle_resolution_choice(
                         kept.len()
                     )));
                 }
-            } else if kept.len() != keep_count {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must select exactly {} cards, got {}",
-                    keep_count,
-                    kept.len()
-                )));
+            } else {
+                // CR 609.3 + CR 101.3: a dig whose filter (or a short library)
+                // leaves fewer selectable cards than `keep_count` must keep as
+                // many as possible, not reject every selection. Without the
+                // clamp no legal action exists in that state —
+                // `validate_dig_selection` below requires every kept id to be in
+                // `selectable_cards` while this gate demands more ids than it
+                // holds — softlocking every controller. Matches the clamp the
+                // candidate enumerator (`ai_support/candidates.rs:1185`) and
+                // `cheap_reject_candidate` (`ai_support/mod.rs:702`) already
+                // apply.
+                let required = keep_count.min(selectable_cards.len());
+                if kept.len() != required {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must select exactly {} cards, got {}",
+                        required,
+                        kept.len()
+                    )));
+                }
             }
 
             // CR 401.2 + CR 608.2c: the keep-selection must be unique, drawn from

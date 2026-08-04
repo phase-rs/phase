@@ -16968,6 +16968,79 @@ fn assist_no_offer_without_other_players() {
     );
 }
 
+/// R4f — CR 702.132a: assist is *"you may **choose** another player"*, a CHOICE and not a
+/// target (CR 115.10a), so the helper list is the seats that still exist to be chosen.
+/// A phased-out seat is treated as though it does not exist (the CR 702.26b MIRROR) and
+/// must drop out of the offer; the eliminated exclusion this seam already had (CR 800.4 +
+/// CR 102.1) must be PRESERVED, not traded for it.
+///
+/// FOUR SEATS, NOT TWO, and that is load-bearing twice over: `setup_game_at_main_phase` is
+/// two-player, so it cannot carry both an excluded and a surviving helper, and
+/// `assist_offer_params` returns `None` when the candidate list is empty — so on a narrower
+/// board the offer would never fire and a "P1 is not a candidate" assertion would pass
+/// vacuously. THE OFFER MUST STILL FIRE, which is why the assertion is on the published
+/// `AssistChoosePlayer` variant and is a TOTAL EQUALITY rather than a `!contains`.
+///
+/// Contrast `assist_no_offer_without_other_players` directly above: that row asserts an
+/// ABSENCE, which is exactly the shape this one must not copy.
+///
+/// REVERT-PROBE: restore HEAD's `.filter(|p| p.id != player && !p.is_eliminated)` at the
+/// `assist_offer_params` site ⇒ candidates become `[P1, P3]` ⇒ the equality FAILS.
+#[test]
+fn assist_offer_excludes_a_phased_out_helper_and_still_offers_the_rest() {
+    use crate::types::format::FormatConfig;
+
+    let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    // Setup anti-vacuity, asserted before anything is measured.
+    let mut setup_events = Vec::new();
+    let transitioned =
+        crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut setup_events);
+    assert_eq!(
+        transitioned,
+        vec![PlayerId(1)],
+        "phase_out_player must actually transition P1"
+    );
+    assert!(
+        state.players[1].is_phased_out(),
+        "P1 must read as phased out"
+    );
+    crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+    assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+
+    let obj_id = make_assist_spell(&mut state);
+    // CR 601.2h: "The player pays the total cost" — unpayable costs can't be paid, so the
+    // caster is staged with enough mana for {3}{R} or the cast never reaches the offer.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    // The PRODUCTION entry point, exactly as every other assist row drives it — never
+    // `assist_offer_params`, which is private.
+    let result = handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+        .expect("assist spell should begin casting");
+
+    match result {
+        WaitingFor::AssistChoosePlayer {
+            player, candidates, ..
+        } => {
+            assert_eq!(player, PlayerId(0));
+            assert_eq!(
+                candidates,
+                vec![PlayerId(3)],
+                "phased-out P1 and eliminated P2 are out; the one valid helper is in"
+            );
+        }
+        other => panic!("expected AssistChoosePlayer, got {other:?}"),
+    }
+}
+
 #[test]
 fn assist_decline_proceeds_to_normal_payment() {
     let mut state = setup_game_at_main_phase();

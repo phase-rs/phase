@@ -486,9 +486,15 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   // The engine records every card the searching player looked at. `cards`
   // remains the legal-selection subset; rendering the full engine-provided
   // look set lets a library-search modal show the remaining library while
-  // keeping non-matching cards unselectable.
+  // keeping non-matching cards unselectable. Put the legal candidates first
+  // so the cards the player can choose are immediately visible.
   const displayedCards = lookedAt
-    ? Array.from(new Set([...lookedAt.map(([, , identity]) => identity.object_id), ...data.cards]))
+    ? Array.from(
+        new Set([
+          ...data.cards,
+          ...lookedAt.map(([, , identity]) => identity.object_id),
+        ]),
+      )
     : data.cards;
   const selectableCards = new Set(data.cards);
   const countValid = searchChoiceAllowsPartialFind(data)
@@ -547,7 +553,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
                   ? "z-10 ring-2 ring-emerald-400/80"
                   : isSelectable
                     ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-                    : "cursor-not-allowed opacity-40"
+                    : "cursor-not-allowed opacity-40 grayscale"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4, y: 0, scale: 1 }}

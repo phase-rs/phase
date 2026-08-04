@@ -9863,6 +9863,10 @@ fn evaluate_trigger_condition_with_source(
             // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar population
             // predicate is likewise set-valued — no "whose turn" semantic.
             | PlayerFilter::PlayerAttribute { .. }
+            // CR 608.2c: a tracked-set possession predicate is set-valued (every
+            // player who possessed a member) — no single-player "whose turn"
+            // semantic. Fail-closed alongside the other set-valued variants.
+            | PlayerFilter::TrackedSetPossessor { .. }
             // CR 506.2 + CR 508.6: a count-only attacked-opponents predicate is
             // set-valued — no single-player "whose turn" semantic. Fail-closed.
             | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked

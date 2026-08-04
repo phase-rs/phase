@@ -477,3 +477,107 @@ fn controller_may_choose_different_announcing_opponents_per_effect() {
     let stack_entry = runner.state().stack.last().expect("spell is on the stack");
     assert_eq!(stack_entry.controller, P0);
 }
+
+/// R4i — CR 601.2c + CR 115.10a: the announcing opponent is CHOSEN by the spell's
+/// controller, not targeted, so the candidate list is the seats that still exist to be
+/// chosen: a phased-out seat is out (the CR 702.26b MIRROR) and a departed one is out
+/// (CR 800.4 + CR 102.1).
+///
+/// ONE ROW, TWO MINTS. The engine mints `ChooseAnnouncingOpponent` in two different
+/// places — the cast-time mint in `casting.rs` and the per-group re-prompt in
+/// `casting_costs::begin_deferred_target_selection` — and a spell with TWO
+/// opponent-choice groups traverses both in one drive. Asserting total equality at BOTH
+/// prompts is what makes the row discriminating for two sites at once: restoring only the
+/// first site flips the first assertion, restoring only the second flips the second.
+///
+/// FIVE SEATS: each mint is gated on `candidates.len() >= 2`, so with fewer surviving
+/// opponents the cast proceeds with no prompt at all and every exclusion assertion would
+/// be unreachable. Asserting the published variant IS the reach-guard.
+#[test]
+fn announcer_offer_excludes_a_phased_out_opponent_at_both_mints() {
+    let p3 = PlayerId(3);
+    let p4 = PlayerId(4);
+
+    let mut scenario = GameScenario::new_n_player(5, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Both SURVIVING opponents control a nonbasic land and a creature, so every slot has
+    // a legal target whichever of them the controller picks.
+    let land_p3 = nonbasic_land(&mut scenario, p3, "P3 Land");
+    let creature_p3 = scenario.add_creature(p3, "P3 Creature", 5, 5).id();
+    let land_p4 = nonbasic_land(&mut scenario, p4, "P4 Land");
+    let creature_p4 = scenario.add_creature(p4, "P4 Creature", 5, 5).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Volcanic Offering", true, VOLCANIC_OFFERING)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Setup anti-vacuity, asserted before the cast: the production APIs report what they
+    // transitioned, so a silent no-op fails loudly here.
+    let mut setup_events = Vec::new();
+    let transitioned =
+        engine::game::phasing::phase_out_player(runner.state_mut(), P1, &mut setup_events);
+    assert_eq!(
+        transitioned,
+        vec![P1],
+        "phase_out_player must actually transition P1"
+    );
+    assert!(
+        runner.state().players[1].is_phased_out(),
+        "P1 must read as phased out"
+    );
+    engine::game::elimination::eliminate_player(runner.state_mut(), PlayerId(2), &mut setup_events);
+    assert!(
+        runner.state().players[2].is_eliminated,
+        "P2 must read as eliminated"
+    );
+
+    let spell_card = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the free instant must succeed");
+
+    // BOTH mints: the cast-time one and the per-group re-prompt.
+    for effect in ["second land", "second creature"] {
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseAnnouncingOpponent {
+                player, candidates, ..
+            } => {
+                assert_eq!(
+                    *player, P0,
+                    "the controller chooses the announcing opponent ({effect})"
+                );
+                assert_eq!(
+                    *candidates,
+                    vec![p3, p4],
+                    "phased-out P1 and eliminated P2 are out at the {effect} mint; both \
+                     valid opponents are in"
+                );
+            }
+            other => panic!("expected ChooseAnnouncingOpponent for {effect}, got {other:?}"),
+        }
+        runner
+            .act(GameAction::ChooseAnnouncingOpponent { opponent: p4 })
+            .expect("controller picks P4 as the announcer");
+    }
+
+    // Drive the four target slots to completion so the row proves the narrowed offer
+    // still produces a castable spell rather than a stuck prompt.
+    for target in [land_p3, land_p4, creature_p3, creature_p4] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("each slot announces its target");
+    }
+    let stack_entry = runner.state().stack.last().expect("spell is on the stack");
+    assert_eq!(stack_entry.controller, P0);
+}

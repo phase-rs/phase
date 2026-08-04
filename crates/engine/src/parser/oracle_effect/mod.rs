@@ -15837,18 +15837,20 @@ fn try_parse_verb_and_target<'a>(
         // "graveyard" conjunct. Claiming the whole clause here (empty remainder)
         // keeps it single — the actual `ChangeZoneAll { InAnyZone }` is built by
         // `parse_exile_ast`, which mirrors this recognizer.
-        if let Some((owner, zones)) = imperative::try_parse_multi_zone_player_exile(rest_lower) {
+        if let Some((type_filters, owner, zones)) =
+            imperative::try_parse_multi_zone_player_exile(rest_lower)
+        {
             return Some((
                 TargetedImperativeAst::ZoneCounterProxy(Box::new(
                     ZoneCounterImperativeAst::Exile {
                         origin: None,
-                        target: TargetFilter::Typed(
-                            crate::types::ability::TypedFilter::default()
-                                .controller(owner)
-                                .properties(vec![crate::types::ability::FilterProp::InAnyZone {
-                                    zones,
-                                }]),
-                        ),
+                        target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                            type_filters,
+                            controller: Some(owner),
+                            properties: vec![crate::types::ability::FilterProp::InAnyZone {
+                                zones,
+                            }],
+                        }),
                         all: true,
                         enter_with_counters: vec![],
                         multi_target: None,
@@ -15856,6 +15858,29 @@ fn try_parse_verb_and_target<'a>(
                 )),
                 // The matcher only claims a fully-consumed clause (trailing text
                 // is rejected), so there is no compound remainder to thread on.
+                "",
+            ));
+        }
+        // CR 406.2 + CR 404.1 + CR 608.2f: "exile all <permanent types> and
+        // <zone(s)>" (Ultimate Nullification) is ONE mass-exile instruction
+        // spanning the battlefield and whole zones, not a compound. This is the
+        // compound-splitter's remainder probe: claiming the whole clause (empty
+        // remainder) keeps it single so it is not mis-split into an orphaned
+        // "graveyards" conjunct. The actual `ChangeZoneAll { Or[..] }` is built
+        // by `parse_exile_ast`, which mirrors this recognizer.
+        if let Some(target) =
+            imperative::try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx)
+        {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(
+                    ZoneCounterImperativeAst::Exile {
+                        origin: None,
+                        target,
+                        all: true,
+                        enter_with_counters: vec![],
+                        multi_target: None,
+                    },
+                )),
                 "",
             ));
         }
@@ -21971,6 +21996,64 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
     })
 }
 
+/// CR 601.3 + CR 109.2b: the card-type gate carried by a
+/// "cast [a <type> spell] from among ..." clause subject.
+///
+/// CR 601.3 ("a player can begin to cast a spell only if a rule or effect
+/// allows that player to cast it") makes the clause's card-type restriction
+/// part of the cast-legality predicate, exactly as much as its mana-value
+/// bound is. The mana-value half already lowers to
+/// `CastPermissionConstraint::ManaValue`, but `CastPermissionConstraint` has no
+/// card-type arm — so the type half must ride on the cast `target` filter,
+/// AND-ed with whatever anaphor binds the candidate set.
+///
+/// Composes the two existing subject parsers in the same order the
+/// `has_from_among_cards_exiled_with_self` branch already uses:
+/// `parse_cast_type_disjunction` first (it handles " or " between bare core
+/// types, which `parse_type_phrase` does not), then `parse_type_phrase`.
+///
+/// Returns `None` when the clause names no card type — "cast a spell from among
+/// them" (Aetherworks Marvel, Svella, Apex of Power) grants an unrestricted
+/// permission, and synthesizing a gate there would silently narrow it. Only the
+/// *type* axis gates: `TypeFilter::Card` / `TypeFilter::Any` are head nouns
+/// rather than restrictions, and non-type restrictions carried as properties
+/// (Chandra's "red spells", Meeting of the Five's "spells with exactly three
+/// colors", Perception Bobblehead's mana-value bound) also yield `None` so this
+/// helper never invents a type gate the Oracle text did not state.
+fn parse_cast_type_gate(rest: &str) -> Option<TypedFilter> {
+    let typed =
+        parse_cast_type_disjunction(rest).or_else(
+            || match super::oracle_target::parse_type_phrase(rest).0 {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            },
+        )?;
+    typed
+        .type_filters
+        .iter()
+        .any(|tf| !matches!(tf, TypeFilter::Card | TypeFilter::Any))
+        .then_some(typed)
+}
+
+/// CR 601.3: AND a parsed card-type gate onto an exile-set cast anaphor.
+///
+/// Deliberately adds no `FilterProp::InZone` leg, unlike the
+/// `from among cards exiled with [self]` branch: these anaphors also cover
+/// self-library peeks (`Dig { keep_count: 0 }` — Velomachus Lorehold, Kiora),
+/// whose candidate cards stay in the LIBRARY and are matched through
+/// `remap_exiled_by_source_for_looked_cards`. Pinning the filter to
+/// `Zone::Exile` would match nothing for those cards, converting a permissive
+/// bug into a total no-op. The exile-resident paths already restrict to
+/// `Zone::Exile` before applying this filter.
+fn exiled_cast_target_with_type_gate(rest: &str) -> TargetFilter {
+    match parse_cast_type_gate(rest) {
+        Some(typed) => TargetFilter::And {
+            filters: vec![TargetFilter::Typed(typed), TargetFilter::ExiledBySource],
+        },
+        None => TargetFilter::ExiledBySource,
+    }
+}
+
 fn strip_cast_target_prefix(rest: &str) -> &str {
     opt(tag::<_, _, OracleError<'_>>("target "))
         .parse(rest)
@@ -22817,6 +22900,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 .and_then(hand_reveal_target_to_controller_ref)
             {
                 let mut hand_filter = TypedFilter::new(TypeFilter::Card).controller(controller);
+                // CR 601.3: the hand binding supplies the zone and the revealed
+                // player's controller; the clause supplies the card type when
+                // it names one. Without this the hand-bound sibling drops the
+                // type gate exactly as the exile-bound anaphor below did
+                // (issue #6880) — "cast an instant or sorcery spell from among
+                // those cards" would reach any revealed card.
+                if let Some(typed) = parse_cast_type_gate(rest) {
+                    hand_filter.type_filters = typed.type_filters;
+                }
                 hand_filter
                     .properties
                     .push(FilterProp::InZone { zone: Zone::Hand });
@@ -22847,8 +22939,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         } else {
             CastFromZoneDriver::LingeringPermission
         };
+        // CR 601.3: the clause's card-type restriction is part of the
+        // cast-legality predicate and must ride on the permission's target
+        // filter. Binding the anaphor alone permitted every card type, so
+        // Velomachus Lorehold's "an instant or sorcery spell with mana value
+        // less than or equal to [its] power" enforced only the mana-value
+        // ceiling and offered creatures inside it (issue #6880).
         return Some(Effect::CastFromZone {
-            target: TargetFilter::ExiledBySource,
+            target: exiled_cast_target_with_type_gate(rest),
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -22862,8 +22960,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     if scan_contains_phrase(rest, "from among those exiled cards")
         || scan_contains_phrase(rest, "from among the exiled cards")
     {
+        // CR 601.3: same card-type gate as the bare anaphor above — this
+        // surface form carries type-restricted members too (Eager Flameguide's
+        // "creature spells", Kylox's "instant and/or sorcery spells").
         return Some(Effect::CastFromZone {
-            target: TargetFilter::ExiledBySource,
+            target: exiled_cast_target_with_type_gate(rest),
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
