@@ -4629,14 +4629,17 @@ fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult
 /// anaphor is ambiguous (O-Kagachi Made Manifest's "that card" is a card the
 /// defending player CHOSE from a graveyard, not a threaded target).
 ///
-/// The `non` prefix (CR 205.2b) is an independent axis composed over the type word
+/// The `non` prefix is an independent grammatical axis composed over the type word
 /// via `opt(tag("non"))`, so every "non<type>" qualifier (`nonland`, `noncreature`,
 /// `nonartifact`, `nonenchantment`, …) is covered by the same node set rather than
-/// enumerated as separate literals. The core card types (CR 300.1) are delegated to
-/// the canonical `parse_core_type` building block so this stays complete against the
-/// full core type set with no sync hazard; `permanent` is the one non-core
-/// grammatical qualifier added alongside it. A trailing `tag(" ")` supplies the
-/// word boundary `parse_core_type` intentionally omits.
+/// enumerated as separate literals. The card-type words (CR 300.1) are delegated to
+/// the canonical `parse_core_type` building block so this stays in sync with the
+/// supported `CoreType` vocabulary with no local drift; `permanent` is the one
+/// non-core grammatical qualifier added alongside it. Coverage is exactly what
+/// `parse_core_type` accepts — CR 300.1's `vanguard` is intentionally NOT covered
+/// here because `CoreType` models no Vanguard variant (see `parse_core_type`), and
+/// this PR does not add it. A trailing `tag(" ")` supplies the word boundary
+/// `parse_core_type` intentionally omits.
 fn parse_card_type_qualifier(input: &str) -> OracleResult<'_, ()> {
     terminated(
         value(
