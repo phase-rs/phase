@@ -49611,6 +49611,44 @@ fn glen_elendras_answer_counter_all_conjunction_parses_single_or() {
     );
 }
 
+/// CR 303.4b + CR 608.2k: the `EnchantedPlayer` relative-player scope produced by
+/// an "attack enchanted player" trigger must bind a bare player anaphor to the
+/// enchanted (attached) player uniformly across every "that player"/"them"
+/// resolver. `enchanted_player_anaphor_filter` is the single authority; this
+/// pins that it maps `EnchantedPlayer → AttachedTo` and nothing else, and that
+/// the library-owner sibling resolver (`that_player_library_filter`, the sibling
+/// of the subject.rs and damage-recipient resolvers) consults it — so "that
+/// player's library" in this trigger class owns the enchanted player's library,
+/// not the attacker's. Building-block guard for a latent class (no shipping card
+/// uses the library body yet).
+#[test]
+fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::types::ability::{ControllerRef, TargetFilter};
+
+    // Shared authority: EnchantedPlayer → AttachedTo; every other scope → None.
+    assert_eq!(
+        super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::EnchantedPlayer)),
+        Some(TargetFilter::AttachedTo)
+    );
+    assert_eq!(
+        super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::TriggeringPlayer)),
+        None
+    );
+    assert_eq!(super::subject::enchanted_player_anaphor_filter(None), None);
+
+    // Library-owner sibling resolver honors the shared binding.
+    let ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::EnchantedPlayer),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::imperative::that_player_library_filter(&ctx),
+        TargetFilter::AttachedTo,
+        "'that player's library' under an attack-enchanted-player scope must own the enchanted player's library"
+    );
+}
+
 /// Reach-guard: single-conjunct "Counter all abilities your opponents control"
 /// (Kadena's Silencer trigger effect) must stay a bare
 /// `CounterAll{StackAbility}` — the ≥2-conjunct gate returns None for one

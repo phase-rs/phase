@@ -21,6 +21,7 @@ mod another_round_repeat;
 mod anya_merciless_angel_5920;
 mod arashin_sovereign_self_tuck;
 mod archmage_ascension_gated_draw_replacement;
+mod archnemesis_you_attack_enchanted_player;
 mod arcum_weathervane_supertype_removal;
 mod ark_of_hunger_play_from_graveyard_751;
 mod armored_kincaller_or_condition;
