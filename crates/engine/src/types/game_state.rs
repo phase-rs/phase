@@ -8780,10 +8780,10 @@ impl GameState {
         }
     }
 
-    /// CR 109.5 + CR 611.2a + CR 611.2c: drop any restored restriction whose
-    /// affected player is still the raw `RestrictionPlayerScope::SourceController`
-    /// placeholder (Conduit of Worlds' "you can't cast additional spells this
-    /// turn"). `add_restriction` ALWAYS lowers this scope to
+    /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
+    /// is still the raw `RestrictionPlayerScope::SourceController` placeholder
+    /// (Conduit of Worlds' "you can't cast additional spells this turn").
+    /// `add_restriction` ALWAYS lowers this scope to
     /// `SpecificPlayer(original_controller)` at the instant the restriction is
     /// created, so a live — and therefore any legitimately-captured — state never
     /// carries the raw scope; for those states this is a no-op. Only an
@@ -8792,13 +8792,15 @@ impl GameState {
     /// (returning `false`, silently bypassing the prohibition in release, and the
     /// casting consumer's `debug_assert!(false)` would panic in debug/test builds
     /// after such a restore). The original activator cannot be recovered from the
-    /// restored state — per CR 611.2c the effect outlives its source, so the
-    /// source's CURRENT controller is not necessarily the original "you" and must
-    /// not be inferred — so the only safe repair is to discard the unbindable
-    /// restriction, which yields the same inert outcome the consumers already
-    /// produce, minus the panic hazard. Called from
-    /// `PersistedGameState::into_game_state`, the single production restore
-    /// chokepoint, so both the Raw and Trusted paths are hardened.
+    /// restored state — per CR 109.5 the "you" of an activated ability is the
+    /// player who activated it, and per CR 611.2a the restriction lasts until end
+    /// of turn regardless of the source, so the source's CURRENT controller is
+    /// not necessarily the original activator and must not be inferred — so the
+    /// only safe repair is to discard the unbindable restriction, which yields
+    /// the same inert outcome the consumers already produce, minus the panic
+    /// hazard. Called from `PersistedGameState::into_game_state`, the single
+    /// production restore chokepoint, so both the Raw and Trusted paths are
+    /// hardened.
     pub fn drop_unresolved_source_controller_restrictions(&mut self) {
         use crate::types::ability::{GameRestriction, RestrictionPlayerScope};
         self.restrictions.retain(|restriction| {
@@ -8904,10 +8906,10 @@ impl PersistedGameState {
         // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
         // sits in an object-growth shortcut window whose pending resolution still consumes it.
         state.migrate_transient_loop_sequence();
-        // CR 109.5 + CR 611.2c: discard any restriction still carrying the raw
+        // CR 109.5 + CR 611.2a: discard any restriction still carrying the raw
         // `SourceController` placeholder — a legitimately-captured state never has
-        // one (it is lowered at creation), so this only sanitizes corrupt/forged
-        // snapshots and closes the fail-open path in both consumers.
+        // one (it is lowered to the activator at creation), so this only sanitizes
+        // corrupt/forged snapshots and closes the fail-open path in both consumers.
         state.drop_unresolved_source_controller_restrictions();
         state
     }
@@ -21752,7 +21754,7 @@ mod tests {
         }
     }
 
-    /// CR 109.5 + CR 611.2c: a restored restriction still carrying the raw
+    /// CR 109.5 + CR 611.2a: a restored restriction still carrying the raw
     /// `SourceController` placeholder (which `add_restriction` always lowers to
     /// `SpecificPlayer` at creation, so it can only appear in a corrupt or forged
     /// snapshot) is dropped on restore through BOTH the Raw and Trusted paths,
