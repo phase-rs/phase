@@ -26197,6 +26197,148 @@ fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
     }
 }
 
+/// CR 603.2e + CR 115.1 + CR 608.2c (Black Bolt, Inhuman King — Lethal Voice):
+/// A "becomes the target of a spell or ability" trigger introduces the
+/// controller of the *targeting* source as the "that player" referent. This
+/// asserts the single-authority scope resolver directly, so it covers every card
+/// in the class rather than one name. Before the fix the resolver had no arm for
+/// the becomes-target event and returned `None`, so a trailing "that player
+/// controls" defaulted to `ControllerRef::You`. Also guards that the new arm
+/// leaves the adjacent damage-done / attack-only arms untouched and does not
+/// false-match their conditions.
+#[test]
+fn relative_player_scope_binds_becomes_target_source_to_triggering_player() {
+    for cond in [
+        "whenever ~ becomes the target of a spell or ability an opponent controls",
+        "whenever a dragon you control becomes the target of a spell or ability an opponent controls",
+        // Unqualified source (no "an opponent controls") — still the source's controller.
+        "whenever ~ becomes the target of an ability",
+    ] {
+        assert!(
+            condition_introduces_becomes_target_source_player(cond),
+            "becomes-target condition must be detected: {cond:?}",
+        );
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::TriggeringPlayer),
+            "\"that player\" in {cond:?} must bind to the targeting source's controller",
+        );
+    }
+
+    // Adjacent grammar must not be swept into the becomes-target detector.
+    assert!(
+        !condition_introduces_becomes_target_source_player("whenever ~ attacks"),
+        "attack triggers must not match the becomes-target detector",
+    );
+    assert!(
+        !condition_introduces_becomes_target_source_player(
+            "equipped creature deals combat damage to a player"
+        ),
+        "damage triggers must not match the becomes-target detector",
+    );
+    // The new arm is placed later in the else-if chain and only fires on
+    // "becomes the target of a", so a proven damage-done condition keeps its
+    // pre-existing `TriggeringPlayer` scope (same input the sibling test
+    // `relative_player_scope_binds_article_less_damage_source_to_triggering_player`
+    // asserts), confirming the new arm perturbs no earlier arm.
+    assert_eq!(
+        relative_player_scope_for_condition("equipped creature deals combat damage to a player"),
+        Some(ControllerRef::TriggeringPlayer),
+        "damage-done scope must remain unchanged by the new arm",
+    );
+}
+
+/// CR 603.2e + CR 608.2c + CR 115.1 (Black Bolt, Inhuman King — Lethal Voice):
+/// "destroy target nonland permanent that player controls" — "that player" is the
+/// opponent controlling the targeting spell/ability, so the destroy filter's
+/// controller must be `TriggeringPlayer`, not the controller's own (`You`).
+/// Verbatim Oracle text; revert-failing: pre-fix `controller == Some(You)`. The
+/// `Effect::Destroy` + `TargetFilter::Typed` match is a positive reach guard — a
+/// demotion to `Effect::Unimplemented` would fail the match rather than pass.
+#[test]
+fn parse_black_bolt_lethal_voice_destroys_triggering_player_controlled_permanent() {
+    let def = parse_trigger_line(
+        "Whenever Black Bolt becomes the target of a spell or ability an opponent controls, \
+         destroy target nonland permanent that player controls.",
+        "Black Bolt, Inhuman King",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::Destroy { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "destroy target must be controlled by the triggering opponent, got {:?}",
+                    tf.controller,
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Permanent)
+                        && tf
+                            .type_filters
+                            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                    "destroy target must be a nonland permanent, got {:?}",
+                    tf.type_filters,
+                );
+            }
+            other => panic!("Lethal Voice destroy target must be a Typed filter, got {other:?}"),
+        },
+        other => panic!("Lethal Voice effect must be Destroy, got {other:?}"),
+    }
+}
+
+/// CR 603.2e + CR 608.2c (Scalelord Reckoner — same class, different trigger
+/// subject "a Dragon you control"): proves the fix is subject-independent — the
+/// scope comes from the becomes-target event, not from the trigger's subject.
+/// Verbatim Oracle text; revert-failing on `controller == Some(You)`.
+#[test]
+fn parse_scalelord_reckoner_becomes_target_destroys_triggering_player_permanent() {
+    let def = parse_trigger_line(
+        "Whenever a Dragon you control becomes the target of a spell or ability an opponent \
+         controls, destroy target nonland permanent that player controls.",
+        "Scalelord Reckoner",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::Destroy { target, .. } => match target {
+            TargetFilter::Typed(tf) => assert_eq!(
+                tf.controller,
+                Some(ControllerRef::TriggeringPlayer),
+                "destroy target must be controlled by the triggering opponent, got {:?}",
+                tf.controller,
+            ),
+            other => panic!("destroy target must be a Typed filter, got {other:?}"),
+        },
+        other => panic!("effect must be Destroy, got {other:?}"),
+    }
+}
+
+/// CR 603.2e (Ashenmoor Liege — becomes-target player-SUBJECT form): the fix must
+/// not perturb the sibling grammar where "that player" is the effect's subject
+/// (life loss), which routes through `oracle_target.rs`'s unconditional
+/// `that player` → `TriggeringPlayer` arm and ignores `relative_player_scope`.
+/// It must stay `TriggeringPlayer` — a regression guard, not a revert probe.
+#[test]
+fn parse_ashenmoor_liege_becomes_target_player_subject_unchanged() {
+    let def = parse_trigger_line(
+        "Whenever Ashenmoor Liege becomes the target of a spell or ability an opponent controls, \
+         that player loses 4 life.",
+        "Ashenmoor Liege",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::LoseLife { target, .. } => assert_eq!(
+            target.as_ref(),
+            Some(&TargetFilter::TriggeringPlayer),
+            "life loss must fall on the triggering opponent, got {target:?}",
+        ),
+        other => panic!("Ashenmoor Liege effect must be LoseLife, got {other:?}"),
+    }
+}
+
 // -----------------------------------------------------------------------
 // Mutable Pupa — perpetual keyword-mirror ETB trigger (issue #6321).
 // Digital-only Alchemy (no CR entry for "perpetually"); CR 702.1c + CR 608.2c govern the

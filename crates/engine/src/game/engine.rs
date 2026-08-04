@@ -15142,7 +15142,12 @@ mod stage2_injector_tests {
                 .strip_prefix(&root)
                 .expect("under src")
                 .display()
-                .to_string();
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
             let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
             for (n, line) in lines.iter().enumerate() {
                 if !line.contains(&needle) || line.contains("..") {
