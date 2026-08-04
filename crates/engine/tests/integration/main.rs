@@ -1242,6 +1242,7 @@ mod vanille_meld_optional_cost;
 mod vannifar_cloak_from_hand;
 mod veteran_bodyguard_tap_redirect;
 mod vohar_discard_drain;
+mod wand_of_orcus_compound_subject_6965;
 mod weeping_angel_combat_prevention;
 mod wheel_and_deal;
 mod where_x_coverage_runtime;

@@ -17370,7 +17370,7 @@ fn try_parse_target_subject_multi_target_damage_chain(
     let application = parse_subject_application(subject_text, &mut tentative_ctx)?;
     application.target.as_ref()?;
     let subject = SubjectPhraseAst {
-        affected: application.affected,
+        affected: Some(application.affected),
         target: application.target,
         multi_target: application.multi_target,
         inherits_parent: application.inherits_parent,
@@ -20055,6 +20055,18 @@ fn lower_subject_predicate_ast(
             unless_pay: None,
         },
         PredicateAst::ImperativeFallback { text } => {
+            // Issue #6965: this is the ONLY predicate kind that applies the
+            // subject filter — the `Continuous` / `Become` / `Restriction` arms
+            // above lower an effect their own clause parser already bound. So
+            // this is the one place an unbound subject (`affected == None`) must
+            // fail closed. It used to arrive as `TargetFilter::Any`, which
+            // matches unconditionally (`game/filter.rs`), turning a parse
+            // FAILURE into a board-wide grant. `Effect::unimplemented` is the
+            // repo's single authority for "the parser couldn't handle this";
+            // see `subject::UNBOUND_SUBJECT_GAP` for the recorded decision.
+            let Some(affected) = subject.affected.clone() else {
+                return parsed_clause(Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, text));
+            };
             let pred_lower = text.to_lowercase();
             // CR 120.1 + CR 601.2c: Native IR has already separated an explicit
             // target damage source from its predicate here ("Target creature …
@@ -20072,29 +20084,22 @@ fn lower_subject_predicate_ast(
                 }
             }
             if matches!(pred_lower.as_str(), "shuffle" | "shuffles")
-                && matches!(
-                    subject.affected,
-                    TargetFilter::Player | TargetFilter::Controller
-                )
+                && matches!(affected, TargetFilter::Player | TargetFilter::Controller)
             {
-                return parsed_clause(Effect::Shuffle {
-                    target: subject.affected,
-                });
+                return parsed_clause(Effect::Shuffle { target: affected });
             }
             // CR 701.20a: "<player> reveals cards from the top of their library
             // until they reveal a [filter]" — third-person form. The subject
             // (e.g., "its controller", "that player", "target opponent") was
-            // extracted into `subject.affected` and identifies whose library is
+            // extracted into `affected` and identifies whose library is
             // revealed. Must be checked BEFORE the RevealTop fallback below,
             // which would otherwise greedy-match the "reveals/top/library" verbs.
             {
                 let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
-                if let Some(clause) =
-                    try_parse_exile_from_top_until(pred_tp, subject.affected.clone())
-                {
+                if let Some(clause) = try_parse_exile_from_top_until(pred_tp, affected.clone()) {
                     return clause;
                 }
-                if let Some(clause) = try_parse_reveal_until(pred_tp, subject.affected.clone()) {
+                if let Some(clause) = try_parse_reveal_until(pred_tp, affected.clone()) {
                     return clause;
                 }
             }
@@ -20115,7 +20120,7 @@ fn lower_subject_predicate_ast(
                     1
                 };
                 return parsed_clause(Effect::RevealTop {
-                    player: subject.affected,
+                    player: affected,
                     count,
                 });
             }
@@ -20133,7 +20138,7 @@ fn lower_subject_predicate_ast(
                 // moved object's `face_down` flag so `visibility.rs` redacts it.
                 let face_down = scan_contains_phrase(&pred_lower, "face down");
                 return parsed_clause(Effect::ExileTop {
-                    player: subject.affected,
+                    player: affected,
                     count,
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down,
@@ -20142,7 +20147,7 @@ fn lower_subject_predicate_ast(
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
             // their library" — Reality Shift's "its controller manifests the top
             // card of their library" routes through this arm so the acting
-            // player is bound to `subject.affected` (e.g., ParentTargetController)
+            // player is bound to `affected` (e.g., ParentTargetController)
             // rather than the default Controller.
             if alt((tag::<_, _, OracleError<'_>>("manifest "), tag("manifests ")))
                 .parse(pred_lower.as_str())
@@ -20160,7 +20165,7 @@ fn lower_subject_predicate_ast(
                     QuantityExpr::Fixed { value: 1 }
                 };
                 return parsed_clause(Effect::Manifest {
-                    target: subject.affected,
+                    target: affected,
                     count,
                     profile: None,
                     enters_under: None,
@@ -20189,7 +20194,7 @@ fn lower_subject_predicate_ast(
             // following clause ("that player may …") — resolve against it. Mirrors
             // the player-target ChangeZone / Explore wrapping just below.
             if matches!(
-                subject.affected,
+                affected,
                 TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
             ) {
                 if let Some(object_target) = subject.target.clone() {
@@ -20225,7 +20230,7 @@ fn lower_subject_predicate_ast(
                 // `recipient = ParentTarget` ("It" = the +1/+1 target); do NOT
                 // clobber that explicit binding with the bare-pronoun subject.
                 if matches!(recipient, TargetFilter::SelfRef) {
-                    *recipient = subject.affected.clone();
+                    *recipient = affected.clone();
                 }
                 return clause;
             }
@@ -20256,7 +20261,7 @@ fn lower_subject_predicate_ast(
             if let Effect::ChooseFromZone { chooser, .. } = &mut clause.effect {
                 if subject.target.is_none()
                     && matches!(
-                        &subject.affected,
+                        &affected,
                         TargetFilter::Typed(tf)
                             if tf.controller == Some(ControllerRef::Opponent)
                                 && tf.type_filters.is_empty()
@@ -20273,10 +20278,8 @@ fn lower_subject_predicate_ast(
                     filter: Some(_),
                     ..
                 }
-            ) && !matches!(
-                subject.affected,
-                TargetFilter::Controller | TargetFilter::SelfRef
-            ) {
+            ) && !matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef)
+            {
                 return parsed_clause(Effect::Unimplemented {
                     name: "choose".to_string(),
                     description: Some(text.clone()),
@@ -20393,12 +20396,10 @@ fn lower_subject_predicate_ast(
                 let subject_filter = if subject.inherits_parent {
                     TargetFilter::ParentTarget
                 } else {
-                    subject.target.as_ref().unwrap_or(&subject.affected).clone()
+                    subject.target.as_ref().unwrap_or(&affected).clone()
                 };
 
-                if subject.target.is_some()
-                    || matches!(subject.affected, TargetFilter::TriggeringSource)
-                {
+                if subject.target.is_some() || matches!(affected, TargetFilter::TriggeringSource) {
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
                     explore.sub_ability = clause.sub_ability;
                     return ParsedEffectClause {
@@ -20418,7 +20419,7 @@ fn lower_subject_predicate_ast(
                     return clause;
                 }
 
-                if !matches!(subject.affected, TargetFilter::SelfRef) {
+                if !matches!(affected, TargetFilter::SelfRef) {
                     return ParsedEffectClause {
                         effect: Effect::ExploreAll {
                             filter: subject_filter,
@@ -20449,7 +20450,7 @@ fn lower_subject_predicate_ast(
             // explicit parent-target player anaphor; a bare "investigate" leaves
             // `affected == SelfRef`/`Controller` and is untouched (caster default).
             if matches!(clause.effect, Effect::Investigate) {
-                if let Some(scope) = player_scope_from_parent_target_subject(&subject.affected) {
+                if let Some(scope) = player_scope_from_parent_target_subject(&affected) {
                     ctx.pending_player_scope = Some(scope);
                 }
                 // CR 701.16a + CR 608.2c + CR 400.7: "investigate FOR EACH nontoken
@@ -20474,7 +20475,7 @@ fn lower_subject_predicate_ast(
             // this for explicit graveyard-to-hand `Effect::ChangeZone`; the
             // rebind tree-walks the filter and is a no-op when the filter has
             // no `ScopedPlayer` ref.
-            if let TargetFilter::Typed(tf) = &subject.affected {
+            if let TargetFilter::Typed(tf) = &affected {
                 if let Some(ControllerRef::ChosenPlayer { index }) = tf.controller {
                     match &mut clause.effect {
                         Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => {
@@ -20486,7 +20487,7 @@ fn lower_subject_predicate_ast(
             }
             if let Effect::PayCost { payer, .. } = &mut clause.effect {
                 if matches!(
-                    subject.affected,
+                    affected,
                     TargetFilter::Controller
                         | TargetFilter::Player
                         | TargetFilter::ParentTargetController
@@ -20501,7 +20502,7 @@ fn lower_subject_predicate_ast(
                         | TargetFilter::Owner
                         | TargetFilter::SpecificPlayer { .. }
                 ) {
-                    *payer = subject.affected.clone();
+                    *payer = affected.clone();
                 }
             }
             // CR 113.10 + CR 702.16j: When the subject is a player-scope filter
@@ -20510,7 +20511,7 @@ fn lower_subject_predicate_ast(
             // Protection), retarget the static's `affected` from SelfRef (the
             // spell object) to the subject filter so the keyword is granted to
             // the player. This is the Teferi's-Protection-clause-2 hook.
-            retarget_player_scoped_keyword_grant(&mut clause.effect, &subject.affected);
+            retarget_player_scoped_keyword_grant(&mut clause.effect, &affected);
             if clause.multi_target.is_none() {
                 clause.multi_target = subject.multi_target;
             }
@@ -21428,7 +21429,11 @@ fn sync_subject_into_nested_shuffle_sub(
     clause: &mut ParsedEffectClause,
     subject: &SubjectPhraseAst,
 ) {
-    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected);
+    // Issue #6965: no bound subject and no target means there is nothing to
+    // rebind — return rather than fabricate a filter.
+    let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) else {
+        return;
+    };
     if !target_filter_can_target_player(subject_filter) {
         return;
     }
@@ -21469,7 +21474,11 @@ fn sync_subject_into_nested_shuffle_sub(
 }
 
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
-    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
+    // Issue #6965: no bound subject and no target means there is nothing to
+    // rebind — return rather than fabricate a filter.
+    let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
+        return;
+    };
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
     // its power..." in an ETB trigger makes the triggering object, not the
     // trigger source permanent, the damage source. Keep the parsed damage
@@ -31850,7 +31859,7 @@ pub(crate) fn parse_effect_chain_ir(
                 // NOT a fresh copy of the player filter, which would surface a
                 // second target slot and prompt the player again (#2344).
                 let subject = SubjectPhraseAst {
-                    affected: TargetFilter::ParentTarget,
+                    affected: Some(TargetFilter::ParentTarget),
                     target: Some(TargetFilter::ParentTarget),
                     multi_target: None,
                     inherits_parent: true,

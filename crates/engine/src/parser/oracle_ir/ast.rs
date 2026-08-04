@@ -182,7 +182,24 @@ pub(crate) enum ClauseAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SubjectPhraseAst {
-    pub(crate) affected: TargetFilter,
+    /// CR 608.2c ("read the whole text and apply the rules of English to the
+    /// text"): the subject the predicate applies to, or `None` when the
+    /// sentence printed a subject the subject grammar could not bind.
+    ///
+    /// **`Option`, not a permissive default (issue #6965).** Both sites that
+    /// re-derive a subject phrase used to substitute `TargetFilter::Any` when
+    /// [`super::SubjectApplication`] could not be produced. `TargetFilter::Any`
+    /// matches unconditionally (`game/filter.rs`), so a parse FAILURE emitted a
+    /// BOARD-WIDE effect — the grant landed on every permanent, lands and
+    /// artifacts included, while coverage still reported the card as supported.
+    /// Encoding the unbound state in the type makes that fail-open
+    /// unrepresentable: every consumer must say what it does with `None`, and
+    /// the one consumer that actually reads this field
+    /// (`lower_subject_predicate_ast`'s `ImperativeFallback` arm, the only
+    /// predicate kind that applies the subject filter) fails closed to
+    /// `Effect::unimplemented`. Same shape, same reason, as
+    /// [`EntersUnderSpec::UnboundAnaphor`].
+    pub(crate) affected: Option<TargetFilter>,
     pub(crate) target: Option<TargetFilter>,
     pub(crate) multi_target: Option<MultiTargetSpec>,
     pub(crate) inherits_parent: bool,
