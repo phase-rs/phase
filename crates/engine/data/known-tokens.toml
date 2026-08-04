@@ -3644,6 +3644,11 @@ scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
 scryfall_id = "6a4b4679-6ca9-49e1-a7ee-2b7a30e3e06c"
 
 [[token.source_card_refs]]
+card_name = "Long-Bodied Grey Dog"
+scryfall_oracle_id = "6f83da19-fd89-44ec-88f3-0c3fddfbd1b2"
+scryfall_id = "d1a1e520-1fe2-4529-8afb-c187bb80da3c"
+
+[[token.source_card_refs]]
 card_name = "Orcrist, Goblin-cleaver"
 scryfall_oracle_id = "cc65821a-1893-4087-b461-35cf9fd26c71"
 scryfall_id = "758b4398-4522-49c8-94de-b0d647532544"
@@ -114494,6 +114499,11 @@ scryfall_oracle_id = "27e17542-549b-4c05-8091-c10a245c916b"
 scryfall_id = "c87f6004-e1cf-42b2-9647-322bc4939339"
 
 [[token.source_card_refs]]
+card_name = "Tidings of War"
+scryfall_oracle_id = "5753f4d6-08d0-4e12-85c5-875ee6441626"
+scryfall_id = "38c16a0a-375e-48cb-9720-dbbc08c603ae"
+
+[[token.source_card_refs]]
 card_name = "Goblin Plate Mail"
 scryfall_oracle_id = "eda99a16-6a7c-4f39-8a6b-a284e6afd3fc"
 scryfall_id = "cb982607-da37-4894-91a5-cf6307d4d703"
@@ -114513,6 +114523,11 @@ scryfall_id = "cb25b11a-6bf5-4a9a-b60f-d4dcac3816d6"
 card_name = "Azog, Moria's Ruin"
 scryfall_oracle_id = "a8b018a7-0350-4ee0-9582-8d391018bdee"
 scryfall_id = "135da718-affc-46ba-be57-c12c23b54dad"
+
+[[token.source_card_refs]]
+card_name = "Goblin-town Flunkies"
+scryfall_oracle_id = "85ceb4ac-7a1c-4c7e-95a3-515a5b5d6116"
+scryfall_id = "ccff7382-8609-494c-aeee-cd1436456dd0"
 
 [[token.source_card_refs]]
 card_name = "Fearsome Goblin Pair"
@@ -171910,6 +171925,16 @@ scryfall_oracle_id = "5c5bfbb2-0e63-4e43-b441-c4878983288f"
 scryfall_id = "d14aa2ff-7bbd-47a6-8e36-481e56302a62"
 
 [[token.source_card_refs]]
+card_name = "Lake-town Lookout"
+scryfall_oracle_id = "cf765efe-884c-48e2-9edb-9d45cf2756dd"
+scryfall_id = "178c4cf6-6b11-40e4-9673-c560d6818a6b"
+
+[[token.source_card_refs]]
+card_name = "Esgaroth Garrison"
+scryfall_oracle_id = "84597236-2cfc-4654-b126-a8ee252f4d14"
+scryfall_id = "573f67b0-6ce8-4857-a703-4a5728640736"
+
+[[token.source_card_refs]]
 card_name = "Omen of the Sun"
 scryfall_oracle_id = "08740dda-0629-4b6f-bbcc-c8088105b5e7"
 scryfall_id = "b3733812-32e5-407d-82f0-089983777e09"
@@ -171960,6 +171985,11 @@ scryfall_oracle_id = "a2ec1dd0-86c7-423d-b562-ed95b79bf8f7"
 scryfall_id = "4cff1878-3f23-4a0a-ad79-28a44921cca8"
 
 [[token.source_card_refs]]
+card_name = "Celebrate the Mountain-king"
+scryfall_oracle_id = "d51136fa-3c13-48a5-83fd-51fe00010a4b"
+scryfall_id = "42fbd61d-e1a6-465d-b1a3-f5ee0869d3af"
+
+[[token.source_card_refs]]
 card_name = "Great Gilded Boat"
 scryfall_oracle_id = "d4607026-80b2-4fa6-99d5-694cd3b43868"
 scryfall_id = "d2b59872-0e11-41c3-9858-3e2dd5a1c3c3"
@@ -171983,6 +172013,11 @@ scryfall_id = "68f4893d-e9a5-4f89-ade3-9ab78a834ad5"
 card_name = "Sound the Trumpets"
 scryfall_oracle_id = "dbcf2a79-b455-43ac-9cf0-9e63708800f4"
 scryfall_id = "dd32a1dd-3541-4572-a717-1deabc14b827"
+
+[[token.source_card_refs]]
+card_name = "Long Lake Nuisance"
+scryfall_oracle_id = "a833fdf1-db0c-4846-8452-d3b2059c2355"
+scryfall_id = "cd5af94d-6321-4834-8e5f-e5d0261b3ef3"
 
 [[token.source_card_refs]]
 card_name = "Patient Instructor"
@@ -173172,7 +173207,9 @@ fidelity = "Full"
 source_card_names = [
     "Down in the Valley",
     "Silvan Rally",
+    "Thranduil the Strategist",
     "Thranduil, Sindarin Liege",
+    "Thranduil, Sindarin Liege // Silvan Rally",
 ]
 set_code = "HOB"
 set_name = "The Hobbit"
@@ -209711,6 +209748,11 @@ card_name = "An Unexpected Party // At the Door"
 face_name = "At the Door"
 scryfall_oracle_id = "38503d34-f4f9-4eeb-9b1e-4fec1df921b3"
 scryfall_id = "f75207fd-89d2-417b-8f36-4ea96b4e3794"
+
+[[token.source_card_refs]]
+card_name = "Dwarven Shortsword"
+scryfall_oracle_id = "9cc52afb-9788-46f6-9f9b-347513f8a64f"
+scryfall_id = "f2341cf3-4d2c-4a4f-9aea-8834104a8910"
 
 [[token.source_card_refs]]
 card_name = "An Unexpected Party // At the Door"

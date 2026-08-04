@@ -12634,7 +12634,9 @@ fn continue_with_prepared(
         // is decided independently — `begin_deferred_target_selection` re-prompts
         // for every remaining group after this first one is recorded.
         if let Some(choice) = casting_costs::next_announcing_opponent_choice(&resolved) {
-            let candidates = crate::game::players::opponents(state, player);
+            // CR 601.2c + CR 115.10a: the announcer is CHOSEN, not targeted, so the
+            // candidate list is the CHOOSABLE opponents.
+            let candidates = crate::game::players::choosable_opponents(state, player);
             if candidates.len() >= 2 {
                 let mut pending = PendingCast::new(
                     prepared.object_id,

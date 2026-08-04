@@ -901,6 +901,95 @@ fn pending_spell_resolution_snapshot(
     }
 }
 
+/// CR 603.4 + CR 608.2k + CR 603.2c + CR 706.2: bind the resolution scope
+/// [`resolve_top`] hands to `resolve_ability_chain`, for an entry ALREADY off
+/// the stack.
+///
+/// Returns `false` iff the CR 603.4 intervening-if re-check fails — i.e. the
+/// live resolution proposes NOTHING. The caller owns the consequence:
+/// [`resolve_top`] pushes `GameEvent::StackResolved` and returns; an analysis
+/// caller returns its fail-closed verdict. The event is deliberately NOT pushed
+/// here — this function takes no event sink, which is what keeps it callable
+/// from the analysis crate.
+///
+/// CR 608.2k is the rule for the `current_trigger_event` lift: *"If an ability's
+/// effect refers to a specific untargeted object that has been previously
+/// referred to by that ability's cost or trigger condition, it still affects
+/// that object even if the object has changed characteristics."* The
+/// `Triggering*` anaphors are exactly untargeted back-references to the object
+/// the TRIGGER CONDITION matched (carried on the entry as `trigger_event`); the
+/// lift is the mechanism that keeps that object reachable while the ability
+/// resolves, and it CLONES the recorded event rather than re-evaluating the
+/// condition, so the binding survives characteristic change by construction.
+/// CR 608.2h is why a clone rather than a re-derivation is right: the answer is
+/// determined only once, when the effect is applied.
+///
+/// The in-order-written execution of those anaphor arms is CR 608.2c; the
+/// batched-subject-count re-stamp is CR 603.2c; the die-roll re-stamp is
+/// CR 706.2.
+pub(crate) fn bind_resolution_scope(
+    state: &mut GameState,
+    entry: &StackEntry,
+    trigger_event_batch: Option<Vec<GameEvent>>,
+) -> bool {
+    // CR 603.4: Intervening-if condition rechecked at resolution time.
+    if let StackEntryKind::TriggeredAbility {
+        condition: Some(ref condition),
+        source_id: _,
+        ref trigger_event,
+        ..
+    } = &entry.kind
+    {
+        let trigger_source = entry
+            .ability()
+            .and_then(|ability| ability.trigger_source.as_ref());
+        if !super::triggers::check_trigger_condition_with_source(
+            state,
+            condition,
+            entry.controller,
+            trigger_source,
+            trigger_event.as_ref(),
+        ) {
+            return false;
+        }
+    }
+
+    // CR 608.2k: Set trigger event context for event-context target resolution.
+    // TriggeringSpellController, TriggeringSource, etc. read this during resolution.
+    if let StackEntryKind::TriggeredAbility {
+        trigger_event: Some(ref te),
+        ..
+    } = entry.kind
+    {
+        state.current_trigger_event = Some(te.clone());
+        state.current_trigger_events = trigger_event_batch.unwrap_or_else(|| vec![te.clone()]);
+    } else if let Some(trigger_events) = trigger_event_batch {
+        state.current_trigger_event = trigger_events.first().cloned();
+        state.current_trigger_events = trigger_events;
+    }
+
+    // CR 603.2c: Lift the filtered subject count of a batched trigger into
+    // resolution scope so `QuantityRef::EventContextAmount` resolves "that
+    // many" against the count, not against zero. Set in lockstep with
+    // `current_trigger_event` and cleared at every reset site below.
+    if let StackEntryKind::TriggeredAbility {
+        subject_match_count,
+        die_result,
+        ..
+    } = entry.kind
+    {
+        state.current_trigger_match_count = subject_match_count;
+        // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll result
+        // into resolution scope so a reflexive "When you do … the result"
+        // sub-ability resolving on its own stack entry (a later apply(), after
+        // the original roll's resolution scope cleared) reads the rolled value
+        // via the `QuantityRef::EventContextAmount` cascade.
+        state.die_result_this_resolution = die_result;
+    }
+
+    true
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -982,67 +1071,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // CR 603.4: Intervening-if condition rechecked at resolution time.
-    if let StackEntryKind::TriggeredAbility {
-        condition: Some(ref condition),
-        source_id: _,
-        ref trigger_event,
-        ..
-    } = &entry.kind
-    {
-        let trigger_source = entry
-            .ability()
-            .and_then(|ability| ability.trigger_source.as_ref());
-        if !super::triggers::check_trigger_condition_with_source(
+    // CR 603.4: the intervening-if recheck lives inside `bind_resolution_scope`; a `false`
+    // return means the condition failed and this entry resolves with no effect. The
+    // SETTLEMENT stays HERE, at the caller, and must never move into the helper:
+    // `analysis/resource.rs` calls `bind_resolution_scope` on CLONED PROBE BOARDS (five
+    // sites), where running terminal delayed-trigger disposition would mutate lifecycle
+    // state for a board that is only being measured.
+    if !bind_resolution_scope(state, &entry, trigger_event_batch) {
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+        finish_resolving_stack_entry(
             state,
-            condition,
-            entry.controller,
-            trigger_source,
-            trigger_event.as_ref(),
-        ) {
-            events.push(GameEvent::StackResolved {
-                object_id: entry.id,
-            });
-            finish_resolving_stack_entry(
-                state,
-                super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
-            );
-            state.resolution_source_relatch = None;
-            return;
-        }
-    }
-
-    // CR 603.7c: Set trigger event context for event-context target resolution.
-    // TriggeringSpellController, TriggeringSource, etc. read this during resolution.
-    if let StackEntryKind::TriggeredAbility {
-        trigger_event: Some(ref te),
-        ..
-    } = entry.kind
-    {
-        state.current_trigger_event = Some(te.clone());
-        state.current_trigger_events = trigger_event_batch.unwrap_or_else(|| vec![te.clone()]);
-    } else if let Some(trigger_events) = trigger_event_batch {
-        state.current_trigger_event = trigger_events.first().cloned();
-        state.current_trigger_events = trigger_events;
-    }
-
-    // CR 603.2c: Lift the filtered subject count of a batched trigger into
-    // resolution scope so `QuantityRef::EventContextAmount` resolves "that
-    // many" against the count, not against zero. Set in lockstep with
-    // `current_trigger_event` and cleared at every reset site below.
-    if let StackEntryKind::TriggeredAbility {
-        subject_match_count,
-        die_result,
-        ..
-    } = entry.kind
-    {
-        state.current_trigger_match_count = subject_match_count;
-        // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll result
-        // into resolution scope so a reflexive "When you do … the result"
-        // sub-ability resolving on its own stack entry (a later apply(), after
-        // the original roll's resolution scope cleared) reads the rolled value
-        // via the `QuantityRef::EventContextAmount` cascade.
-        state.die_result_this_resolution = die_result;
+            super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
+        );
+        state.resolution_source_relatch = None;
+        return;
     }
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
@@ -13005,6 +13049,231 @@ mod tests {
         assert!(obj.transformed);
         assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(5));
         assert_eq!(obj.defense, Some(5));
+    }
+
+    /// **§6 R26 — `resolve_top`'s BEHAVIOUR IS UNCHANGED ACROSS THE
+    /// `bind_resolution_scope` EXTRACTION.**
+    ///
+    /// U1 moves the CR 603.4 re-check and the CR 608.2k / CR 603.2c / CR 706.2
+    /// resolution-scope binding out of the universal resolution chokepoint into
+    /// a shared function the analysis probe can also call. Three matched pairs,
+    /// each keyed to one thing a WIDER extraction boundary would have broken —
+    /// the boundary this plan struck, which would have pulled the pop, the
+    /// keyword-action branch and the `StackResolved` pushes across with it:
+    ///
+    /// * **(a) CR 113.3b keyword actions still resolve.** The `KeywordAction`
+    ///   early return sits ABOVE the extracted region and must stay in
+    ///   `resolve_top` (it needs `&mut Vec<GameEvent>`, which the shared
+    ///   function deliberately does not take). Equip attaches, and
+    ///   `StackResolved` is emitted exactly once.
+    /// * **(b) CR 603.4 false ⇒ removed from the stack, does nothing,
+    ///   `StackResolved` STILL emitted.** The event is pushed by the CALLER —
+    ///   the extracted function returns a bare `bool` and has no event sink, so
+    ///   this is the seam the struck `Option<GameState>` signature had no
+    ///   channel for. Matched against the condition-TRUE twin, which resolves.
+    /// * **(c) CR 107.3m + CR 707.10 `paid_facts` survives.** The pop and its
+    ///   `paid_snapshot` binding stayed in `resolve_top`: a permanent spell with
+    ///   printed loyalty `X` enters with the snapshot's `x_value` in loyalty
+    ///   counters. Matched against the same spell with NO snapshot, which enters
+    ///   with none.
+    ///
+    /// REACH-GUARD on all three: the stack depth decreased by exactly 1, so an
+    /// entry that never resolved cannot satisfy a "did nothing" arm vacuously.
+    ///
+    /// REVERT-PROBES (the plan's, each a single edit): (a) move the
+    /// `KeywordAction` branch into `bind_resolution_scope` and return `false`
+    /// for it ⇒ the equipment never attaches; (b) delete the
+    /// `events.push(StackResolved)` from `resolve_top`'s `false` arm ⇒ the event
+    /// assertion flips; (c) move the pop into the shared function so
+    /// `paid_snapshot` is dropped ⇒ the spell enters at `cost_x_paid`/0 loyalty.
+    #[test]
+    fn resolve_top_behaviour_is_unchanged_across_the_bind_resolution_scope_extraction() {
+        let resolved_once = |events: &[GameEvent], id: ObjectId| {
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::StackResolved { object_id } if *object_id == id))
+                .count()
+        };
+
+        // ── (a) CR 113.3b: the keyword-action early return ──
+        {
+            let mut state = setup();
+            let equipment = create_object(
+                &mut state,
+                CardId(701),
+                PlayerId(0),
+                "Test Equipment".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(702),
+                PlayerId(0),
+                "Test Bearer".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let entry_id = ObjectId(7010);
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: equipment,
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction {
+                    action: KeywordAction::Equip {
+                        equipment_id: equipment,
+                        target_creature_id: creature,
+                    },
+                },
+            });
+            let depth = state.stack.len();
+
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+
+            assert_eq!(state.stack.len(), depth - 1, "reach-guard (a): it resolved");
+            assert_eq!(
+                state.objects[&equipment].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(creature)),
+                "CR 702.6a: the equip keyword action must still attach — its branch \
+                 returns EARLY, above the extracted region"
+            );
+            assert_eq!(
+                resolved_once(&events, entry_id),
+                1,
+                "CR 405.5: exactly one StackResolved for the keyword action"
+            );
+        }
+
+        // ── (b) CR 603.4: a FALSE intervening-if still emits StackResolved ──
+        // `setup()` is a standard-format board (20 starting life), so the
+        // intervening-if `LifeTotalGE 5` is TRUE and `LifeTotalGE 99` FALSE.
+        for (label, minimum, expect_gain) in [("TRUE", 5, 3i32), ("FALSE", 99, 0)] {
+            let mut state = setup();
+            let source = create_object(
+                &mut state,
+                CardId(703),
+                PlayerId(0),
+                "Conditional Trigger".to_string(),
+                Zone::Battlefield,
+            );
+            let entry_id = ObjectId(7020);
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: Some(TriggerCondition::LifeTotalGE { minimum }),
+                    trigger_event: None,
+                    description: None,
+                    source_name: "Conditional Trigger".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                },
+            });
+            let depth = state.stack.len();
+            let life_before = state.players[0].life;
+
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+
+            assert_eq!(
+                state.stack.len(),
+                depth - 1,
+                "reach-guard (b/{label}): the entry left the stack either way"
+            );
+            assert_eq!(
+                state.players[0].life - life_before,
+                expect_gain,
+                "CR 603.4 ({label}): the effect runs only when the intervening-if holds"
+            );
+            assert_eq!(
+                resolved_once(&events, entry_id),
+                1,
+                "CR 405.5 ({label}): the CALLER pushes StackResolved on BOTH sides of \
+                 the extracted check — the shared function takes no event sink"
+            );
+        }
+
+        // ── (c) CR 107.3m + CR 707.10: the popped paid snapshot survives ──
+        for (label, snapshot_x, expected_loyalty) in
+            [("snapshot X=3", Some(3u32), 3u32), ("no snapshot", None, 0)]
+        {
+            let mut state = setup();
+            let spell_id = create_object(
+                &mut state,
+                CardId(704),
+                PlayerId(0),
+                "X Loyalty Walker".to_string(),
+                Zone::Stack,
+            );
+            {
+                let obj = state.objects.get_mut(&spell_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Planeswalker);
+                obj.printed_loyalty = Some(crate::types::card::PrintedLoyalty::X);
+                obj.loyalty = None;
+            }
+            if let Some(x_value) = snapshot_x {
+                state.stack_paid_facts.insert(
+                    spell_id,
+                    StackPaidSnapshot {
+                        x_value: Some(x_value),
+                        ..Default::default()
+                    },
+                );
+            }
+            state.stack.push_back(StackEntry {
+                id: spell_id,
+                source_id: spell_id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(704),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            let depth = state.stack.len();
+
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+
+            assert_eq!(
+                state.stack.len(),
+                depth - 1,
+                "reach-guard (c/{label}): the spell resolved"
+            );
+            assert_eq!(
+                state.objects[&spell_id].zone,
+                Zone::Battlefield,
+                "reach-guard (c/{label}): the permanent spell entered the battlefield"
+            );
+            assert_eq!(
+                state.objects[&spell_id]
+                    .counters
+                    .get(&CounterType::Loyalty)
+                    .copied()
+                    .unwrap_or(0),
+                expected_loyalty,
+                "CR 107.3m ({label}): the ETB counter count comes from the POPPED \
+                 payment snapshot, which stays bound in `resolve_top`"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

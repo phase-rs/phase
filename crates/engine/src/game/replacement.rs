@@ -7353,6 +7353,237 @@ pub fn find_applicable_replacements(
     candidates
 }
 
+// ===========================================================================
+// CR 614.1a + CR 616.1 — the ONE prompt-cause authority over a proposed event.
+//
+// Derived from the SAME candidate authority the live pipeline uses
+// (`find_applicable_replacements`), so VIRTUAL candidates — which have no
+// `ReplacementDefinition` at all and are therefore invisible to any def scan —
+// are included by construction. A name-derived class map was fail-open twice
+// over: a `ProposedEvent::CreateToken` also draws `ReplacementEvent::ChangeZone`
+// defs (Giada, Font of Hope), and no def scan can see a virtual.
+// ===========================================================================
+
+/// CR 614.1a + CR 616.1: why the live replacement pipeline can open a player
+/// choice on one proposed event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplacementPromptCause {
+    /// CR 614.1a: a single optional / `MayCost` candidate prompts. An
+    /// unresolvable def — which every virtual candidate is — is conservatively
+    /// optional, mirroring `unwrap_or(true)` at the token gate.
+    OptionalCandidate,
+    /// A mandatory body continuation (`execute` / `runtime_execute`) is stashed
+    /// as a `PostReplacementContinuation` and drained through an arbitrary
+    /// `ResolvedAbility`, which can set a non-priority `waiting_for`.
+    MandatoryBodyContinuation,
+    /// CR 616.1: two or more candidates whose ordering is material — the
+    /// affected player orders them.
+    OrderingMaterial,
+}
+
+impl ReplacementPromptCause {
+    const fn bit(self) -> u8 {
+        match self {
+            ReplacementPromptCause::OptionalCandidate => 1 << 0,
+            ReplacementPromptCause::MandatoryBodyContinuation => 1 << 1,
+            ReplacementPromptCause::OrderingMaterial => 1 << 2,
+        }
+    }
+}
+
+/// A SET of [`ReplacementPromptCause`], never one cause.
+///
+/// The shape production already computes: `token_creation_needs_choice` asks
+/// `any_optional || ordering_material` — a DISJUNCTION over the whole candidate
+/// list. A single-cause return cannot express a disjunction, so on a board whose
+/// first-decided cause is `MandatoryBodyContinuation` while a *different*
+/// candidate is optional it would answer `false` where the live gate answers
+/// `true` — fail-OPEN. No precedence is invented, because production asks for
+/// none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ReplacementPromptCauses(u8);
+
+impl ReplacementPromptCauses {
+    /// No cause — the identity for [`ReplacementPromptCauses::union`].
+    pub(crate) const NONE: Self = Self(0);
+
+    pub(crate) const fn of(cause: ReplacementPromptCause) -> Self {
+        Self(cause.bit())
+    }
+
+    pub(crate) const fn contains(self, cause: ReplacementPromptCause) -> bool {
+        self.0 & cause.bit() != 0
+    }
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice
+/// on THIS proposed event, and why? Read-only (`&GameState`, no
+/// `apply_single_replacement`), and derived from the pipeline's own candidate
+/// authority rather than from a name-keyed class map.
+pub(crate) fn proposed_event_prompt_cause(
+    state: &GameState,
+    event: &ProposedEvent,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> ReplacementPromptCauses {
+    let candidates = find_applicable_replacements(state, event, registry);
+    if candidates.is_empty() {
+        return ReplacementPromptCauses::NONE;
+    }
+    let mut causes = ReplacementPromptCauses::NONE;
+    for rid in &candidates {
+        let def = state
+            .objects
+            .get(&rid.source)
+            .and_then(|o| o.replacement_definitions.get(rid.index));
+        let Some(def) = def else {
+            // CR 614.1a: no resolvable definition (every virtual candidate) ⇒
+            // conservatively interactive.
+            causes = causes.union(ReplacementPromptCauses::of(
+                ReplacementPromptCause::OptionalCandidate,
+            ));
+            continue;
+        };
+        if replacement_mode_is_optional(&def.mode) {
+            causes = causes.union(ReplacementPromptCauses::of(
+                ReplacementPromptCause::OptionalCandidate,
+            ));
+        } else if def.execute.is_some() || def.runtime_execute.is_some() {
+            causes = causes.union(ReplacementPromptCauses::of(
+                ReplacementPromptCause::MandatoryBodyContinuation,
+            ));
+        }
+    }
+    // CR 616.1: ordering is only a choice when at least two candidates compete.
+    if candidates.len() >= 2 && replacement_ordering_is_material(state, &candidates, event) {
+        causes = causes.union(ReplacementPromptCauses::of(
+            ReplacementPromptCause::OrderingMaterial,
+        ));
+    }
+    causes
+}
+
+/// CR 732.2a: does this proposed event's applier write a board axis the
+/// completeness witness can observe — life, poison, counters, battlefield
+/// cardinality, the CR 121.1 draw ledger or the CR 120.3a damage ledger?
+///
+/// EXHAUSTIVE over all 29 `ProposedEvent` variants with NO wildcard: a new
+/// variant fails to compile until it is classified, and an unclassified variant
+/// costs COVERAGE (the probe refuses) rather than soundness. This is the single
+/// partition — `probe_resolution`'s fourth `Prompted` arm and the R10′ witness's
+/// `predicted_axes` both read it, so the resolver and the witness cannot drift
+/// about which variants are accounted.
+///
+/// THREE ZERO-PAYLOAD GUARDS ride the same rule, because a zero-valued event
+/// writes no axis while still drawing candidates: candidate selection carries
+/// `> 0` gates (the shield-damage arm and the CR 702.150a Compleated loyalty
+/// arm), so a still-zero amount must be honest-red rather than silently
+/// candidate-free.
+pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
+    match event {
+        // ---- accounted: the applier's principal board write, or its own
+        //      engine-maintained turn ledger, is on an axis the witness reads ----
+        // CR 119.3: `player.life`.
+        ProposedEvent::LifeGain { .. } | ProposedEvent::LifeLoss { .. } => true,
+        // Zone cardinalities.
+        ProposedEvent::ZoneChange { .. } => true,
+        // Object / player counters. Zero-payload guard: the CR 702.150a
+        // Compleated virtual candidate is drawn under `count > 0`.
+        ProposedEvent::AddCounter { count, .. } => *count > 0,
+        // `zones::create_object` ⇒ battlefield cardinality.
+        ProposedEvent::CreateToken { .. } => true,
+        // CR 120.3a: the player branch DELEGATES its life write to a companion
+        // `LifeLoss`, but keeps `state.damage_dealt_this_turn`. Zero-payload
+        // guard: the shield-damage virtual candidate is drawn under `amount > 0`.
+        ProposedEvent::Damage { amount, .. } => *amount > 0,
+        // CR 121.1: DELEGATES every card to `zone_pipeline::move_object`, but
+        // keeps `player.cards_drawn_this_turn`.
+        ProposedEvent::Draw { count, .. } => *count > 0,
+        // ---- unaccounted: no axis of its own ⇒ the probe refuses. Named, not
+        //      wildcarded, so a new variant is a compile error here. ----
+        ProposedEvent::TokenEntry { .. }
+        | ProposedEvent::SearchFound { .. }
+        | ProposedEvent::Scry { .. }
+        | ProposedEvent::Mill { .. }
+        | ProposedEvent::CoinFlip { .. }
+        | ProposedEvent::Explore { .. }
+        | ProposedEvent::Connive { .. }
+        | ProposedEvent::Proliferate { .. }
+        | ProposedEvent::RemoveCounter { .. }
+        | ProposedEvent::MoveCounter { .. }
+        | ProposedEvent::Discard { .. }
+        | ProposedEvent::Tap { .. }
+        | ProposedEvent::Untap { .. }
+        | ProposedEvent::TurnFaceUp { .. }
+        | ProposedEvent::Destroy { .. }
+        | ProposedEvent::Sacrifice { .. }
+        | ProposedEvent::BeginTurn { .. }
+        | ProposedEvent::BeginPhase { .. }
+        | ProposedEvent::ProduceMana { .. }
+        | ProposedEvent::EmptyManaPool { .. }
+        | ProposedEvent::Planeswalk { .. }
+        | ProposedEvent::Attach { .. } => false,
+    }
+}
+
+thread_local! {
+    /// CR 614.1a: armed only inside a speculative probe run. `None` = disarmed,
+    /// which is every production resolution.
+    static PROPOSED_EVENT_RECORDER: std::cell::RefCell<Option<Vec<ProposedEvent>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the PREVIOUS recorder on drop, not a hard reset, so nesting composes
+/// exactly as `SimulationProbeGuard` does. `[profile.dev]` / `[profile.test]`
+/// set no `panic` key, so the default is `unwind` — save/restore alone would
+/// leak the armed recorder past a caught panic in the test profile as well as
+/// in the server build.
+struct ProposedEventRecorderGuard(Option<Vec<ProposedEvent>>);
+
+impl Drop for ProposedEventRecorderGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        PROPOSED_EVENT_RECORDER.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+/// Runs `f` with the recorder armed; returns every [`ProposedEvent`] that
+/// reached `pipeline_loop` inside it — the pipeline BODY, not the
+/// `replace_event` wrapper. `pipeline_loop` has 9 call sites and
+/// `replace_combat_damage_batch` bypasses `replace_event` entirely, so recording
+/// at the wrapper would be blind to every combat-damage event.
+///
+/// Purely OBSERVATIONAL: `pipeline_loop` takes no behavioural branch on the
+/// recorder, so an armed run and an unarmed run cannot diverge.
+pub(crate) fn record_proposed_events<F: FnOnce()>(f: F) -> Vec<ProposedEvent> {
+    let guard = ProposedEventRecorderGuard(
+        PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().replace(Vec::new())),
+    );
+    f();
+    let recorded = PROPOSED_EVENT_RECORDER
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_default();
+    drop(guard);
+    recorded
+}
+
+/// The recorder hook. Called once per `pipeline_loop` entry, before any
+/// candidate is drawn, so the recorded event is the one the resolver proposed.
+fn record_proposed_event(event: &ProposedEvent) {
+    PROPOSED_EVENT_RECORDER.with(|cell| {
+        if let Some(buffer) = cell.borrow_mut().as_mut() {
+            buffer.push(event.clone());
+        }
+    });
+}
+
 /// CR 614.1b + CR 614.10: Read-only probe for whether a turn-start skip
 /// replacement would replace the proposed turn with nothing. This deliberately
 /// does not call `replace_event`, so projection code can answer display-only
@@ -8942,6 +9173,11 @@ fn pipeline_loop(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    // The single recording point (CR 614.1a). This is the pipeline BODY every one
+    // of the 9 entries runs, so an event a resolver proposes cannot avoid it.
+    // Disarmed (a no-op) outside a speculative probe.
+    record_proposed_event(&proposed);
+
     loop {
         if depth >= MAX_REPLACEMENT_DEPTH {
             break;
@@ -19676,6 +19912,120 @@ mod tests {
             runner.state().objects[&swans].damage_marked,
             0,
             "damage dealt TO Swans must still be prevented"
+        );
+    }
+
+    /// **§6 R13 — RECORDING-POINT COMPLETENESS.**
+    ///
+    /// The derivation `probe_resolution` builds is only as complete as the point
+    /// the recorder is hooked at. R13 pins the INVARIANT, never a call-site
+    /// count (U1 itself moves one caller of `find_applicable_replacements` from
+    /// `effects/token.rs` into this file): **every production path that goes on
+    /// to apply a replacement routes through `fn pipeline_loop`, where the one
+    /// hook sits.**
+    ///
+    /// Two conjuncts, because either alone is passable for the wrong reason:
+    ///
+    /// 1. STRUCTURAL — exactly one hook call site, and its enclosing top-level
+    ///    `fn` is `pipeline_loop`. The needle is ASSEMBLED AT RUNTIME so this
+    ///    test's own source text cannot be counted by its own instrument (the
+    ///    self-referential-contamination shape that made the deleted
+    ///    `resolution_choice_verdicts_are_exactly_pinned` census state `== 3`
+    ///    while returning 8).
+    /// 2. RUNTIME — the two production appliers that reach the pipeline by
+    ///    DIFFERENT routes both land in the recorder. `replace_combat_damage_batch`
+    ///    is the discriminating one: it calls `pipeline_loop` directly and
+    ///    **bypasses `replace_event` entirely**, so a hook on the wrapper is blind
+    ///    to every combat-damage event while still passing conjunct 1's spirit.
+    ///
+    /// REVERT-PROBE (RUN, not argued): move the hook from `pipeline_loop` into
+    /// `replace_event` ⇒ the batch arm records nothing ⇒ this test FAILS.
+    #[test]
+    fn every_applying_path_reaches_the_recorder_because_the_hook_is_in_pipeline_loop() {
+        // Assembled, never written whole: a literal needle would appear in this
+        // file and be counted by the very scan that looks for it.
+        let hook_needle = format!("{}{}", "record_proposed_", "event(&");
+        let fn_header = format!("\n{}{} ", "fn ", "pipeline_loop(");
+        let src = std::fs::read_to_string(format!(
+            "{}/src/game/replacement.rs",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("this module's own source is readable");
+        let sites: Vec<usize> = src.match_indices(&hook_needle).map(|(at, _)| at).collect();
+        assert_eq!(
+            sites.len(),
+            1,
+            "the recorder must have exactly ONE call site; found {}",
+            sites.len()
+        );
+        // EVERY top-level visibility, not just the bare `fn `. Measured: with
+        // only `"\nfn "` this scan silently passed when the hook was moved into
+        // `pub fn replace_event` — the nearest preceding COLUMN-0 `fn ` was
+        // `pipeline_loop`'s own header, so the wrong placement read as right.
+        let enclosing = ["\nfn ", "\npub fn ", "\npub(crate) fn "]
+            .iter()
+            .filter_map(|header| src[..sites[0]].rfind(header))
+            .max()
+            .expect("a top-level `fn` encloses the hook");
+        assert!(
+            src[enclosing..].starts_with(fn_header.trim_end()),
+            "the hook must sit in `pipeline_loop` — the pipeline BODY every entry \
+             runs — not in the `replace_event` wrapper that \
+             `replace_combat_damage_batch` bypasses"
+        );
+
+        // Conjunct 2. One board, one event, two routes.
+        let mut state = GameState::new_two_player(7);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "R13 Source".to_string(),
+            Zone::Battlefield,
+        );
+        let damage = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            applied: HashSet::new(),
+        };
+        let is_our_damage = |event: &ProposedEvent| {
+            matches!(
+                event,
+                ProposedEvent::Damage {
+                    amount: 3,
+                    is_combat: true,
+                    ..
+                }
+            )
+        };
+
+        let mut events = Vec::new();
+        let batch_recorded = record_proposed_events(|| {
+            let _ = replace_combat_damage_batch(&mut state, &mut events, vec![damage.clone()]);
+        });
+        assert!(
+            batch_recorded.iter().any(is_our_damage),
+            "CR 510.2: the combat-damage batch enters `pipeline_loop` DIRECTLY, so its \
+             proposed events must still reach the derivation; recorded {batch_recorded:?}"
+        );
+
+        let wrapper_recorded = record_proposed_events(|| {
+            let _ = replace_event(&mut state, damage.clone(), &mut events);
+        });
+        assert!(
+            wrapper_recorded.iter().any(is_our_damage),
+            "positive control on the OTHER route: the `replace_event` wrapper also \
+             funnels through the same hook; recorded {wrapper_recorded:?}"
+        );
+
+        // Non-vacuity of the instrument itself: an armed extent that proposes
+        // nothing records nothing, so the two `any(..)`s above are attributable
+        // to the drives and not to a recorder that always reports something.
+        assert!(
+            record_proposed_events(|| {}).is_empty(),
+            "an armed extent with no pipeline entry records nothing"
         );
     }
 }

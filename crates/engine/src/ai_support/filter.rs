@@ -139,6 +139,9 @@ impl CandidateFilter for SimulationFilter {
     }
 
     fn accept(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+        if super::structurally_valid_search_selection(state, &candidate.action) {
+            return true;
+        }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
@@ -157,6 +160,9 @@ impl CandidateFilter for SimulationFilter {
         candidate: &CandidateAction,
         probe: Option<&casting::PriorityCastProbe>,
     ) -> bool {
+        if super::structurally_valid_search_selection(state, &candidate.action) {
+            return true;
+        }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }

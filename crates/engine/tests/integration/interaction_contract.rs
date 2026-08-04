@@ -14,8 +14,8 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::game::DeckEntry;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, ChosenAttribute,
-    CounterCostSelection, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter, ZoneOwner,
+    CounterCostSelection, Effect, ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility,
+    SacrificeCost, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card::CardFace;
@@ -2358,6 +2358,7 @@ fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
                 win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema {
                 iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
@@ -2417,6 +2418,7 @@ fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
             win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
             // A NARROWED bound, i.e. what `elimination_bounds` produces on a real board.
@@ -2465,6 +2467,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
@@ -2519,10 +2522,11 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             win_kind: engine::analysis::loop_check::WinKind::Advantage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
-            // No narrowed CR 732.2a bound — the global cap, as every offer states today.
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
             max_iterations: ShortcutDecisionSchema::default().max_iterations,
             points: vec![
                 DecisionPoint {
@@ -3019,5 +3023,539 @@ fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
             .map(|entry| entry.count)
             .sum::<u32>(),
         14
+    );
+}
+
+/// The interaction contract omits a debug-capability gate at the transport
+/// (`SessionManager::handle_interaction`) on the grounds that candidate
+/// enumeration never produces one. This converts that "cannot happen" into
+/// something that fails the day it starts happening.
+///
+/// It asserts on the **client-visible** publication — `derive_viewer_interaction`
+/// -> `opportunity_for_slot` -> `actor_candidates` -> `ai_support`'s validated
+/// candidate set — rather than on an internal helper, so it covers what a
+/// remote seat could actually submit.
+///
+/// The sandbox capability is armed *fully* and deliberately: the claim is not
+/// that debug actions are unreachable because sandbox mode is off, it is that
+/// enumeration ignores the flag even when it is on. All three of
+/// `allow_debug_actions`, `debug_mode`, and `debug_permitted` are set because
+/// `apply`'s own gate requires the latter two together — arming only one would
+/// leave the capability half-granted and the test could pass for the wrong
+/// reason.
+#[test]
+fn published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game() {
+    let mut state = GameState::new_two_player(42);
+    state.format_config.allow_debug_actions = true;
+    state.debug_mode = true;
+    state.debug_permitted.insert(P0);
+    bind(&mut state, "sandbox-debug-enumeration");
+
+    let view = priority_view(&state);
+
+    // Reach guard (1): a `ViewerInteraction` with `can_submit: false`, or a
+    // terminal `waiting_for`, publishes no opportunities at all and would
+    // satisfy the negative below vacuously.
+    assert!(
+        !view.opportunities.is_empty(),
+        "the fixture must publish something for the negative assertion to bite"
+    );
+
+    // Reach guard (3): the capability is genuinely in force at assertion time.
+    assert!(
+        state.format_config.allow_debug_actions
+            && state.debug_mode
+            && state.debug_permitted.contains(&P0),
+        "the sandbox capability must be armed, or this asserts nothing"
+    );
+
+    // Reach guard (2): `WaitingFor::Priority` maps to
+    // `HumanResponseModel::ExactCandidates`, which is the `actor_candidates`
+    // branch — the enumerator whose output this test is about.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the enumerating branch is selected by the waiting_for shape, got {:?}",
+        state.waiting_for
+    );
+
+    let mut saw_choices = false;
+    for opportunity in &view.opportunities {
+        let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+            continue;
+        };
+        saw_choices |= !choices.is_empty();
+        for choice in choices {
+            for surface in &choice.surfaces {
+                if let InteractionPresentationSurface::Action { code, .. } = surface {
+                    assert!(
+                        !matches!(
+                            code,
+                            InteractionActionCode::Debug
+                                | InteractionActionCode::GrantDebugPermission
+                                | InteractionActionCode::RevokeDebugPermission
+                        ),
+                        "candidate enumeration published a debug action ({code:?}); \
+                         `SessionManager::handle_interaction`'s missing debug gate is \
+                         no longer safe"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_choices,
+        "an ExactChoices opportunity with real choices is what proves the \
+         actor_candidates path ran"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6944: a flexible-mana land rendered an unlabelled "Tap for mana".
+//
+// `TapLandForMana` candidates are minted from `ManaSourceOption::semantic_selection`
+// (one *concrete* row per producible color) and executed via
+// `live_land_mana_option_for_selection`. The label projection resolved them
+// through the *manual* authority (`live_mana_source_option_for_selection`)
+// instead, whose `manual_selection_for_option` deliberately collapses a flexible
+// source to `Colorless` + `DeferredColorChoice`. The concrete row therefore never
+// matched, the resolver returned `Err`, and the projection silently emitted no
+// `ProducedMana` surface at all.
+//
+// Every test below asserts a *non-empty* produced-mana label for a flexible
+// source, which is exactly the surface that was missing before the fix.
+// ---------------------------------------------------------------------------
+
+/// Produced-mana symbols projected for each `TapLandForMana` candidate whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_land_mana_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Flatten per-candidate labels into one sorted symbol list, asserting that no
+/// candidate was left unlabelled. The unlabelled case is the #6944 regression.
+fn sorted_labelled_symbols(labels: &[Vec<String>], context: &str) -> Vec<String> {
+    assert!(
+        !labels.is_empty(),
+        "{context}: expected at least one TapLandForMana candidate"
+    );
+    assert!(
+        labels.iter().all(|units| !units.is_empty()),
+        "{context}: every mana candidate must carry a produced-mana label, got {labels:?}"
+    );
+    let mut symbols: Vec<String> = labels.iter().flatten().cloned().collect();
+    symbols.sort();
+    symbols
+}
+
+#[test]
+fn tap_land_for_mana_labels_each_color_of_an_any_one_color_land() {
+    // ManaProduction::AnyOneColor — the card from issue #6944.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let city = scenario
+        .add_land_from_oracle(
+            P0,
+            "City of Brass",
+            "Whenever this land becomes tapped, it deals 1 damage to you.\n{T}: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), city, "city-of-brass-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "City of Brass"),
+        ["B", "G", "R", "U", "W"],
+        "each concrete color row must project its own color, not an unlabelled tap"
+    );
+    assert!(
+        labels.iter().all(|units| units.len() == 1),
+        "'Add one mana of any color' produces exactly one unit per row: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_granted_flexible_mana_ability() {
+    // ManaProduction::AnyOneColor { count: 2 } reached through a `GrantAbility`
+    // static — the second card named in issue #6944. The label must carry both
+    // produced units and the granted spend restriction.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Resonating Lute",
+        "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.",
+    );
+    // An explicitly-printed mana ability, not `add_basic_land`: a basic land's
+    // production is subtype-inferred by `land_mana_options`, and that fallback is
+    // deliberately suppressed once any explicit `Effect::Mana` ability exists —
+    // which the grant itself supplies. Printing the ability keeps this test about
+    // the label projection rather than the basic-land fallback.
+    let forest = scenario
+        .add_land_from_oracle(P0, "Forest", "{T}: Add {G}.")
+        .id();
+    let mut runner = scenario.build();
+    // `GameScenario::build` does not run a layer pass, so the `GrantAbility`
+    // static has not yet been applied to the land's ability list.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let labels = projected_land_mana_labels(runner.state_mut(), forest, "resonating-lute-grant");
+    let symbols = sorted_labelled_symbols(&labels, "Resonating Lute granted ability");
+    let granted: Vec<&Vec<String>> = labels.iter().filter(|units| units.len() == 2).collect();
+    assert_eq!(
+        granted.len(),
+        5,
+        "the granted 'two mana of any one color' ability exposes one two-unit row \
+         per color: {labels:?}"
+    );
+    assert!(
+        granted
+            .iter()
+            .all(|units| units[0] == units[1] && symbols.contains(&units[0])),
+        "'any one color' produces two units of the SAME chosen color: {granted:?}"
+    );
+    assert!(
+        labels.iter().any(|units| units == &vec!["G".to_string()]),
+        "the Forest's own printed mana ability is still labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_type_produceable_by_land() {
+    // ManaProduction::AnyTypeProduceableBy.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pool = scenario
+        .add_land_from_oracle(
+            P0,
+            "Reflecting Pool",
+            "{T}: Add one mana of any type that a land you control could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pool, "reflecting-pool-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Reflecting Pool"),
+        ["G"],
+        "the surveyed Forest's type is the only produceable type"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_opponent_land_colors_land() {
+    // ManaProduction::OpponentLandColors.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), orchard, "exotic-orchard-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Exotic Orchard"),
+        ["U"],
+        "the opponent's Island is the only surveyed color"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_commander_color_identity_land() {
+    // ManaProduction::AnyInCommandersColorIdentity.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tower = scenario
+        .add_land_from_oracle(
+            P0,
+            "Command Tower",
+            "{T}: Add one mana of any color in your commander's color identity.",
+        )
+        .id();
+    let commander = scenario
+        .add_creature(P0, "Mono-Red Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_commander(commander);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), tower, "command-tower-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Command Tower"),
+        ["R"],
+        "the label follows the commander's color identity"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
+    // ManaProduction::AnyOneColorAmongPermanents.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plaza = scenario
+        .add_land_from_oracle(
+            P0,
+            "Plaza of Heroes",
+            "{T}: Add {C}.\n{T}: Add one mana of any color. Spend this mana only to cast a legendary spell.\n{T}: Add one mana of any color among legendary permanents you control.\n{3}, {T}, Exile this land: Target legendary creature gains hexproof and indestructible until end of turn.",
+        )
+        .id();
+    scenario
+        .add_creature(P0, "Legendary Red Bear", 2, 2)
+        .as_legendary()
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        });
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), plaza, "plaza-of-heroes-label");
+    let symbols = sorted_labelled_symbols(&labels, "Plaza of Heroes");
+    assert!(
+        symbols.contains(&"R".to_string()),
+        "the among-legendary-permanents ability projects the legend's color: {labels:?}"
+    );
+    assert!(
+        symbols.contains(&"C".to_string()),
+        "the sibling colorless ability stays labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
+    // ManaProduction::ChoiceAmongExiledColors.
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pit = scenario
+        .add_land_from_oracle(
+            P0,
+            "Pit of Offerings",
+            "{T}: Add {C}.\n{T}: Add one mana of any of the exiled cards' colors.",
+        )
+        .id();
+    let exiled = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: pit,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pit, "pit-of-offerings-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Pit of Offerings"),
+        ["C", "R"],
+        "the exiled red card's color is labelled alongside the colorless sibling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling coverage: `ActivateManaSource`.
+//
+// The two mana surfaces now share `push_produced_mana_surfaces`, each passing
+// its own reducer's resolver. The tests above pin the `TapLandForMana` arm; this
+// one pins the `ActivateManaSource` arm so the shared helper cannot be changed
+// to satisfy one caller while silently dropping the other's labels.
+//
+// `ActivateManaSource` is only ever projected from the
+// `WaitingFor::ManaSourceSelection` arm of `direct_choice_projection` — no
+// priority arm mints it — so the fixture must drive the real cast pipeline into
+// that window. `CastPaymentMode::AutoExceptSacrificialMana` does exactly that:
+// the automatic planner refuses to spend an irreversible sacrifice row without
+// explicit consent and hands the choice back as `ManaSourceSelection`.
+// ---------------------------------------------------------------------------
+
+fn sacrificial_mana_source(produced: ManaProduction) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
+}
+
+/// Produced-mana symbols projected for the `ActivateManaSource` candidates whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_mana_source_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = viewer_interaction(state, P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the mana-source prompt is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::ActivateManaSource,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Mana Source Label Witness", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    // Both rows must be sacrifice-only: a non-sacrificial row on either source
+    // would let the automatic planner pay without ever opening the prompt.
+    let fixed = scenario
+        .add_creature(P0, "Fixed Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let flexible = scenario
+        .add_creature(P0, "Flexible Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 2 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+        })
+        .expect("the production cast path should stop for sacrificial-mana consent");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaSourceSelection { .. }
+        ),
+        "ActivateManaSource is projected only from this window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let fixed_labels = projected_mana_source_labels(runner.state_mut(), fixed, "fixed-mana-source");
+    assert_eq!(
+        fixed_labels,
+        vec![vec!["B".to_string()]],
+        "a fixed sacrificial source projects its one concrete produced unit"
+    );
+
+    let flexible_labels =
+        projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
+    assert_eq!(
+        flexible_labels,
+        vec![vec!["R".to_string(), "R".to_string()]],
+        "a flexible source is offered as ONE deferred-color candidate whose label \
+         still carries both produced units; `manual_selection_for_option` collapses \
+         it to Colorless + DeferredColorChoice, so resolving it through the land \
+         authority (the #6944 bug) would drop this label entirely"
     );
 }

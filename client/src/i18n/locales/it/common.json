@@ -48,7 +48,7 @@
     "updated": "aggiornato"
   },
   "comboDetector": {
-    "label": "Rilevatore di combo",
+    "label": "Rilevatore di combo (sperimentale)",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "on": "Attivo",
     "off": "Disattivato",

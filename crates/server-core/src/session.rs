@@ -8,7 +8,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::finalize_public_state;
-use engine::game::interaction::bind_interaction_authority;
+use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::preview::preview_auto_payment_sources;
 use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
@@ -17,7 +17,7 @@ use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::ObjectId;
-use engine::types::interaction::InteractionSessionId;
+use engine::types::interaction::{InteractionSessionId, InteractionSubmission};
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaCost;
 use engine::types::match_config::MatchConfig;
@@ -1400,6 +1400,116 @@ impl SessionManager {
         ))
     }
 
+    /// Apply one engine-authored interaction submission from a player.
+    ///
+    /// Deliberately shaped as the exact sibling of [`Self::handle_action`]: it
+    /// returns the same [`ActionResult`], so the transport's broadcast path is
+    /// shared rather than duplicated.
+    ///
+    /// The acting `PlayerId` is resolved from the join-token-authenticated
+    /// session, never from the payload — the wire frame carries no actor field
+    /// at all (`protocol.rs`: "The authenticated session, rather than the
+    /// client, determines the actor"). `submit_interaction` then re-authorizes
+    /// the actor against the interaction slot inside the engine, so a forged
+    /// `interaction_id` belonging to another seat is rejected twice.
+    ///
+    /// There is deliberately no debug-capability gate here, unlike
+    /// `handle_action`. `materialize_response` dispatches on
+    /// `human_response_model`, and its `Choose` fallthrough sources actions from
+    /// `actor_candidates` ->
+    /// `ai_support::validated_candidate_actions_for_semantic_owner`. An
+    /// engine-wide grep shows no production constructor of
+    /// `GameAction::Debug`, `GrantDebugPermission`, or `RevokeDebugPermission`
+    /// anywhere in that chain — only classification and ordering matches — so
+    /// guarding here would be validation for a case that cannot occur. The
+    /// engine test
+    /// `published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game`
+    /// (`crates/engine/tests/integration/interaction_contract.rs`) fails the day
+    /// that stops being true.
+    pub fn handle_interaction(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        submission: InteractionSubmission,
+    ) -> Result<ActionResult, String> {
+        let session = self
+            .sessions
+            .get_mut(game_code)
+            .ok_or_else(|| format!("Game not found: {game_code}"))?;
+
+        let player = session
+            .player_for_token(player_token)
+            .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // GH #1507: the authoritative state must not move while the table is
+        // voting on a rollback. Same interlock, same reason, as `handle_action`.
+        if session.pending_takeback.is_some() {
+            return Err(
+                "A takeback request is pending — resolve it before taking further actions"
+                    .to_string(),
+            );
+        }
+
+        // Snapshot BEFORE `log_player_names` is written, matching
+        // `handle_action`'s order exactly. The two handlers are siblings; the
+        // ordering is part of that.
+        //
+        // The clone is unconditional here where `handle_action`'s is
+        // conditional on `!action.is_actor_scoped_preference()`, because the
+        // action is not known until `submit_interaction` returns. That is
+        // equivalent, not a regression: the seven actions that predicate
+        // matches are UI preferences that no candidate enumerator or
+        // `materialize_*` function ever produces, so the predicate is always
+        // false on this path. The guard below is kept anyway so the two
+        // handlers stay structurally identical if that ever changes.
+        let pre_action_state = session.state.clone();
+
+        // Set player names for log resolution.
+        session.state.log_player_names = session.display_names.clone();
+
+        let applied =
+            submit_interaction(&mut session.state, player, submission).map_err(|error| {
+                warn!(
+                    game = %game_code,
+                    player = ?player,
+                    code = ?error.code,
+                    reason = "interaction_rejected",
+                    "interaction rejected"
+                );
+                // Byte-identical to the WASM transport
+                // (`engine-wasm/src/lib.rs`) and to
+                // `interaction_payload_guard`, so every layer that reports an
+                // engine reason code, on both transports, classifies the same
+                // rejection identically.
+                format!("Engine error: {:?}", error.code)
+            })?;
+
+        if !applied.action.is_actor_scoped_preference() {
+            session.push_takeback_state(player, pre_action_state);
+        }
+
+        info!(
+            game = %game_code,
+            player = ?player,
+            action_type = applied.action.variant_name(),
+            event_count = applied.result.events.len(),
+            "interaction applied"
+        );
+
+        let (new_legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
+        let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
+
+        Ok((
+            session.state.clone(),
+            applied.result.events,
+            new_legal_actions,
+            applied.result.log_entries,
+            auto_pass,
+            spell_costs,
+            by_object,
+        ))
+    }
+
     /// Applies the payload-free match-concede intent after binding its
     /// requester to an authenticated player token. The closed cause is chosen
     /// here, never by the wire payload or a game action.
@@ -1596,7 +1706,10 @@ mod tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::CardType;
     use engine::types::game_state::{CastPaymentMode, PersistedGameState, WaitingFor};
-    use engine::types::interaction::{InteractionAvailability, InteractionReasonCode};
+    use engine::types::interaction::{
+        InteractionAvailability, InteractionChoiceId, InteractionReasonCode, InteractionResponse,
+        MAX_INTERACTION_LIST_LEN,
+    };
     use engine::types::mana::ManaCost;
     use engine::types::phase::{Phase, PhaseStop, PhaseStopScope};
     use engine::types::zones::Zone;
@@ -4344,5 +4457,175 @@ mod tests {
             attacker.object_id == attacks[1].0
                 && attacker.attack_target == AttackTarget::Player(PlayerId(2))
         }));
+    }
+
+    /// A live, engine-published submission for whichever seat currently holds a
+    /// complete progress witness, paired with that seat's authenticated token.
+    ///
+    /// Deriving the witness from `derive_viewer_interaction` rather than
+    /// hand-building one is the point: these tests must exercise a capability
+    /// the engine actually minted, or a `StaleInteraction` would be
+    /// indistinguishable from a fabricated id.
+    fn live_witness<'a>(
+        mgr: &SessionManager,
+        code: &str,
+        token0: &'a str,
+        token1: &'a str,
+    ) -> (PlayerId, &'a str, &'a str, InteractionSubmission) {
+        let state = &mgr.sessions.get(code).expect("session").state;
+        for (player, token, other) in [(PlayerId(0), token0, token1), (PlayerId(1), token1, token0)]
+        {
+            let filtered = filter_state_for_player(state, player);
+            let view = derive_viewer_interaction(state, &filtered, player);
+            if let InteractionAvailability::ProgressAvailable { witness } = view.availability {
+                return (player, token, other, witness);
+            }
+        }
+        panic!("a started session must publish a progress witness for some seat");
+    }
+
+    fn started_two_seat_game() -> (SessionManager, String, String, String) {
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr
+            .join_game(&code, make_deck())
+            .expect("second seat joins");
+        (mgr, code, token0, token1)
+    }
+
+    /// The multi-authority hostile fixture: two seats, both legitimately
+    /// authenticated, one capability. Seat B holding a *valid* token for the
+    /// same game must not be able to spend seat A's `interaction_id`.
+    #[test]
+    fn handle_interaction_binds_the_actor_to_the_authenticated_token() {
+        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, acting_token, other_token, witness) =
+            live_witness(&mgr, &code, &token0, &token1);
+
+        let before = mgr.sessions[&code].state.active_interaction_slots.clone();
+
+        let forged = mgr.handle_interaction(&code, other_token, witness.clone());
+        let error = forged.expect_err("a valid token for another seat must not spend this slot");
+        assert!(
+            error.contains("NotAuthorized"),
+            "unexpected reason: {error}"
+        );
+        assert_eq!(
+            mgr.sessions[&code].state.active_interaction_slots, before,
+            "a refused submission must not consume the capability"
+        );
+
+        // The success half is the reach guard: without it the `Err` above could
+        // have come from staleness rather than from authorization.
+        mgr.handle_interaction(&code, acting_token, witness)
+            .expect("the authenticated owner of the slot may spend it");
+        assert_ne!(
+            mgr.sessions[&code].state.active_interaction_slots, before,
+            "an accepted submission re-mints the interaction slots"
+        );
+    }
+
+    #[test]
+    fn handle_interaction_rejects_an_unknown_token() {
+        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, _acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
+
+        let before_waiting = mgr.sessions[&code].state.waiting_for.clone();
+        let before_slots = mgr.sessions[&code].state.active_interaction_slots.clone();
+
+        let error = mgr
+            .handle_interaction(&code, "not-a-real-token", witness)
+            .expect_err("an unknown token is not a seat");
+        assert_eq!(error, "Invalid player token");
+
+        assert_eq!(mgr.sessions[&code].state.waiting_for, before_waiting);
+        assert_eq!(
+            mgr.sessions[&code].state.active_interaction_slots,
+            before_slots
+        );
+    }
+
+    /// Capability consumption. This is the routine condition the benign
+    /// rejection channel exists for: a double-click produces exactly this.
+    #[test]
+    fn handle_interaction_rejects_a_stale_submission_benignly() {
+        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
+
+        mgr.handle_interaction(&code, acting_token, witness.clone())
+            .expect("the first submission spends a live capability");
+
+        let error = mgr
+            .handle_interaction(&code, acting_token, witness)
+            .expect_err("an interaction id is single-use");
+        assert!(error.contains("StaleInteraction"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn handle_interaction_rejects_an_oversized_response_before_the_reducer() {
+        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (_acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
+
+        let choice = InteractionChoiceId("a".to_string());
+        let oversized = InteractionSubmission {
+            interaction_id: witness.interaction_id.clone(),
+            response: InteractionResponse::Select {
+                choice_ids: vec![choice.clone(); MAX_INTERACTION_LIST_LEN + 1],
+            },
+        };
+
+        let error = mgr
+            .handle_interaction(&code, acting_token, oversized)
+            .expect_err("an oversized response is refused");
+        assert_eq!(error, "Engine error: PayloadTooLarge");
+
+        // Negative sibling: the boundary sits at the constant, not at "any
+        // large list". The same shape at exactly the limit is still refused,
+        // but for a different reason and further downstream.
+        let at_limit = InteractionSubmission {
+            interaction_id: witness.interaction_id.clone(),
+            response: InteractionResponse::Select {
+                choice_ids: vec![choice; MAX_INTERACTION_LIST_LEN],
+            },
+        };
+        let error = mgr
+            .handle_interaction(&code, acting_token, at_limit)
+            .expect_err("unknown choices are still refused");
+        assert!(
+            !error.contains("PayloadTooLarge"),
+            "the bound must be the constant, not list size in general: {error}"
+        );
+    }
+
+    #[test]
+    fn handle_interaction_defers_to_a_pending_takeback() {
+        let (mut mgr, code, token0, token1) = started_two_seat_game();
+        let (acting, acting_token, _other, witness) = live_witness(&mgr, &code, &token0, &token1);
+
+        let target_state = mgr.sessions[&code].state.clone();
+        mgr.sessions.get_mut(&code).unwrap().pending_takeback = Some(PendingTakeback {
+            requested_by: acting,
+            target_state,
+            approvals: HashSet::new(),
+        });
+
+        let before_slots = mgr.sessions[&code].state.active_interaction_slots.clone();
+        let error = mgr
+            .handle_interaction(&code, acting_token, witness.clone())
+            .expect_err("the table is voting; the state must not move");
+        assert!(
+            error.contains("takeback request is pending"),
+            "unexpected: {error}"
+        );
+        assert_eq!(
+            mgr.sessions[&code].state.active_interaction_slots,
+            before_slots
+        );
+
+        // Reach guard: the very same submission succeeds once the interlock is
+        // cleared, so the refusal above is attributable to the takeback.
+        mgr.sessions.get_mut(&code).unwrap().pending_takeback = None;
+        mgr.handle_interaction(&code, acting_token, witness)
+            .expect("with no pending takeback the same submission applies");
     }
 }

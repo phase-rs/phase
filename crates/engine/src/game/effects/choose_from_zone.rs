@@ -101,7 +101,12 @@ pub fn resolve(
     // the decision out of APNAP defaults; the handler re-enters through
     // `resolve_with_choosing_player` with the picked opponent.
     if matches!(chooser, Chooser::Opponent) && !has_targeted_opponent(ability) {
-        let candidates: Vec<PlayerId> = players::opponents(state, ability.controller)
+        // CR 608.2d: "The player can't choose an option that's illegal or impossible" —
+        // a resolution-time CHOICE, not a target (CR 115.10a), so the candidate list is
+        // the CHOOSABLE opponents. The pre-existing `!pl.is_eliminated` re-filter is left
+        // in place: it is redundant with `is_alive` inside the authority, and removing a
+        // redundant filter would turn a one-token routing into an unmeasured change.
+        let candidates: Vec<PlayerId> = players::choosable_opponents(state, ability.controller)
             .into_iter()
             .filter(|&p| {
                 state
@@ -1085,7 +1090,20 @@ fn resolve_chooser(state: &GameState, ability: &ResolvedAbility, chooser: Choose
                 return targeted_opponent;
             }
             // Fallback: first opponent in APNAP order (CR-correct for 2-player).
-            players::opponents(state, ability.controller)
+            //
+            // CR 115.10a + CR 608.2d: `choosable_opponents` — the SAME authority the
+            // multi-candidate prompt above consults — not the raw `opponents`. The two
+            // differ by `player_exists_for_choice`, i.e. by PHASED-OUT seats, since
+            // `opponents` filters only on `is_alive`. Routing the >= 2 path through the
+            // choice authority while leaving this < 2 path on the raw list made the two
+            // disagree about who is choosable, and it did so in the one case that gets
+            // NO prompt: a phased-out seat could be handed the choice instead of the
+            // only legal opponent, with nothing on screen to reveal it.
+            //
+            // Empty (every opponent phased out or gone) still degrades to the
+            // controller, which is the fail-closed direction and what CR 608.2d asks
+            // for — an impossible choice is not offered.
+            players::choosable_opponents(state, ability.controller)
                 .into_iter()
                 .next()
                 .unwrap_or(ability.controller)
@@ -1596,6 +1614,89 @@ mod tests {
                 assert_eq!(*count, 1);
             }
             other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
+        }
+    }
+
+    /// R4h — CR 608.2d: *"The player can't choose an option that's illegal or impossible."*
+    /// The controller's pick of WHICH opponent chooses is a resolution-time choice, not a
+    /// target (CR 115.10a), so a phased-out seat (the CR 702.26b MIRROR) and a departed one
+    /// (CR 800.4 + CR 102.1) must both be absent from the published candidate list.
+    ///
+    /// FIVE SEATS, extending `resolve_with_opponent_chooser`'s construction rather than
+    /// copying its board: on that row's two-player board the `candidates.len() >= 2` gate
+    /// can never be met, so it publishes `ChooseFromZoneChoice` and never the
+    /// `ChooseFromZoneOpponentChooser` this row asserts. That gate is also this row's
+    /// REACH-GUARD — with fewer than two surviving opponents the resolver falls through to
+    /// the non-prompting path and an exclusion-only assertion would pass vacuously.
+    ///
+    /// REVERT-PROBE: restore `players::opponents` at the candidate derivation ⇒ P1
+    /// reappears ⇒ the total equality FAILS.
+    #[test]
+    fn opponent_chooser_offer_excludes_a_phased_out_opponent_and_still_offers_the_rest() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut setup_events = Vec::new();
+
+        // Setup anti-vacuity, asserted before anything is measured.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut setup_events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(
+            state.players[1].is_phased_out(),
+            "P1 must read as phased out"
+        );
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+        assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+
+        let card1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Exile,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![card1]);
+        state.next_tracked_set_id = 2;
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Opponent,
+                up_to: false,
+                constraint: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(0), "the controller makes this pick");
+                assert_eq!(
+                    *candidates,
+                    vec![PlayerId(3), PlayerId(4)],
+                    "phased-out P1 and eliminated P2 are out; both valid opponents are in"
+                );
+            }
+            other => panic!("Expected ChooseFromZoneOpponentChooser, got {other:?}"),
         }
     }
 

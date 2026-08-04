@@ -2684,9 +2684,17 @@ fn filter_inner_for_object(
                         if source_controller == Some(obj_ctrl) {
                             return false;
                         }
-                        // CR 102.3 + CR 800.4a: A player who has left the game is
-                        // not an opponent; cards in their zones are not legal
-                        // targets (Captain N'ghathrod class).
+                        // Two claims, two authorities — kept apart deliberately.
+                        // SEAT: CR 800.4 + CR 102.1 — a player who has left the game is
+                        // no longer one of the people in the game, so they are not an
+                        // opponent. (CR 102.3 is scoped to games BETWEEN TEAMS and does
+                        // not define "opponent" in a free-for-all, which is the board
+                        // this seam serves; the engine's free-for-all authority is
+                        // `topology::is_opponent`.)
+                        // OBJECTS: CR 800.4a — "all objects owned by that player leave
+                        // the game" — so cards in their zones are not legal targets
+                        // (Captain N'ghathrod class). This is the half CR 800.4a really
+                        // governs.
                         if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }

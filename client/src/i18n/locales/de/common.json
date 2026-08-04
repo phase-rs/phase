@@ -48,7 +48,7 @@
     "updated": "aktualisiert"
   },
   "comboDetector": {
-    "label": "Combo-Detektor",
+    "label": "Combo-Detektor (experimentell)",
     "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
     "on": "An",
     "off": "Aus",

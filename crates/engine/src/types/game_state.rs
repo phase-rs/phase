@@ -8690,6 +8690,100 @@ fn delayed_trigger_install_command_mut(
         .as_object_mut()
 }
 
+/// CR 732.2a: a shortcut proposal describes "a sequence of game choices ... that may be
+/// legally taken based on the current game state". A restored `LoopShortcut` OFFER whose
+/// bound is `0` can describe no such sequence — it admits only the empty one — so the
+/// saved offer is corrupt and the load fails closed rather than reviving it.
+///
+/// WHY THIS SEAM AND NOT THE DECLARE SEAM. `max_iterations >= 1` holds for every schema
+/// minted IN-PROCESS (`decision_template`'s `Default` via `default_max_iterations`, its
+/// `MAX_SHORTCUT_CYCLES` literal, and `game::engine::build_shortcut_schema`'s clamped
+/// parameter). A WIRE-sourced offer has no such producer, so the guarantee holds
+/// everywhere except across deserialization — which is exactly here. This must NEVER be
+/// "fixed" instead by re-refusing the DECLARED count at `handle_declare_shortcut`: a
+/// declared `IterationCount::Fixed(0)` is a legal zero-repetition proposal (CR 732.2a
+/// admits "a non-repetitive series of choices"), and refusing it there re-creates the
+/// over-refusal this phase exists to remove. The zero in the OFFER'S BOUND and the zero
+/// in a DECLARED COUNT are different values at different seams.
+///
+/// SCOPED TO `LoopShortcut` ONLY, deliberately. `WaitingFor::RespondToShortcut` carries a
+/// `ShortcutProposal`, which has no `schema`/`max_iterations` field at all — there is no
+/// bound to check. Its only reachable zero is `proposal.count`, the ALREADY-DECLARED
+/// count, where `Fixed(0)` is legal; re-refusing it here would re-break the same
+/// over-refusal at a seam no row can see.
+///
+/// `== 0` is the COMPLETE rejection predicate and must not be widened: `max_iterations`
+/// is `u32`, so negatives fail serde before this runs; values at or above
+/// `MAX_SHORTCUT_CYCLES` mean "unbounded", a legitimate state; and an ABSENT wire key
+/// decodes to `MAX_SHORTCUT_CYCLES` through `#[serde(default = "default_max_iterations")]`,
+/// so every legacy save predating the field is untouched.
+/// CR 732.2a: a certified period spanning ZERO frames is not a period.
+///
+/// Single authority for the field so both wire hosts enforce identically — the offer's
+/// `LoopCertificate::per_cycle` and the proposal's `ShortcutProposal::per_cycle` are different
+/// structs carrying the same `PeriodicDelta`, and only the second is what the drive reads.
+fn reject_zero_frames_per_period(
+    period: &Option<crate::analysis::resource::PeriodicDelta>,
+    host: &str,
+) -> Result<(), String> {
+    if period.as_ref().is_some_and(|pd| pd.frames_per_period == 0) {
+        return Err(format!(
+            "persisted {host} states frames_per_period 0, which delimits every committed cycle \
+             at the first priority beat rather than at the certified CR 732.2a period"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
+    if let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &state.waiting_for
+    {
+        if schema.max_iterations == 0 {
+            return Err(
+                "persisted LoopShortcut offer states max_iterations 0, which CR 732.2a admits \
+                 no legally takeable sequence for"
+                    .to_string(),
+            );
+        }
+        // The SIBLING wire zero. `max_iterations` says how many repetitions there are;
+        // `frames_per_period` says what one repetition IS, and a wire-supplied 0 corrupts the
+        // second question exactly as a 0 bound corrupts the first.
+        //
+        // ⚠ THIS CALL COVERS ONE OF THE FIELD'S TWO HOSTS. `frames_per_period` rides
+        // `PeriodicDelta`, which hangs off BOTH `LoopCertificate` (here) and `ShortcutProposal`
+        // (the `RespondToShortcut` arm below) — and the second is the one the drive reads. Neither
+        // call is complete alone; `reject_zero_frames_per_period` is the shared authority so the
+        // two can never drift apart.
+        //
+        // Mechanism, not a symmetry argument: `drive_one_shortcut_cycle` delimits a committed
+        // cycle with `frames_per_period.is_some_and(|k| frames_this_cycle >= k)`
+        // (`game/engine.rs`). `frames_this_cycle` is a `u32`, so `>= 0` is a TAUTOLOGY — that
+        // disjunct fires at the first active-player priority beat, collapsing the cycle boundary
+        // to one beat instead of the certified span, and every per-cycle conformance check then
+        // measures a truncated cycle against a whole-period delta.
+        //
+        // Production never mints 0 — both certification bases derive it measured (`span as u32`
+        // on basis A, `k` on basis B) — which is exactly why a 0 arriving on the wire is a
+        // corrupted or hand-edited save rather than a live shape.
+        reject_zero_frames_per_period(&certificate.per_cycle, "LoopShortcut offer")?;
+    }
+    // THE SECOND WIRE HOST FOR THE SAME FIELD, and the one the drive actually reads.
+    // `frames_per_period` is not a `LoopCertificate` field — it lives on `PeriodicDelta`, and
+    // `ShortcutProposal` carries its own `per_cycle` too. `materialize_fixed_shortcut` feeds
+    // `drive_one_shortcut_cycle` from `proposal.per_cycle.as_ref().map(|pd| pd.frames_per_period)`
+    // (`game/engine.rs`), i.e. from THIS host, not from the offer's certificate. Guarding only
+    // the offer would leave the consumed path open — the restored `RespondToShortcut` state is
+    // reached without ever re-entering `LoopShortcut`.
+    if let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for {
+        reject_zero_frames_per_period(&proposal.per_cycle, "RespondToShortcut proposal")?;
+    }
+    Ok(())
+}
+
 impl Serialize for TrustedGameStateEnvelope {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -8817,7 +8911,11 @@ impl GameState {
 
 /// Decodes both current trusted snapshots and historical raw `GameState`
 /// snapshots. The raw form has no pre-cast route authority, so restoring it
-/// always drops any protocol wait before it reaches a live game session.
+/// routes through `precast_copy_shortcut::normalize_untrusted_restore`, which
+/// rewrites only the PRE-CAST COPY waits. Other protocol waits survive intact —
+/// a `WaitingFor::LoopShortcut` offer restores as itself — and what validates a
+/// restored offer's bound is `reject_zero_bound_shortcut_offer` on the decode
+/// path, not a blanket drop here.
 #[derive(Debug, Clone)]
 pub enum PersistedGameState {
     Raw(Box<GameState>),
@@ -12859,6 +12957,32 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
     }
 }
 
+/// CR 104.4b + CR 732.2a: ONE retained loop-detection sample, with its two roles
+/// separated at the type level.
+///
+/// `normalized` is the **CR 104.4b comparand** — the only half
+/// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` /
+/// `ring_delta_signature` may read. It is byte-identical to the frame the ring held
+/// before the split, because [`GameState::normalize_for_loop`] is unchanged.
+///
+/// `live` is the **CR 732.2a evaluable** — the same beat un-normalized, and the only
+/// half the period-touch consumers may read. Normalization zeroes `next_object_id` and
+/// runs `clear_trigger_identity_recursive`, so evaluating a resolution against a
+/// normalized frame allocates `ObjectId(0)` over a live object and loses the trigger
+/// source identity; those are inputs to a mint and to a resolution probe, never to an
+/// equality comparand.
+///
+/// `Clone` is load-bearing, not decoration: ring elements are written through
+/// `Arc::make_mut` (two sites in `analysis/resource.rs`), which is bounded
+/// `T: CloneToUninit` ⇐ `T: Clone`. `PartialEq`/`Serialize`/`Default` are deliberately
+/// absent — the field is `#[serde(skip, default)]` and excluded from `impl PartialEq for
+/// GameState`, so no site needs them.
+#[derive(Debug, Clone)]
+pub struct LoopDetectSample {
+    pub normalized: GameState,
+    pub live: GameState,
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -13183,7 +13307,9 @@ declare_game_state! {
     )]
     pub static_mode_presence: crate::types::statics::StaticModePresence,
     /// CR 732.2a loop-shortcut detection ring (PR-3). A bounded FIFO of recent
-    /// post-resolution NORMALIZED board snapshots, captured at the post-pipeline frame
+    /// post-resolution [`LoopDetectSample`]s — each carrying BOTH the CR 104.4b
+    /// `normalized` comparand (what this ring held before the two roles were split) and
+    /// the CR 732.2a `live` evaluable — captured at the post-pipeline frame
     /// of `game::engine::pass_priority_once_with_pipeline` (after
     /// `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at
     /// the SBA-reconciliation seam (`game::engine::reconcile_terminal_result`). A
@@ -13203,7 +13329,7 @@ declare_game_state! {
     /// `layers_dirty`, which are `serde(skip)` but ARE compared in `eq`) so AI-search
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
-    pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<GameState>>,
+    pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
     /// Live-only authority for the finite pre-cast shortcut. It is absent from
     /// raw/public serialization; trusted persistence uses the explicit codec
     /// envelope in `game::precast_copy_shortcut`.
@@ -14910,6 +15036,7 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
+        reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)
@@ -14933,6 +15060,12 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
+        // Both decode entry points guard, because they are genuinely two ingresses:
+        // `decode_persisted_resolution_state` above deserializes `ResolutionStateWire`
+        // itself and never routes through `decode`. Hosting the CR 732.2a bound check on
+        // only one of them leaves the other — the one a bare-`GameState` `impl Deserialize`
+        // reaches — able to revive a zero-bound offer.
+        reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)
@@ -19419,8 +19552,25 @@ impl GameState {
         if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
             self.loop_detect_ring.pop_front();
         }
-        let snapshot = std::sync::Arc::new(self.normalize_for_loop());
+        let snapshot = std::sync::Arc::new(LoopDetectSample {
+            normalized: self.normalize_for_loop(),
+            live: self.loop_detect_live_sample(),
+        });
         self.loop_detect_ring.push_back(snapshot);
+    }
+
+    /// CR 732.2a: the un-normalized half of a [`LoopDetectSample`] — this beat exactly as
+    /// it stood, so a period-touch consumer evaluates against real object ids and real
+    /// trigger-source identity.
+    ///
+    /// The ring clear is mandatory and is `normalize_for_loop`'s own reason: samples are
+    /// produced from the live state, so without it each stored sample would carry a clone
+    /// of the live ring ⇒ recursive/quadratic growth. **Nothing else is touched** — every
+    /// other field is what makes this half the evaluable one.
+    pub(crate) fn loop_detect_live_sample(&self) -> GameState {
+        let mut clone = self.clone();
+        clone.loop_detect_ring.clear();
+        clone
     }
 
     /// CR 510.2 + CR 704.3 + CR 704.5a + CR 732.2a: drop the loop-detection ring when a
@@ -20686,6 +20836,7 @@ mod forced_cascade_window_tests {
             win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
             mandatory: false,
             residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         }
     }
 
@@ -20957,6 +21108,7 @@ mod forced_cascade_window_tests {
                         unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
                         win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
                         template: None,
+                        per_cycle: None,
                     },
                 },
             ),

@@ -226,11 +226,15 @@ fn resolve_revealed_from_library_top(
     });
 
     // CR 608.2d + CR 700.3: "An opponent" — the controller chooses which opponent
-    // performs the partition. With a single opponent the choice is trivial.
+    // performs the partition. With a single opponent the choice is trivial. A CHOICE,
+    // not a target (CR 115.10a): existence authority only, no targeting exclusions.
+    // `p.id != controller` stays — opponent SCOPE, not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != controller && !p.is_eliminated)
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
         .map(|p| p.id)
         .collect();
 
@@ -301,11 +305,15 @@ fn resolve_exiled_this_way(
     }
 
     // CR 608.2d + CR 700.3: "An opponent" — the controller chooses which
-    // opponent performs the partition (trivial in two-player).
+    // opponent performs the partition (trivial in two-player). A CHOICE, not a target
+    // (CR 115.10a): existence authority only. The SECOND pile-source mint of this
+    // variant; it must narrow identically to the `RevealedFromLibraryTop` mint above.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != controller && !p.is_eliminated)
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
         .map(|p| p.id)
         .collect();
 
@@ -558,6 +566,156 @@ mod tests {
                 assert_eq!(eligible.len(), 3);
             }
             other => panic!("expected SeparatePilesPartition, got {other:?}"),
+        }
+    }
+
+    /// R4k — CR 608.2d + CR 700.3: *"an opponent"* separates the piles, and WHICH opponent
+    /// is the controller's CHOICE (CR 115.10a), not a target. Both pile-source mints of
+    /// `SeparatePilesChooseOpponent` must narrow identically: a phased-out seat (the
+    /// CR 702.26b MIRROR) and a departed seat (CR 800.4 + CR 102.1) are not choosable.
+    ///
+    /// TWO ARMS, ONE PER MINT, because the two are separate code paths that were changed
+    /// separately — restoring either inline filter alone must flip its own arm. Neither is
+    /// reachable from the file's existing row: `make_an_example_ability` uses
+    /// `PileSource::Battlefield`, which dispatches to `resolve_battlefield` and reaches
+    /// neither site.
+    ///
+    /// FIVE SEATS: both mints publish only when `candidates.len() >= 2`, so with fewer
+    /// surviving opponents the resolver takes the single-opponent auto-partition branch and
+    /// publishes `SeparatePilesPartition` instead — an exclusion-only assertion would then
+    /// pass without the routed code ever running. Asserting the published variant IS the
+    /// reach-guard. Pre-fix value measured, not assumed: `[P1, P3, P4]`.
+    ///
+    /// REVERT-PROBE: restore either `.filter(|p| p.id != controller && !p.is_eliminated)`
+    /// ⇒ P1 reappears in that arm ⇒ that arm's total equality FAILS.
+    #[test]
+    fn separate_piles_offer_excludes_a_phased_out_opponent_at_both_pile_sources() {
+        use crate::types::format::FormatConfig;
+
+        fn board() -> GameState {
+            let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+            let mut setup_events = Vec::new();
+            // Setup anti-vacuity, asserted before anything is measured.
+            let transitioned =
+                crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut setup_events);
+            assert_eq!(
+                transitioned,
+                vec![PlayerId(1)],
+                "phase_out_player must actually transition P1"
+            );
+            assert!(
+                state.players[1].is_phased_out(),
+                "P1 must read as phased out"
+            );
+            crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+            assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+            state
+        }
+
+        fn pile_ability(
+            source_id: ObjectId,
+            controller: PlayerId,
+            ps: PileSource,
+        ) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature(),
+                    ),
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: sacrifice_sub(),
+                    pile_source: ps,
+                    unchosen_pile_effect: None,
+                },
+                Vec::new(),
+                source_id,
+                controller,
+            )
+        }
+
+        // ARM 1 — site 12, `RevealedFromLibraryTop`. At least one library card is staged, or
+        // `reveal_count == 0` short-circuits before the candidate derivation runs.
+        {
+            let mut state = board();
+            let caster = state.players[0].id;
+            let card = crate::game::zones::create_object(
+                &mut state,
+                CardId(11),
+                caster,
+                "Top Card".to_string(),
+                Zone::Library,
+            );
+            assert!(
+                state.players[0].library.contains(&card),
+                "reach-guard: the reveal needs a library card, or the resolver returns \
+                 before it ever derives candidates"
+            );
+
+            let ability = pile_ability(
+                ObjectId(100),
+                caster,
+                PileSource::RevealedFromLibraryTop { count: 1 },
+            );
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolves");
+            match &state.waiting_for {
+                WaitingFor::SeparatePilesChooseOpponent {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, caster);
+                    assert_eq!(
+                        *candidates,
+                        vec![PlayerId(3), PlayerId(4)],
+                        "RevealedFromLibraryTop mint: phased-out P1 and eliminated P2 out, \
+                         both valid opponents in"
+                    );
+                }
+                other => panic!("expected SeparatePilesChooseOpponent, got {other:?}"),
+            }
+        }
+
+        // ARM 2 — site 13, `ExiledThisWay`. The eligible set comes from the source's exile
+        // links, so one linked exiled card is staged or the resolver returns early.
+        {
+            let mut state = board();
+            let caster = state.players[0].id;
+            let source_id = ObjectId(101);
+            let exiled = crate::game::zones::create_object(
+                &mut state,
+                CardId(12),
+                caster,
+                "Exiled Card".to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(crate::types::game_state::ExileLink {
+                exiled_id: exiled,
+                source_id,
+                kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+            });
+            assert!(
+                !crate::game::players::linked_exile_cards_for_source(&state, source_id).is_empty(),
+                "reach-guard: the ExiledThisWay eligible set must be non-empty, or the \
+                 resolver returns before it ever derives candidates"
+            );
+
+            let ability = pile_ability(source_id, caster, PileSource::ExiledThisWay);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).expect("resolves");
+            match &state.waiting_for {
+                WaitingFor::SeparatePilesChooseOpponent {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, caster);
+                    assert_eq!(
+                        *candidates,
+                        vec![PlayerId(3), PlayerId(4)],
+                        "ExiledThisWay mint: phased-out P1 and eliminated P2 out, both \
+                         valid opponents in"
+                    );
+                }
+                other => panic!("expected SeparatePilesChooseOpponent, got {other:?}"),
+            }
         }
     }
 

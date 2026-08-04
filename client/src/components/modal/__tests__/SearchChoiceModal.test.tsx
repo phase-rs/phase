@@ -36,7 +36,7 @@ describe("SearchChoice modal", () => {
     cleanup();
   });
 
-  it("shows every card the engine exposed during a library search", () => {
+  it("shows selectable cards first and disables ineligible cards", () => {
     const waitingFor: WaitingFor = {
       type: "SearchChoice",
       data: { player: 0, cards: [42], count: 1 },
@@ -55,8 +55,8 @@ describe("SearchChoice modal", () => {
           effective_library_owner: 0,
           learned_audience: [0],
           looked_at: [
-            [0, "Library", { object_id: 42, incarnation: 0 }],
             [0, "Library", { object_id: 43, incarnation: 0 }],
+            [0, "Library", { object_id: 42, incarnation: 0 }],
           ],
         },
       },
@@ -65,8 +65,13 @@ describe("SearchChoice modal", () => {
 
     render(<CardChoiceModal />);
 
-    expect(screen.getByLabelText(/Eligible Card/)).toBeInTheDocument();
+    const eligibleCard = screen.getByLabelText(/Eligible Card/);
+    expect(eligibleCard).toBeInTheDocument();
     const ineligibleCard = screen.getByLabelText(/Ineligible Card/);
     expect(ineligibleCard.closest("button")).toBeDisabled();
+    expect(
+      eligibleCard.compareDocumentPosition(ineligibleCard) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

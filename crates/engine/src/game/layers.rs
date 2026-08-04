@@ -3181,6 +3181,9 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             quantity_ref_reads_life(attr) || quantity_expr_reads_life(value)
         }
+        // CR 608.2c + CR 109.4: the tracked-set possession predicate applies its
+        // object `filter` to each member; route it like `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor { filter, .. } => target_filter_reads_life_total(filter),
         // Payload-free player sets — none read the life family. Enumerated
         // explicitly (no wildcard).
         PlayerFilter::Controller

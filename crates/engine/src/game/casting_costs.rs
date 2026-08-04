@@ -668,7 +668,9 @@ fn continue_after_gift_promised(
     cost_source: SpellCostSource,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let opponents = crate::game::players::opponents(state, player);
+    // CR 702.174a: "you may choose an opponent" — a CHOICE, not a target (CR 115.10a),
+    // so the recipient list is the CHOOSABLE opponents, not the raw seat relation.
+    let opponents = crate::game::players::choosable_opponents(state, player);
     if opponents.is_empty() {
         return Err(EngineError::InvalidAction(
             "Cannot promise a gift with no opponents".to_string(),
@@ -1537,7 +1539,10 @@ pub(crate) fn begin_deferred_target_selection(
     // its announcing opponent chosen (and the controller has ≥2 opponents to pick
     // among), raise that decision before declaring targets. This loops once per
     // unassigned group, so each opponent-choice effect gets its own announcer.
-    let announcing_candidates = crate::game::players::opponents(state, player);
+    // CR 115.10a: the announcer is CHOSEN, not targeted — the SECOND mint of this
+    // variant, and it must narrow identically to the cast-time mint in `casting.rs`
+    // or the re-prompt would hand back a seat the first prompt excluded.
+    let announcing_candidates = crate::game::players::choosable_opponents(state, player);
     if announcing_candidates.len() >= 2 {
         if let Some(choice) = next_announcing_opponent_choice(&pending.ability) {
             return Ok(WaitingFor::ChooseAnnouncingOpponent {
@@ -11817,10 +11822,14 @@ fn assist_offer_params(
     {
         return None;
     }
+    // CR 702.132a: "you may choose another player" — a CHOICE, not a target
+    // (CR 115.10a), so the seat is judged by `player_exists_for_choice` and NOT by the
+    // targeting-only exclusions. `p.id != player` stays: that is "another player" SCOPE,
+    // not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != player && !p.is_eliminated)
+        .filter(|p| p.id != player && crate::game::players::player_exists_for_choice(state, p.id))
         .map(|p| p.id)
         .collect();
     if candidates.is_empty() {

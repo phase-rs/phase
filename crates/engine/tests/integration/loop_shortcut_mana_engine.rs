@@ -679,6 +679,7 @@ fn loop_action_sequence_conditional_load_migration() {
             win_kind: WinKind::Advantage,
             mandatory: false,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         },
         schema: ShortcutDecisionSchema::default(),
     };
