@@ -391,6 +391,59 @@ pub fn resolve(
         }
     }
 
+    // CR 601.3 + CR 607.2a: The exile-set anaphor ("… from among them", "…
+    // from among the exiled cards") is a LINKED reference, never a targeted
+    // one — its object ids reach this effect implicitly, forwarded by the
+    // chain seam that resolved the exile step (`Effect::ExileTop`'s sub-ability
+    // hand-off in `effects::resolve_ability_chain`). That seam forwards EVERY
+    // exiled card, because it cannot know which of them this instruction
+    // describes. The permission granted below is what "a rule or effect allows
+    // that player to cast" (CR 601.3), so the clause's own filter — the card
+    // type gate on "cast instant and sorcery spells" / "up to two sorcery
+    // spells" / "a Vehicle or artifact creature spell" — must still be applied
+    // to the forwarded set. Without this, the type leg the parser composes onto
+    // the `ExiledBySource` anaphor is inert at runtime and every exiled card
+    // becomes castable (issue #6960; the mana-value axis already survives via
+    // the `CastPermissionConstraint`).
+    //
+    // Placed HERE, immediately after `target_ids` is final and ABOVE every
+    // downstream router (the private-library one-shot, the per-opponent fanout
+    // window, and the `driver_free_cast` / `immediate_graveyard_free_cast`
+    // single-target casts), so the gate is universal rather than partial: those
+    // routers return early, and `immediate_graveyard_free_cast` in particular
+    // carries no driver requirement, so a set filtered only below them would
+    // leave the type gate unapplied on whichever path fires first.
+    //
+    // Scoped to `references_exiled_by_source()` — the one filter class whose
+    // ids are chain-forwarded rather than chosen. Explicitly targeted grants
+    // (Emry, Bring to Light, Urza) were validated when their target was
+    // declared and must not be re-filtered here. The no-target fallback above
+    // populates `target_ids` from the live exile links and has already applied
+    // the whole filter to them, so re-testing the residual here is idempotent.
+    if !target_ids.is_empty() && target_filter.references_exiled_by_source() {
+        // CR 607.2a: apply the clause's OWN legs only. `without_exile_anaphor`
+        // discharges the `ExiledBySource` leg the seam already satisfied and
+        // returns what is left of the tree, preserving its `And`/`Or` structure
+        // (Sanwell's `And[Or[Vehicle, artifact creature], ExiledBySource]`
+        // residualizes to the bare `Or`). Re-evaluating the anaphor here would be
+        // actively wrong: on a triggered ability `filter::ExiledBySource` reads
+        // the trigger's `linked_exile_snapshot`, captured before this ability's
+        // own exile step ran, so every forwarded id would be dropped and the
+        // grant would become a total no-op. `None` means the filter was nothing
+        // *but* the anaphor (Hellcarver Demon, Improvisation Capstone, and every
+        // other bare-`ExiledBySource` row) — those keep the full forwarded set.
+        if let Some(own_filter) = target_filter.without_exile_anaphor() {
+            // CR 607.2a: bind the residual's object-scope reads to exactly the
+            // forwarded set, mirroring the no-target fallback's scoped context.
+            let mut scoped_ability = ability.clone();
+            scoped_ability.targets = target_ids.iter().copied().map(TargetRef::Object).collect();
+            let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+            target_ids.retain(|id| {
+                crate::game::filter::matches_target_filter(state, *id, &own_filter, &ctx)
+            });
+        }
+    }
+
     // The usual no-target fallback above observes the raw chain shape. Optional
     // look-cast frames may instead arrive with the same looked-at cards already
     // injected as resolved targets; both forms carry exactly the private-library

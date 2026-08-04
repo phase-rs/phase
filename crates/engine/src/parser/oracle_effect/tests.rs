@@ -42106,7 +42106,7 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
 }
 
 /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
-/// `parse_cast_type_disjunction` — "from among the instant or sorcery
+/// `parse_cast_type_list` — "from among the instant or sorcery
 /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
 /// with the disjunctive type set.
 #[test]

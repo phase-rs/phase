@@ -4,7 +4,7 @@ Consolidated from 50 per-batch clustering passes over the whole card database. S
 
 - **Canonical root causes:** 30
 - **Distinct cards implicated:** 4719
-- **Total card appearances across root causes:** 4753 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Total card appearances across root causes:** 4752 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -17,7 +17,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 330 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 239 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 238 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 211 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 210 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -2567,7 +2567,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (239 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (238 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2750,7 +2750,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Sauron, the Dark Lord
 - Savai Triome
 - Sawback Manticore
-- Scarlet Witch, Chaotic Avenger
 - Scarred Puma
 - Sea Troll
 - Search the Premises

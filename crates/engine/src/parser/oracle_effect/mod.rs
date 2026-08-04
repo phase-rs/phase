@@ -71,8 +71,10 @@ use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1, space1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
-use nom::multi::{many1, many_till, separated_list1};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+};
+use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -21942,58 +21944,244 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     }
 }
 
-/// CR 601.2a + CR 118.9: Parse "cast it/that card [without paying its mana cost]".
+/// CR 109.2b: the bare informational head-noun WORD that closes a cast type
+/// gate — "spell(s)" / "card(s)". CR 109.2b: "If a spell or ability uses a
+/// description of an object that includes the word 'spell,' it means a spell
+/// matching that description on the stack." The noun therefore scopes the ZONE,
+/// it is not a card-type restriction — which is why `parse_cast_type_gate`
+/// separately rejects a gate whose only atoms are `TypeFilter::Card`/`Any`.
 ///
-/// Three branches:
-/// CR 205.2 + CR 108.1: Parse a leading core-type disjunction with the
-/// "spell" / "card" informational suffix — "an instant or sorcery spell",
-/// "target instant or sorcery card". Returns a `TypedFilter` whose type atom
-/// is the disjunctive set.
+/// The alphabet is NOT re-declared here: `oracle_nom::target::parse_type_filter_word`
+/// already maps exactly `{spell, spells, card, cards}` — and nothing else — to
+/// `TypeFilter::Card` (CR 112.1: a spell is a card on the stack), behind the same
+/// non-alphanumeric word-boundary guard, plural before singular. So the head noun
+/// is that shared table `verify`-ed down to its `Card` image: one alphabet, one
+/// boundary guard, and the leg parser below and this guard can never drift apart.
+/// The boundary is what keeps a subtype that merely *prefixes* the noun
+/// ("Spellshaper") from being mistaken for it — it falls through to the subtype
+/// table and yields `Subtype`, which `verify` rejects.
 ///
-/// `parse_type_phrase` handles single core types and adjective-conjunction
-/// ("artifact creature") but not " or " between bare core-type words. This
-/// helper covers the common cast-effect surface that needs the disjunctive
-/// form (Jeleva, Past in Flames, Mizzix's Mastery, Wandering Mind, and the
-/// wider "cast instant or sorcery from <zone>" class).
-fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
-    type E<'a> = OracleError<'a>;
-    fn parse_core(i: &str) -> nom::IResult<&str, TypeFilter, OracleError<'_>> {
+/// This is the bare form used as the leg-internal `not(..)` guard;
+/// `parse_cast_head_noun` is the space-leading form that closes the list.
+fn parse_cast_head_noun_word(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(
+            super::oracle_nom::target::parse_type_filter_word,
+            |type_filter: &TypeFilter| matches!(type_filter, TypeFilter::Card),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 109.2b: the head noun that closes a cast type gate, **including its
+/// leading space** — byte-identical to the `" spell"` / `" spells"` /
+/// `" card"` / `" cards"` suffix `alt` this replaces. The leg combinator below
+/// deliberately consumes no trailing space, so the space belongs here (and on
+/// the separator), exactly as in `oracle_nom/enchant.rs`.
+fn parse_cast_head_noun(input: &str) -> OracleResult<'_, ()> {
+    preceded(tag::<_, _, OracleError<'_>>(" "), parse_cast_head_noun_word).parse(input)
+}
+
+/// CR 205.2b: one leg of a cast type gate — a run of ADJACENT type words with
+/// no connector between them. CR 205.2b: "Some objects have more than one card
+/// type (for example, an artifact creature). Such objects satisfy the criteria
+/// for any effect that applies to any of their card types." So adjacent words
+/// describe ONE object bearing all of them and lower to a conjunctive
+/// `TypedFilter::type_filters` vector (`game/filter.rs:3722` / `:4024` evaluate
+/// that vector with `.all()`).
+///
+/// The word alphabet is `oracle_nom::target::parse_type_filter_word` — the
+/// shared, word-boundary-guarded table of core types (singular AND plural) plus
+/// the canonical subtype registry, which is what lets a subtype leg ("Vehicle",
+/// CR 205.3g) stand beside a core-type leg. Do not re-declare type words here.
+///
+/// `separated_list1` (not `many1(terminated(word, tag(" ")))`): the leg consumes
+/// NO trailing space, so the space-leading separator and head noun compose.
+/// `separated_list1` backtracks the separator when the following element fails,
+/// so "instant and sorcery" stops cleanly after "instant" and leaves
+/// " and sorcery…" for `parse_cast_type_list_sep`.
+///
+/// The `not(parse_cast_head_noun_word)` guard is what stops the run at the head
+/// noun: CR 112.1 makes `parse_type_filter_word` map "spell"/"spells" to
+/// `TypeFilter::Card`, so without the guard the noun would be swallowed as a
+/// leg word and the mandatory head-noun close would then fail.
+fn parse_cast_type_leg(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    separated_list1(
+        tag(" "),
+        preceded(
+            not(parse_cast_head_noun_word),
+            super::oracle_nom::target::parse_type_filter_word,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 601.3 + CR 205.2b: the connector between cast type-gate legs. Every
+/// spelling enumerates ALTERNATIVE members of the permission's candidate set —
+/// CR 601.3 defines the permission by the set of spells it allows to be cast,
+/// and "instant and sorcery spells" is a plural over that set, not a
+/// conjunction over one object: no object is both an instant and a sorcery, so
+/// a literal per-object AND would match nothing and turn a permissive bug into
+/// a total no-op. `and`, `or`, and `and/or` are therefore ONE axis with ONE
+/// meaning, not three branches. Per-object conjunction is expressed only by
+/// ADJACENT type words with no connector (CR 205.2b), i.e. inside a leg.
+///
+/// Longest-match-first; the alphabet is kept byte-identical to
+/// `oracle_target.rs::match_mass_union_separator` and a superset of
+/// `oracle_nom/enchant.rs::parse_enchant_list_sep` so the connector tables
+/// cannot drift.
+fn parse_cast_type_list_sep(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
         alt((
-            value(TypeFilter::Instant, tag::<_, _, E>("instant")),
-            value(TypeFilter::Sorcery, tag("sorcery")),
-            value(TypeFilter::Creature, tag("creature")),
-            value(TypeFilter::Artifact, tag("artifact")),
-            value(TypeFilter::Enchantment, tag("enchantment")),
-            value(TypeFilter::Planeswalker, tag("planeswalker")),
-            value(TypeFilter::Land, tag("land")),
-            value(TypeFilter::Battle, tag("battle")),
-        ))
-        .parse(i)
-    }
+            tag(", and/or "),
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" and/or "),
+            tag(" or "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 601.2: a leading quantifier on a cast permission — "up to two",
+/// "up to X", "any number of", "one or more". CR 601.2 ("to cast a spell is to
+/// take it from where it is…") makes the quantifier a count of CAST EVENTS, not
+/// an object quality, so it is consumed and DISCARDED here: it belongs on the
+/// cast permission (`Effect::FreeCastFromZones { count }` and
+/// `try_parse_counted_free_cast_from_exiled_this_way`), never on the type
+/// filter.
+///
+/// `nom_primitives::parse_number` (not `parse_number_or_x`) so a literal "X" is
+/// never silently resolved to 0; the explicit `"x "` arm consumes the variable
+/// spelling instead ("cast up to X instant and/or sorcery spells" — Wand of
+/// Wonder). Mirrors `parse_cast_copies_count_prefix` and the "up to N" head of
+/// `try_parse_counted_free_cast_from_exiled_this_way`, both in this file.
+fn parse_cast_quantifier_prefix(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("up to "),
+                opt(alt((
+                    value((), terminated(nom_primitives::parse_number, tag(" "))),
+                    value((), tag("x ")),
+                ))),
+            ),
+        ),
+        value((), tag("any number of ")),
+        value((), tag("one or more ")),
+    ))
+    .parse(input)
+}
+
+/// CR 601.3 + CR 205.2b + CR 109.2b: the card-type list carried by a cast
+/// clause subject — "an instant or sorcery spell", "instant and sorcery
+/// spells", "any number of instant and/or sorcery spells", "up to two sorcery
+/// spells", "a Vehicle or artifact creature spell", "target instant or sorcery
+/// card".
+///
+/// Composed per axis, not enumerated — `and` × `or` × `and/or` × serial comma ×
+/// article × quantifier would be 24+ literal arms; here each axis is one
+/// `opt`/`alt`/`many0` call:
+///
+/// ```text
+/// cast_type_list := opt("target ") opt(quantifier) opt(article) leg (sep leg)* head_noun
+/// leg            := type_word (" " type_word)*        -- CR 205.2b, per-object conjunction
+/// sep            := ", and/or " | ", or " | ", and " | ", " | " and/or " | " or " | " and "
+/// head_noun      := " spell" | " spells" | " card" | " cards"        -- CR 109.2b, mandatory
+/// ```
+///
+/// **Acceptance boundary.** Returns `Some` only when it consumed something
+/// `parse_type_phrase` demonstrably cannot: at least two legs (so a connector
+/// was consumed) OR a leading quantifier. A single leg with no quantifier is
+/// still rejected, exactly as before, so "a creature spell", "an artifact
+/// spell", and "an Aura spell" keep falling through to `parse_type_phrase`
+/// byte-for-byte. That predicate, together with the mandatory head noun and the
+/// `separated_list1` (which yields zero legs when the clause opens on the head
+/// noun — "cast a spell from among them"), is the anti-swallow guard that keeps
+/// the 25 correctly-bare "from among them" cards bare.
+///
+/// Output shape, by exhaustive match on leg arity/width:
+/// * one leg (quantifier present) → `Typed { type_filters: leg }`
+/// * every leg exactly one atom → `Typed { type_filters: [AnyOf(atoms)] }` —
+///   byte-identical to the shape this helper produced before, which is what
+///   keeps the Jeleva/Velomachus pins green
+/// * some leg wider than one atom → `Or` over one `Typed` per leg, because a
+///   per-object conjunction cannot collapse into a single `type_filters` vector
+///   alongside a disjunction. No new `TypeFilter` variant is introduced;
+///   `TargetFilter::Or` already evaluates through every consumer on this path.
+fn parse_cast_type_list(rest: &str) -> Option<TargetFilter> {
+    type E<'a> = OracleError<'a>;
     let (rest, _) = opt(tag::<_, _, E>("target ")).parse(rest).ok()?;
-    // Strip optional "a "/"an " article.
+    let (rest, quantifier) = opt(parse_cast_quantifier_prefix).parse(rest).ok()?;
+    // Strip optional "a "/"an " article (longest-first).
     let (rest, _) = opt(alt((tag::<_, _, E>("an "), tag("a "))))
         .parse(rest)
         .ok()?;
-    let (rest, first) = parse_core(rest).ok()?;
-    let (rest, _) = tag::<_, _, E>(" or ").parse(rest).ok()?;
-    let (rest, second) = parse_core(rest).ok()?;
-    // Require the informational "spell"/"card" suffix so we don't over-match
-    // bare disjunctions ("instant or sorcery" alone falls through to the
-    // normal parser path).
-    let (_rest, _) = alt((
-        tag::<_, _, E>(" spell"),
-        tag(" card"),
-        tag(" spells"),
-        tag(" cards"),
-    ))
-    .parse(rest)
-    .ok()?;
-    Some(TypedFilter {
-        type_filters: vec![TypeFilter::AnyOf(vec![first, second])],
-        controller: None,
-        properties: Vec::new(),
-    })
+
+    let (rest, first) = parse_cast_type_leg(rest).ok()?;
+    let (rest, more) = many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg))
+        .parse(rest)
+        .ok()?;
+    // CR 109.2b: the head noun is mandatory, so a bare type list with no noun
+    // ("instant or sorcery" alone) still falls through to the normal parser
+    // path.
+    let (_rest, ()) = parse_cast_head_noun(rest).ok()?;
+
+    let mut legs = Vec::with_capacity(more.len() + 1);
+    legs.push(first);
+    legs.extend(more);
+
+    fn typed(atoms: Vec<TypeFilter>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: atoms,
+            controller: None,
+            properties: Vec::new(),
+        })
+    }
+
+    match legs.as_slice() {
+        // CR 601.3: one leg with no quantifier is ordinary type-phrase
+        // territory — `parse_type_phrase` already handles it and can carry
+        // controller/property legs this helper never builds. Reject, exactly as
+        // before this helper was composed.
+        [_single] if quantifier.is_none() => None,
+        [single] => Some(typed(single.clone())),
+        many if many.iter().all(|leg| leg.len() == 1) => Some(typed(vec![TypeFilter::AnyOf(
+            many.iter().map(|leg| leg[0].clone()).collect(),
+        )])),
+        many => Some(TargetFilter::Or {
+            filters: many.iter().map(|leg| typed(leg.clone())).collect(),
+        }),
+    }
+}
+
+/// CR 109.2b: does this cast gate name a real card type?
+///
+/// The exact predicate the pre-composition gate applied to a flat `TypedFilter`
+/// (`type_filters.iter().any(|tf| !matches!(tf, Card | Any))`), lifted to walk
+/// the composed `Or`/`And`/`Not` tree. Deliberately NOT
+/// `TypedFilter::has_meaningful_type_constraint`, which also returns true for a
+/// filter carrying only *properties*: a non-type restriction (Perception
+/// Bobblehead's mana-value bound, Meeting of the Five's colour count) must keep
+/// yielding `None` here so this helper never invents a type gate the Oracle
+/// text did not state.
+fn cast_gate_names_a_card_type(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .type_filters
+            .iter()
+            .any(|tf| !matches!(tf, TypeFilter::Card | TypeFilter::Any)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(cast_gate_names_a_card_type)
+        }
+        TargetFilter::Not { filter } => cast_gate_names_a_card_type(filter),
+        _ => false,
+    }
 }
 
 /// CR 601.3 + CR 109.2b: the card-type gate carried by a
@@ -22009,8 +22197,8 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
 ///
 /// Composes the two existing subject parsers in the same order the
 /// `has_from_among_cards_exiled_with_self` branch already uses:
-/// `parse_cast_type_disjunction` first (it handles " or " between bare core
-/// types, which `parse_type_phrase` does not), then `parse_type_phrase`.
+/// `parse_cast_type_list` first (it owns the multi-leg / quantified / subtype
+/// grammar `parse_type_phrase` does not), then `parse_type_phrase`.
 ///
 /// Returns `None` when the clause names no card type — "cast a spell from among
 /// them" (Aetherworks Marvel, Svella, Apex of Power) grants an unrestricted
@@ -22020,19 +22208,15 @@ fn parse_cast_type_disjunction(rest: &str) -> Option<TypedFilter> {
 /// (Chandra's "red spells", Meeting of the Five's "spells with exactly three
 /// colors", Perception Bobblehead's mana-value bound) also yield `None` so this
 /// helper never invents a type gate the Oracle text did not state.
-fn parse_cast_type_gate(rest: &str) -> Option<TypedFilter> {
-    let typed =
-        parse_cast_type_disjunction(rest).or_else(
-            || match super::oracle_target::parse_type_phrase(rest).0 {
-                TargetFilter::Typed(tf) => Some(tf),
+fn parse_cast_type_gate(rest: &str) -> Option<TargetFilter> {
+    let gate =
+        parse_cast_type_list(rest).or_else(|| {
+            match super::oracle_target::parse_type_phrase(rest).0 {
+                typed @ TargetFilter::Typed(_) => Some(typed),
                 _ => None,
-            },
-        )?;
-    typed
-        .type_filters
-        .iter()
-        .any(|tf| !matches!(tf, TypeFilter::Card | TypeFilter::Any))
-        .then_some(typed)
+            }
+        })?;
+    cast_gate_names_a_card_type(&gate).then_some(gate)
 }
 
 /// CR 601.3: AND a parsed card-type gate onto an exile-set cast anaphor.
@@ -22047,8 +22231,8 @@ fn parse_cast_type_gate(rest: &str) -> Option<TypedFilter> {
 /// `Zone::Exile` before applying this filter.
 fn exiled_cast_target_with_type_gate(rest: &str) -> TargetFilter {
     match parse_cast_type_gate(rest) {
-        Some(typed) => TargetFilter::And {
-            filters: vec![TargetFilter::Typed(typed), TargetFilter::ExiledBySource],
+        Some(gate) => TargetFilter::And {
+            filters: vec![gate, TargetFilter::ExiledBySource],
         },
         None => TargetFilter::ExiledBySource,
     }
@@ -22168,11 +22352,11 @@ fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
 /// * `None` — anchor or "exiled this way" suffix not present.
 ///
 /// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
-/// strip) and `parse_cast_type_disjunction` / `parse_type_phrase` (typed
+/// strip) and `parse_cast_type_list` / `parse_type_phrase` (typed
 /// leg extraction).
 fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     type E<'a> = OracleError<'a>;
-    let (after_anchor, _) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
+    let (after_anchor, before_anchor) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
     let (after_anchor, _) = tag::<_, _, E>("from among ").parse(after_anchor).ok()?;
     let (after_article, _) = opt(alt((tag::<_, _, E>("the "), tag("those "))))
         .parse(after_anchor)
@@ -22186,10 +22370,20 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
         return None;
     }
 
-    // Try disjunctive typed leg first ("instant or sorcery cards"); fall
-    // back to parse_type_phrase ("nonland cards", "creature cards").
-    let mut typed_filter = parse_cast_type_disjunction(after_article)
-        .map(TargetFilter::Typed)
+    // CR 601.3: WotC puts the type list BEFORE the anchor in the
+    // counted form ("cast up to X instant and/or sorcery spells from among
+    // cards exiled this way" — Wand of Wonder) and AFTER it in the article form
+    // ("from among the nonland cards exiled this way" — Etali). Probe the
+    // pre-anchor prefix first: when both positions carry text, the prefix is
+    // the restriction and the suffix is the anaphor's own head noun. The
+    // untyped members of this family ("any number of spells ", "up to two
+    // spells ") yield `None` from the prefix probe because the leg list is
+    // empty once the head noun is guarded out, so they stay bare.
+    //
+    // Then the post-article probe ("instant or sorcery cards"), then
+    // `parse_type_phrase` ("nonland cards", "creature cards").
+    let mut typed_filter = parse_cast_type_list(before_anchor)
+        .or_else(|| parse_cast_type_list(after_article))
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
 
     // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
@@ -22906,14 +23100,32 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 // type gate exactly as the exile-bound anaphor below did
                 // (issue #6880) — "cast an instant or sorcery spell from among
                 // those cards" would reach any revealed card.
-                if let Some(typed) = parse_cast_type_gate(rest) {
-                    hand_filter.type_filters = typed.type_filters;
-                }
+                let and_leg = match parse_cast_type_gate(rest) {
+                    // Single typed gate: graft its atoms onto the hand binding,
+                    // replacing the bare `Card` head noun. Unchanged behaviour.
+                    Some(TargetFilter::Typed(typed)) => {
+                        hand_filter.type_filters = typed.type_filters;
+                        None
+                    }
+                    // CR 205.2b: a gate whose legs are per-object conjunctions
+                    // ("a Vehicle or artifact creature spell") cannot collapse
+                    // into one `type_filters` vector — AND it beside the hand
+                    // binding instead, which `matches_target_filter` evaluates
+                    // as the same conjunction of predicates.
+                    Some(gate) => Some(gate),
+                    None => None,
+                };
                 hand_filter
                     .properties
                     .push(FilterProp::InZone { zone: Zone::Hand });
+                let hand_target = match and_leg {
+                    Some(gate) => TargetFilter::And {
+                        filters: vec![gate, TargetFilter::Typed(hand_filter)],
+                    },
+                    None => TargetFilter::Typed(hand_filter),
+                };
                 return Some(Effect::CastFromZone {
-                    target: TargetFilter::Typed(hand_filter),
+                    target: hand_target,
                     without_paying_mana_cost: without_paying,
                     mode,
                     cast_transformed: false,
@@ -22992,30 +23204,26 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // AND it with `ExiledBySource` so the cast is restricted both by card
     // type and by the source-exile-link.
     if has_from_among_cards_exiled_with_self(rest) {
-        // First try the disjunctive form ("an instant or sorcery spell ...")
-        // since `parse_type_phrase` doesn't currently handle " or " between
-        // bare core-type words. Then fall back to `parse_type_phrase` for
-        // single-type forms.
-        let typed_filter = parse_cast_type_disjunction(rest)
-            .map(TargetFilter::Typed)
+        // First try the composed type-list form ("an instant or sorcery
+        // spell ...") since `parse_type_phrase` doesn't handle connectors
+        // between bare core-type words. Then fall back to `parse_type_phrase`
+        // for single-type forms.
+        let mut typed_filter = parse_cast_type_list(rest)
             .unwrap_or_else(|| super::oracle_target::parse_type_phrase(rest).0);
-        let target = if let TargetFilter::Typed(mut tf) = typed_filter {
-            // CR 406.1: source-linked exiled cards live in the Exile zone.
-            // Make the zone explicit so target legality (CR 601.2c) restricts
-            // the choice to exile-zone objects even before AND'ing with
-            // ExiledBySource.
-            if !tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::InZone { .. }))
-            {
-                tf.properties.push(FilterProp::InZone { zone: Zone::Exile });
+        let target = match typed_filter {
+            TargetFilter::Typed(_) | TargetFilter::Or { .. } => {
+                // CR 406.1: source-linked exiled cards live in the Exile zone.
+                // Make the zone explicit so target legality (CR 601.2c)
+                // restricts the choice to exile-zone objects even before
+                // AND'ing with ExiledBySource. `ensure_exile_zone_on_cast_target`
+                // is the shared recursing form, so an `Or`-shaped gate gets the
+                // zone on every leg.
+                ensure_exile_zone_on_cast_target(&mut typed_filter);
+                TargetFilter::And {
+                    filters: vec![typed_filter, TargetFilter::ExiledBySource],
+                }
             }
-            TargetFilter::And {
-                filters: vec![TargetFilter::Typed(tf), TargetFilter::ExiledBySource],
-            }
-        } else {
-            TargetFilter::ExiledBySource
+            _ => TargetFilter::ExiledBySource,
         };
         return Some(Effect::CastFromZone {
             target,
@@ -23100,8 +23308,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // so for inputs of the form "spell from your hand with mana value ..."
     // the mana-value clause is past the type-phrase pos when reached.
     let cast_target_rest = strip_cast_target_prefix(rest);
-    let mut filter = parse_cast_type_disjunction(rest)
-        .map(TargetFilter::Typed)
+    let mut filter = parse_cast_type_list(rest)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase(cast_target_rest).0);
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);

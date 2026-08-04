@@ -14540,6 +14540,73 @@ impl TargetFilter {
         }
     }
 
+    /// CR 601.3 + CR 607.2a: This filter with the exile-set anaphor
+    /// (`TargetFilter::ExiledBySource`) removed — i.e. the clause's OWN
+    /// restrictions, expressed against a set of objects whose membership in the
+    /// exile link has *already* been established by whoever produced the set.
+    ///
+    /// Returns `None` when nothing but the anaphor remains. A bare
+    /// `ExiledBySource` restricts a pre-established set not at all, so its
+    /// consumers must filter nothing rather than re-derive the link — re-reading
+    /// it is not merely redundant, it is wrong whenever the link is younger than
+    /// the reader's view of it (a trigger's `linked_exile_snapshot` is captured
+    /// when the trigger is put on the stack, before the ability's own exile step
+    /// has run, so the anaphor leg would be false for every forwarded id).
+    ///
+    /// Structure: `And` legs residualize independently and re-conjoin; an `Or`
+    /// with a branch that residualizes away imposes nothing on any member and so
+    /// drops whole. `TrackedSetFiltered` keeps its own set membership and
+    /// residualizes only the filter nested under it.
+    ///
+    /// INVARIANT — `Not`: this helper does not descend into `Not`, and neither
+    /// does [`TargetFilter::references_exiled_by_source`], the predicate that
+    /// gates every consumer of this residual. The two rest on the same premise
+    /// and must be changed in lockstep: no production cast filter puts the
+    /// anaphor under a negation ("cards NOT exiled this way" describes no
+    /// printed clause), so a `Not` is always a genuine restriction and is
+    /// preserved verbatim. If a card ever makes that shape real, both helpers
+    /// must be taught about it in the SAME change — a residual that still
+    /// contains `ExiledBySource` would re-evaluate the very link this helper
+    /// exists to discharge, and (per the paragraph above) that re-read is false
+    /// for every forwarded id, so the grant would silently become a no-op.
+    /// `not_over_the_exile_anaphor_is_unreachable_and_pinned_in_lockstep` pins
+    /// the current agreement between the two.
+    pub fn without_exile_anaphor(&self) -> Option<TargetFilter> {
+        match self {
+            TargetFilter::ExiledBySource => None,
+            TargetFilter::And { filters } => {
+                let mut residual: Vec<TargetFilter> = filters
+                    .iter()
+                    .filter_map(TargetFilter::without_exile_anaphor)
+                    .collect();
+                match residual.len() {
+                    0 => None,
+                    1 => residual.pop(),
+                    _ => Some(TargetFilter::And { filters: residual }),
+                }
+            }
+            TargetFilter::Or { filters } => {
+                let mut residual = Vec::with_capacity(filters.len());
+                for filter in filters {
+                    residual.push(filter.without_exile_anaphor()?);
+                }
+                Some(TargetFilter::Or { filters: residual })
+            }
+            // The tracked-set membership is its own restriction and survives; only
+            // the anaphor nested under it is discharged.
+            TargetFilter::TrackedSetFiltered {
+                id,
+                filter,
+                caused_by,
+            } => Some(TargetFilter::TrackedSetFiltered {
+                id: *id,
+                filter: Box::new(filter.without_exile_anaphor().unwrap_or(TargetFilter::Any)),
+                caused_by: *caused_by,
+            }),
+            other => Some(other.clone()),
+        }
+    }
+
     /// CR 400.7d + CR 608.2k: True when this filter tree references the
     /// cost-paid object (`TargetFilter::CostPaidObject`) at any structural
     /// position — directly, or nested inside `And`/`Or`/`Not`/
@@ -24144,6 +24211,145 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 601.3 + CR 607.2a: `without_exile_anaphor` is the residual of a cast
+    /// filter once the exile-set anaphor is discharged. The three shapes that
+    /// matter to the chain-forwarded grant path:
+    ///
+    /// * a BARE `ExiledBySource` (Hellcarver Demon, Improvisation Capstone, and
+    ///   the ~50 other bare rows) has no residual — its consumers must filter
+    ///   nothing, so those cards are a strict no-change path;
+    /// * a single-gate `And` residualizes to the gate alone;
+    /// * a nested `And[Or[..], ExiledBySource]` (Sanwell, Scarlet Witch) keeps
+    ///   the whole `Or` — collapsing it would drop one of its branches.
+    #[test]
+    fn without_exile_anaphor_discharges_only_the_anaphor_legs() {
+        let vehicle =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string())));
+        let artifact_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+            controller: None,
+            properties: Vec::new(),
+        });
+
+        assert_eq!(TargetFilter::ExiledBySource.without_exile_anaphor(), None);
+
+        let single_gate = TargetFilter::And {
+            filters: vec![vehicle.clone(), TargetFilter::ExiledBySource],
+        };
+        assert_eq!(
+            single_gate.without_exile_anaphor(),
+            Some(vehicle.clone()),
+            "a lone surviving leg unwraps out of the And"
+        );
+
+        let or_gate = TargetFilter::Or {
+            filters: vec![vehicle, artifact_creature],
+        };
+        let sanwell = TargetFilter::And {
+            filters: vec![or_gate.clone(), TargetFilter::ExiledBySource],
+        };
+        assert_eq!(
+            sanwell.without_exile_anaphor(),
+            Some(or_gate),
+            "both Or branches must survive the discharge"
+        );
+
+        // An Or with a bare-anaphor branch restricts a pre-established set not
+        // at all, so the whole disjunction drops rather than half of it.
+        assert_eq!(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+            .without_exile_anaphor(),
+            None
+        );
+    }
+
+    /// CR 601.3 + CR 607.2a: the `Not` invariant documented on
+    /// `without_exile_anaphor`. Neither that helper nor
+    /// `references_exiled_by_source` descends into `Not`; zero production cast
+    /// filters put the anaphor under a negation, so the two agree today. These
+    /// rows pin that agreement: teaching one helper about `Not` without the
+    /// other reddens this test instead of silently producing a residual that
+    /// re-reads the anaphor.
+    #[test]
+    fn not_over_the_exile_anaphor_is_unreachable_and_pinned_in_lockstep() {
+        let anaphor_under_not = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ExiledBySource),
+        };
+        assert!(
+            !anaphor_under_not.references_exiled_by_source(),
+            "the gate predicate does not descend into Not, so this shape never \
+             reaches the chain-forwarded retain at all"
+        );
+        assert_eq!(
+            anaphor_under_not.clone().without_exile_anaphor(),
+            Some(anaphor_under_not),
+            "and the residualizer agrees: Not is preserved verbatim — if either \
+             side learns to descend, BOTH must, in the same change"
+        );
+
+        // An anaphor-free negation is a genuine restriction and survives the
+        // discharge unchanged, which is the shape this arm actually exists for.
+        let not_a_land = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+        };
+        assert_eq!(
+            TargetFilter::And {
+                filters: vec![not_a_land.clone(), TargetFilter::ExiledBySource],
+            }
+            .without_exile_anaphor(),
+            Some(not_a_land)
+        );
+    }
+
+    /// CR 607.2a + CR 608.2c: a tracked-set membership ("cards exiled this way")
+    /// is its own restriction on a chain-forwarded set, so it survives the
+    /// discharge; only the filter nested under it residualizes.
+    #[test]
+    fn without_exile_anaphor_keeps_tracked_set_membership() {
+        let instant = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let gated = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::And {
+                filters: vec![instant.clone(), TargetFilter::ExiledBySource],
+            }),
+            caused_by: Some(ThisWayCause::Exiled),
+        };
+        assert!(
+            gated.references_exiled_by_source(),
+            "the gate predicate descends into the tracked set, so the residual \
+             below is what the retain applies"
+        );
+        assert_eq!(
+            gated.without_exile_anaphor(),
+            Some(TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(instant),
+                caused_by: Some(ThisWayCause::Exiled),
+            })
+        );
+
+        // A tracked set whose only nested leg is the anaphor degrades that leg
+        // to `Any` — never to `None`, which would discard the membership too.
+        assert_eq!(
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(1),
+                filter: Box::new(TargetFilter::ExiledBySource),
+                caused_by: Some(ThisWayCause::Exiled),
+            }
+            .without_exile_anaphor(),
+            Some(TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(1),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Exiled),
+            })
+        );
+    }
 
     #[test]
     fn put_chosen_counter_quantity_visitor_includes_target_condition_rhs() {
