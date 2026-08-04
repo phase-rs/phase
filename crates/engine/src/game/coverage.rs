@@ -9388,10 +9388,24 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("prevent") && effective_lower.contains("damage")
                 }
                 Effect::CopySpell { .. } => {
-                    // "You may have this creature enter as a copy of ..." lines
-                    // (including "enter tapped as a copy of")
-                    // Parsed as CopySpell without a description string.
+                    // CR 707.10: to copy a spell is to put a copy of it onto the
+                    // stack. A CopySpell is parsed without a description string, so
+                    // it is matched here by effect type. Two surface classes:
+                    //   (a) clone-permanent copies — "... enter as a copy of ..."
+                    //       (including "enter tapped as a copy of");
+                    //   (b) spell copies — "copy that spell", "copy it", "copy
+                    //       target instant or sorcery spell". These frequently nest
+                    //       inside a CreateDelayedTrigger ("When you next cast ...
+                    //       this turn, copy that spell", CR 603.7b), reached via
+                    //       ability_tree_any's CreateDelayedTrigger recursion. The
+                    //       retarget rider ("you may choose new targets for the
+                    //       copy") is CR 707.10c. Covers Galvanic Iteration /
+                    //       Doublecast / Dual Strike / Twincast / Fork.
                     effective_lower.contains("as a copy of")
+                        || (effective_lower.contains("copy")
+                            && (effective_lower.contains("that spell")
+                                || effective_lower.contains("copy it")
+                                || effective_lower.contains("copy target")))
                 }
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
@@ -13669,6 +13683,111 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
             "unsupported non-Defiler cost reduction should remain visible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn delayed_spell_copy_line_is_not_a_silent_drop() {
+        // CR 707.10 / CR 603.7b: "When you next cast an instant or sorcery spell
+        // this turn, copy that spell. You may choose new targets for the copy."
+        // parses to a description-less CopySpell nested inside a
+        // CreateDelayedTrigger. The description matcher misses (no description
+        // string at any level), so coverage must come from the effect-type
+        // fallback reaching the nested CopySpell via ability_tree_any's
+        // CreateDelayedTrigger recursion. Covers the whole delayed spell-copy
+        // class (Galvanic Iteration / Doublecast / Dual Strike), not one card.
+        // The delayed-trigger condition variant is immaterial to the seam under
+        // test (the audit inspects only the effect subtree for coverage), so a
+        // minimal AtNextPhase stands in for the real WhenNextEvent.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let delayed_copy = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::CopySpell {
+                            target: TargetFilter::TriggeringSource,
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
+                            additional_modifications: vec![],
+                            starting_loyalty_from_casualty_sacrifice: false,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            )
+        };
+
+        for oracle in [
+            // Galvanic Iteration / Doublecast
+            "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+            // Dual Strike — mana-value-restricted variant of the same class
+            "When you next cast an instant or sorcery spell with mana value 4 or less this turn, copy that spell. You may choose new targets for the copy.",
+        ] {
+            let mut face = make_face();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities.push(delayed_copy());
+            let findings = audit_card_lines(oracle, &face);
+            assert!(
+                findings.is_empty(),
+                "delayed spell-copy line falsely flagged: {oracle} -> {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_spell_copy_line_without_description_is_not_a_silent_drop() {
+        // CR 707.10: "Copy target instant or sorcery spell. You may choose new
+        // targets for the copy." (Twincast / Fork). The real printings carry an
+        // ability description that the description matcher catches, but a
+        // description-less CopySpell of the same direct-copy class must still be
+        // covered by the effect-type fallback rather than flagged as a SilentDrop.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle =
+            "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings.is_empty(),
+            "direct spell-copy line falsely flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_line_without_copyspell_effect_is_still_a_silent_drop() {
+        // Reach-guard (non-vacuous): proves the negatives above are caused by the
+        // CopySpell arm actually reaching the effect — not by the line being
+        // skipped for an unrelated reason. The same "... copy that spell ..." line
+        // on a face whose only effect is an unimplemented stub (no CopySpell) MUST
+        // still surface as a SilentDrop.
+        let oracle = "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("copy that spell", oracle),
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "spell-copy line without a CopySpell effect must remain a SilentDrop: {findings:?}"
         );
     }
 
