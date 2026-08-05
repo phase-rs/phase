@@ -210,6 +210,22 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // MISaligned copies go to a different graveyard and are correctly prompted by
     // the same conflict — see the impl-report soundness note.)
     "skyfisher spider",
+    // ---- unprofiled-effect commute, batch: the effect node has no RW profile, so
+    // the fail-closed `RwProfile::conservative()` catch-all prompts ----
+    // dies-batch optional PutOnTopOrBottom{SelfRef, chooser: Controller} (AST
+    // measured): each co-departing copy moves ONLY its own graveyard card (CR 603.6c
+    // first-zone check) to its OWN owner's library, so the members' writes are
+    // disjoint — owner-misaligned copies route to different libraries entirely, and
+    // same-owner copies contend only for the top/bottom slot, where identical
+    // same-name cards commute up to relabeling. The "may" and the top-or-bottom pick
+    // are resolution-time choices made by the one batch controller in either order
+    // (CR 603.5). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
+    // lands in `RwProfile::conservative()` (maximal reads/writes + fail-closed
+    // `reads_member_bound`), refusing batch-T1 and tripping the feed rows, so no
+    // in-scope recognizer proves the self-scoped move context-free (Valakut
+    // Exploration misparse-fix fixture regen surfaced this card in the sweep
+    // corpus; same adjudication as the #7031 branch).
+    "arashin sovereign",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event

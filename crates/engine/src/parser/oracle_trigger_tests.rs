@@ -26714,3 +26714,353 @@ fn elder_brain_they_draw_binds_to_defending_player() {
         other => panic!("expected Draw, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Existential exiled-with-source intervening-if — the bare-plural existential
+// axis ("there are [no] cards exiled with [source]") plus the plural anaphor
+// it introduces ("put THEM ..."). CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k.
+// SHAPE tests over the FULL pipeline (`parse_oracle_text`), verbatim Oracle
+// text per /card-test.
+// ---------------------------------------------------------------------------
+
+/// Recursive Unimplemented walk over an ability chain (sub + else branches).
+fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+    matches!(*ability.effect, Effect::Unimplemented { .. })
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_has_unimplemented)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_has_unimplemented)
+}
+
+/// SHAPE (P2) — Valakut Exploration trigger 2: the bare existential
+/// intervening-if is hoisted to the trigger condition (CR 603.4), the swept
+/// plural anaphor binds to the linked-exile pool as a mass move
+/// (CR 608.2k + CR 406.6 + CR 607.2a), and the conjoined ", then ~ deals that
+/// much damage to each opponent" clause survives as a chained sub-ability
+/// reading the moved count (CR 608.2c later-text-reads-earlier-action).
+#[test]
+fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
+    let parsed = parse_oracle_text(
+        "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.\nAt the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+        "Valakut Exploration",
+        &["Landfall".to_string()],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2, "both triggers must survive");
+    let end_step = &parsed.triggers[1];
+    assert_eq!(end_step.mode, TriggerMode::Phase);
+
+    // CR 603.4: the intervening-if is hoisted, not dropped.
+    match &end_step.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) => {}
+        other => panic!("expected CardsExiledBySource GE 1 condition, got {other:?}"),
+    }
+
+    // CR 406.6 + CR 607.2a: the sweep is a mass move of the linked pool from
+    // exile (Bomat Courier's proven ChangeZoneAll shape), never the
+    // single-object ParentTarget resolution-choice path.
+    let execute = end_step.execute.as_ref().expect("execute ability");
+    match &*execute.effect {
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Graveyard,
+            target: TargetFilter::ExiledBySource,
+            ..
+        } => {}
+        other => {
+            panic!("expected ChangeZoneAll Exile->Graveyard over ExiledBySource, got {other:?}")
+        }
+    }
+
+    // CR 608.2c: the trailing damage clause is chained, reading the moved
+    // count (Whirlpool Drake's `, then` + EventContextAmount shape;
+    // DamageEachPlayer verified live on Shadowheart, Cleric of War).
+    let damage = execute
+        .sub_ability
+        .as_ref()
+        .expect("damage clause must chain after the sweep");
+    // The `, then` boundary chains a resolution step of the same instruction
+    // (CR 608.2c in-order) — the same default `ContinuationStep` link
+    // Whirlpool Drake's ", then draw that many cards" chain carries.
+    assert_eq!(damage.sub_link, SubAbilityLink::ContinuationStep);
+    match &*damage.effect {
+        Effect::DamageEachPlayer {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            player_filter: PlayerFilter::Opponent,
+        } => {}
+        other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
+    }
+
+    // Reach-guard: zero Unimplemented across the whole parse — the negative
+    // assertions above cannot pass vacuously via a failed parse.
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert!(
+                !chain_has_unimplemented(execute),
+                "trigger chain leaked Unimplemented: {execute:?}"
+            );
+        }
+    }
+    for ability in &parsed.abilities {
+        assert!(
+            !chain_has_unimplemented(ability),
+            "ability chain leaked Unimplemented: {ability:?}"
+        );
+    }
+}
+
+/// SHAPE (P3) — Evercoat Ursine: the same bare existential gate binds on a
+/// combat-damage trigger (CR 603.4) and the `Condition_If` swallow warning
+/// clears — paired with positives (condition present, CastFromZone body
+/// present, zero Unimplemented) so the empty-warnings negative cannot pass
+/// vacuously (the suppression rule mutes units owning an Unimplemented).
+#[test]
+fn evercoat_ursine_combat_damage_gate_binds_and_swallow_warning_clears() {
+    let parsed = parse_oracle_text(
+        "Trample\nHideaway 3, hideaway 3 (When this creature enters, look at the top three cards of your library, exile one face down, then put the rest on the bottom in a random order. Then do it again.)\nWhenever this creature deals combat damage to a player, if there are cards exiled with it, you may play one of them without paying its mana cost.",
+        "Evercoat Ursine",
+        &["Hideaway".to_string(), "Trample".to_string()],
+        &["Creature".to_string()],
+        &["Elemental".to_string(), "Bear".to_string()],
+    );
+    let combat = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::DamageDone)
+        .expect("combat-damage trigger must parse");
+
+    // CR 603.4: the gate binds.
+    match &combat.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) => {}
+        other => panic!("expected CardsExiledBySource GE 1 condition, got {other:?}"),
+    }
+
+    // Positive reach-guards: the play-one-of-them body still parses (its
+    // pre-existing "one of them" binding is OUT of this fix's claimed axis and
+    // stays as-is), and no Unimplemented anywhere.
+    let execute = combat.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(&*execute.effect, Effect::CastFromZone { .. }),
+        "the play-one-of-them body must remain CastFromZone, got {:?}",
+        execute.effect
+    );
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert!(
+                !chain_has_unimplemented(execute),
+                "trigger chain leaked Unimplemented: {execute:?}"
+            );
+        }
+    }
+
+    // The Condition_If swallow warning clears — the gate is now represented.
+    let swallowed: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|w| {
+            matches!(
+                w,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "the hoisted gate must clear the Condition_If swallow warning: {swallowed:?}"
+    );
+}
+
+/// SHAPE (P4) — Search the City: the "no" pole attaches at CLAUSE level
+/// ("Then if there are no cards exiled with this enchantment, sacrifice it")
+/// as an `AbilityCondition::QuantityCheck` EQ 0 on the sacrifice sub-ability
+/// (`strip_leading_general_conditional` → `static_condition_to_ability_condition`).
+#[test]
+fn search_the_city_no_cards_exiled_gate_attaches_to_sacrifice_clause() {
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, exile the top five cards of your library.\nWhenever you play a card with the same name as one of the exiled cards, you may put one of those cards with that name into its owner's hand. Then if there are no cards exiled with this enchantment, sacrifice it. If you do, take an extra turn after this one.",
+        "Search the City",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 2, "both triggers must survive");
+    let play_trigger = &parsed.triggers[1];
+    let execute = play_trigger.execute.as_ref().expect("execute ability");
+    let sacrifice = execute
+        .sub_ability
+        .as_ref()
+        .expect("sacrifice clause must chain after the put");
+    assert!(
+        matches!(&*sacrifice.effect, Effect::Sacrifice { .. }),
+        "expected Sacrifice clause, got {:?}",
+        sacrifice.effect
+    );
+
+    // CR 603.4-adjacent clause-level gate: EQ 0 (the polarity sibling of the
+    // GE-1 bare existential), bridged to AbilityCondition::QuantityCheck.
+    match &sacrifice.condition {
+        Some(AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }) => {}
+        other => panic!("expected CardsExiledBySource EQ 0 clause gate, got {other:?}"),
+    }
+
+    // Reach-guard: the ExtraTurn rider still chains after the sacrifice.
+    let extra_turn = sacrifice
+        .sub_ability
+        .as_ref()
+        .expect("ExtraTurn rider must remain chained after the sacrifice");
+    assert!(
+        matches!(&*extra_turn.effect, Effect::ExtraTurn { .. }),
+        "expected ExtraTurn rider, got {:?}",
+        extra_turn.effect
+    );
+}
+
+/// SHAPE (P5) — The Mysterious Sphere: the COUNTED condition (GE 3) is
+/// untouched, but its "put them into your graveyard" sweep now binds to the
+/// linked pool as a mass move. Coverage honesty: its later
+/// `Unimplemented { name: "create" }` clause MUST remain (this card is a
+/// partial fix and must stay red there).
+#[test]
+fn the_mysterious_sphere_sweep_binds_to_pool_and_create_stays_red() {
+    let parsed = parse_oracle_text(
+        "Advertising — {T}: Exile the top card of your library. You gain 1 life.\nShow — At the beginning of combat on your turn, if there are three or more cards exiled with The Mysterious Sphere, you may put them into your graveyard. If you do, create copies of each nonland card among them. You may cast the copies without paying their mana costs. If you cast a creature spell this way, it gains haste and \"Sacrifice this creature at the beginning of your end step.\"",
+        "The Mysterious Sphere",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let show = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("beginning-of-combat trigger must parse");
+
+    // The pre-existing counted condition is byte-identical.
+    match &show.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) => {}
+        other => panic!("expected CardsExiledBySource GE 3 condition, got {other:?}"),
+    }
+
+    // CR 608.2k + CR 406.6: the sweep binds to the pool as a mass move.
+    let execute = show.execute.as_ref().expect("execute ability");
+    match &*execute.effect {
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Graveyard,
+            target: TargetFilter::ExiledBySource,
+            ..
+        } => {}
+        other => {
+            panic!("expected ChangeZoneAll Exile->Graveyard over ExiledBySource, got {other:?}")
+        }
+    }
+
+    // Coverage honesty: the create-copies clause stays Unimplemented (red).
+    fn chain_has_named_unimplemented(ability: &AbilityDefinition, name: &str) -> bool {
+        matches!(&*ability.effect, Effect::Unimplemented { name: n, .. } if n == name)
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(|s| chain_has_named_unimplemented(s, name))
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(|s| chain_has_named_unimplemented(s, name))
+    }
+    assert!(
+        chain_has_named_unimplemented(execute, "create"),
+        "the create-copies gap must stay honestly Unimplemented: {execute:?}"
+    );
+}
+
+/// SHAPE (P6) — River Song's Diary: the multi-authority antecedent fixture.
+/// The plural-pool wiring is NUMBER-scoped (CR 608.2c rules of English):
+/// a singular "it" whose antecedent is the nearer chained object ("choose one
+/// of them at random. You may cast IT") must keep its ParentTarget choose→cast
+/// chain even though the trigger's condition reads the linked-exile pool.
+#[test]
+fn river_songs_diary_singular_it_keeps_parent_target_chain() {
+    let parsed = parse_oracle_text(
+        "Imprint — Whenever a player casts an instant or sorcery spell from their hand, exile it instead of putting it into a graveyard as it resolves.\nAt the beginning of your upkeep, if there are four or more cards exiled with this artifact, choose one of them at random. You may cast it without paying its mana cost.",
+        "River Song's Diary",
+        &["Imprint".to_string()],
+        &["Artifact".to_string()],
+        &["Book".to_string()],
+    );
+    let upkeep = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Phase)
+        .expect("upkeep trigger must parse");
+
+    // Reach-guard: its counted condition (GE 4) is present.
+    match &upkeep.condition {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }) => {}
+        other => panic!("expected CardsExiledBySource GE 4 condition, got {other:?}"),
+    }
+
+    // Reach-guard: the ChooseFromZone head is present.
+    let execute = upkeep.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(&*execute.effect, Effect::ChooseFromZone { .. }),
+        "expected ChooseFromZone head, got {:?}",
+        execute.effect
+    );
+
+    // The singular "it" cast stays bound to the CHOSEN card (ParentTarget) —
+    // a number-blind pool wiring would flip this to ExiledBySource.
+    let cast = execute
+        .sub_ability
+        .as_ref()
+        .expect("cast clause must chain after the choose");
+    match &*cast.effect {
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => panic!("expected CastFromZone over ParentTarget (the chosen card), got {other:?}"),
+    }
+}

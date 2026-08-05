@@ -959,6 +959,7 @@ mod urge_to_feed_regression;
 mod urza_lord_high_artificer_shuffle_exile_free_cast;
 mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;
+mod valakut_exploration_end_step_exile_sweep;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod veteran_armorsmith_soldier_anthem;
 mod vigor_regression;

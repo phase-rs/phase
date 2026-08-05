@@ -1352,6 +1352,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         actor: ctx.actor.clone(),
         object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
             .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
+            &if_condition,
+        ),
         in_trigger: true,
         ..Default::default()
     };
@@ -9159,6 +9162,43 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     }
 
     None
+}
+
+/// CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k: an intervening-if that reads the
+/// source's linked-exile pool ("if there are cards exiled with ~") introduces
+/// that pool as the plural-anaphor antecedent for the effect body ("put THEM
+/// into their owner's graveyard" sweeps the pool). Number-scoped on purpose:
+/// only bare PLURAL pronouns bind to the pool (see
+/// `ParseContext::plural_object_pronoun_ref`).
+fn trigger_plural_object_pronoun_ref_for_intervening_if(
+    if_condition: &Option<TriggerCondition>,
+) -> Option<TargetFilter> {
+    fn reads_linked_exile_pool(condition: &TriggerCondition) -> bool {
+        match condition {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: _,
+                rhs,
+            } => expr_reads_linked_exile_pool(lhs) || expr_reads_linked_exile_pool(rhs),
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().any(reads_linked_exile_pool)
+            }
+            TriggerCondition::Not { condition } => reads_linked_exile_pool(condition),
+            _ => false,
+        }
+    }
+    fn expr_reads_linked_exile_pool(expr: &QuantityExpr) -> bool {
+        matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource
+            }
+        )
+    }
+    if_condition
+        .as_ref()
+        .filter(|condition| reads_linked_exile_pool(condition))
+        .map(|_| TargetFilter::ExiledBySource)
 }
 
 /// CR 608.2k: When an intervening-if pins the trigger source off the
