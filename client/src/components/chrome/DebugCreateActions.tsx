@@ -776,7 +776,6 @@ function CustomTokenForm({ onDispatch }: Props) {
 // copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
 // form is a thin source+owner picker over the `CreateTokenCopy` debug action.
 function CopyPermanentForm({ onDispatch }: Props) {
-  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
   const [nonlegendary, setNonlegendary] = useState(false);

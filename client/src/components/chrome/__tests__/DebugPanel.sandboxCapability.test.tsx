@@ -61,11 +61,7 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn() }));
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({
-  useTranslation: () => ({
-    t: (key: string) => key === "debugCreate.makeNonlegendary" ? "Make nonlegendary" : key,
-  }),
-}));
+vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 // `CardNameAutocomplete` fetches the full name list on mount via a build-time
 // define that vitest does not provide. Only the ungated branch mounts it, and
 // the suggestion list is not what these tests measure — the input's presence
