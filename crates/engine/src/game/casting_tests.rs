@@ -211,7 +211,7 @@ fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProdu
     source
 }
 
-fn create_black_red_filter_land(state: &mut GameState, card_id: u32) -> ObjectId {
+fn create_black_red_filter_land(state: &mut GameState, card_id: u64) -> ObjectId {
     let filter_land = create_object(
         state,
         CardId(card_id),
