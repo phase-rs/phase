@@ -20,7 +20,7 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ManaChoice, SpellCastRecord};
+use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
@@ -260,6 +260,57 @@ fn mana_selection_for_source(state: &GameState, source_id: ObjectId) -> ManaSour
         .expect("source must have one live mana selection")
 }
 
+fn mana_selection_for_source_ability(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> ManaSourceSelection {
+    crate::game::mana_sources::activatable_mana_source_selections(state, PlayerId(0))
+        .into_iter()
+        .find(|selection| {
+            selection.source.object_id == source_id
+                && selection.ability_index == Some(ability_index)
+        })
+        .expect("source must expose the requested live mana ability")
+}
+
+fn choose_black_red_filter_output(state: &mut GameState) -> WaitingFor {
+    if let WaitingFor::PayManaAbilityMana { options, .. } = &state.waiting_for {
+        let payment = options
+            .iter()
+            .find(|payment| payment.as_slice() == [ManaType::Black])
+            .cloned()
+            .expect("the filter-land mana-cost prompt must offer {B}");
+        apply_as_current(state, GameAction::PayManaAbilityMana { payment })
+            .expect("the offered filter-land mana payment must be accepted");
+    }
+
+    let WaitingFor::ChooseManaColor {
+        choice: ManaChoicePrompt::Combination { options },
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "filter-land activation must offer a combination choice, got {:?}",
+            state.waiting_for
+        );
+    };
+    let colors = options
+        .iter()
+        .find(|colors| colors.as_slice() == [ManaType::Black, ManaType::Red])
+        .cloned()
+        .expect("the filter-land combination prompt must offer {B}{R}");
+    apply_as_current(
+        state,
+        GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(colors),
+            count: 1,
+        },
+    )
+    .expect("the offered filter-land {B}{R} choice must resolve")
+    .waiting_for
+}
+
 fn advertised_cast_for(state: &GameState, spell: ObjectId) -> GameAction {
     crate::ai_support::legal_actions(state)
         .into_iter()
@@ -383,31 +434,24 @@ fn castability_follows_two_swamps_through_a_filter_land_payment() {
         WaitingFor::ManaPayment { .. }
     ));
 
-    let filter_selection = mana_selection_for_source(&state, filter_land);
+    let filter_selection = mana_selection_for_source_ability(&state, filter_land, 0);
     let filter_result = apply_as_current(
         &mut state,
-        GameAction::TapLandForMana {
-            selection: filter_selection,
+        GameAction::ActivateAbility {
+            source_id: filter_selection.source.object_id,
+            ability_index: filter_selection
+                .ability_index
+                .expect("the filter land selection names its printed ability"),
         },
     )
     .expect("the filter land must accept the black mana payment");
     assert!(matches!(
         filter_result.waiting_for,
-        WaitingFor::ChooseManaColor { .. }
+        WaitingFor::PayManaAbilityMana { .. } | WaitingFor::ChooseManaColor { .. }
     ));
 
-    let choice_result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: ManaChoice::Combination(vec![ManaType::Black, ManaType::Red]),
-            count: 1,
-        },
-    )
-    .expect("the filter land's {B}{R} choice must resolve");
-    assert!(matches!(
-        choice_result.waiting_for,
-        WaitingFor::ManaPayment { .. }
-    ));
+    let choice_result = choose_black_red_filter_output(&mut state);
+    assert!(matches!(choice_result, WaitingFor::ManaPayment { .. }));
     let second_swamp_selection = mana_selection_for_source(&state, second_swamp);
     let second_result = apply_as_current(
         &mut state,
@@ -508,26 +552,19 @@ fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment()
         WaitingFor::ManaPayment { .. }
     ));
 
-    let filter_selection = mana_selection_for_source(&state, filter_land);
+    let filter_selection = mana_selection_for_source_ability(&state, filter_land, 0);
     apply_as_current(
         &mut state,
-        GameAction::TapLandForMana {
-            selection: filter_selection,
+        GameAction::ActivateAbility {
+            source_id: filter_selection.source.object_id,
+            ability_index: filter_selection
+                .ability_index
+                .expect("the filter land selection names its printed ability"),
         },
     )
     .expect("the filter land must spend one of the battery's black mana");
-    let choice_result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: ManaChoice::Combination(vec![ManaType::Black, ManaType::Red]),
-            count: 1,
-        },
-    )
-    .expect("the filter land's {B}{R} choice must resolve");
-    assert!(matches!(
-        choice_result.waiting_for,
-        WaitingFor::ManaPayment { .. }
-    ));
+    let choice_result = choose_black_red_filter_output(&mut state);
+    assert!(matches!(choice_result, WaitingFor::ManaPayment { .. }));
     apply_as_current(&mut state, GameAction::PassPriority)
         .expect("the completed manual route must finalize the advertised cast");
     assert_eq!(state.objects[&spell].zone, Zone::Stack);
