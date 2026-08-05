@@ -69,4 +69,56 @@ describe("processRemoteUpdate", () => {
     ]);
     expect(useGameStore.getState().nextLogSeq).toBe(1);
   });
+
+  // F3. The server-published rewind list must reach the store through the SAME
+  // path as the snapshot it describes, so it sits under the generation gate.
+  describe("rewindTargets threading", () => {
+    it("writes the server list into the store", async () => {
+      const targets = [{ turn_number: 3, active_player: 1 }];
+
+      await processRemoteUpdate(prioritySnapshot(), [], [], targets);
+
+      expect(useGameStore.getState().rewindTargets).toEqual(targets);
+    });
+
+    it("clears the list when the server publishes an empty one", async () => {
+      // Paired negative: `[]` is a real value meaning "no boundaries left",
+      // most obviously right after an approved rewind prunes the ring.
+      await processRemoteUpdate(prioritySnapshot(), [], [], [
+        { turn_number: 3, active_player: 1 },
+      ]);
+      expect(useGameStore.getState().rewindTargets).toHaveLength(1);
+
+      await processRemoteUpdate(prioritySnapshot(), [], [], []);
+
+      expect(useGameStore.getState().rewindTargets).toEqual([]);
+    });
+
+    it("leaves the list untouched when the transport does not publish", async () => {
+      // Hostile: `undefined` and `[]` are NOT the same. P2P and draft call
+      // `processRemoteUpdate` with three arguments; collapsing the two would
+      // make every p2p update wipe a list it knows nothing about.
+      await processRemoteUpdate(prioritySnapshot(), [], [], [
+        { turn_number: 3, active_player: 1 },
+      ]);
+
+      await processRemoteUpdate(prioritySnapshot(), [], []);
+
+      expect(useGameStore.getState().rewindTargets).toEqual([
+        { turn_number: 3, active_player: 1 },
+      ]);
+    });
+
+    // NOT TESTED HERE: that a *superseded* update declines to write. The
+    // generation is bumped only by `abandonDispatchesForStateRestore`
+    // (reachable via `restoreGameState`), and an event-free update runs to
+    // completion synchronously, so there is no window in which to supersede it
+    // from this harness. The property is structural instead: the write sits
+    // immediately after `processRemoteUpdateInner`'s second
+    // `isCurrentDispatchGeneration` guard, next to `commitEngineSnapshot`, and
+    // is the reason the list is threaded through dispatch rather than written
+    // from `GameProvider`. A `reset()`-based version of this test passes
+    // vacuously — `reset()` neither bumps the generation nor leaves the store
+    // untouched — so it is deliberately absent rather than green.
+  });
 });

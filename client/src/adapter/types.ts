@@ -3610,3 +3610,43 @@ export function supportsMatchConcede(
     && (adapter as Partial<MatchConcedeCapability>).supportsMatchConcede === true
     && typeof (adapter as Partial<MatchConcedeCapability>).sendMatchConcede === "function";
 }
+
+/**
+ * One turn boundary the server offers as a rollback target. Snake_case because
+ * this is the wire shape verbatim (`server-core`'s `RewindOption`); the client
+ * renders it and never derives it.
+ */
+export interface RewindOption {
+  readonly turn_number: number;
+  readonly active_player: PlayerId;
+}
+
+/**
+ * How far back a rollback request reaches. Mirrors `server-core`'s
+ * `RewindTarget` — an internally tagged union, not a boolean pair, because the
+ * two granularities carry different payloads.
+ */
+export type RewindTarget =
+  | { readonly kind: "last_action" }
+  | { readonly kind: "turn_start"; readonly turn_number: number };
+
+/**
+ * Optional transport capability for a *server-authoritative* rollback. Shaped
+ * exactly like `MatchConcedeCapability` above, and for the same reason: only
+ * the adapter that can actually bind the request to an authenticated wire
+ * session declares it, so no other adapter is forced to answer a question it
+ * has no meaningful answer to. A local-authority adapter rewinds its own state
+ * instead and must NOT claim this.
+ */
+export interface ServerRewindCapability {
+  readonly supportsServerRewind: true;
+  sendRequestTakeback(target?: RewindTarget): void;
+}
+
+export function supportsServerRewind(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & ServerRewindCapability {
+  return adapter !== null
+    && (adapter as Partial<ServerRewindCapability>).supportsServerRewind === true
+    && typeof (adapter as Partial<ServerRewindCapability>).sendRequestTakeback === "function";
+}

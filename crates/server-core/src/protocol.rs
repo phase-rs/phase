@@ -15,6 +15,7 @@ use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
 use crate::session::FullSessionKey;
+use crate::takeback::{RewindOption, RewindTarget};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
@@ -320,10 +321,19 @@ pub enum ClientMessage {
         draft_code: String,
     },
     /// GH #1507: ask every other human player at the table to approve
-    /// rolling the game back to the state immediately before the requester's
-    /// most recent action. Auto-approves when the requester is the only
+    /// rolling the game back. Auto-approves when the requester is the only
     /// human seat (e.g. solo vs. AI).
-    RequestTakeback,
+    ///
+    /// A **newtype** variant carrying `Option<RewindTarget>`, not a struct
+    /// variant, and that shape is load-bearing. `ClientMessage` is adjacently
+    /// tagged (`tag = "type"`, `content = "data"`); serde synthesizes a
+    /// missing-`data` arm only for unit and newtype variants, and only an
+    /// `Option<T>` payload recovers from it. The client omits `data` entirely
+    /// for a last-action undo, so a struct variant here would make this server
+    /// reject its own same-version client's frame with ``missing field
+    /// `data` ``. `None` normalizes to [`RewindTarget::LastAction`], which is
+    /// exactly what an omitted payload means.
+    RequestTakeback(Option<RewindTarget>),
     /// Approve or decline the table's pending takeback request. Any single
     /// decline withdraws the request — rollback requires unanimous approval.
     RespondTakeback {
@@ -432,6 +442,12 @@ pub enum ServerMessage {
         /// seat. `serde(default)` keeps this back-compat for older clients.
         #[serde(default)]
         events: Vec<GameEvent>,
+        /// Turn boundaries this session currently offers as rollback targets.
+        /// Populated here as well as on `StateUpdate` so a reconnect mid-game
+        /// sees the list immediately rather than waiting for the next action.
+        /// Empty for every deployment except a `SingleUser` sidecar.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rewind_targets: Vec<RewindOption>,
     },
     StateUpdate {
         /// Monotonic server-authored snapshot revision. Reused for read-only
@@ -469,6 +485,11 @@ pub enum ServerMessage {
         /// Viewer-scoped interactive opportunities derived from the same
         /// authoritative state as this filtered snapshot.
         viewer_interaction: engine::types::interaction::ViewerInteraction,
+        /// Turn boundaries this session currently offers as rollback targets,
+        /// published alongside the state they describe rather than out of band.
+        /// Empty for every deployment except a `SingleUser` sidecar.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
         reason: String,
@@ -1209,6 +1230,7 @@ mod tests {
             player_token: None,
             full_key: None,
             events: vec![],
+            rewind_targets: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1263,6 +1285,7 @@ mod tests {
             player_token: None,
             full_key: None,
             events: vec![],
+            rewind_targets: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -2240,10 +2263,121 @@ mod tests {
 
     #[test]
     fn client_message_request_takeback_roundtrips() {
-        let msg = ClientMessage::RequestTakeback;
+        let msg = ClientMessage::RequestTakeback(None);
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, ClientMessage::RequestTakeback));
+        assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+    }
+
+    /// R15. The last-action frame the client actually sends carries **no**
+    /// `data` key at all, which is byte-identical to the frame every deployed
+    /// client already sends. `ClientMessage` is adjacently tagged, and serde
+    /// synthesizes a missing-content arm only for unit and newtype variants —
+    /// and only an `Option<T>` payload recovers from it. A struct variant here
+    /// would reject this frame with ``missing field `data` ``, so this
+    /// assertion is what fails if the variant shape regresses.
+    #[test]
+    fn request_takeback_without_data_decodes_as_last_action() {
+        let parsed: ClientMessage =
+            serde_json::from_str(r#"{"type":"RequestTakeback"}"#).expect("absent data must decode");
+        assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+
+        let null_data: ClientMessage =
+            serde_json::from_str(r#"{"type":"RequestTakeback","data":null}"#)
+                .expect("explicit null data must decode");
+        assert!(matches!(null_data, ClientMessage::RequestTakeback(None)));
+
+        // `None` is the wire spelling of "this client predates turn rewind",
+        // and the transport normalizes it with `unwrap_or_default()`. Pin the
+        // default so that normalization cannot silently change meaning.
+        assert_eq!(RewindTarget::default(), RewindTarget::LastAction);
+    }
+
+    /// R15. The turn-rewind frame is the only `data`-bearing shape, and its
+    /// exact bytes are the contract `ws-adapter.ts` is written against.
+    #[test]
+    fn request_takeback_turn_start_roundtrips_with_exact_wire_bytes() {
+        let msg = ClientMessage::RequestTakeback(Some(RewindTarget::TurnStart { turn_number: 7 }));
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"RequestTakeback","data":{"kind":"turn_start","turn_number":7}}"#
+        );
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::RequestTakeback(Some(RewindTarget::TurnStart { turn_number: 7 }))
+        ));
+
+        let last_action = ClientMessage::RequestTakeback(Some(RewindTarget::LastAction));
+        let json = serde_json::to_string(&last_action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"RequestTakeback","data":{"kind":"last_action"}}"#
+        );
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMessage::RequestTakeback(Some(RewindTarget::LastAction))
+        ));
+    }
+
+    /// R15. `rewind_targets` must survive a `StateUpdate` round-trip, must be
+    /// omitted from the wire entirely when empty (same shape as
+    /// `server_hello_omits_public_url_when_none`), and must decode to an empty
+    /// vec when a producer omits it.
+    #[test]
+    fn state_update_rewind_targets_roundtrip_and_omission() {
+        let state = GameState::new_two_player(42);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
+        let build = |rewind_targets: Vec<RewindOption>| ServerMessage::StateUpdate {
+            state_revision: 4,
+            state: state.clone(),
+            events: vec![],
+            legal_actions: vec![],
+            auto_pass_recommended: false,
+            end_continuous_effect_offers: vec![],
+            mana_payment_shortcut_actions: vec![],
+            eliminated_players: vec![],
+            log_entries: vec![],
+            spell_costs: HashMap::new(),
+            legal_actions_by_object: HashMap::new(),
+            derived: Default::default(),
+            viewer_interaction: viewer_interaction.clone(),
+            rewind_targets,
+        };
+
+        let populated = build(vec![RewindOption {
+            turn_number: 3,
+            active_player: PlayerId(1),
+        }]);
+        let json = serde_json::to_string(&populated).unwrap();
+        assert!(json.contains(r#""rewind_targets":[{"turn_number":3,"active_player":1}]"#));
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::StateUpdate { rewind_targets, .. } => {
+                assert_eq!(
+                    rewind_targets,
+                    vec![RewindOption {
+                        turn_number: 3,
+                        active_player: PlayerId(1),
+                    }]
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let empty = serde_json::to_string(&build(vec![])).unwrap();
+        assert!(
+            !empty.contains("rewind_targets"),
+            "an empty list must not appear on the wire at all"
+        );
+        match serde_json::from_str::<ServerMessage>(&empty).unwrap() {
+            ServerMessage::StateUpdate { rewind_targets, .. } => {
+                assert!(rewind_targets.is_empty(), "absent field decodes to empty");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

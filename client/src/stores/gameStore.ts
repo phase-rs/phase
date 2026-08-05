@@ -15,6 +15,7 @@ import type {
   ObjectId,
   PlayerId,
   PersistedGameState,
+  RewindOption,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
@@ -187,6 +188,13 @@ interface GameStoreState {
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
+   * Server-published turn boundaries offered as rollback targets. Mirrors the
+   * server exactly — never appended to client-side, never derived. Empty on
+   * every transport that does not publish them (which is all of them except a
+   * `SingleUser` phase-server sidecar).
+   */
+  rewindTargets: RewindOption[];
+  /**
    * Pre-game P2P lobby fill state, populated by the `lobbyProgress` adapter
    * event and cleared when `game_setup` arrives (game starts). `null` when
    * not in a pre-game P2P lobby (i.e. during AI/online games or after the
@@ -291,6 +299,12 @@ interface GameStoreActions {
   resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
+  /**
+   * Replace the server-published rollback targets. Only `dispatch.ts` calls
+   * this, and only from inside its generation gate — a superseded remote update
+   * must not clobber the list with a stale one.
+   */
+  setRewindTargets: (targets: RewindOption[]) => void;
   reset: () => void;
   setAdapter: (adapter: EngineAdapter) => void;
   /**
@@ -389,6 +403,7 @@ async function seedResumedServerGame(
       nextLogSeq: 0,
       stateHistory: [],
       turnCheckpoints: [],
+      rewindTargets: [],
     },
   });
 }
@@ -416,6 +431,7 @@ const initialState: GameStoreState = {
   viewerInteraction: null,
   stateHistory: [],
   turnCheckpoints: [],
+  rewindTargets: [],
   lobbyProgress: null,
   resolutionProgress: null,
   isResolvingAll: false,
@@ -540,6 +556,7 @@ export const useGameStore = create<GameStore>()(
           nextLogSeq: initLogEntries.length,
           stateHistory: [],
           turnCheckpoints: [],
+          rewindTargets: [],
           startingContest,
         },
       });
@@ -566,6 +583,7 @@ export const useGameStore = create<GameStore>()(
           nextLogSeq: 0,
           stateHistory: [],
           turnCheckpoints: savedCheckpoints,
+          rewindTargets: [],
         },
       });
     },
@@ -649,6 +667,10 @@ export const useGameStore = create<GameStore>()(
           stateHistory: stateHistory.slice(0, -1),
         },
       });
+    },
+
+    setRewindTargets: (targets) => {
+      set({ rewindTargets: targets });
     },
 
     reset: () => {
