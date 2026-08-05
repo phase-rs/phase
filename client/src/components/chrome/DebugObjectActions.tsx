@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type {
   AttachTarget,
@@ -135,8 +136,10 @@ function RemoveObjectForm({ onDispatch }: Props) {
 }
 
 function CreateTokenCopyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
+  const [nonlegendary, setNonlegendary] = useState(false);
 
   return (
     <>
@@ -149,11 +152,21 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label={t("debugCreate.makeNonlegendary")}
+        />
+      </FieldRow>
       <SubmitButton
         disabled={sourceId == null}
         onClick={() =>
           sourceId != null &&
-          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } })
+          onDispatch({
+            type: "CreateTokenCopy",
+            data: { source_id: sourceId, owner, nonlegendary },
+          })
         }
       >
         Copy Object

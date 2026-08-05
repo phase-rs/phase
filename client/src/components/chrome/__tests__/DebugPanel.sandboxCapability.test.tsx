@@ -60,7 +60,11 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn() }));
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string) => key === "debugCreate.makeNonlegendary" ? "Make nonlegendary" : key,
+  }),
+}));
 // `CardNameAutocomplete` fetches the full name list on mount via a build-time
 // define that vitest does not provide. Only the ungated branch mounts it, and
 // the suggestion list is not what these tests measure — the input's presence
@@ -201,6 +205,7 @@ describe("DebugPanel — desktop solo capability", () => {
     openCreateCardAccordion();
 
     expect(screen.getByPlaceholderText("Lightning Bolt")).toBeInTheDocument();
+    expect(screen.getByLabelText("Make nonlegendary")).toBeInTheDocument();
     expect(
       screen.queryByText(/Spawning a card by name needs the in-browser engine/),
     ).toBeNull();

@@ -55,7 +55,8 @@
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
-    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token.",
+    "makeNonlegendary": "Make nonlegendary"
   },
   "nextUp": {
     "label": "Next Up",

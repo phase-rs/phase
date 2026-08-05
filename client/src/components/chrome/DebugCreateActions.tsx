@@ -147,6 +147,7 @@ interface CardFaceShape {
 }
 
 function CreateCardForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
@@ -154,6 +155,7 @@ function CreateCardForm({ onDispatch }: Props) {
   // ETB triggers + SBAs (engine default); unchecked = raw placement. Only sent
   // meaningfully for Battlefield — the engine ignores it for other zones.
   const [runEtb, setRunEtb] = useState(true);
+  const [nonlegendary, setNonlegendary] = useState(false);
   const [face, setFace] = useState<CardFaceShape | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -262,11 +264,25 @@ function CreateCardForm({ onDispatch }: Props) {
           <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
         </FieldRow>
       )}
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label={t("debugCreate.makeNonlegendary")}
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() =>
           onDispatch({
             type: "CreateCard",
-            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo(), run_etb: runEtb },
+            data: {
+              card_name: cardName,
+              owner,
+              zone,
+              attach_to: buildAttachTo(),
+              run_etb: runEtb,
+              nonlegendary,
+            },
           })
         }
         disabled={!cardName.trim() || !hasHost}
@@ -761,8 +777,10 @@ function CustomTokenForm({ onDispatch }: Props) {
 // copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
 // form is a thin source+owner picker over the `CreateTokenCopy` debug action.
 function CopyPermanentForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
+  const [nonlegendary, setNonlegendary] = useState(false);
 
   return (
     <>
@@ -778,10 +796,20 @@ function CopyPermanentForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label={t("debugCreate.makeNonlegendary")}
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() => {
           if (sourceId == null) return;
-          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } });
+          onDispatch({
+            type: "CreateTokenCopy",
+            data: { source_id: sourceId, owner, nonlegendary },
+          });
         }}
         disabled={sourceId == null}
       >

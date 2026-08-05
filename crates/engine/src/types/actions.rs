@@ -1029,6 +1029,12 @@ pub enum DebugAction {
         /// consulted for `zone == Battlefield`; ignored for other destinations.
         #[serde(default = "default_true")]
         run_etb: bool,
+        /// Strip the Legendary supertype from the spawned card's copiable
+        /// characteristics. This sandbox-only override is applied before an
+        /// optional battlefield entry so legend-rule SBAs see the requested
+        /// characteristics.
+        #[serde(default)]
+        nonlegendary: bool,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1168,6 +1174,10 @@ pub enum DebugAction {
     CreateTokenCopy {
         source_id: ObjectId,
         owner: PlayerId,
+        /// Apply the existing `RemoveSupertype(Legendary)` copy modification
+        /// while synthesizing the token.
+        #[serde(default)]
+        nonlegendary: bool,
     },
 }
 
@@ -1262,6 +1272,7 @@ impl DebugAction {
                 zone,
                 attach_to,
                 run_etb,
+                nonlegendary,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1271,13 +1282,15 @@ impl DebugAction {
                     None => String::new(),
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
+                let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
                 format!(
-                    "CreateCard ({} for {} in {:?}{}{})",
+                    "CreateCard ({} for {} in {:?}{}{}{})",
                     card_name,
                     player_label(*owner),
                     zone,
                     attach_suffix,
                     etb_suffix,
+                    nonlegendary_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
@@ -1446,10 +1459,15 @@ impl DebugAction {
                     etb_suffix
                 )
             }
-            DebugAction::CreateTokenCopy { source_id, owner } => format!(
-                "CreateTokenCopy ({} for {})",
+            DebugAction::CreateTokenCopy {
+                source_id,
+                owner,
+                nonlegendary,
+            } => format!(
+                "CreateTokenCopy ({} for {}{})",
                 obj(*source_id),
-                player_label(*owner)
+                player_label(*owner),
+                if *nonlegendary { " (nonlegendary)" } else { "" },
             ),
         }
     }
