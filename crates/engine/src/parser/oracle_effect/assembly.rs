@@ -2431,7 +2431,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
                 if has_tracked_ref {
-                    // CR 608.2c + CR 614.6: same walk, narrower predicate —
+                    // CR 608.2c + CR 607.2a: same walk, narrower predicate —
                     // does any prior clause publish members stamped `Exiled`?
                     // Only then may a cast anaphor narrow to
                     // `caused_by: Exiled`.
