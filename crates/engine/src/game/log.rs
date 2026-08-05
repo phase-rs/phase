@@ -51,6 +51,16 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         }
         // CardDrawn also reveals which specific card was drawn
         GameEvent::CardDrawn { .. } => true,
+        // CR 121.1: PlayerPerformedAction { Draw } is an internal ledger signal
+        // (consumed by "for each player who drew a card this way" counting and
+        // the player-action trigger index), not a user-facing event. Excluding it
+        // keeps the visible log silent on draws — matching the deliberate
+        // CardDrawn exclusion above — instead of narrating every draw-step and
+        // cantrip draw as debug-formatted spam.
+        GameEvent::PlayerPerformedAction {
+            action: crate::types::events::PlayerActionKind::Draw,
+            ..
+        } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
         // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
@@ -1447,6 +1457,42 @@ mod tests {
             [LogSegment::PlayerName { player_id, .. }, LogSegment::Text(text)]
                 if *player_id == PlayerId(1) && text == " foretold a card"
         ));
+    }
+
+    #[test]
+    fn draw_player_action_is_excluded_but_other_actions_are_logged() {
+        use crate::types::events::PlayerActionKind;
+
+        let state = GameState::new_two_player(42);
+        // CR 121.1: the Draw ledger signal must not reach the visible log —
+        // this assertion flips (entries.len() == 1) if the exclusion is reverted.
+        let draw_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Draw,
+            look_count: None,
+            scry_bottom_count: None,
+        };
+        let draw_entries = resolve_log_entries(&[draw_event], &state);
+        assert!(
+            draw_entries.is_empty(),
+            "PlayerPerformedAction {{ Draw }} is a ledger-only signal and must be excluded from the log"
+        );
+
+        // Reach-guard against an over-broad exclusion: a non-Draw player action
+        // (Scry) must still produce a log entry. Fails if someone excludes all
+        // PlayerPerformedAction variants instead of just Draw.
+        let scry_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Scry,
+            look_count: Some(1),
+            scry_bottom_count: Some(0),
+        };
+        let scry_entries = resolve_log_entries(&[scry_event], &state);
+        assert_eq!(
+            scry_entries.len(),
+            1,
+            "Non-Draw player actions must remain visible in the log"
+        );
     }
 
     #[test]

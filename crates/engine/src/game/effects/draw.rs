@@ -4,7 +4,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{DrawSequenceOrigin, GameState};
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::statics::StaticMode;
@@ -446,6 +446,26 @@ fn resume_draw_sequence_outcome(
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
     state.last_effect_count = Some(frame.accumulated as i32);
+    // CR 121.1 + CR 608.2c + CR 109.5: Record the drawing player exactly once per
+    // settled draw INSTRUCTION — the emission granularity is the whole draw, not
+    // the per-card unit that `apply_draw_after_replacement` settles. `frame.player`
+    // is the concrete drawer, so during a `player_scope: Opponent` fan-out (Cut a
+    // Deal) each scoped opponent's own instruction records that opponent, without
+    // relying on `ability.controller` rebinding. Gated on `frame.accumulated > 0`
+    // so an instruction that delivered no card (empty library, or every unit
+    // replaced away) records nothing (CR 608.2c ruling: a player who doesn't draw
+    // isn't counted). The generic post-effect scan in `effects/mod.rs` folds this
+    // event into `player_actions_this_way` (a set — dedups the drawer for a
+    // multi-card draw) and `player_actions_this_turn` (a Vec — now one entry per
+    // draw event, not per card).
+    if frame.accumulated > 0 {
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: frame.player,
+            action: PlayerActionKind::Draw,
+            look_count: None,
+            scry_bottom_count: None,
+        });
+    }
     match frame.origin {
         DrawSequenceOrigin::Plain => {
             // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
@@ -668,6 +688,16 @@ pub fn apply_draw_after_replacement(
             .expect("empty-library draw bookkeeping must have a live player and journal cause");
     }
 
+    // CR 121.1 + CR 608.2c + CR 109.5: The `PlayerPerformedAction { Draw }`
+    // ledger emission is NOT made here. This helper settles ONE draw unit — the
+    // sequence driver (`resume_draw_sequence_outcome`) calls it once per card
+    // (count = 1), and the resumed-choice path in `engine_replacement` settles a
+    // single paused unit too — so recording here would push one event per card.
+    // Instead the drawing player is recorded exactly once per settled draw
+    // INSTRUCTION, at frame completion, gated on the instruction's true total.
+    // That keeps `player_actions_this_way` (a set) counting players who drew and
+    // makes `player_actions_this_turn` (a Vec) count draw events, not cards, so a
+    // future `PlayerActionsThisTurn { Draw }` consumer measures draws not cards.
     drawn_count
 }
 
@@ -1685,5 +1715,115 @@ mod tranche4_draw_pipeline_tests {
              here means the consult did not run (raw-bypass or exempt-Draw regression)."
         );
         assert!(state.players[0].graveyard.contains(&drawn));
+    }
+}
+
+/// CR 121.1 + CR 608.2c + CR 109.5: The `PlayerPerformedAction { Draw }` ledger
+/// emission fires once per settled draw INSTRUCTION, at draw-sequence completion
+/// (`resume_draw_sequence_outcome`). These tests drive the REAL production driver
+/// (`start_draw_sequence`), which internally delivers a multi-card draw
+/// unit-by-unit (count = 1 per card) — the exact shape production uses — and
+/// assert the emission granularity is per instruction, not per card. A direct
+/// `apply_draw_after_replacement` call with `count: 2` is deliberately NOT used:
+/// production never settles a multi-card draw in a single such call, so it would
+/// exercise a shape the engine doesn't drive.
+#[cfg(test)]
+mod draw_this_way_ledger_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+
+    fn drew_action_events(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: PlayerActionKind::Draw,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn card_drawn_events(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { .. }))
+            .count()
+    }
+
+    /// CR 121.1 + CR 608.2c: A TWO-card draw driven by the production sequence
+    /// (`start_draw_sequence(.., 2, ..)`) delivers two cards (two `CardDrawn`
+    /// events) but records the drawing player with exactly ONE
+    /// `PlayerPerformedAction { Draw }` — the emission is per settled draw
+    /// instruction, not per card. Revert-failing anchor: moving the emit back
+    /// into the per-unit `apply_draw_after_replacement` makes `drew_action_events`
+    /// == 2 (one per card) and fails the final assertion. This is the emission
+    /// side of ruling #2 ("if an opponent drew more than one card this way … you
+    /// still draw only one card for that player"); the `player_actions_this_way`
+    /// `HashSet` is the second line of defence, validated end-to-end in the
+    /// `cut_a_deal_draw_this_way_count` integration suite.
+    #[test]
+    fn multi_card_instruction_records_player_once_via_sequence() {
+        let mut sc = GameScenario::new();
+        sc.add_card_to_library_top(P0, "Island");
+        sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 2, &mut events);
+
+        assert_eq!(
+            card_drawn_events(&events),
+            2,
+            "the two-card instruction must deliver two cards (per-card CardDrawn)"
+        );
+        assert_eq!(
+            drew_action_events(&events),
+            1,
+            "but the draw-action ledger event must fire exactly once per instruction, \
+             not once per card (CR 608.2c ruling #2)"
+        );
+    }
+
+    /// CR 121.1: A draw instruction that delivers no card (empty library — no top
+    /// card enters the hand, so no draw occurs) emits no
+    /// `PlayerPerformedAction { Draw }`, so a player who doesn't draw is never
+    /// counted (CR 608.2c ruling #1). This is the `frame.accumulated > 0` gate.
+    #[test]
+    fn empty_library_instruction_records_nothing_via_sequence() {
+        let sc = GameScenario::new();
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 1, &mut events);
+
+        assert_eq!(
+            card_drawn_events(&events),
+            0,
+            "empty library delivers no card"
+        );
+        assert_eq!(
+            drew_action_events(&events),
+            0,
+            "a draw that delivers nothing must not record the player (CR 608.2c ruling #1)"
+        );
+    }
+
+    /// CR 121.1: Baseline — a normal one-card draw instruction records the drawing
+    /// player once, so ordinary draws still populate the ledger.
+    #[test]
+    fn single_card_instruction_records_player_once_via_sequence() {
+        let mut sc = GameScenario::new();
+        sc.add_card_to_library_top(P0, "Plains");
+        let mut state = sc.state;
+
+        let mut events = Vec::new();
+        start_draw_sequence(&mut state, P0, 1, &mut events);
+
+        assert_eq!(card_drawn_events(&events), 1);
+        assert_eq!(drew_action_events(&events), 1);
     }
 }
