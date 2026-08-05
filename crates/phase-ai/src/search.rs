@@ -10,7 +10,8 @@ use engine::ai_support::{
     TargetedExchangeVerdict,
 };
 use engine::types::ability::{
-    AbilityDefinition, ContinuousModification, Duration, Effect, StaticDefinition, TargetFilter,
+    AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
+    TargetFilter,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
@@ -103,6 +104,50 @@ const LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS: usize = 128;
 
 fn has_large_battlefield(state: &GameState) -> bool {
     state.battlefield.len() >= LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS
+}
+
+/// A target for a wholly unmodeled spell cannot receive an effect-aware tactical
+/// ranking. Select directly from the engine-issued target domain instead of
+/// entering speculative cast/payment scoring, which has no semantic upside and
+/// can delay the required choice on a large game state.
+fn target_selection_has_no_modeled_effect(state: &GameState) -> bool {
+    let WaitingFor::TargetSelection { pending_cast, .. } = &state.waiting_for else {
+        return false;
+    };
+
+    ability_tree_has_no_modeled_effect(&pending_cast.ability)
+}
+
+fn ability_tree_has_no_modeled_effect(ability: &ResolvedAbility) -> bool {
+    matches!(ability.effect, Effect::Unimplemented { .. })
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_tree_has_no_modeled_effect)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_tree_has_no_modeled_effect)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_definition_has_no_modeled_effect)
+}
+
+fn ability_definition_has_no_modeled_effect(ability: &AbilityDefinition) -> bool {
+    matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_none_or(ability_definition_has_no_modeled_effect)
+        && ability
+            .else_ability
+            .as_deref()
+            .is_none_or(ability_definition_has_no_modeled_effect)
+        && ability
+            .mode_abilities
+            .iter()
+            .all(ability_definition_has_no_modeled_effect)
 }
 
 /// CR 701.21a: choose which permanents to sacrifice for a mandatory
@@ -240,6 +285,17 @@ fn choose_action_with_session_inner(
 
     if durable_pact_routes {
         retain_live_pact_route(state, ai_player, session);
+    }
+
+    // A wholly unmodeled spell still has a real, engine-owned target prompt.
+    // Do not wait for speculative cast/payment scoring to fail before answering
+    // it: the engine-issued domain already supplies a valid path forward.
+    if target_selection_has_no_modeled_effect(state) {
+        return issued_domain()
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
+            .or_else(|| fallback_action(state, config, &contract))
+            .and_then(&bind_specialist);
     }
 
     // Gated on the variant so the hot `Priority` path never materializes the
@@ -8468,6 +8524,112 @@ mod tests {
             Some(GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             })
+        );
+    }
+
+    #[test]
+    fn unmodeled_target_selection_uses_an_issued_forward_action_without_scoring() {
+        let mut state = spell_target_selection_state(
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            vec![
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            false,
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("target-selection fixture must retain its pending cast");
+        };
+        pending_cast.ability.effect = Effect::unimplemented(
+            "unsupported_targeted_spell",
+            "Choose a target for an unsupported spell.",
+        );
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+
+        engine::game::perf_counters::reset();
+        let mut rng = SmallRng::seed_from_u64(7);
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let counters = engine::game::perf_counters::snapshot();
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "an unsupported spell's engine-issued target slot must not replay cast/payment \
+             simulation before the AI can answer"
+        );
+        assert!(
+            action.is_some(),
+            "a required target slot with legal choices must always retain a forward action"
+        );
+        assert!(
+            action
+                .as_ref()
+                .is_some_and(|action| contract.contains_action(&state, action)),
+            "the bounded target answer must stay inside the engine-issued decision domain"
+        );
+    }
+
+    #[test]
+    fn modeled_else_branch_keeps_target_selection_on_the_normal_scoring_path() {
+        let mut state = spell_target_selection_state(
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("target-selection fixture must retain its pending cast");
+        };
+        pending_cast.ability.effect =
+            Effect::unimplemented("unsupported_primary_clause", "Unsupported primary clause.");
+        pending_cast.ability.else_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            pending_cast.object_id,
+            PlayerId(0),
+        )));
+
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a modeled else branch must retain the normal effect-aware target scorer"
+        );
+    }
+
+    #[test]
+    fn modeled_mode_keeps_target_selection_on_the_normal_scoring_path() {
+        let mut state = spell_target_selection_state(
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Player(PlayerId(1))],
+            false,
+        );
+        let WaitingFor::TargetSelection { pending_cast, .. } = &mut state.waiting_for else {
+            panic!("target-selection fixture must retain its pending cast");
+        };
+        pending_cast.ability.effect =
+            Effect::unimplemented("modal_placeholder", "Unsupported mode placeholder.");
+        pending_cast
+            .ability
+            .mode_abilities
+            .push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            ));
+
+        assert!(
+            !target_selection_has_no_modeled_effect(&state),
+            "a modeled mode must retain the normal effect-aware target scorer"
         );
     }
 
