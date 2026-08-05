@@ -12081,10 +12081,11 @@ fn parse_spells_quoted_duplicate_cascade_kept() {
     );
 }
 
-// The parser's duplicate gate consults `cast_merge_preserves_instances`, which is
-// deliberately NARROWER than the semantic `instances_function_separately`: Exalted
-// remains excluded because its cast-grant count is not consumed, while Storm is
-// preserved because its synthesized trigger consumes every cast-time instance.
+// CR 702.40b: Each Storm instance triggers separately. The parser's duplicate gate
+// consults `cast_merge_preserves_instances`, which is deliberately NARROWER than the
+// semantic `instances_function_separately`: Exalted remains excluded because its
+// cast-grant count is not consumed, while Storm is preserved because its synthesized
+// trigger consumes every cast-time instance.
 #[test]
 fn cast_merge_preserves_instances_is_narrower_than_functions_separately() {
     assert!(Keyword::Cascade.instances_function_separately());

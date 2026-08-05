@@ -15,7 +15,7 @@ use engine::types::statics::StaticMode;
 
 const OPT_ORACLE: &str = "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.";
 
-/// CR 601.2f + CR 611.2f + CR 702.40a: a Storm grant that only applies before
+/// CR 601.2a + CR 611.2f + CR 702.40a: a Storm grant that only applies before
 /// the caster has cast a spell this turn is latched before the spell enters the
 /// cast ledger, then produces its trigger from that snapshot.
 #[test]

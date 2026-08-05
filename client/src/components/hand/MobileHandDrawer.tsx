@@ -18,6 +18,7 @@ import {
 } from "../../viewmodel/cardActionChoice.ts";
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
+import { StormCopyBadge } from "./StormCopyBadge.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
@@ -305,12 +306,7 @@ const DrawerCard = memo(function DrawerCard({
         <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
       {stormCopyCount !== undefined && (
-        <span
-          className="pointer-events-none absolute right-1 top-1 rounded-full bg-violet-700 px-1.5 py-0.5 text-[11px] font-bold leading-none text-white shadow-md"
-          title={t("storm.copies", { count: stormCopyCount })}
-        >
-          {stormCopyCount}
-        </span>
+        <StormCopyBadge count={stormCopyCount} variant="drawer" />
       )}
     </button>
   );

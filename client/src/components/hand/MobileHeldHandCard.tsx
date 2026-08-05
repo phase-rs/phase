@@ -1,6 +1,5 @@
 import { useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
-import { useTranslation } from "react-i18next";
 import {
   motion,
   useMotionValue,
@@ -17,6 +16,7 @@ import type { MobileHandGesture } from "../../stores/uiStore.ts";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { StormCopyBadge } from "./StormCopyBadge.tsx";
 
 interface MobileHeldHandCardProps {
   gesture: MobileHandGesture | null;
@@ -32,7 +32,6 @@ interface MobileHeldHandCardProps {
  * remains keyed in the fan but collapsed until the gesture ends.
  */
 export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHeldHandCardProps) {
-  const { t } = useTranslation("game");
   const effectiveCost = useGameStore((s) =>
     object ? s.spellCosts[String(object.id)] : undefined,
   );
@@ -134,12 +133,7 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
         <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
       {stormCopyCount !== undefined && (
-        <span
-          className="absolute right-1 top-1 rounded-full bg-violet-700 px-1.5 py-0.5 text-[11px] font-bold leading-none text-white shadow-md"
-          title={t("storm.copies", { count: stormCopyCount })}
-        >
-          {stormCopyCount}
-        </span>
+        <StormCopyBadge count={stormCopyCount} variant="held" />
       )}
     </motion.div>,
     document.body,
