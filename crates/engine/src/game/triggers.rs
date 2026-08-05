@@ -7821,7 +7821,11 @@ fn trigger_source_matches_doubler_filter(
         // Built-in keyword triggers are collected only from battlefield
         // candidates and do not capture a source context. Their source remains
         // live during this collection pass, so evaluate its current object.
-        return matches_target_filter(state, trigger.source_id, filter, &filter_context);
+        return state
+            .objects
+            .get(&trigger.source_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            && matches_target_filter(state, trigger.source_id, filter, &filter_context);
     };
     if source_context.identity.expected_zone != Zone::Battlefield {
         return false;
