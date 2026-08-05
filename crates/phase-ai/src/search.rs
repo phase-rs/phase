@@ -6,8 +6,8 @@ use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
     build_decision_context, certify_fetch_then_cast, certify_pact_plan, is_pact_payment_cast,
-    targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner, AiDecisionContract,
-    TargetedExchangeVerdict,
+    root_may_yield_adverse_exchange, targeted_exchange_verdict,
+    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
@@ -529,14 +529,28 @@ fn fast_priority_action(
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
 }
 
-/// Keep direct priority shortcuts under the same pre-cast exchange gate as the
-/// scored candidate pipeline.  The engine candidate is recovered by semantic
-/// owner so replay keeps its authenticated actor instead of fabricating one.
+/// Keep the direct priority shortcuts under the pre-cast exchange gate. The
+/// engine candidate is recovered by semantic owner so replay keeps its
+/// authenticated actor instead of fabricating one.
+///
+/// The engine's clone-free precondition runs FIRST: a root whose source carries
+/// no adverse-exchange effect shape can never be rejected, so recovering its
+/// candidate — a full `validated_candidate_actions_for_semantic_owner` pass,
+/// with a `GameState` clone per candidate the cheap filters decline — is pure
+/// cost. This gate is invoked once per action from a filter over the whole
+/// priority list, so the recovery must stay behind the precondition or the pass
+/// count is quadratic in the number of castable roots. The reordering is
+/// behavior-identical: with the same precondition inside
+/// `targeted_exchange_verdict`, the old path returned `true` on every root this
+/// one short-circuits.
 fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
     if !matches!(
         action,
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
     ) {
+        return true;
+    }
+    if !root_may_yield_adverse_exchange(state, action) {
         return true;
     }
     validated_candidate_actions_for_semantic_owner(state, ai_player)

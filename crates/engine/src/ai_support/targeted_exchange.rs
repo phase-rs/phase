@@ -11,12 +11,14 @@ use crate::game::engine::apply_interaction_for_simulation;
 use crate::game::layers::flush_layers;
 use crate::game::sba::check_state_based_actions;
 use crate::types::ability::{DamageSource, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use crate::types::ability_visit::visit_ability_def;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, PendingCast, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+use std::ops::ControlFlow;
 
 /// Root-cast tactical result. `Indeterminate` deliberately leaves the root
 /// candidate available; the preview is a safety veto, not a second rules engine.
@@ -58,6 +60,17 @@ impl RootBinding {
         }
     }
 
+    /// The object whose ability trees the announced spell or activated ability
+    /// will bind. CR 601.2a: an announced spell "has all the characteristics of
+    /// the card"; CR 602.2b: an activated ability's announcement is identical, so
+    /// the same object supplies both.
+    const fn source_object_id(self) -> ObjectId {
+        match self {
+            Self::Cast { object_id } => object_id,
+            Self::Activation { source_id, .. } => source_id,
+        }
+    }
+
     fn matches_pending(self, pending: &PendingCast) -> bool {
         match self {
             Self::Cast { object_id } => pending.object_id == object_id,
@@ -72,6 +85,190 @@ impl RootBinding {
     }
 }
 
+/// Clone-free precondition for [`targeted_exchange_verdict`]. `false` PROVES the
+/// verdict cannot be [`TargetedExchangeVerdict::Reject`], so the caller can skip
+/// both the candidate enumeration and the bounded reducer replay.
+///
+/// `Reject` is returned from exactly two sites — `preview_target_sourced_self_damage`
+/// and `preview_fight_exchange` — and both are reached only through
+/// `preview_bound_exchange`, which first requires `is_target_sourced_self_damage`
+/// or `find_fight_leaf` to match the BOUND ability. A root whose source carries
+/// neither shape anywhere in the ability lists below therefore cannot be rejected.
+///
+/// Completeness comes from [`crate::types::ability_visit::visit_ability_def`],
+/// the engine's single wildcard-free `AbilityDefinition`/`Effect` traversal: it
+/// reaches every nested carrier, including `Effect::ChooseOneOf` branches and
+/// `AbilityCost::EffectCost` under `cost`/`unless_pay`. This is deliberately an
+/// OVER-approximation of the two bound tests, which walk only the `.effect` +
+/// `.sub_ability` spine. Looser is the safety property; tighter would silently
+/// shrink the rejection set.
+///
+/// FALSIFIER (a SEAM CLASS, not one function): a new site that writes
+/// `obj.abilities` or `obj.base_abilities` on LIVE state — by assignment OR via
+/// `Arc::make_mut(&mut obj.abilities).push/extend(..)`, which is the idiom the
+/// layer system itself uses (see the note at `game/layers.rs:2028`) — where the
+/// installed content is NOT already inside the four fields entered below, is NOT
+/// a shrink (`clear()` / empty `Vec`), is NOT a write to a local rather than a
+/// `GameObject`, is NOT a layer write railed by the `layers_dirty` gate above,
+/// and does NOT target a freshly created object (token/emblem). Also falsified by a
+/// new production site that constructs one of the two adverse shapes outside
+/// Oracle lowering. **AND** falsified by (c) below.
+///
+/// Note what is deliberately NOT on that list: "an installer the cast path
+/// provably never calls." That clause was carried for three rounds with an
+/// instrument — a grep for LEAF installer names over three files — that could
+/// not have detected its own falsity: `stickers.rs:490` is reached through a
+/// WRAPPER (`zones.rs:511 rebuild_public_zone_stickers`) named in a file the
+/// grep already covered, so the grep returned zero while the route existed.
+/// (The route is in fact dead on a cast — `zones.rs:511` is inside
+/// `if from == Zone::Battlefield {` at `zones.rs:482` — but an instrument that
+/// is right by luck is not an instrument.) Dispose of a new site by reading ONE
+/// function: what does it write, and where does the content come from. If a
+/// negative reach claim is genuinely needed, discharge it with a BOUNDED
+/// TRANSITIVE CALLER CLOSURE — enumerate every caller of the installer by exact
+/// name, then every caller of each wrapper, until each terminating site's gate
+/// has been read in source, quoting the ENCLOSING CONDITIONAL of every line.
+///
+/// (c) CR 123.5 DEPENDENCY — recorded, not hypothetical. This note is
+/// ONE-DIRECTIONAL: it is discoverable from the guard's side only, and
+/// nothing in `game/zones.rs`, where such a fix would be made, points back
+/// to it. CR 123.5
+/// says stickers "are retained as that object moves to a public zone and
+/// continue to apply to the new object it becomes in that zone." The engine
+/// implements only half of that: `zones.rs:468-471` clears on a move to a
+/// hidden zone, and `zones.rs:508-513` re-applies ONLY on a battlefield exit
+/// (`from == Zone::Battlefield`, `zones.rs:482`). A card carrying a sticker in
+/// hand or library therefore keeps `obj.stickers` while `obj.abilities` never
+/// reflects it, so this predicate and the bind (`casting::combined_spell_ability_def`)
+/// read the same list and agree. IF THAT GAP IS EVER CLOSED — by un-gating
+/// `zones.rs:508-513`, by widening `zones.rs:482`, or by adding an entry-side
+/// install (`zone_pipeline.rs` today contains zero occurrences of "sticker") —
+/// then an ability sticker's granted abilities are installed into `abilities`
+/// during the cast's own move to the stack, i.e. AFTER this predicate has read
+/// the object, from a payload (`obj.stickers`, Oracle TEXT) that no traversal
+/// arm can reach without re-running the parser. This predicate is then UNSOUND
+/// and needs a fall-open rail immediately below the `layers_dirty` one:
+///     if crate::game::stickers::object_has_sticker_kind(
+///         source, crate::types::stickers::StickerKind::Ability) { return true; }
+/// `object_has_sticker_kind` (`game/stickers.rs:101`, unconditionally `pub`) is
+/// `obj.stickers.iter().any(|s| s.kind() == kind)` — no allocation, no clone.
+/// `StickerKind::Ability` is the correct discriminant: `stickers.rs:483` is the
+/// sole gate on the path to the `abilities` write at `:490`.
+///
+/// Deliberately stated WITHOUT a reachability qualifier: deciding which of those
+/// dispositions applies needs one function read, whereas deciding "is this
+/// reachable from the cast reducer" needs a call-chain trace, and that trace was
+/// got wrong in four consecutive reviews of this guard.
+///
+/// To re-audit, sweep the CHANGE, not the tree — the tree census is 516 hits:
+///   git diff <base>..HEAD -U0 -- crates/engine/src \
+///     | rg '^\+.*(\.(base_)?abilities\s*=([^=]|$)|&mut\s+[A-Za-z_0-9.:&()\[\] ]*\.(base_)?abilities\b)'
+/// The second alternation deliberately matches ANY `&mut <path>.abilities`, not
+/// just `Arc::make_mut(&mut obj.abilities)`: the engine writes this field
+/// through a complex receiver 84 times
+/// (`Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities)`) and
+/// takes a `&mut` binding to it (`let a = &mut obj.abilities;`) once, and a
+/// `make_mut(&mut <ident>.abilities)` pattern sees neither. A `&mut` borrow of
+/// this field taken to a local is itself a site worth surfacing.
+/// A binding whose mutation happens on a LATER line is invisible to any
+/// single-line regex; the first line of the pair matches, so read the whole
+/// diff hunk when it fires.
+/// Do NOT audit `casting::prepare_casting_variant` alone: the live-face swap at
+/// `casting.rs:9860` (`handle_cast_spell_with_payment_mode:10902` → `:12013` →
+/// `continue_cast_from_prepared:9827` → the Disturb branch at `:9835` →
+/// `continue_cast_with_alternative_spell_face:9849`) never enters it, and the
+/// flip-revert install at `flip.rs:345`/`:346` is reached through the zone
+/// pipeline, not through `casting.rs` at all.
+///
+/// CR 601.2a + CR 602.2b: the bound ability is an ability of the root's source
+/// object, so that object's ability trees bound the reachable effect shapes.
+pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -> bool {
+    let Some(root) = RootBinding::from_action(action) else {
+        // Not a cast or an activation: `targeted_exchange_verdict` is
+        // Indeterminate by construction (see `RootBinding::from_action`).
+        return false;
+    };
+    let Some(source) = state.objects.get(&root.source_object_id()) else {
+        return true;
+    };
+    // CR 613.1f: layer 6 ability-adding and ability-removing effects rewrite
+    // `abilities`, and `layers::evaluate_layers` re-derives that list from
+    // `base_abilities` on each pass. A pending flush can therefore leave the
+    // live list out of step with what the reducer will bind, which this
+    // predicate must never guess at. CR 704.3's state-based-action loop
+    // (`game::sba::check_state_based_actions`) flushes before every priority
+    // window, which is the only place this gate runs.
+    if state.layers_dirty.is_dirty() {
+        return true;
+    }
+    // CR 613.1: the union of the printed and post-layer lists is a superset of
+    // either, so a live removal cannot hide a shape the printed list carries.
+    source
+        .base_abilities
+        .iter()
+        .chain(source.abilities.iter())
+        // CR 712.11b / CR 715.3a / CR 720.3a: a cast-time face election replaces
+        // `abilities` AND `base_abilities` with the alternative face's list
+        // (`casting::swap_to_alternative_spell_face` ->
+        // `printed_cards::apply_back_face_to_object`) while the reducer is still
+        // applying the root `CastSpell` — `casting.rs:11028-11039` elects a
+        // single surviving variant inline, with no second `GameAction`. The
+        // pre-swap source list is therefore also reachable input to the bind.
+        .chain(
+            source
+                .back_face
+                .iter()
+                .flat_map(|back| back.abilities.iter()),
+        )
+        // CR 702.148b + CR 612: cleave's second ability is a text-changing
+        // effect; `casting::apply_cleave_text_change` replaces both `abilities`
+        // and `base_abilities` with the bracket-removed variant on the same
+        // inline-election path, so that list is reachable input too.
+        .chain(
+            source
+                .cleave_variant
+                .iter()
+                .flat_map(|variant| variant.abilities.iter()),
+        )
+        .any(|def| {
+            visit_ability_def(def, &mut |effect| {
+                if effect_may_yield_adverse_exchange(effect) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break()
+        })
+}
+
+/// The leaf shape test. The `_ => false` arm is correct BECAUSE this predicate is
+/// an over-approximation whose default answer is "carries no adverse-exchange
+/// shape" — it is not a missed-arm hazard on `Effect`. The wildcard-free part of
+/// the guard is the traversal above it, not this leaf.
+///
+/// CR 701.14a: a Fight instruction makes two creatures deal damage to each other.
+/// CR 120.1: `damage_source: Some(DamageSource::Target)` attributes the damage to
+/// the ability's first object target rather than to its source, which is the
+/// wording class `is_target_sourced_self_damage` gates. `DamageAll` shares that
+/// one axis with `DealDamage` (see
+/// `ability_utils::one_sided_fight_source_supplies_quantity_creature`), so it is
+/// admitted here to keep the guard no tighter than the class.
+fn effect_may_yield_adverse_exchange(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Fight { .. }
+            | Effect::DealDamage {
+                damage_source: Some(DamageSource::Target),
+                ..
+            }
+            | Effect::DamageAll {
+                damage_source: Some(DamageSource::Target),
+                ..
+            }
+    )
+}
+
 /// Preview whether every complete, supported target declaration for `root` is
 /// the strictly bad exchange where the selected friendly creature dies and its
 /// exact recipient survives.
@@ -84,30 +281,65 @@ pub fn targeted_exchange_verdict(
     state: &GameState,
     root: &CandidateAction,
 ) -> TargetedExchangeVerdict {
-    let Some(root_binding) = RootBinding::from_action(&root.action) else {
-        return TargetedExchangeVerdict::Indeterminate;
-    };
-    let Some(semantic_owner) = root.metadata.semantic_owner else {
-        return TargetedExchangeVerdict::Indeterminate;
-    };
-    let Some(mut next) = replay_exact_candidate(state, root) else {
-        return TargetedExchangeVerdict::Indeterminate;
-    };
-    let mut budget = WitnessBudget::default();
-    inspect_successor(&mut next, root_binding, semantic_owner, &mut budget)
+    targeted_exchange_verdict_inner(state, root).0
 }
 
-#[derive(Default)]
-struct WitnessBudget {
-    nodes: usize,
-    branches: usize,
+/// Test-support view of the same computation: the bounded-witness budget records
+/// exactly how much replay work the verdict cost. Mirrors
+/// [`crate::ai_support::adversarial_swarm_witness_with_counters`].
+#[cfg(feature = "test-support")]
+pub fn targeted_exchange_verdict_with_budget(
+    state: &GameState,
+    root: &CandidateAction,
+) -> (TargetedExchangeVerdict, TargetedExchangeBudget) {
+    targeted_exchange_verdict_inner(state, root)
+}
+
+fn targeted_exchange_verdict_inner(
+    state: &GameState,
+    root: &CandidateAction,
+) -> (TargetedExchangeVerdict, TargetedExchangeBudget) {
+    let mut budget = TargetedExchangeBudget::default();
+    let Some(root_binding) = RootBinding::from_action(&root.action) else {
+        return (TargetedExchangeVerdict::Indeterminate, budget);
+    };
+    let Some(semantic_owner) = root.metadata.semantic_owner else {
+        return (TargetedExchangeVerdict::Indeterminate, budget);
+    };
+    // Clone-free precondition: a root that cannot be rejected must not pay the
+    // candidate enumeration or the reducer replay below.
+    if !root_may_yield_adverse_exchange(state, &root.action) {
+        return (TargetedExchangeVerdict::Indeterminate, budget);
+    }
+    let Some(mut next) = replay_exact_candidate(state, root, &mut budget) else {
+        return (TargetedExchangeVerdict::Indeterminate, budget);
+    };
+    let verdict = inspect_successor(&mut next, root_binding, semantic_owner, &mut budget);
+    (verdict, budget)
+}
+
+/// Bounded-witness budget for one `targeted_exchange_verdict` call: the caps the
+/// preview enforces, plus what the preview actually spent. The spend fields are
+/// maintained unconditionally (three `usize` increments against a `GameState`
+/// clone is not measurable) and are read only through
+/// `targeted_exchange_verdict_with_budget`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TargetedExchangeBudget {
+    pub nodes: usize,
+    pub branches: usize,
+    /// `replay_exact_candidate` clone-and-applies performed (root + target children).
+    pub replay_clone_applies: usize,
+    /// `preview_*` state clones taken to resolve a bound exchange.
+    pub preview_clone_resolves: usize,
+    /// Full `validated_candidate_actions_for_semantic_owner` passes this call ran.
+    pub candidate_enumerations: usize,
 }
 
 fn inspect_successor(
     state: &mut GameState,
     root: RootBinding,
     semantic_owner: PlayerId,
-    budget: &mut WitnessBudget,
+    budget: &mut TargetedExchangeBudget,
 ) -> TargetedExchangeVerdict {
     if budget.nodes >= MAX_WITNESS_NODES {
         return TargetedExchangeVerdict::Indeterminate;
@@ -119,7 +351,7 @@ fn inspect_successor(
     // either the matching PendingCast (manual payment) or the exact announced
     // Spell stack entry (automatic payment), before prompt classification.
     if let Some(ability) = bound_root_ability(state, root) {
-        if let Some(verdict) = preview_bound_exchange(state, ability, semantic_owner) {
+        if let Some(verdict) = preview_bound_exchange(state, ability, semantic_owner, budget) {
             return verdict;
         }
     }
@@ -176,12 +408,13 @@ fn explore_target_children(
     state: &GameState,
     root: RootBinding,
     semantic_owner: PlayerId,
-    budget: &mut WitnessBudget,
+    budget: &mut TargetedExchangeBudget,
 ) -> TargetedExchangeVerdict {
     let owner = target_selection_owner(&state.waiting_for);
     let Some(owner) = owner else {
         return TargetedExchangeVerdict::Indeterminate;
     };
+    budget.candidate_enumerations += 1;
     let candidates = validated_candidate_actions_for_semantic_owner(state, owner);
     if candidates
         .iter()
@@ -209,7 +442,7 @@ fn explore_target_children(
             return TargetedExchangeVerdict::Indeterminate;
         }
         budget.branches += 1;
-        let Some(mut next) = replay_exact_candidate(state, &child) else {
+        let Some(mut next) = replay_exact_candidate(state, &child, budget) else {
             return TargetedExchangeVerdict::Indeterminate;
         };
         match inspect_successor(&mut next, root, semantic_owner, budget) {
@@ -235,9 +468,14 @@ fn target_selection_owner(waiting_for: &WaitingFor) -> Option<PlayerId> {
     }
 }
 
-fn replay_exact_candidate(state: &GameState, wanted: &CandidateAction) -> Option<GameState> {
+fn replay_exact_candidate(
+    state: &GameState,
+    wanted: &CandidateAction,
+    budget: &mut TargetedExchangeBudget,
+) -> Option<GameState> {
     let semantic_owner = wanted.metadata.semantic_owner?;
     let actor = wanted.metadata.actor?;
+    budget.candidate_enumerations += 1;
     let current = validated_candidate_actions_for_semantic_owner(state, semantic_owner);
     current
         .iter()
@@ -248,6 +486,7 @@ fn replay_exact_candidate(state: &GameState, wanted: &CandidateAction) -> Option
                 && candidate.metadata.tactical_class == wanted.metadata.tactical_class
         })
         .then(|| {
+            budget.replay_clone_applies += 1;
             let mut next = state.clone();
             apply_interaction_for_simulation(
                 &mut next,
@@ -264,20 +503,23 @@ fn preview_bound_exchange(
     state: &GameState,
     ability: &ResolvedAbility,
     semantic_owner: PlayerId,
+    budget: &mut TargetedExchangeBudget,
 ) -> Option<TargetedExchangeVerdict> {
     if is_target_sourced_self_damage(ability) {
-        return preview_target_sourced_self_damage(state, ability, semantic_owner);
+        return preview_target_sourced_self_damage(state, ability, semantic_owner, budget);
     }
     let fight = find_fight_leaf(ability)?;
-    preview_fight_exchange(state, ability, fight, semantic_owner)
+    preview_fight_exchange(state, ability, fight, semantic_owner, budget)
 }
 
 fn preview_target_sourced_self_damage(
     state: &GameState,
     ability: &ResolvedAbility,
     semantic_owner: PlayerId,
+    budget: &mut TargetedExchangeBudget,
 ) -> Option<TargetedExchangeVerdict> {
     let (source, recipient) = exchange_participants(state, ability, semantic_owner)?;
+    budget.preview_clone_resolves += 1;
     let mut preview = state.clone();
     flush_layers(&mut preview);
     let source_ref = ObjectIncarnationRef::from_object(preview.objects.get(&source)?);
@@ -312,6 +554,7 @@ fn preview_fight_exchange(
     ability: &ResolvedAbility,
     fight: &ResolvedAbility,
     semantic_owner: PlayerId,
+    budget: &mut TargetedExchangeBudget,
 ) -> Option<TargetedExchangeVerdict> {
     let (first, second) =
         crate::game::effects::fight::resolve_fight_fighters(state, fight).ok()??;
@@ -332,6 +575,7 @@ fn preview_fight_exchange(
         return None;
     }
 
+    budget.preview_clone_resolves += 1;
     let mut preview = state.clone();
     flush_layers(&mut preview);
     let ai_ref = ObjectIncarnationRef::from_object(preview.objects.get(&ai_fighter)?);
@@ -499,9 +743,22 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
+        CopiableValues, CounterSourceRider, DelayedTriggerCondition, DieResultBranch, Duration,
+        PileSource, PlayerFilter, PlayerScope, PtValue, QuantityExpr, ReplacementDefinition,
+        ReplacementMode, StaticDefinition, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayModifier, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+    };
+    use crate::types::card::CleaveVariant;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::CastPaymentMode;
     use crate::types::identifiers::CardId;
     use crate::types::phase::Phase;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use std::sync::Arc;
 
     fn add_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
@@ -608,6 +865,944 @@ mod tests {
                 TargetedExchangeVerdict::Reject
             ),
             "semantic-owner-aware root replay must not veto a favorable opposing-source branch"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // `root_may_yield_adverse_exchange` — the clone-free precondition.
+    //
+    // Every fixture below flushes the layer lattice and asserts it is `Clean`
+    // before reading the guard's answer. That reach guard is load-bearing in
+    // both directions: the guard's first rail is `layers_dirty.is_dirty() =>
+    // return true`, so a dirty lattice makes every `true` assertion vacuous and
+    // every `false` assertion fail for the wrong reason. `a_pending_layer_grant_
+    // falls_open` is the one test that deliberately sits on the other side of
+    // that rail.
+    // ---------------------------------------------------------------------
+
+    fn fight_effect() -> Effect {
+        Effect::Fight {
+            target: TargetFilter::Any,
+            subject: TargetFilter::SelfRef,
+        }
+    }
+
+    fn fight_def() -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, fight_effect())
+    }
+
+    fn benign_def() -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate)
+    }
+
+    fn fight_cost() -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(fight_effect()),
+        }
+    }
+
+    fn grant_fight_static() -> StaticDefinition {
+        StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::GrantAbility {
+                definition: Box::new(fight_def()),
+            }])
+    }
+
+    /// A priority window with a sorcery in P0's hand carrying `abilities`, and a
+    /// `Clean` layer lattice.
+    fn guard_fixture(abilities: Vec<AbilityDefinition>) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Guard Test Spell".to_string(),
+            Zone::Hand,
+        );
+        let spell_object = state
+            .objects
+            .get_mut(&spell)
+            .expect("created spell must exist");
+        spell_object.card_types.core_types.push(CoreType::Sorcery);
+        *Arc::make_mut(&mut spell_object.abilities) = abilities;
+        flush_layers(&mut state);
+        (state, spell)
+    }
+
+    fn cast_action(state: &GameState, object_id: ObjectId) -> GameAction {
+        GameAction::CastSpell {
+            object_id,
+            card_id: state
+                .objects
+                .get(&object_id)
+                .expect("fixture object must exist")
+                .card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        }
+    }
+
+    /// Read the guard's answer for the root cast of `object_id`, after proving
+    /// the `layers_dirty` rail is not what answers.
+    fn guard_answer(state: &GameState, object_id: ObjectId) -> bool {
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "reach guard: a dirty lattice makes `root_may_yield_adverse_exchange` fall open before it reads any ability list"
+        );
+        root_may_yield_adverse_exchange(state, &cast_action(state, object_id))
+    }
+
+    fn guard_sees(def: AbilityDefinition) -> bool {
+        let (state, spell) = guard_fixture(vec![def]);
+        guard_answer(&state, spell)
+    }
+
+    fn carries_fight(object: &crate::game::game_object::GameObject) -> bool {
+        object
+            .base_abilities
+            .iter()
+            .chain(object.abilities.iter())
+            .any(|def| matches!(&*def.effect, Effect::Fight { .. }))
+    }
+
+    /// N1 — `damage_source: None` is ordinary spell-sourced damage and must not
+    /// admit; `is_target_sourced_self_damage` cannot match it.
+    #[test]
+    fn plain_spell_sourced_damage_is_not_an_adverse_exchange_shape() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        assert!(
+            !guard_sees(def),
+            "spell-sourced damage carries no adverse-exchange shape; admitting it would make the guard inert"
+        );
+    }
+
+    /// N2 — `DamageAll` shares the `damage_source` axis with `DealDamage`, so the
+    /// guard must be no tighter than that class.
+    #[test]
+    fn damage_all_from_a_target_source_is_admitted() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                player_filter: None,
+                damage_source: Some(DamageSource::Target),
+            },
+        );
+        assert!(
+            guard_sees(def),
+            "target-sourced DamageAll is in the gated class (CR 120.1); dropping the arm makes the guard tighter than the class"
+        );
+    }
+
+    /// H1 — hostile: the named source object is absent. An over-approximating
+    /// guard must fall open, never claim the root is safe.
+    #[test]
+    fn missing_source_object_falls_open() {
+        let (state, _spell) = guard_fixture(vec![fight_def()]);
+        assert!(!state.layers_dirty.is_dirty(), "reach guard: lattice Clean");
+        let action = GameAction::CastSpell {
+            object_id: ObjectId(9999),
+            card_id: CardId(9999),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(
+            root_may_yield_adverse_exchange(&state, &action),
+            "an absent source proves nothing about the bound ability, so the guard must fall open"
+        );
+    }
+
+    /// H2 — hostile: all four entered lists are empty. The paired positive in the
+    /// same test is what keeps the `false` from being a tautology.
+    #[test]
+    fn source_with_no_abilities_cannot_reject() {
+        let (mut state, spell) = guard_fixture(vec![]);
+        {
+            let source = state.objects.get(&spell).expect("fixture spell must exist");
+            assert!(
+                source.base_abilities.is_empty(),
+                "precondition: base_abilities empty"
+            );
+            assert!(source.abilities.is_empty(), "precondition: abilities empty");
+            assert!(source.back_face.is_none(), "precondition: back_face absent");
+            assert!(
+                source.cleave_variant.is_none(),
+                "precondition: cleave_variant absent"
+            );
+        }
+        assert!(
+            !guard_answer(&state, spell),
+            "an object with no ability definitions anywhere cannot bind an adverse-exchange shape"
+        );
+
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&spell)
+                .expect("fixture spell must exist")
+                .abilities,
+        )
+        .push(fight_def());
+        assert!(
+            guard_answer(&state, spell),
+            "paired positive: the same fixture must flip once a Fight definition is present"
+        );
+    }
+
+    /// H3 — hostile multi-authority: two ability trees on one object, in both
+    /// push orders. Scanning only the first entry fails the benign-first case.
+    #[test]
+    fn a_second_ability_carrying_the_shape_still_admits() {
+        for (label, abilities) in [
+            ("benign first", vec![benign_def(), fight_def()]),
+            ("shape first", vec![fight_def(), benign_def()]),
+        ] {
+            let (state, spell) = guard_fixture(abilities);
+            assert!(
+                guard_answer(&state, spell),
+                "{label}: every ability tree on the object must be walked, not just the first"
+            );
+        }
+    }
+
+    /// H4 — assumption A's rail. A layer-6 grant that has not been flushed is not
+    /// in `abilities` yet, so the guard must refuse to answer from a stale list.
+    ///
+    /// Scope: this row decides the `layers_dirty` rail only. It deliberately
+    /// marks the lattice dirty and so never reaches assumption B (the
+    /// stale-`Clean` case), which `installing_a_layer_six_grant_marks_the_lattice_dirty`
+    /// pins from the other side.
+    #[test]
+    fn a_pending_layer_grant_falls_open() {
+        let mut state = GameState::new_two_player(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let creature = add_creature(&mut state, PlayerId(0));
+        let granter = add_creature(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&granter)
+            .expect("granter must exist")
+            .static_definitions
+            .push(grant_fight_static());
+        // Deliberately NOT flushed: the grant must still be pending when the
+        // guard reads the object, which is the whole point of this row.
+        crate::game::layers::mark_layers_full(&mut state);
+
+        {
+            let source = state.objects.get(&creature).expect("creature must exist");
+            assert!(
+                !carries_fight(source),
+                "precondition: the grant is still pending, so neither entered list carries the shape — without the rail the guard would answer `false`"
+            );
+        }
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "precondition: the fixture is on the dirty side of the rail"
+        );
+        assert!(
+            root_may_yield_adverse_exchange(
+                &state,
+                &GameAction::ActivateAbility {
+                    source_id: creature,
+                    ability_index: 0,
+                }
+            ),
+            "CR 613.1f: a pending layer-6 grant can add the shape after this read, so the guard must fall open"
+        );
+
+        // Non-vacuity: the grant is real. On a flushed copy of the same state it
+        // lands in `abilities`, which is what the dirty case was hiding.
+        let mut flushed = state.clone();
+        flush_layers(&mut flushed);
+        assert!(
+            carries_fight(flushed.objects.get(&creature).expect("creature must exist")),
+            "the fixture's grant must actually install once the lattice is flushed, or the dirty case proves nothing"
+        );
+    }
+
+    /// B1-fx — assumption B's tracking fixture. Moving a permanent that carries a
+    /// layer-6 grant onto the battlefield must mark the lattice dirty. This does
+    /// not prove the engine-wide invariant (no fixture can); it pins the specific
+    /// mutation class the guard's `Clean` reading depends on.
+    #[test]
+    fn installing_a_layer_six_grant_marks_the_lattice_dirty() {
+        let mut state = GameState::new_two_player(0);
+        let card_id = CardId(state.next_object_id);
+        let granter = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Grant Test Enchantment".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&granter)
+            .expect("granter must exist")
+            .static_definitions
+            .push(grant_fight_static());
+        flush_layers(&mut state);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "precondition: the lattice starts Clean, so the mark below is the one under test"
+        );
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, granter, Zone::Battlefield, &mut events);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "CR 613.1f: installing a layer-6 grant must mark the lattice, or the guard could read a stale `Clean` list"
+        );
+    }
+
+    /// H5 — hostile: the shape is reachable only through a branch the bound
+    /// tests' `.effect` + `.sub_ability` spine never walks.
+    #[test]
+    fn shape_behind_else_or_mode_branch_still_admits() {
+        let mut with_else = benign_def();
+        with_else.else_ability = Some(Box::new(fight_def()));
+        assert!(
+            guard_sees(with_else),
+            "CR 608.2c: an `else` continuation is part of the definition tree the bind reads"
+        );
+
+        let mut with_mode = benign_def();
+        with_mode.mode_abilities.push(benign_def());
+        with_mode.mode_abilities.push(fight_def());
+        assert!(
+            guard_sees(with_mode),
+            "CR 700.2a: modes are chosen as part of casting, so a mode branch really can feed the bound spine"
+        );
+    }
+
+    /// H6 — hostile branch precedence: a non-cast/non-activate action is answered
+    /// by `RootBinding::from_action`, before the guard reads anything. The fixture
+    /// deliberately holds a Fight spell so the `false` is about the action kind.
+    #[test]
+    fn non_root_action_short_circuits_before_the_guard() {
+        let (state, spell) = guard_fixture(vec![fight_def()]);
+        assert!(
+            guard_answer(&state, spell),
+            "precondition: this state DOES carry an adverse shape on its cast root"
+        );
+        assert!(
+            !root_may_yield_adverse_exchange(&state, &GameAction::PassPriority),
+            "a non-root action is Indeterminate by construction; the guard must not read a source for it"
+        );
+        let pass = validated_candidate_actions_for_semantic_owner(&state, PlayerId(0))
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::PassPriority))
+            .expect("the engine must issue a pass-priority candidate at a priority window");
+        assert_eq!(
+            targeted_exchange_verdict(&state, &pass),
+            TargetedExchangeVerdict::Indeterminate,
+            "the verdict's own `RootBinding::from_action` early-out keeps its current precedence"
+        );
+    }
+
+    /// H7 — carrier completeness. Mirrors
+    /// `printed_cards::tests::walker_covers_every_nested_carrier` with
+    /// `Effect::Fight` as the marker instead of `Effect::Conjure`. A future nested
+    /// struct field is not caught by the compiler; these two fixtures are the
+    /// safety net, and a dropped descent fails both.
+    #[test]
+    fn predicate_sees_a_fight_in_every_nested_carrier() {
+        let mut cases: Vec<(&str, AbilityDefinition)> = Vec::new();
+
+        // --- AbilityDefinition level ---
+        let mut sub = benign_def();
+        sub.sub_ability = Some(Box::new(fight_def()));
+        cases.push(("sub_ability", sub));
+
+        let mut else_branch = benign_def();
+        else_branch.else_ability = Some(Box::new(fight_def()));
+        cases.push(("else_ability", else_branch));
+
+        let mut mode = benign_def();
+        mode.mode_abilities.push(fight_def());
+        cases.push(("mode_abilities", mode));
+
+        let mut cost = benign_def();
+        cost.cost = Some(fight_cost());
+        cases.push(("cost (EffectCost)", cost));
+
+        let mut unless_pay = benign_def();
+        unless_pay.unless_pay = Some(UnlessPayModifier {
+            cost: fight_cost(),
+            payer: TargetFilter::Controller,
+        });
+        cases.push(("unless_pay.cost", unless_pay));
+
+        // --- AbilityCost level ---
+        let mut composite = benign_def();
+        composite.cost = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, fight_cost()],
+        });
+        cases.push(("AbilityCost::Composite", composite));
+
+        let mut one_of = benign_def();
+        one_of.cost = Some(AbilityCost::OneOf {
+            costs: vec![AbilityCost::Tap, fight_cost()],
+        });
+        cases.push(("AbilityCost::OneOf", one_of));
+
+        let mut per_counter = benign_def();
+        per_counter.cost = Some(AbilityCost::PerCounter {
+            counter: CounterType::Plus1Plus1,
+            target: TargetFilter::SelfRef,
+            base: Box::new(fight_cost()),
+        });
+        cases.push(("AbilityCost::PerCounter.base", per_counter));
+
+        // --- Effect level ---
+        cases.push((
+            "Vote::per_choice_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec!["x".into()],
+                    per_choice_effect: vec![Box::new(fight_def())],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Named,
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+        ));
+        cases.push((
+            "VoteSubject::Objects::outcome_template",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec![],
+                    per_choice_effect: vec![],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Objects {
+                        candidate_filter: TargetFilter::Any,
+                        outcome_template: Box::new(fight_def()),
+                    },
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+        ));
+        cases.push((
+            "SeparateIntoPiles::chosen_pile_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Any,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: Box::new(fight_def()),
+                    pile_source: PileSource::Battlefield,
+                    unchosen_pile_effect: None,
+                },
+            ),
+        ));
+        cases.push((
+            "SeparateIntoPiles::unchosen_pile_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Any,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: Box::new(benign_def()),
+                    pile_source: PileSource::Battlefield,
+                    unchosen_pile_effect: Some(Box::new(fight_def())),
+                },
+            ),
+        ));
+        cases.push((
+            "RevealFromHand::on_decline",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Any,
+                    on_decline: Some(Box::new(fight_def())),
+                },
+            ),
+        ));
+        cases.push((
+            "CreateDelayedTrigger::effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::Upkeep,
+                    },
+                    effect: Box::new(fight_def()),
+                    uses_tracked_set: false,
+                },
+            ),
+        ));
+        cases.push((
+            "FlipCoin::win_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: Some(Box::new(fight_def())),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+        ));
+        cases.push((
+            "FlipCoin::lose_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(Box::new(fight_def())),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+        ));
+        cases.push((
+            "FlipCoins::win_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: Some(Box::new(fight_def())),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+        ));
+        cases.push((
+            "FlipCoins::lose_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: None,
+                    lose_effect: Some(Box::new(fight_def())),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+        ));
+        cases.push((
+            "FlipCoinUntilLose::win_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoinUntilLose {
+                    win_effect: Box::new(fight_def()),
+                },
+            ),
+        ));
+        cases.push((
+            "RollDie::results[].effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 6,
+                    results: vec![DieResultBranch {
+                        min: 1,
+                        max: 6,
+                        effect: Box::new(fight_def()),
+                    }],
+                    modifier: None,
+                },
+            ),
+        ));
+        cases.push((
+            "ChooseOneOf::branches",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![fight_def()],
+                },
+            ),
+        ));
+        cases.push((
+            "CreateDrawReplacement::replacement_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(fight_effect()),
+                },
+            ),
+        ));
+        cases.push((
+            "CreatePlaneswalkReplacement::replacement_effect",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreatePlaneswalkReplacement {
+                    replacement_effect: Box::new(fight_effect()),
+                },
+            ),
+        ));
+        cases.push((
+            "GenericEffect::static_abilities",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![grant_fight_static()],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            ),
+        ));
+        cases.push((
+            "Token::static_abilities",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "T".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec!["Creature".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![grant_fight_static()],
+                    enter_with_counters: vec![],
+                },
+            ),
+        ));
+        cases.push((
+            "CreateEmblem::statics",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateEmblem {
+                    statics: vec![grant_fight_static()],
+                    triggers: vec![],
+                },
+            ),
+        ));
+
+        let mut emblem_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        emblem_trigger.execute = Some(Box::new(fight_def()));
+        cases.push((
+            "CreateEmblem::triggers -> TriggerDefinition::execute",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateEmblem {
+                    statics: vec![],
+                    triggers: vec![emblem_trigger],
+                },
+            ),
+        ));
+
+        let mut trigger_unless_pay = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger_unless_pay.unless_pay = Some(UnlessPayModifier {
+            cost: fight_cost(),
+            payer: TargetFilter::Controller,
+        });
+        cases.push((
+            "TriggerDefinition::unless_pay.cost",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateEmblem {
+                    statics: vec![],
+                    triggers: vec![trigger_unless_pay],
+                },
+            ),
+        ));
+
+        let mut repl_execute = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_execute.execute = Some(Box::new(fight_def()));
+        cases.push((
+            "AddTargetReplacement -> ReplacementDefinition::execute",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(repl_execute),
+                    target: TargetFilter::Any,
+                },
+            ),
+        ));
+
+        let mut repl_maycost_cost = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_maycost_cost.mode = ReplacementMode::MayCost {
+            cost: fight_cost(),
+            decline: None,
+        };
+        cases.push((
+            "ReplacementMode::MayCost.cost",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(repl_maycost_cost),
+                    target: TargetFilter::Any,
+                },
+            ),
+        ));
+
+        let mut repl_maycost_decline = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_maycost_decline.mode = ReplacementMode::MayCost {
+            cost: AbilityCost::Tap,
+            decline: Some(Box::new(fight_def())),
+        };
+        cases.push((
+            "ReplacementMode::MayCost.decline",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(repl_maycost_decline),
+                    target: TargetFilter::Any,
+                },
+            ),
+        ));
+
+        let mut repl_optional = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_optional.mode = ReplacementMode::Optional {
+            decline: Some(Box::new(fight_def())),
+        };
+        cases.push((
+            "ReplacementMode::Optional.decline",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(repl_optional),
+                    target: TargetFilter::Any,
+                },
+            ),
+        ));
+
+        cases.push((
+            "Counter::source_rider::LosesAbilities::static_def",
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_rider: Some(CounterSourceRider::LosesAbilities {
+                        static_def: Box::new(grant_fight_static()),
+                        duration: Box::new(Duration::UntilHostLeavesPlay),
+                    }),
+                    countered_spell_zone: None,
+                },
+            ),
+        ));
+
+        // --- ContinuousModification level (reached through a static) ---
+        let mut grant_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        grant_trigger.execute = Some(Box::new(fight_def()));
+        cases.push((
+            "ContinuousModification::GrantTrigger",
+            static_carrier(ContinuousModification::GrantTrigger {
+                trigger: Box::new(grant_trigger),
+            }),
+        ));
+
+        let mut grant_replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        grant_replacement.execute = Some(Box::new(fight_def()));
+        cases.push((
+            "ContinuousModification::GrantReplacement",
+            static_carrier(ContinuousModification::GrantReplacement {
+                replacement: Box::new(grant_replacement),
+            }),
+        ));
+
+        cases.push((
+            "ContinuousModification::GrantStaticAbility",
+            static_carrier(ContinuousModification::GrantStaticAbility {
+                definition: Box::new(grant_fight_static()),
+            }),
+        ));
+
+        // --- CopiableValues level (reached through CopyValues) ---
+        let mut copy_abilities = empty_copiable_values();
+        copy_abilities.abilities = Arc::new(vec![fight_def()]);
+        cases.push((
+            "CopiableValues::abilities",
+            static_carrier(copy_values(copy_abilities)),
+        ));
+
+        let mut copy_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        copy_trigger.execute = Some(Box::new(fight_def()));
+        let mut copy_triggers = empty_copiable_values();
+        copy_triggers.trigger_definitions = Arc::new(vec![copy_trigger]);
+        cases.push((
+            "CopiableValues::trigger_definitions",
+            static_carrier(copy_values(copy_triggers)),
+        ));
+
+        let mut copy_statics = empty_copiable_values();
+        copy_statics.static_definitions = Arc::new(vec![grant_fight_static()]);
+        cases.push((
+            "CopiableValues::static_definitions",
+            static_carrier(copy_values(copy_statics)),
+        ));
+
+        let mut copy_repl = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        copy_repl.execute = Some(Box::new(fight_def()));
+        let mut copy_replacements = empty_copiable_values();
+        copy_replacements.replacement_definitions = Arc::new(vec![copy_repl]);
+        cases.push((
+            "CopiableValues::replacement_definitions",
+            static_carrier(copy_values(copy_replacements)),
+        ));
+
+        for (carrier, def) in cases {
+            assert!(
+                guard_sees(def),
+                "the predicate missed an `Effect::Fight` planted in carrier '{carrier}'"
+            );
+        }
+    }
+
+    /// Wrap a `ContinuousModification` in the static-ability carrier
+    /// `visit_ability_def` reaches from an `AbilityDefinition`.
+    fn static_carrier(modification: ContinuousModification) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GenericEffect {
+                static_abilities: vec![
+                    StaticDefinition::new(StaticMode::Continuous).modifications(vec![modification])
+                ],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+        )
+    }
+
+    fn copy_values(values: CopiableValues) -> ContinuousModification {
+        ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::default(),
+            printed_ref: None,
+            token_image_ref: None,
+        }
+    }
+
+    /// A `CopiableValues` whose four definition lists are empty, so only the list
+    /// a test overwrites can carry the marker.
+    fn empty_copiable_values() -> CopiableValues {
+        let mut state = GameState::new_two_player(0);
+        let object_id = add_creature(&mut state, PlayerId(0));
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&object_id).expect("creature must exist"),
+        );
+        assert!(
+            values.abilities.is_empty()
+                && values.trigger_definitions.is_empty()
+                && values.static_definitions.is_empty()
+                && values.replacement_definitions.is_empty(),
+            "precondition: the base CopiableValues must be marker-free"
+        );
+        values
+    }
+
+    /// H8 — `Effect::ChooseOneOf` is the shape real card data exercises (Sycorax
+    /// Commander). The guard admits it; the bound spine then finds nothing,
+    /// because the branch is chosen at resolution, so behavior is unchanged.
+    #[test]
+    fn fight_inside_choose_one_of_branches_is_admitted() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![fight_def()],
+            },
+        );
+        let (state, spell) = guard_fixture(vec![def]);
+        assert!(
+            guard_answer(&state, spell),
+            "the guard must not rely on the bound-spine reduction; dropping the ChooseOneOf descent makes this `false`"
+        );
+        let root = validated_candidate_actions_for_semantic_owner(&state, PlayerId(0))
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell)
+            })
+            .expect("the engine must issue the root cast candidate");
+        assert_eq!(
+            targeted_exchange_verdict(&state, &root),
+            TargetedExchangeVerdict::Indeterminate,
+            "the announcement-time spine's root effect is still ChooseOneOf, so `find_fight_leaf` finds nothing and the verdict is unchanged"
+        );
+    }
+
+    /// H9 — hostile second-face authority. The front lists carry no shape; the
+    /// back face does. Both live cast-time face-election routes install from
+    /// exactly this field (CR 712.11b / CR 715.3a / CR 720.3a), and Fuse reads it
+    /// without installing at all.
+    #[test]
+    fn alternative_face_only_shape_still_admits() {
+        let (mut state, spell) = guard_fixture(vec![benign_def()]);
+        let mut face = crate::game::printed_cards::snapshot_object_base_face(
+            state.objects.get(&spell).expect("fixture spell must exist"),
+        );
+        face.abilities = vec![fight_def()];
+        {
+            let source = state.objects.get(&spell).expect("fixture spell must exist");
+            assert!(
+                !carries_fight(source),
+                "precondition: the front lists must be shape-free, or this row passes for the wrong reason"
+            );
+        }
+        state
+            .objects
+            .get_mut(&spell)
+            .expect("fixture spell must exist")
+            .back_face = Some(face);
+        assert!(
+            guard_answer(&state, spell),
+            "deleting the `back_face` chain arm silently loses every Reject reachable through a cast-time face swap"
+        );
+    }
+
+    /// H9b — hostile second *text* authority on the same face. Cleave's second
+    /// ability is a text-changing effect (CR 702.148b + CR 612), and
+    /// `apply_cleave_text_change` installs both ability lists from this field.
+    #[test]
+    fn cleave_variant_only_shape_still_admits() {
+        let (mut state, spell) = guard_fixture(vec![benign_def()]);
+        {
+            let source = state.objects.get(&spell).expect("fixture spell must exist");
+            assert!(
+                !carries_fight(source),
+                "precondition: the front lists must be shape-free, or this row passes for the wrong reason"
+            );
+            assert!(
+                source.back_face.is_none(),
+                "precondition: no back face, so only the cleave arm can answer"
+            );
+        }
+        state
+            .objects
+            .get_mut(&spell)
+            .expect("fixture spell must exist")
+            .cleave_variant = Some(CleaveVariant {
+            abilities: vec![fight_def()],
+            ..CleaveVariant::default()
+        });
+        assert!(
+            guard_answer(&state, spell),
+            "deleting the `cleave_variant` chain arm silently loses every Reject reachable through a cleave text change"
         );
     }
 }
