@@ -22686,22 +22686,6 @@ fn parse_owned_plus_lesser_exiled_subject(i: &str) -> OracleResult<'_, ()> {
     Ok((i, ()))
 }
 
-/// CR 608.2g + CR 601.2a: Is the "that card" anaphor's referent a graveyard-scoped
-/// CHOSEN target (`Effect::TargetOnly` with `InZone { Graveyard }` — Conduit of
-/// Worlds)? Only such a referent upgrades a *paid* "you may cast that card" to a
-/// during-resolution cast; exile/hand/library chosen targets and impulse/tracked
-/// anaphors (`parent_target_is_chosen == false`) keep the lingering permission.
-/// Reads the zone off the chain's prior chosen target via the shared
-/// `TargetFilter::extract_in_zone` building block.
-fn parent_target_is_graveyard_scoped(ctx: &ParseContext) -> bool {
-    ctx.parent_target_is_chosen
-        && ctx
-            .chain_prior_chosen_target
-            .as_ref()
-            .and_then(TargetFilter::extract_in_zone)
-            == Some(crate::types::zones::Zone::Graveyard)
-}
-
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -22817,23 +22801,29 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // the standing permission, neither of which the one-shot
         // during-resolution path models.
         // CR 608.2g: a paid, single-target, no-duration graveyard "cast that
-        // card" bound to a CHOSEN graveyard target is also a during-resolution
-        // cast (Conduit of Worlds: "Choose target nonland permanent card in your
+        // card" bound to a CHOSEN target is also a during-resolution cast
+        // (Conduit of Worlds: "Choose target nonland permanent card in your
         // graveyard. … you may cast that card."). The controller pays the real
         // printed cost with normal mana (`mana_spend_permission: None`) as the
         // ability resolves. This is the paid complement of the `without_paying`
         // free case: the same structural gates (single target, no lingering
         // duration, no alt-cost, no constraint) apply, plus the requirement that
-        // the anaphor's referent is a graveyard-scoped chosen target — Emry's
-        // "you may cast that card THIS TURN" keeps its lingering grant because
-        // its `duration` is `UntilEndOfTurn`, and exile/hand/library chosen
-        // anaphors keep `LingeringPermission` because their zone is not the
-        // graveyard.
+        // the anaphor's referent is a CHOSEN target (`Effect::TargetOnly`).
+        //
+        // CR 608.2g: the timing is a property of the resolving INSTRUCTION, not of
+        // the chosen card's zone. A no-duration "you may cast that card" is cast
+        // during resolution whether the chosen card is in a graveyard, hand,
+        // exile, or library; only an explicit standing duration (Emry's "you may
+        // cast that card THIS TURN" — `duration.is_some()`) keeps the lingering
+        // grant. The gate therefore reads `parent_target_is_chosen` (any zone),
+        // NOT the target's zone: an impulse/tracked-set anaphor
+        // (`ExiledBySource`/`TrackedSet`, `parent_target_is_chosen == false`)
+        // still keeps `LingeringPermission`.
         let driver = if mode == CardPlayMode::Cast
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
-            && (without_paying || parent_target_is_graveyard_scoped(ctx))
+            && (without_paying || ctx.parent_target_is_chosen)
         {
             crate::types::ability::CastFromZoneDriver::DuringResolution
         } else {
