@@ -1244,6 +1244,31 @@ fn modal_marker_ir(
     }
 }
 
+/// CR 608.2c + CR 608.2k: The subject a modal mode body may inherit for
+/// pronoun anaphora. Only a real non-self, non-`Any` trigger subject routes a
+/// mode-body "it"/"that creature" to the triggering object (e.g. an
+/// equipped-creature trigger's "that creature"). A `SelfRef`/`Any` subject is
+/// cleared so mode-internal referents bind mode-body anaphors: a typed target
+/// introduced by the mode's OWN earlier sentence takes "it" via
+/// `parent_target_available` → `ParentTarget`, and "that player" resolves to
+/// `ParentTargetController` (CR 608.2c: instructions are read in written
+/// order; the mode's own earlier instruction is the nearest antecedent).
+/// Trigger-established facts that outrank the subject are unaffected: the
+/// DamageDone player scope is re-seeded per mode by
+/// `modal_relative_player_scope_for_trigger`, and `object_pronoun_ref` pins
+/// (CR 603.4 intervening-if zone pins, spell-cast object pins) still serve
+/// bare pronouns whenever no mode-internal referent precedes them.
+/// Restores the filtering the retired pre-IR path applied via
+/// `derive_modal_subject` (#6811 ported the context threading but dropped the
+/// filter; issue #7031 — plus the silent "that player" → TriggeringPlayer
+/// misbind the same commit introduced, e.g. Disciple of Perdition).
+fn mode_anaphor_subject(subject: Option<TargetFilter>) -> Option<TargetFilter> {
+    match subject {
+        Some(TargetFilter::SelfRef | TargetFilter::Any) => None,
+        other => other,
+    }
+}
+
 fn parse_modal_mode_irs(
     modes: &[ModeAst],
     kind: AbilityKind,
@@ -1253,6 +1278,7 @@ fn parse_modal_mode_irs(
         .iter()
         .map(|mode| {
             let mut mode_ctx = base_ctx.clone();
+            mode_ctx.subject = mode_anaphor_subject(mode_ctx.subject.take());
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
             guard_unsupported_mode_qualifiers_ir(&mut ability, kind, &mode_ctx);
@@ -4459,6 +4485,381 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 .iter()
                 .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
             "standard Tiered modes must be unaffected by the shared-effect arm"
+        );
+    }
+
+    // ---- #7031 — modal mode-body subject filter (`mode_anaphor_subject`) ----
+
+    fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| chain_has_unimplemented(s))
+    }
+
+    const SAURON_DINO_DEVOTEE_ORACLE: &str = "Flying\nWhenever Sauron enters or attacks, choose one —\n• Cure Cancer — You gain 3 life.\n• Turn People into Dinosaurs — Put a saurian counter on another target creature. It's a green Dinosaur with base power and toughness 5/5 for as long as it has a saurian counter on it.";
+
+    /// SHAPE (R8, #7031): Sauron, Dino Devotee's mode-2 second sentence
+    /// ("It's a green Dinosaur with base power and toughness 5/5 for as long
+    /// as it has a saurian counter on it") lowers to the full animation
+    /// payload bound to the MODE'S TARGET — the CR 608.2c nearest antecedent
+    /// introduced by the mode's own first sentence. Revert-fail: with the
+    /// mode-body subject filter reverted, the leaked `SelfRef` subject makes
+    /// the contracted-copula honest-bind gate decline and the clause falls to
+    /// `Effect::Unimplemented`, failing both the zero-Unimplemented
+    /// reach-guard and the modification-set equality.
+    #[test]
+    fn sauron_dino_devotee_mode_body_animation_binds_parent_target() {
+        use crate::types::ability::{ContinuousModification, FilterProp, TypeFilter};
+        use crate::types::card_type::{CoreType, SubtypeSet};
+        use crate::types::counter::{CounterMatch, CounterType};
+        use crate::types::mana::ManaColor;
+        use crate::types::Duration;
+
+        let parsed = parse_oracle_text(
+            SAURON_DINO_DEVOTEE_ORACLE,
+            "Sauron, Dino Devotee",
+            &[],
+            &[],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("enters-or-attacks trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+
+        // Zero-Unimplemented reach-guard: makes every negative below
+        // non-vacuous (an Unimplemented chain would short-circuit them).
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        // Mode-2 head: the counter placement that introduces the antecedent.
+        let mode2 = &execute.mode_abilities[1];
+        match mode2.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert_eq!(counter_type, &CounterType::Generic("saurian".to_string()));
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    filter.properties.contains(&FilterProp::Another),
+                    "'another target creature' keeps the Another property"
+                );
+            }
+            other => panic!("mode 2 head must be PutCounter on a typed target, got {other:?}"),
+        }
+
+        // Mode-2 second sentence: the restored animation payload.
+        let sub = mode2
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        // CR 611.2b: the peeled `for as long as` duration survives on the
+        // sub-ability wrapper, exactly where the pre-fix export carried it.
+        let expected_condition = StaticCondition::RecipientHasCounters {
+            counters: CounterMatch::OfType(CounterType::Generic("saurian".to_string())),
+            minimum: 1,
+            maximum: None,
+        };
+        assert_eq!(
+            sub.duration,
+            Some(Duration::ForAsLongAs {
+                condition: expected_condition
+            }),
+            "wrapper duration must be ForAsLongAs{{RecipientHasCounters saurian >= 1}}"
+        );
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    target,
+                    &Some(TargetFilter::ParentTarget),
+                    "the animation must bind the MODE'S TARGET (CR 608.2c)"
+                );
+                let grant = static_abilities.first().expect("one continuous grant");
+                assert_eq!(
+                    grant.affected,
+                    Some(TargetFilter::ParentTarget),
+                    "affected must be the mode's target, never the trigger source"
+                );
+                // CR 613.4b (base P/T, Layer 7b) + CR 613.1e (color, Layer 5) +
+                // CR 613.1d (type, Layer 4) + CR 205.1a (subtype replacement:
+                // RemoveAllSubtypes precedes the granted subtype).
+                assert_eq!(
+                    grant.modifications,
+                    vec![
+                        ContinuousModification::SetPower { value: 5 },
+                        ContinuousModification::SetToughness { value: 5 },
+                        ContinuousModification::SetColor {
+                            colors: vec![ManaColor::Green]
+                        },
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature
+                        },
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Dinosaur".to_string()
+                        },
+                    ],
+                    "the exact v0.35.2 animation payload must be restored"
+                );
+            }
+            other => panic!("mode 2 second sentence must be GenericEffect, got {other:?}"),
+        }
+    }
+
+    const DISCIPLE_OF_PERDITION_ORACLE: &str = "When this creature dies, choose one. If you have exactly 13 life, you may choose both instead.\n• You draw a card and you lose 1 life.\n• Exile target opponent's graveyard. That player loses 1 life.";
+
+    /// SHAPE (R8b, #7031 second discriminating card): Disciple of Perdition's
+    /// mode-2 "That player loses 1 life" binds to the TARGETED OPPONENT
+    /// (`ParentTargetController` — the CR 608.2c anaphor to the player target
+    /// chosen earlier in the same mode), restoring the verified v0.35.2
+    /// binding. Revert-fail: with the filter reverted the leaked trigger
+    /// subject flips the "that player" arm to `TriggeringPlayer` — the silent
+    /// misbind #6811 introduced (verified in the pre-fix export).
+    #[test]
+    fn disciple_of_perdition_that_player_binds_to_targeted_opponent() {
+        let parsed = parse_oracle_text(
+            DISCIPLE_OF_PERDITION_ORACLE,
+            "Disciple of Perdition",
+            &[],
+            &[],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("dies trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+        // Zero-Unimplemented reach-guard for the binding assertion below.
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        let mode2 = &execute.mode_abilities[1];
+        // Reach-guard: the head is the graveyard exile that introduces the
+        // player-target antecedent.
+        assert!(
+            matches!(mode2.effect.as_ref(), Effect::ChangeZoneAll { .. }),
+            "mode 2 head must be the graveyard exile, got {:?}",
+            mode2.effect
+        );
+        let sub = mode2
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        match sub.effect.as_ref() {
+            Effect::LoseLife { target, .. } => {
+                assert_eq!(
+                    target,
+                    &Some(TargetFilter::ParentTargetController),
+                    "'That player' must bind to the targeted opponent \
+                     (ParentTargetController), not TriggeringPlayer"
+                );
+            }
+            other => panic!("mode 2 second sentence must be LoseLife, got {other:?}"),
+        }
+    }
+
+    const BLIZZARD_SPECTER_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a player, choose one —\n• That player returns a permanent they control to its owner's hand.\n• That player discards a card.";
+
+    /// SHAPE (R8b negative sibling): Blizzard Specter's "That player" modes
+    /// KEEP their `TriggeringPlayer` binding — the DamageDone trigger scope
+    /// (`modal_relative_player_scope_for_trigger`; CR 608.2c back-reference to
+    /// the damaged player established by the trigger event) is re-seeded per
+    /// mode and outranks the cleared subject in the "that player" rung ladder.
+    /// This proves the subject filter clears ONLY the subject axis, not the
+    /// trigger-established player scope.
+    #[test]
+    fn blizzard_specter_that_player_keeps_triggering_player_scope() {
+        let parsed = parse_oracle_text(BLIZZARD_SPECTER_ORACLE, "Blizzard Specter", &[], &[], &[]);
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("combat-damage trigger present");
+        let execute = trigger.execute.as_deref().expect("modal execute");
+        assert_eq!(execute.mode_abilities.len(), 2, "two modes");
+        // Zero-Unimplemented reach-guard.
+        for (i, mode) in execute.mode_abilities.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+
+        // Mode 1: "That player returns a permanent they control ..." — the
+        // bounce is scoped to the damaged player's permanents.
+        match execute.mode_abilities[0].effect.as_ref() {
+            Effect::Bounce {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert_eq!(
+                    filter.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "mode 1 'that player' must stay the damaged player"
+                );
+            }
+            other => panic!("mode 1 must be Bounce of a typed permanent, got {other:?}"),
+        }
+        // Mode 2: "That player discards a card."
+        match execute.mode_abilities[1].effect.as_ref() {
+            Effect::Discard { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "mode 2 'that player' must stay the damaged player"
+                );
+            }
+            other => panic!("mode 2 must be Discard, got {other:?}"),
+        }
+    }
+
+    // R7 — `mode_anaphor_subject` building-block arms. The inline `"; or"`
+    // modal form funnels through the same `parse_modal_mode_irs` seam as the
+    // bullet form, so these arms exercise the filter at its production entry.
+
+    fn lower_inline_modes(body: &str, ctx: &ParseContext) -> Vec<AbilityDefinition> {
+        let modal = try_parse_inline_modal_ir(body, ctx).expect("inline modal must parse");
+        modal
+            .modes
+            .iter()
+            .map(|mode| lower_ability_ir(&mode.ability))
+            .collect()
+    }
+
+    /// Extract the single continuous grant's affected filter of a
+    /// `GenericEffect` chain node.
+    fn generic_effect_affected(ability: &AbilityDefinition) -> TargetFilter {
+        match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities
+                .first()
+                .expect("one continuous grant")
+                .affected
+                .clone()
+                .expect("grant carries an affected filter"),
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    const INLINE_MODAL_WITH_INTERNAL_REFERENT: &str = "Choose one — Draw a card; or Put a +1/+1 counter on target creature. It gains flying until end of turn.";
+    const INLINE_MODAL_WITHOUT_INTERNAL_REFERENT: &str =
+        "Choose one — Draw a card; or It gains flying until end of turn.";
+
+    /// R7(a): a `SelfRef` trigger subject is CLEARED at the mode seam, so the
+    /// mode-internal typed referent binds the mode-body "It" (CR 608.2c —
+    /// the mode's own earlier instruction is the nearest antecedent).
+    #[test]
+    fn mode_anaphor_subject_clears_self_subject_for_mode_internal_referent() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        assert_eq!(modes.len(), 2);
+        for (i, mode) in modes.iter().enumerate() {
+            assert!(
+                !chain_has_unimplemented(mode),
+                "mode {i} must lower with zero Unimplemented: {mode:?}"
+            );
+        }
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::ParentTarget,
+            "cleared self-subject: mode-body 'It' binds the mode's own target"
+        );
+    }
+
+    /// R7(b): a real typed (non-self) trigger subject flows through the
+    /// filter's identity arm and keeps its threading — the mode-body "It"
+    /// resolves to the triggering object (CR 608.2k), NOT the mode target.
+    #[test]
+    fn mode_anaphor_subject_retains_typed_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::TriggeringSource,
+            "retained typed subject: mode-body 'It' binds the triggering object"
+        );
+    }
+
+    /// R7(c): an `object_pronoun_ref` pin (CR 603.4 intervening-if zone pins,
+    /// spell-cast object pins) SURVIVES the subject filter — with no
+    /// mode-internal referent preceding the pronoun, `parent_target_available`
+    /// is false, the ParentTarget branch cannot fire, and `resolve_it_pronoun`
+    /// still serves the pin.
+    #[test]
+    fn mode_anaphor_subject_preserves_object_pronoun_pin_without_referent() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITHOUT_INTERNAL_REFERENT, &ctx);
+        assert_eq!(
+            generic_effect_affected(&modes[1]),
+            TargetFilter::SelfRef,
+            "with no mode-internal referent the pinned object still serves 'It'"
+        );
+    }
+
+    /// R7(d): with a mode-internal typed referent PRECEDING the pronoun, the
+    /// mode-internal referent outranks the pin — the CR 608.2c
+    /// nearest-antecedent reading within the mode's own instruction sequence
+    /// (Oracle templating uses "this card"/the card name, not "it", when the
+    /// source is meant across an intervening referent). The combination
+    /// (SelfRef/Any subject + zone-pin + modal body) is pool-empty today; this
+    /// pin makes the precedence deliberate so a future contradicting card
+    /// forces a conscious change.
+    #[test]
+    fn mode_anaphor_subject_mode_internal_referent_outranks_pin() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let modes = lower_inline_modes(INLINE_MODAL_WITH_INTERNAL_REFERENT, &ctx);
+        let sub = modes[1]
+            .sub_ability
+            .as_deref()
+            .expect("mode 2 second sentence present");
+        assert_eq!(
+            generic_effect_affected(sub),
+            TargetFilter::ParentTarget,
+            "a mode-internal referent preceding the pronoun outranks the pin"
         );
     }
 }
