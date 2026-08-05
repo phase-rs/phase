@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-04T00:00:00Z",
+  "updated": "2026-08-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -660,7 +660,7 @@
         },
         {
           "count": 2,
-          "name": "Farewell"
+          "name": "Temporary Lockdown"
         },
         {
           "count": 2,
@@ -684,15 +684,15 @@
         },
         {
           "count": 4,
-          "name": "Omen of the Sea"
-        },
-        {
-          "count": 4,
           "name": "Get Lost"
         },
         {
           "count": 2,
           "name": "Ultima"
+        },
+        {
+          "count": 4,
+          "name": "Quick Study"
         }
       ],
       "sideboard": [
@@ -706,7 +706,7 @@
         },
         {
           "count": 2,
-          "name": "Temporary Lockdown"
+          "name": "Minor Misstep"
         },
         {
           "count": 2,
@@ -717,8 +717,12 @@
           "name": "Quantum Riddler"
         },
         {
-          "count": 4,
-          "name": "Change the Equation"
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Test of Talents"
         }
       ]
     },
@@ -874,6 +878,117 @@
       ]
     },
     {
+      "name": "Orzhov Greasefang",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Bleachbone Verge"
+        },
+        {
+          "count": 4,
+          "name": "Brightclimb Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Fleeting Spirit"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
+        },
+        {
+          "count": 4,
+          "name": "Guardian of New Benalia"
+        },
+        {
+          "count": 4,
+          "name": "Iron-Shield Elf"
+        },
+        {
+          "count": 1,
+          "name": "Lively Dirge"
+        },
+        {
+          "count": 4,
+          "name": "Monument to Endurance"
+        },
+        {
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 4,
+          "name": "The Mycosynth Gardens"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 4,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 3,
+          "name": "Pest Control"
+        }
+      ]
+    },
+    {
       "name": "Dimir Midrange",
       "author": "MTGGoldfish",
       "colors": [
@@ -1001,236 +1116,6 @@
         {
           "count": 2,
           "name": "Graveyard Trespasser"
-        }
-      ]
-    },
-    {
-      "name": "Orzhov Greasefang",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Bleachbone Verge"
-        },
-        {
-          "count": 4,
-          "name": "Brightclimb Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Fleeting Spirit"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 4,
-          "name": "Guardian of New Benalia"
-        },
-        {
-          "count": 4,
-          "name": "Iron-Shield Elf"
-        },
-        {
-          "count": 1,
-          "name": "Lively Dirge"
-        },
-        {
-          "count": 4,
-          "name": "Monument to Endurance"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "The Mycosynth Gardens"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 3,
-          "name": "Pest Control"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Phoenix",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Arclight Phoenix"
-        },
-        {
-          "count": 4,
-          "name": "Artist's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Consider"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 2,
-          "name": "Flashback"
-        },
-        {
-          "count": 3,
-          "name": "Into the Flood Maw"
-        },
-        {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Picklock Prankster"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Command"
-        },
-        {
-          "count": 1,
-          "name": "Proft's Eidetic Memory"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
-        },
-        {
-          "count": 4,
-          "name": "Treasure Cruise"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 3,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Third Path Iconoclast"
-        },
-        {
-          "count": 2,
-          "name": "Brazen Borrower"
         }
       ]
     },
@@ -1366,6 +1251,125 @@
         {
           "count": 2,
           "name": "Disdainful Stroke"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Phoenix",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Arclight Phoenix"
+        },
+        {
+          "count": 4,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Consider"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Impulse"
+        },
+        {
+          "count": 2,
+          "name": "Flashback"
+        },
+        {
+          "count": 3,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 4,
+          "name": "Picklock Prankster"
+        },
+        {
+          "count": 1,
+          "name": "Prismari Command"
+        },
+        {
+          "count": 1,
+          "name": "Proft's Eidetic Memory"
+        },
+        {
+          "count": 1,
+          "name": "Stormcarved Coast"
+        },
+        {
+          "count": 4,
+          "name": "Treasure Cruise"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 3,
+          "name": "Ledger Shredder"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Third Path Iconoclast"
+        },
+        {
+          "count": 2,
+          "name": "Brazen Borrower"
         }
       ]
     }
