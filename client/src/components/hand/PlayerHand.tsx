@@ -865,7 +865,6 @@ const HandCard = memo(function HandCard({
   onMouseEnter,
   onMouseLeave,
 }: HandCardProps) {
-  const { t } = useTranslation("game");
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setDragging = useUiStore((s) => s.setDragging);
   const isMobileDragged = useUiStore(
