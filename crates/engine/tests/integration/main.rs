@@ -158,6 +158,7 @@ mod diluvian_primordial_6754;
 mod disjunctive_state_change_head_coverage_honesty;
 mod disorder_in_the_court_5955;
 mod divine_visitation_token_substitution;
+mod doom_s_time_platform_exile_with_time_counters;
 mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;
 mod dragonstorm_forecaster_named_or_tutor;
