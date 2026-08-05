@@ -104,6 +104,7 @@
     "mainDeck": "Hauptdeck",
     "emptyDeckHint": "Klicke Karten aus dem Pool an, um sie deinem Deck hinzuzufügen.",
     "addableCards": "Hinzufügbare Karten",
+    "searchAddableCards": "Hinzufügbare Karten durchsuchen...",
     "autoLands": "Auto-Länder",
     "suggestDeck": "Deck vorschlagen",
     "submitDeck": "Deck einreichen",

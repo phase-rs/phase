@@ -104,6 +104,7 @@
     "mainDeck": "Deck principal",
     "emptyDeckHint": "Cliquez sur des cartes du pool pour les ajouter à votre deck.",
     "addableCards": "Cartes ajoutables",
+    "searchAddableCards": "Rechercher des cartes ajoutables...",
     "autoLands": "Terrains auto",
     "suggestDeck": "Suggérer un deck",
     "submitDeck": "Soumettre le deck",

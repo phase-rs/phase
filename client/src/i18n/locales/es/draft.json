@@ -104,6 +104,7 @@
     "mainDeck": "Mazo principal",
     "emptyDeckHint": "Haz clic en las cartas del grupo para añadirlas a tu mazo.",
     "addableCards": "Cartas añadibles",
+    "searchAddableCards": "Buscar cartas añadibles...",
     "autoLands": "Tierras automáticas",
     "suggestDeck": "Sugerir mazo",
     "submitDeck": "Enviar mazo",

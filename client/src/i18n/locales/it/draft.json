@@ -104,6 +104,7 @@
     "mainDeck": "Mazzo principale",
     "emptyDeckHint": "Clicca le carte dal pool per aggiungerle al tuo mazzo.",
     "addableCards": "Carte aggiungibili",
+    "searchAddableCards": "Cerca carte aggiungibili...",
     "autoLands": "Terre automatiche",
     "suggestDeck": "Suggerisci mazzo",
     "submitDeck": "Invia mazzo",

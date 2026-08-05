@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
+
+afterEach(cleanup);
 
 vi.mock("../../../stores/draftStore", () => ({
   useDraftStore: (selector: (state: Record<string, unknown>) => unknown) =>

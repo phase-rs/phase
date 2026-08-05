@@ -223,7 +223,7 @@ describe("DebugPanel — desktop solo capability", () => {
       target: { value: "Isamaru, Hound of Konda" },
     });
     fireEvent.click(screen.getByLabelText("Make nonlegendary"));
-    fireEvent.click(screen.getAllByRole("button", { name: "Create Card" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Create Card" }));
 
     expect(debugDispatch).toHaveBeenCalledWith({
       type: "Debug",
