@@ -13332,9 +13332,12 @@ declare_game_state! {
     /// CR 732.2a loop-shortcut detection ring (PR-3). A bounded FIFO of recent
     /// post-resolution [`LoopDetectSample`]s — each carrying BOTH the CR 104.4b
     /// `normalized` comparand (what this ring held before the two roles were split) and
-    /// the CR 732.2a `live` evaluable — captured at the post-pipeline frame
-    /// of `game::engine::pass_priority_once_with_pipeline` (after
-    /// `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at
+    /// the CR 732.2a `live` evaluable — captured at TWO post-pipeline frames in
+    /// `game::engine` (both after `run_post_action_pipeline` places refilling triggers,
+    /// CR 603.3): the settle sampler in `pass_priority_once_with_pipeline` and the
+    /// forced-window ANSWER site in `apply_action`. See
+    /// [`GameState::record_loop_detect_sample`] for what the two sites share and where they
+    /// differ. Scanned at
     /// the SBA-reconciliation seam (`game::engine::reconcile_terminal_result`). A
     /// self-refilling MANDATORY cascade drives the engine one resolution per `apply()`
     /// with no call-local window (the per-beat single-apply drive), so the window that
@@ -19643,9 +19646,21 @@ impl GameState {
     /// PR-3 (Option C): push one NORMALIZED post-resolution snapshot onto the
     /// CR 732.2a loop-detection ring, evicting the oldest at `LOOP_DETECT_RING_CAP`.
     /// The snapshot is `normalize_for_loop`d (its own ring cleared, see above) and
-    /// `Arc`-shared so storage is O(1) per element. Called only from the post-pipeline
-    /// frame behind the refill gate (`game::engine::pass_priority_once_with_pipeline`,
-    /// after `run_post_action_pipeline` places refilling triggers).
+    /// `Arc`-shared so storage is O(1) per element.
+    ///
+    /// TWO production call sites, both in `game::engine` and both on the frame AFTER
+    /// `run_post_action_pipeline` has placed refilling triggers (CR 603.3):
+    ///
+    /// 1. the SETTLE sampler behind the refill gate in `pass_priority_once_with_pipeline`
+    ///    (gated on `resolved_this_beat`, and the only one of the two with a `ring.clear()`
+    ///    counterpart on its `else`); and
+    /// 2. the forced-window ANSWER site in `apply_action` (gated on
+    ///    `answering_forced_window`), added because an entry announced ACROSS a forced
+    ///    pre-priority window never appeared in any settle frame's stack.
+    ///
+    /// "Only the settle sampler" was the pre-(2) premise and it is no longer true; the two
+    /// share every other conjunct, including `WaitingFor::Priority{active_player}`, which is
+    /// what keeps the ring homogeneous for `analysis::resource::ring_delta_signature`.
     pub(crate) fn record_loop_detect_sample(&mut self) {
         if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
             self.loop_detect_ring.pop_front();

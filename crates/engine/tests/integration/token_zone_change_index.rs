@@ -1604,16 +1604,52 @@ fn a_realized_copy_token_entry_and_a_same_turn_token_batch_take_distinct_indices
 
 /// CR 400.7 + CR 603.6a — convergence point (a). On the UNPAUSED copy route the entry is realized
 /// inside `finish_copy_target_choice_entry`, i.e. during the action that answers the copy-target
-/// prompt. The settled-`Priority` backstop cannot substitute for it: this action does not settle
-/// (a stale second `CopyTargetChoice` is a known pre-existing defect on this route), so the
-/// backstop would slip the row and the emit into a LATER action — one client round trip late, with
-/// an empty CR 400.7 look-back in between.
+/// prompt.
 ///
-/// REVERT-PROBE (discriminating, RUN): delete the flush call in
-/// `engine_replacement::finish_copy_target_choice_entry` ⇒ the FIRST copy-target answer emits
-/// nothing and both ledgers are still empty after it, failing here, while
-/// `..._through_a_mandatory_as_enters_choice`, `..._with_a_second_pause` and
-/// `..._an_etb_counter_ordering_pause` stay green (they realize at (c) / (b)).
+/// STATUS UPDATED — this now carries the same status `counters.rs`'s `EmitCommittedCopyTokenEntry`
+/// site carries: EXERCISED, not isolated. The old text here said "this action does not settle (a
+/// stale second `CopyTargetChoice` is a known pre-existing defect on this route)". That defect is
+/// FIXED: `handle_copy_target_choice`'s liminal-resume branch now clears the answered prompt
+/// (CR 614.12a — the choice is made before the permanent enters, so the prompt is spent; CR 603.3 —
+/// the ETB abilities are owed the priority boundary the echo denied them). The route settles on the
+/// copy-target answer, so `engine::apply_action`'s settled-`Priority` backstop
+/// (`realize_settled_token_battlefield_entry`, called immediately before `run_post_action_pipeline`)
+/// now realizes the entry inside this same action and ahead of the same SBA pass. The old
+/// "one client round trip late" hazard cannot arise on this route any more.
+///
+/// REVERT-PROBE, RE-MEASURED (NO LONGER DISCRIMINATING): deleting the flush call in
+/// `engine_replacement::finish_copy_target_choice_entry` used to fail this test. Measured after the
+/// fix: this test and the whole `token_zone_change_index` / `spark_double_as_enters` /
+/// `vizier_of_many_faces_embalm_copy_panic_5278` / `metamorphic_alteration` /
+/// `constellation_enters_with_choice` / `issue_3260_phantasmal_image_persist` set stay GREEN with
+/// that call deleted, because the settled backstop covers it. Stronger than that: the call site is
+/// unpinned by the **whole** suite — `cargo test -p phase-engine` with it deleted returns the same
+/// 18514 + 12 + 9 + 4550 passing / 0 failed as baseline.
+///
+/// WHY IT IS STILL KEPT, measured rather than assumed. Probing the call site over the full suite
+/// gives 29 calls: 11 realize (`pushed=2`, Token-liminal settled route), 17 are inert, and 1 is the
+/// Meld caller — also inert (`pushed=0`; nothing is parked on a meld, because only the `Suppress`
+/// TOKEN commit parks `pending_token_battlefield_entry`). The CR 616.1 counter-pause reaches this
+/// call **0** times: it returns from `finish_copy_target_choice_entry` at the
+/// `apply_etb_counters == false` branch, well above the flush. So an earlier draft of this comment
+/// naming "the CR 616.1 counter-pause and Meld returns" as the callers this guards was wrong on
+/// both counts.
+///
+/// The call site's own comment says the flush precedes the replay / batch-drain / aura blocks so
+/// THEIR pause returns cannot strand a parked entry. **That guard function is stated, not
+/// established.** The intersection it describes — a Token-liminal entry that raises a pause AFTER
+/// the flush — IS reachable with the ordinary card pool: Embalm copying a creature whose ETB
+/// targets (e.g. Flametongue Kavu) drives
+/// `["ReplacementChoice(2)", "CopyTargetChoice", "TriggerTargetSelection"]`, returning the
+/// `replay_deferred_entry_events` pause after the flush. Measured at that pause with the flush call
+/// deleted vs intact: identical state in both arms (`parked=false`, the same single entry row).
+/// **Nothing is stranded**, so the only reachable instance does not demonstrate the guard.
+///
+/// Honest status, therefore: retained defensively. No shape reachable today has been measured to
+/// strand an entry when this call is removed, and no fixture pins it. Keep it for the CR 704.3
+/// ordering property it does provide on the 11 realizing calls (the CR 400.7 row is written before
+/// the settling action's SBA pass, so CR 704.5f cannot bury a 0-toughness copy first); do not cite
+/// a guard this file cannot demonstrate.
 #[test]
 fn unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself() {
     let mut scenario = GameScenario::new();
@@ -1625,13 +1661,19 @@ fn unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself() {
     let drive = drive_embalm_copy(&mut runner, vizier, Some("Grizzly Bears"));
     // POSITIVE reach-guard: the copy-target prompt is the only production entrance to the
     // postponed (`Suppress`) route, and this route raises no as-enters pause after it.
+    //
+    // WHOLE vector, not the `[..2]` slice this used to assert. The slice existed only because the
+    // unsettled action echoed a stale third `CopyTargetChoice`; with that fixed the full vector is
+    // assertable, and asserting it makes this test the cheapest stale-prompt regression detector on
+    // the route it names.
     assert_eq!(
-        drive.prompts[..2],
-        [
+        drive.prompts,
+        vec![
             "ReplacementChoice(2)".to_string(),
             "CopyTargetChoice".to_string()
         ],
-        "the unpaused route reaches the copy-target prompt with no intervening pause"
+        "the unpaused route reaches the copy-target prompt with no intervening pause, and that \
+         answer is the LAST prompt because it settles"
     );
     let token = drive.token();
 

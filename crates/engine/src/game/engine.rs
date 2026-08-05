@@ -1981,6 +1981,37 @@ fn bounded_cycle_offer(
     outcome
 }
 
+/// CR 732.2a: THE candidate walk — newest-first over `idx`, one item per candidate pair,
+/// `span = live.len() - 1 - idx` in RETAINED RING FRAMES, `span >= 1`.
+///
+/// PRODUCTION'S walk, exposed so its test-side consumers CONSUME it instead of imitating it. A
+/// row that hard-codes `&live[live.len() - 2..]` is asserting `span == 1` without saying so,
+/// and reads a HALF PERIOD the moment the sampling rate moves — which is exactly what the
+/// answer-beat sampler did to two of them.
+///
+/// A span of 0 is the pair `state` against its own snapshot. It is already refused by
+/// `net_progress_for` on the resulting zero delta in every production trajectory, but it is
+/// refused HERE too, explicitly: `materialize_fixed_shortcut` DELIMITS a committed cycle by
+/// this count, and a published `0` would mean "one repetition spans no frames", which no drive
+/// can honour. Filtered BEFORE the window is yielded — `span >= 1` is `window.len() >= 2`
+/// identically — so a degenerate window never reaches a touch or a mint.
+///
+/// TWO LIFETIMES, not one. `certified_bounded_cycle_offer` carries a `PeriodTouch<'a>` OUT of
+/// the loop, so the ELEMENT lifetime must survive independently of the borrow of the slice;
+/// that is what `certified_period_touch(window: &[&'a GameState], current: &'a GameState) ->
+/// PeriodTouch<'a>` already requires.
+pub(crate) fn candidate_windows<'w, 'a>(
+    ring_live: &'w [&'a GameState],
+) -> impl Iterator<Item = (usize, u32, &'w [&'a GameState])> + 'w {
+    (0..ring_live.len())
+        .rev()
+        .map(move |idx| {
+            let span = (ring_live.len() - 1 - idx) as u32;
+            (idx, span, &ring_live[idx..])
+        })
+        .filter(|&(_, span, _)| span >= 1)
+}
+
 /// CR 732.2a: certification (step 4/4b), the choice gate and the bound — everything that can
 /// ask the verdict door, split out so its caller owns exactly one meter snapshot.
 #[allow(clippy::too_many_arguments)]
@@ -2010,28 +2041,13 @@ fn certified_bounded_cycle_offer<'a>(
         PeriodTouch<'_>,
         PeriodicDelta,
     )> = None;
-    for idx in (0..ring.len()).rev() {
-        // The span, in RETAINED RING FRAMES, that this candidate pair covers.
-        // `ring.last()` is the sample `pass_priority_once_with_pipeline` recorded at THIS
-        // beat, before the bridge ran, so the newest frame is the current state and the
-        // span from `ring[idx]` is `len - 1 - idx`.
-        //
-        // A span of 0 is the pair `state` against its own snapshot. It is already refused
-        // by `net_progress_for` on the resulting zero delta in every production
-        // trajectory, but it is refused HERE too, explicitly: `materialize_fixed_shortcut`
-        // now DELIMITS a committed cycle by this count, and a published `0` would mean
-        // "one repetition spans no frames", which no drive can honour. Fail closed on the
-        // degenerate pair rather than rely on a downstream conjunct to catch it.
-        //
-        // EVALUATED FIRST, before the window is built, touched or minted from — `span >= 1`
-        // is `window.len() >= 2` identically, so this guard is also what keeps a degenerate
-        // window out of the touch and the mint.
-        let span = ring.len() - 1 - idx;
-        if span < 1 {
-            continue;
-        }
+    // The walk itself — its ORDER, its span arithmetic and its degenerate-pair filter — lives
+    // in `candidate_windows`, so the rows that need production's candidates take THE SAME
+    // iterator rather than a copy of it. `ring` and `ring_live` are the two halves of the same
+    // frames and therefore the same length, so indexing the comparand by the walk's `idx` is
+    // the pairing it always was.
+    for (idx, span, window) in candidate_windows(ring_live) {
         let prior = ring[idx];
-        let window = &ring_live[idx..];
         // Built under `BoardCovered` unconditionally, because step 4 does not yet know which
         // disjunct will match; step 4b keeps it or rebuilds it.
         let touch_cover = certified_period_touch(window, state, PeriodCertification::BoardCovered);
@@ -2089,7 +2105,7 @@ fn certified_bounded_cycle_offer<'a>(
                 // `interactive_3p_subset_lethal_does_not_crown` fixture's repetition
                 // spans TWO frames (a gain-life resolution then a lose-life one), and
                 // under the old hardcode its accepted drive committed nothing at all.
-                frames_per_period: span as u32,
+                frames_per_period: span,
                 delta,
                 victim_slot: Vec::new(),
             },
@@ -2238,9 +2254,14 @@ fn certified_bounded_cycle_offer<'a>(
     // CR 704.5a: what ONE repetition charges to whichever seat a slot's pin names. The
     // max-vs-sum reasoning, the gain clamp and the fail-closed direction live on the
     // function; `elimination_bounds` then sums the published slots per declarable victim.
-    // Extracted rather than inlined so the fork has a callable seam — `victim_slot` is empty
-    // on every trajectory that offers today, so this value is dropped in production and only
-    // `worst_seat_life_loss_is_the_max_seat_never_the_sum` discriminates max from sum.
+    // Extracted rather than inlined so the fork has a callable seam. ⚠ THE "`victim_slot` IS
+    // EMPTY ON EVERY TRAJECTORY THAT OFFERS TODAY" NOTE THAT STOOD HERE IS FALSIFIED, and is
+    // replaced rather than softened: the answer-beat sampling site in `apply_action` announces
+    // the entries a FORCED pre-priority window puts on the stack, and a CR 608.2b `Targets`
+    // declaration is exactly the shape that resolves across one. On the F4 boards `points` now
+    // carries Torch's `Targets` point, so this value is NOT dropped — it reaches
+    // `elimination_bounds` in production and `r1_the_bounded_offer_fires_on_the_real_f4_dump`
+    // re-derives the published bound with a non-zero declared term.
     let worst_seat_life_loss: i64 = periodic.delta.worst_seat_life_loss();
     periodic.victim_slot = points
         .iter()
@@ -2589,7 +2610,11 @@ pub(crate) fn entry_publishes_pin_slots(
     // it does NOT bound who the resolver ASKS, nor WHETHER it asks, nor HOW MANY TIMES.
     // Three mint-time conjunct groups, all FAIL-CLOSED pre-filters on the ONE gate a
     // `MayChoice` pin is for — the CR 603.5 gate inside `resolve_chain_body`
-    // (`effects/mod.rs`, the `if ability.optional && !has_kind_driven_repeat(..)` block).
+    // (`effects/mod.rs`). ⚠ GROUPS (a) AND (c) ARE NO LONGER RESTATED HERE: they, plus the
+    // `optional_for` and feasibility conjuncts this mint used to OMIT, now live in
+    // `effects::upfront_optional_gate`, which is the same function production's own branch
+    // takes. The prose below stays because it records WHY each group is load-bearing; the
+    // code below asks the authority for all of them at once.
     // THIS IS THE ONE PLACE `may` IS MINTED, so the guards cover shape (A) and shape (B)
     // together rather than being restated per shape. Soundness over the OTHER FOUR
     // production producers of `WaitingFor::OptionalEffectChoice` is NOT claimed here; it is
@@ -2616,21 +2641,31 @@ pub(crate) fn entry_publishes_pin_slots(
     //     `Draw` / `Token` of that shape would otherwise mint ONE slot for N prompts. Ask
     //     production's own three predicates rather than re-deriving them here, which is
     //     the same authority-sharing rule (a) follows.
-    let may = (ability.optional
-        && crate::game::effects::optional_prompt_player(state, ability) == proposer
-        && !crate::game::effects::has_kind_driven_repeat(ability)
-        && !crate::game::effects::has_member_driven_repeat_after_hydration(state, ability)
-        && !crate::game::effects::is_repeated_optional_payment(ability)
-        && ability.may_trigger_origin.as_ref().is_none_or(|origin| {
-            state
-                .may_trigger_auto_choice(&crate::types::game_state::MayTriggerAutoChoiceKey {
-                    player: proposer,
-                    source_id: ability.source_id,
-                    origin: origin.clone(),
-                })
-                .is_none()
-        }))
-    .then(|| DecisionSlot {
+    // ADOPTION B. All four groups are `effects::upfront_optional_gate`'s, asked of the ONE
+    // function `resolve_chain_body`'s own branch is, so the mint and the gate cannot drift.
+    // `Probe` is the right mode here: this caller has NOT run the probe (production's `Known`
+    // belongs to a resolve that is not happening yet) and the authority evaluates it LAST, so the
+    // clone-bearing `CastFromZone` arm needs `optional ∧ ¬optional_for ∧ ¬repeat`. MEASURED on a
+    // full `--test integration` run: 16402 mints ⇒ 4573 probes ⇒ 0 arm entries (59 via `Known`).
+    //
+    // BEHAVIOUR CHANGE, and it is rules-correct in the fail-closed direction: this now
+    // withholds the slot for an `optional_for` ability (CR 608.2d + CR 101.4 — a fan-out is an
+    // APNAP cascade of up to one window PER LIVING PLAYER, and one published slot standing for
+    // N prompts is the cardinality defect group (c) already argues against) and for an
+    // infeasible optional (which opens no window at all, so a slot for it is a pin the gate
+    // can never spend). Direction: strictly FEWER offers, never more.
+    let may = crate::game::effects::upfront_optional_gate(
+        state,
+        ability,
+        crate::game::effects::OptionalFeasibility::Probe,
+    )
+    .filter(|gate| gate.prompt_player == proposer)
+    .filter(|gate| {
+        gate.key
+            .as_ref()
+            .is_none_or(|key| state.may_trigger_auto_choice(key).is_none())
+    })
+    .map(|_| DecisionSlot {
         source: source.clone(),
         index: 1,
     });
@@ -3268,6 +3303,33 @@ enum CycleOutcome {
     Abort,
 }
 
+/// CR 732.2a: THE FRAME DELIMITER — one published repetition is `k` retained ring frames.
+///
+/// The SINGLE AUTHORITY for "has the published period elapsed?". `drive_one_shortcut_cycle`
+/// has to answer that question in two arms — the active-player settle arm and the
+/// forced-window ANSWER arm — and both arms are places a frame can be recorded now that
+/// `apply_action` carries a second sampling site. Two inline copies of
+/// `frames_per_period.is_some_and(|k| frames_this_cycle >= k)` would be two places to get the
+/// comparison wrong, in a predicate whose `>=` vs `==` and whose `None` arm are both
+/// load-bearing (see `published_period_elapsed_is_total_over_the_axes_that_delimit_a_cycle`).
+///
+/// `None` ⇒ NEVER elapsed. An offer whose producer states no per-period signature publishes
+/// no frame count, and a drive must not invent one: such a cycle is delimited by board
+/// recurrence alone, exactly as it was before this delimiter existed. That is the fail-closed
+/// direction — a `true` here ends a cycle, and ending one early commits a FRACTION of the
+/// published delta, which is the conditional action CR 732.2a forbids outright.
+///
+/// `>=`, not `==`: a single beat may retain more than one frame, and a cycle that overshot `k`
+/// has still elapsed. An `==` would drive past its own boundary and only stop at the beat cap.
+///
+/// Beat-kind agnostic BY CONSTRUCTION — it reads only the counter the ring itself advanced, so
+/// it is valid at every beat where a frame can be recorded. The two board-recurrence predicates
+/// are deliberately NOT folded in: `GameState::normalize_for_loop`'s contract rests on
+/// `waiting_for` being `Priority` at the sample point, so they stay in the settle arm.
+fn published_period_elapsed(frames_this_cycle: u32, frames_per_period: Option<u32>) -> bool {
+    frames_per_period.is_some_and(|k| frames_this_cycle >= k)
+}
+
 /// PR-7 Combo-UI Stage 2: drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
 /// of `committed`, seeded to the canonical settle beat (`Priority{active_player}`, the same
 /// beat the detector ring samples). Recurrence is detected against `boundary` (normalized).
@@ -3293,12 +3355,17 @@ enum CycleOutcome {
 /// the beat cap (`Abort`, committing zero cycles) or by crossing lethal, and the declared `n`
 /// is inert: `Fixed(1)` and `Fixed(3)` produce byte-identical boards.
 ///
-/// The frame count is the same quantity `frames_per_period` names, measured the same way: the
-/// single `record_loop_detect_sample` call site lives in `pass_priority_once_with_pipeline`,
-/// which is the very function this loop steps, so a driven beat samples the ring under exactly
-/// the gates an observed beat does. A new frame is detected by `Arc` identity of the ring's
-/// back rather than by length, because the ring evicts at `LOOP_DETECT_RING_CAP` and a length
-/// delta reads 0 once it is full.
+/// The frame count is the same quantity `frames_per_period` names, measured the same way: this
+/// loop steps `pass_priority_once_with_pipeline` and answers its prompts through
+/// `apply_action`, which are exactly the two functions the OBSERVED drive samples the ring in,
+/// so a driven beat samples under exactly the gates an observed beat does. ⚠ THAT IS TWO
+/// SAMPLING SITES, NOT ONE — the note that stood here named only the settle sampler, and the
+/// forced-window ANSWER site falsifies it. Which is why the frame counter is advanced in the
+/// ANSWER arm too: a period whose extra frames are recorded at answer beats would otherwise
+/// never reach `k`, and `frames_per_period` would be unreachable exactly on the boards the
+/// widening was for. A new frame is detected by `Arc` identity of the ring's back rather than
+/// by length, because the ring evicts at `LOOP_DETECT_RING_CAP` and a length delta reads 0
+/// once it is full.
 fn drive_one_shortcut_cycle(
     committed: &GameState,
     boundary: &GameState,
@@ -3339,9 +3406,11 @@ fn drive_one_shortcut_cycle(
             }
             // Active-player settle beat: cycle complete iff the board recurred (constant-depth
             // equal-modulo-resources OR ω-covering growth) or the published period's worth of
-            // ring frames has elapsed. This is the ONLY beat kind the ring samples at (the
-            // sampler's own gate is `Priority{player == active_player}`), so the frame counter
-            // is advanced here and nowhere else.
+            // ring frames has elapsed. NOT the only beat kind the ring samples at — the
+            // forced-window ANSWER arm below reaches `apply_action`'s second sampling site, so
+            // it advances the same counter. Both arms key the advance on the ring's BACK
+            // ALLOCATION actually changing rather than on the beat kind, which is what keeps
+            // the drive's frame count equal to the mint's on either path.
             Ok(WaitingFor::Priority { player }) if player == work.active_player => {
                 ev.append(&mut beat_events);
                 let ring_back_after = work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
@@ -3351,7 +3420,7 @@ fn drive_one_shortcut_cycle(
                 let norm = work.normalize_for_loop();
                 if crate::analysis::resource::loop_states_equal_modulo_resources(boundary, &norm)
                     || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, &norm)
-                    || frames_per_period.is_some_and(|k| frames_this_cycle >= k)
+                    || published_period_elapsed(frames_this_cycle, frames_per_period)
                 {
                     return CycleOutcome::Recurred {
                         state: Box::new(work),
@@ -3370,7 +3439,20 @@ fn drive_one_shortcut_cycle(
             Ok(other) => {
                 ev.append(&mut beat_events);
                 match inject_pinned_answer(&mut work, template, iteration, &other) {
-                    Ok(()) => continue,
+                    Ok(()) => {
+                        let ring_back_after =
+                            work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
+                        if ring_back_after.is_some() && ring_back_after != ring_back_before {
+                            frames_this_cycle += 1;
+                        }
+                        if published_period_elapsed(frames_this_cycle, frames_per_period) {
+                            return CycleOutcome::Recurred {
+                                state: Box::new(work),
+                                events: ev,
+                            };
+                        }
+                        continue;
+                    }
                     Err(RecastAbort) => return CycleOutcome::Abort,
                 }
             }
@@ -6743,10 +6825,12 @@ fn apply_action(
     // so an action-keyed list could not have expressed the class correctly at all.
     // `PassPriority` keeps its own action-side exemption because it is answered at a
     // `Priority` window, which is deliberately NOT in the forced class.
+    let answering_forced_window = state.waiting_for.is_forced_cascade_window();
+    let stack_len_before_action = state.stack.len();
     if !matches!(
         action,
         GameAction::PassPriority | GameAction::OrderTriggers { .. }
-    ) && !state.waiting_for.is_forced_cascade_window()
+    ) && !answering_forced_window
     {
         state.loop_detect_ring.clear();
     }
@@ -11062,7 +11146,52 @@ fn apply_action(
             triggers_processed_inline,
             skip_deferred_trigger_drain,
         )?;
-        state.waiting_for = wf.clone();
+        // CR 732.2a: the SECOND sampling site — a stack entry announced while a player
+        // answers a FORCED pre-priority window.
+        //
+        // NOT "the settle sampler's conjuncts PLUS the window flag". The two sets are the
+        // same SIZE, one member apart: `answering_forced_window` (captured before the
+        // reducer consumed the window) REPLACES the settle sampler's `resolved_this_beat`.
+        // Everything else is shared — `!in_simulation_probe()`, `samples()`,
+        // `!stack.is_empty()`, the non-shrinking `len >= before`, and
+        // `Priority{active_player}`.
+        //
+        // The settle sampler's `else { ring.clear() }` has NO counterpart here, and that is
+        // deliberate: this site is not a settle verdict on the beat, it is an additive
+        // observation of entries a forced window announced, so a miss must leave the
+        // accumulation alone rather than wipe it. CONSEQUENCE, accepted: a forced-window
+        // answer that resolves nothing but leaves the stack non-shrinking records a frame
+        // whose stack duplicates its predecessor's. That costs one ring slot and a zero
+        // frame-delta; it cannot manufacture a period, because `ring_delta_signature` refuses
+        // a zero smallest-period delta outright, and it cannot desynchronize the count,
+        // because MINT AND DRIVE ARE SYMMETRIC — `drive_one_shortcut_cycle` answers its prompts
+        // through `inject_pinned_answer`: three of its FOUR arms dispatch `apply_action` and walk
+        // this very branch, advancing `frames_this_cycle`; the fourth `Err`s before any advance.
+        //
+        // ORDERING, NOW SYNCHRONIZED (maintainer call on PR #7005; previously carried here
+        // as a documented latent asymmetry). `game::public_state::sync_waiting_for` is the
+        // canonical synchronizer — it installs `wf`, runs the legacy-attach normalization,
+        // and recomputes `priority_player` through `turn_control`'s authorized-submitter
+        // resolver — and it now runs BEFORE the record, exactly as the settle sampler in
+        // `pass_priority_once_with_pipeline` does. So a frame minted here carries the same
+        // `waiting_for`/`priority_player` pair a settle frame carries, and that homogeneity
+        // is load-bearing: `impl PartialEq for GameState` compares both fields and
+        // `normalize_for_loop` neutralizes neither, so a mixed ring would break
+        // `ring_delta_signature`'s turn-position conjunct. BLAST RADIUS IS THE RING ONLY —
+        // `apply_action_boundary` re-syncs the returned `wf` before the result leaves the
+        // engine, so the settled state is unchanged. MEASURED before the reorder: a
+        // `debug_assert_eq!` census on both fields reported 0 divergences over 18,486 lib +
+        // 4,487 integration rows, so this replaces a coincidence with a guarantee.
+        sync_waiting_for(state, &wf);
+        if answering_forced_window
+            && !in_simulation_probe()
+            && state.loop_detection.samples()
+            && !state.stack.is_empty()
+            && state.stack.len() >= stack_len_before_action
+            && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
+        {
+            state.record_loop_detect_sample();
+        }
         return Ok(ActionResult {
             events,
             waiting_for: wf,
@@ -15210,6 +15339,38 @@ mod stage2_injector_tests {
                 //     their new coordinates AND still inside the same enclosing functions
                 //     (`drive_sequential_repeated_optional_payment` ×2, `resolve_chain_body`),
                 //     which is stronger evidence than the coordinate alone.
+                //   THIS PR, REBASED ONTO UPSTREAM `b654513cb` (#6996, #6999, #6998, #7001,
+                //     #6997, #6946): `:6065/:6142/:9324 ⇒ :6175/:6252/:9456`. The three pins
+                //     it replaces were UPSTREAM's own literals, correct for the upstream tree
+                //     — verified by re-deriving them at `b654513cb`, where all three sit
+                //     exactly there — so this shift is THIS BRANCH's commits replayed on top,
+                //     i.e. LOCAL, and the CI-vs-local diagnosis in the header does not apply.
+                //     The shift is NOT UNIFORM (`+110/+110/+132`), and that asymmetry is the
+                //     measurement rather than a puzzle: `git diff -U0 b654513cb HEAD` on this
+                //     file has exactly four hunks. `@@ -5957,0 +5958,110 @@` — C1's
+                //     `upfront_optional_gate` authority plus `OptionalFeasibility` — lands
+                //     above ALL THREE producers and is the whole `+110`. The third producer
+                //     takes a further `+22` from two hunks INSIDE `resolve_chain_body` and
+                //     above its own gate: `@@ -9207,0 +9318,7 @@` (the `optional_for` fan-out
+                //     coupling note) and `@@ -9281,6 +9398,21 @@` (adoption A — the inline
+                //     conjunct chain replaced by the `upfront_optional_gate` call and its
+                //     `debug_assert!`); the fourth hunk is net `0`. Whole-file delta is also
+                //     `+132`, so nothing was added below the third producer, and predicted
+                //     `6065+110`, `6142+110`, `9324+132` equal the observed coordinates
+                //     exactly. Identity re-established, not assumed: each producer at its new
+                //     coordinate is sha256-identical to `b654513cb:effects/mod.rs` at its old
+                //     one (`9869a19f…9b43a2`, `2bc316e3…e861185`, `3134c156…2aeeb66`)
+                //     and to the pre-rebase tip `117baa6a1` at
+                //     `:6109/:6186/:9183`, AND each is still inside the enclosing function
+                //     this row NAMES — `drive_sequential_repeated_optional_payment`,
+                //     `resolve_repeated_optional_payment_choice`, `resolve_chain_body`. The
+                //     diff instrument discriminates: in the NEW tree the three OLD coordinates
+                //     hold a `may_trigger_auto_choice` lookup, a blank line, and a bare `//`,
+                //     none of which mints anything. Set preservation: the two asserts above
+                //     this one ran FIRST and both fired GREEN on the run that caught this —
+                //     total still **37**, partition still **5/7/25** — and the other two
+                //     entries (`scoped_library_search.rs:452`, `engine.rs:11549`) did not move
+                //     at all, both re-read and sha256-confirmed in place.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -15222,9 +15383,9 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:6065".to_string(),
-                "game/effects/mod.rs:6142".to_string(),
-                "game/effects/mod.rs:9324".to_string(),
+                "game/effects/mod.rs:6175".to_string(),
+                "game/effects/mod.rs:6252".to_string(),
+                "game/effects/mod.rs:9456".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -15264,7 +15425,39 @@ mod stage2_injector_tests {
                 // `begin_pending_trigger_target_selection` (fn now opens at :11271, itself −7).
                 // The OTHER FOUR entries live in `game/effects/`, which this unit does not
                 // touch at all, and did not move — the same set-preservation evidence.
-                "game/engine.rs:11420".to_string(),
+                //
+                // THIS PR (C4's answer-beat sampler + C5's `candidate_windows` extraction), ON
+                // TOP OF UPSTREAM'S `:11420`: both insertions land in `engine.rs` ABOVE this
+                // producer and neither is a prompt. The coordinate below is re-derived from the
+                // row's OWN failure output at this base, with the line re-read and
+                // sha256-compared there and the enclosing function re-checked.
+                //
+                // THIS PR (the ACCEPT-WITH-FIXES doc round), ON TOP OF `:11515`: `⇒ :11549`,
+                // +34. LOCAL, not upstream, so the CI-vs-local diagnosis in the header does
+                // not apply. engine.rs's ENTIRE delta this round is two COMMENT hunks, and
+                // both sit above this producer: `@@ -3409,3 +3409,5 @@` in
+                // `drive_one_shortcut_cycle` (+2) and `@@ -11148,3 +11150,35 @@` in
+                // `apply_action` (+32) — 2 + 32 = 34, the whole shift, with nothing below.
+                // A comment round cannot mint a prompt, and the census agrees: total 37 and
+                // partition 5/7/25 are untouched and the other four entries did not move.
+                // Identity re-established rather than assumed: line :11549 is byte-identical
+                // by sha256 (`8a544e878d3e77fb…5cc7d63`) to `c7b18c3c7:engine.rs:11515`, and
+                // it is still inside `begin_pending_trigger_target_selection`, which moved by
+                // the same +34 (opens :11366 ⇒ :11400).
+                //
+                // REBASE ONTO UPSTREAM `b654513cb`: re-derived rather than carried over, and
+                // **UNMOVED** at `:11549`. Upstream's six commits contribute a net ZERO above
+                // this producer, measured on both sides of the rebase: it sits at `:11420` in
+                // the OLD base `dcb8f3808` and at `:11420` in the NEW base `b654513cb`, so
+                // this branch's own `+95` (C4/C5) and `+34` (the doc round) still land it on
+                // `:11549`. That an entry can stay put while three others move by `+110`/`+132`
+                // is the set-preservation evidence for this rebase: a gained or lost producer
+                // could not leave this one byte-identical AND in place. Identity re-checked at
+                // the unchanged coordinate rather than presumed from the unchanged number:
+                // sha256 `a6d7f2f9d1e15de5…5cb032`, matching `117baa6a1:engine.rs:11549`, and
+                // still inside `begin_pending_trigger_target_selection` (opens :11400 here,
+                // :11271 at `b654513cb`).
+                "game/engine.rs:11549".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
@@ -15278,9 +15471,19 @@ mod stage2_injector_tests {
         let effects_src = std::fs::read_to_string(root.join("game/effects/mod.rs"))
             .expect("readable effects module");
         let authority = format!("{}_prompt_player", "optional");
+        // CODE LINES ONLY. A whole-file `matches()` also counted PROSE, and this PR's C1 adds a
+        // doc link to the authority in `upfront_optional_gate`'s comment — a mention that is
+        // neither a definition nor a call. Excluding `//` lines makes the instrument STRICTLY
+        // MORE specific to the thing it names (a second CALL) rather than less: the pinned
+        // count is unchanged at 2, and a real second call still trips it because a call cannot
+        // live on a comment line.
+        let authority_code_hits = effects_src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(&authority))
+            .count();
         assert_eq!(
-            effects_src.matches(&authority).count(),
-            2,
+            authority_code_hits, 2,
             "one definition + exactly one call — the CR 603.5 gate's `let prompt_player = ..`. \
              A second call inside `effects/mod.rs` means a second producer started consulting \
              the authority and this row's partition needs re-deriving"
@@ -17239,9 +17442,11 @@ mod bounded_offer_conjunct_tests {
         let field_address = format!("as {}const", '*');
         assert_eq!(
             engine_code_hits(&lines, extent, &sample_identity).len(),
-            2,
-            "the ring-advance detector must read the SAMPLE's allocation at both its before \
-             and after sites, in {}-{}",
+            3,
+            "the ring-advance detector must read the SAMPLE's allocation at EVERY one of its \
+             sites — the shared per-beat `before` read plus an `after` read in each arm that \
+             can advance the ring (the active-player settle arm and the forced-window ANSWER \
+             arm), in {}-{}",
             extent.0 + 1,
             extent.1 + 1
         );
@@ -17317,18 +17522,337 @@ mod bounded_offer_conjunct_tests {
                 lines[*site].trim()
             );
         }
-        let window_bindings = engine_code_hits(&lines, certified, "let window");
-        assert!(
-            !window_bindings.is_empty(),
-            "REACH-GUARD: the windows must be bound inside this extent"
+        // F-4: after `candidate_windows` was extracted, basis A's carrier decision lives at the
+        // CALL SITE, not in a `let window`. A `!is_empty()` reach-guard tolerated losing half
+        // the subject (2 producers -> 1) IN SILENCE — MEASURED: the pin still passed with one
+        // producer gone. And the obvious repair, widening the extent over `fn
+        // candidate_windows`, is VACUOUS — also MEASURED: `ring_live` is the walk's own
+        // PARAMETER NAME, so it reads identically whatever the caller passes, including under
+        // the DROP mutant that hands the walk the CR 104.4b comparand. Both producers are
+        // therefore pinned by EXACT COUNT, and each must name the evaluable ring on the line
+        // that chooses it.
+        let walk_calls = engine_code_hits(&lines, certified, "candidate_windows(");
+        assert_eq!(
+            walk_calls.len(),
+            1,
+            "basis A takes its window from EXACTLY ONE `candidate_windows` call; found {}",
+            walk_calls.len()
         );
-        for binding in &window_bindings {
+        let window_bindings = engine_code_hits(&lines, certified, "let window");
+        assert_eq!(
+            window_bindings.len(),
+            1,
+            "basis B binds EXACTLY ONE window directly; found {}. Together with the walk call \
+             that is the TWO producers this pin covers — a count that DROPS is a producer that \
+             left the extent, which is exactly what an extraction does silently",
+            window_bindings.len()
+        );
+        for producer in walk_calls.iter().chain(window_bindings.iter()) {
             assert!(
-                lines[*binding].contains("ring_live"),
-                "every window is sliced from the EVALUABLE ring; line {} reads `{}`",
-                binding + 1,
-                lines[*binding].trim()
+                lines[*producer].contains("ring_live"),
+                "every period-touch window is sliced from the EVALUABLE ring (CR 732.2a), never \
+                 the CR 104.4b comparand; line {} reads `{}`",
+                producer + 1,
+                lines[*producer].trim()
             );
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────────
+    // N1 — the period boundary has ONE authority, and every frame-recording arm asks it.
+    // ───────────────────────────────────────────────────────────────────────────────────
+
+    /// N1, BEHAVIOURAL HALF — `published_period_elapsed` is TOTAL over the two axes that
+    /// delimit a cycle, and each of its three interesting answers is asserted.
+    ///
+    /// CR 732.2a. This is the anti-vacuity control for the structural half below: a census
+    /// proving the two arms call ONE function says nothing if that function is wrong, and the
+    /// two properties a caller depends on — `None` never elapses, `>=` and not `==` — are
+    /// invisible at the call sites.
+    ///
+    /// * **`None` ⇒ never.** An offer whose producer states no per-period signature publishes
+    ///   no frame count. Inventing one would end the cycle after an arbitrary number of frames
+    ///   and commit a FRACTION of the published delta — the conditional action CR 732.2a
+    ///   forbids. Fail-closed means "keep driving until the board recurs", not "stop early".
+    /// * **`Some(k)` with fewer frames ⇒ not yet.** The row asserts `k - 1` explicitly, so an
+    ///   off-by-one that closed a 2-frame period after 1 frame FLIPS here.
+    /// * **`Some(k)` with `k` or MORE ⇒ elapsed.** A single beat may retain more than one
+    ///   frame, so a strict `==` would drive past its own boundary and end at the beat cap
+    ///   instead. `k + 1` is the arm that discriminates `>=` from `==`.
+    ///
+    /// REVERT-PROBE: change `is_some_and` to `is_none_or` ⇒ the `None` rows FLIP. Change `>=`
+    /// to `==` ⇒ the `k + 1` row FLIPS. Change `>=` to `>` ⇒ the exact-`k` row FLIPS.
+    #[test]
+    fn published_period_elapsed_is_total_over_the_axes_that_delimit_a_cycle() {
+        use super::published_period_elapsed;
+
+        // (frames_this_cycle, frames_per_period) -> elapsed
+        let table: [((u32, Option<u32>), bool); 8] = [
+            ((0, None), false),
+            ((1, None), false),
+            ((7, None), false),
+            ((0, Some(1)), false),
+            ((1, Some(1)), true),
+            ((1, Some(2)), false),
+            ((2, Some(2)), true),
+            ((3, Some(2)), true),
+        ];
+        let measured: Vec<((u32, Option<u32>), bool)> = table
+            .iter()
+            .map(|&(input, _)| (input, published_period_elapsed(input.0, input.1)))
+            .collect();
+        assert_eq!(
+            measured,
+            table.to_vec(),
+            "CR 732.2a: an UNPUBLISHED period never elapses by frame count ({{None}} rows), a \
+             period is not over before its k-th frame, and one that overshot k IS over — the \
+             three properties `drive_one_shortcut_cycle`'s two arms depend on and neither \
+             call site can state"
+        );
+    }
+
+    /// N1, STRUCTURAL HALF — ONE authority for the period boundary, ASKED BY BOTH ARMS.
+    ///
+    /// CR 732.2a. `drive_one_shortcut_cycle` can record a ring frame in two places now that
+    /// `apply_action` carries the forced-window ANSWER sampling site: the active-player settle
+    /// arm and the injector arm. Both must advance the frame counter and both must ask the
+    /// same delimiter, or the published `frames_per_period` is unreachable on exactly the
+    /// boards the widening was for and the drive can only end at its runaway beat cap.
+    ///
+    /// The census is EXTENT-SCOPED (`engine_fn_extent` + `engine_code_hits`, the same
+    /// machinery the two carrier rows and the CR 603.5 census use) and comment lines are
+    /// excluded, so it cannot count its own prose.
+    ///
+    /// REVERT-PROBE: drop the injector arm's counter advance ⇒ `frames_this_cycle += 1` goes
+    /// 2 → 1 ⇒ FLIPS. Re-inline `frames_per_period.is_some_and(|k| frames_this_cycle >= k)` at
+    /// either arm ⇒ the raw-comparison count goes 0 → 1 ⇒ FLIPS.
+    #[test]
+    fn the_period_delimiter_has_one_authority_and_both_frame_recording_arms_ask_it() {
+        let src = include_str!("engine.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let drive = engine_fn_extent(&lines, "fn drive_one_shortcut_cycle(");
+
+        let delimiter = format!("published_period{}elapsed(", '_');
+        let asks = engine_code_hits(&lines, drive, &delimiter);
+        assert_eq!(
+            asks.len(),
+            2,
+            "the settle arm and the injector arm must EACH ask the delimiter, in {}-{}; found \
+             {:?} (1-based)",
+            drive.0 + 1,
+            drive.1 + 1,
+            asks.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+        let advances = engine_code_hits(&lines, drive, "frames_this_cycle += 1");
+        assert_eq!(
+            advances.len(),
+            2,
+            "…and each of those two arms must ADVANCE the counter first, else one arm asks a \
+             question the other's bookkeeping answers; found {:?} (1-based)",
+            advances.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+        let raw = engine_code_hits(&lines, drive, "frames_this_cycle >=");
+        assert!(
+            raw.is_empty(),
+            "the comparison itself lives in the authority and NOWHERE in this extent — an \
+             inlined copy is the second place to get `>=` and the `None` arm wrong; found \
+             {:?} (1-based)",
+            raw.iter().map(|i| i + 1).collect::<Vec<_>>()
+        );
+
+        // POSITIVE CONTROL against a dead grep, same extractor and same filter: one token
+        // known present in this extent, one known absent. The `raw.is_empty()` assertion above
+        // is a ZERO census and needs an instrument proven able to return non-zero.
+        assert!(
+            !engine_code_hits(&lines, drive, "frames_this_cycle").is_empty(),
+            "the instrument must be able to find a token that IS there"
+        );
+        assert!(
+            engine_code_hits(&lines, drive, "certified_period_touch").is_empty(),
+            "…and must not find one that is not"
+        );
+    }
+
+    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE FIVE
+    /// PREDICATES, AND EVERY SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
+    ///
+    /// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a. Three places used to answer *"does this
+    /// ability open ONE up-front optional gate?"* — production's own branch, the mint's guard
+    /// (b), and `analysis::resource::auto_may_answer_for` — and the latter two omitted
+    /// conjuncts the first has. After adoption, `effects::upfront_optional_gate` is the only
+    /// place the set is assembled, and the census is what keeps it that way.
+    ///
+    /// MEASURED counts, not derived ones. The plan's derivation predicted `2 / 2 / 2 / 1 / 2`
+    /// and the tree measures `2 / 2 / 2 / 1 / 2`; if these ever disagree the MEASURED value is
+    /// what belongs here.
+    ///
+    /// | predicate | production sites | where |
+    /// |---|---|---|
+    /// | `has_kind_driven_repeat` | 2 | `upfront_optional_gate` + `repeat_for_outermost_with_scope_or_unless` |
+    /// | `has_member_driven_repeat_after_hydration` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver guard |
+    /// | `is_repeated_optional_payment` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver dispatch |
+    /// | `optional_prompt_player` | 1 | `upfront_optional_gate` only |
+    /// | `optional_effect_is_infeasible` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s `CastFromZone` decline |
+    ///
+    /// **THE THREE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
+    /// They consume these predicates to decide WHICH DRIVER RUNS — whether a counted repeat
+    /// has to wrap scoped/unless-pay instructions (CR 608.2c), which repeat driver takes the
+    /// ability, and the CR 603.12a repeated-payment dispatch that fires *because* the up-front
+    /// gate suppressed itself. That is a different question from "does one up-front window
+    /// open", and it is asked after the gate has already declined.
+    ///
+    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE FIVE
+    /// PREDICATES. A copy that re-derives the same conjunct from `ability.repeat_for` (or from
+    /// `optional_for`, or from the effect discriminant) inline is NOT caught, and no census
+    /// over these five tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
+    /// re-derivation.
+    ///
+    /// The zero-outside-`game/effects/` assertion carries its own POSITIVE CONTROL, because a
+    /// zero census with a dead instrument is indistinguishable from a passing one.
+    ///
+    /// REVERT-PROBE: re-introduce any one predicate call in `analysis/resource.rs` or in
+    /// `entry_publishes_pin_slots` ⇒ that predicate's count rises AND the outside-set becomes
+    /// non-empty ⇒ FLIPS on two independent assertions.
+    #[test]
+    fn f2c_the_cr_603_5_conjunct_set_has_one_production_assembler() {
+        /// Every `.rs` under the crate's `src`. A whole file whose stem ends `_tests` is
+        /// test-only (its parent declares it under `#[cfg(test)]`).
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        /// The `#[cfg(test)]`-attributed column-0 `mod … {` … column-0 `}` spans, so the
+        /// census cannot count its own harness. Same shape as the CR 603.5 prompt census.
+        fn cfg_test_spans(lines: &[&str]) -> Vec<(usize, usize)> {
+            let mut spans = Vec::new();
+            let mut i = 0;
+            while i < lines.len() {
+                if lines[i].trim() == "#[cfg(test)]" {
+                    let mut j = i + 1;
+                    while j < lines.len()
+                        && (lines[j].trim_start().starts_with("#[") || lines[j].trim().is_empty())
+                    {
+                        j += 1;
+                    }
+                    let is_mod = j < lines.len()
+                        && lines[j].starts_with(['m', 'p'])
+                        && lines[j].contains("mod ")
+                        && lines[j].trim_end().ends_with('{');
+                    if is_mod {
+                        let mut k = j + 1;
+                        while k < lines.len() && lines[k] != "}" {
+                            k += 1;
+                        }
+                        spans.push((j, k));
+                        i = k;
+                    }
+                }
+                i += 1;
+            }
+            spans
+        }
+
+        // ASSEMBLED needles, so this row's own source cannot be counted by its own instrument.
+        let predicates: [(String, usize); 5] = [
+            (format!("has_kind_driven{}repeat(", '_'), 2),
+            (
+                format!("has_member_driven_repeat_after{}hydration(", '_'),
+                2,
+            ),
+            (format!("is_repeated_optional{}payment(", '_'), 2),
+            (format!("optional_prompt{}player(", '_'), 1),
+            (format!("optional_effect_is{}infeasible(", '_'), 2),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 100, "reach-guard: the walker found the crate");
+
+        let mut sites: Vec<(usize, String)> = Vec::new();
+        let mut control_hits = 0usize;
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("readable source file");
+            let lines: Vec<&str> = text.lines().collect();
+            let spans = cfg_test_spans(&lines);
+            let rel = path
+                .strip_prefix(&root)
+                .expect("under src")
+                .display()
+                .to_string();
+            let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
+            for (n, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
+                    continue;
+                }
+                // POSITIVE CONTROL for the zero census below: a token that IS present in
+                // production, counted by this very walker under this very filter.
+                if line.contains("fn resolve_chain_body(") {
+                    control_hits += 1;
+                }
+                for (i, (needle, _)) in predicates.iter().enumerate() {
+                    // The DEFINITION is not a call site.
+                    if line.contains(needle) && !line.contains(&format!("fn {needle}")) {
+                        sites.push((i, format!("{rel}:{}", n + 1)));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            control_hits, 1,
+            "POSITIVE CONTROL: the walker+filter must find `fn resolve_chain_body(` exactly \
+             once in production source. A zero below is only meaningful with a live instrument"
+        );
+
+        let counted: Vec<(String, usize)> = predicates
+            .iter()
+            .enumerate()
+            .map(|(i, (needle, _))| {
+                (
+                    needle.clone(),
+                    sites.iter().filter(|(j, _)| *j == i).count(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, usize)> = predicates
+            .iter()
+            .map(|(needle, want)| (needle.clone(), *want))
+            .collect();
+        assert_eq!(
+            counted, expected,
+            "the CR 603.5 conjunct set gained or lost a production consumer. The surviving \
+             non-authority sites are `repeat_for_outermost_with_scope_or_unless` (does a \
+             counted repeat wrap scoped/unless-pay instructions), `resolve_chain_body`'s \
+             repeat-driver guard and its CR 603.12a driver dispatch, and \
+             `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
+             DRIVER rather than opening an up-front window, so a NEW site is a decision to \
+             adjudicate here and not a number to move.\nsites={sites:#?}"
+        );
+
+        let outside: Vec<&String> = sites
+            .iter()
+            .filter(|(_, site)| !site.starts_with("game/effects/"))
+            .map(|(_, site)| site)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "SINGLE ASSEMBLER: every production consumer of these five predicates lives in \
+             `game/effects/`, next to the authority that assembles them. A caller in another \
+             module is by construction re-deriving the gate's conjunct set from outside it — \
+             which is exactly what `analysis::resource::auto_may_answer_for` and \
+             `engine::entry_publishes_pin_slots` used to do, each with a DIFFERENT omission. \
+             Found {outside:#?}"
+        );
     }
 }

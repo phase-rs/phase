@@ -7354,7 +7354,15 @@ pub fn find_applicable_replacements(
 }
 
 // ===========================================================================
-// CR 614.1a + CR 616.1 — the ONE prompt-cause authority over a proposed event.
+// CR 614.1 + CR 616.1 — the ONE prompt-cause authority over a proposed event.
+//
+// CR 614.1, NOT CR 614.1a. `614.1a` scopes itself to effects that use the word
+// "instead"; this authority classifies EVERY applicable replacement — skips
+// (`614.1b`), enters-with (`614.1c`/`614.1d`), turned-face-up (`614.1e`), and the
+// virtual candidates that carry no `ReplacementDefinition` at all. The definitional
+// head (`614.1`: "some continuous effects are replacement effects … such effects
+// watch for a particular event") is the anchor; `614.1a` was a sub-rule cited for
+// its parent's job.
 //
 // Derived from the SAME candidate authority the live pipeline uses
 // (`find_applicable_replacements`), so VIRTUAL candidates — which have no
@@ -7364,8 +7372,9 @@ pub fn find_applicable_replacements(
 // defs (Giada, Font of Hope), and no def scan can see a virtual.
 // ===========================================================================
 
-/// CR 614.1a + CR 616.1: why the live replacement pipeline can open a player
-/// choice on one proposed event.
+/// CR 614.1 + CR 616.1: why the live replacement pipeline can open a player
+/// choice on one proposed event. (`614.1`, the definitional head, not `614.1a` —
+/// see the block comment above.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplacementPromptCause {
     /// CR 614.1a: a single optional / `MayCost` candidate prompts. An

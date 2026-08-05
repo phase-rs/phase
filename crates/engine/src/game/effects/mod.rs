@@ -5955,6 +5955,116 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
     }
 }
 
+/// CR 608.2d: how a caller supplies the feasibility fact [`upfront_optional_gate`]'s LAST
+/// conjunct needs.
+///
+/// `resolve_chain_body` has ALREADY run the probe by the time it reaches the gate — it needs
+/// the value for the `CastFromZone` decline early-return that precedes both the CR 101.4
+/// fan-out and the gate — so it passes [`OptionalFeasibility::Known`] and production never
+/// probes twice. That matters: [`optional_effect_is_infeasible`]'s `CastFromZone` arm clones
+/// the whole `GameState` per bound object and runs a full `cast_from_zone::resolve` dry-run.
+/// Every other caller passes [`OptionalFeasibility::Probe`], which runs only after the cheap
+/// conjuncts have all passed.
+///
+/// A TWO-VARIANT DOMAIN ENUM RATHER THAN `Option<bool>`, and the reason is naming, not
+/// CLAUDE.md's `bool` prohibition (`Option<T>` is on its approved list): `Known(bool)` says
+/// *"the caller already ran the probe and this is its answer"* while `Probe` says *"run it
+/// here, after the cheap conjuncts"*. With `Option<bool>`, `None` would mean "probe here" only
+/// by convention — undocumented at every call site and indistinguishable from "no opinion".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OptionalFeasibility {
+    /// The caller ran [`optional_effect_is_infeasible`] and hands its answer over.
+    Known(bool),
+    /// Run the probe here, LAST — after every cheap conjunct has passed.
+    Probe,
+}
+
+/// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a — THE single authority for *"does this
+/// ability open ONE up-front optional gate, and to whom, under which key?"*
+///
+/// `None` ⇒ no up-front gate opens at all. Four disjoint reasons, in the order they are
+/// evaluated:
+///
+/// 1. not `optional`;
+/// 2. `optional_for` is set — the CR 608.2d + CR 101.4 fan-out prompts eligible players in
+///    APNAP order instead, which is a CASCADE of up to one window per living player and not
+///    one gate (`resolve_chain_body` returns at that fan-out before ever reaching the gate;
+///    see the coupling note there);
+/// 3. one of the three `repeat_for` shapes that re-fire optionality PER ITERATION
+///    (CR 608.2c + CR 608.2d + CR 603.12a);
+/// 4. an infeasible optional (CR 608.2d: "a player can't choose an impossible option").
+///
+/// **THE FEASIBILITY PROBE IS THE LAST CONJUNCT, AND THAT ORDERING IS A GUARANTEE, NOT AN
+/// IMPLEMENTATION ACCIDENT.** `engine::entry_publishes_pin_slots` calls this once per announced
+/// entry, per candidate window, per beat, where production pays it once per resolution. LAST
+/// ordering restricts the clone-bearing arm to `optional ∧ ¬optional_for ∧ ¬repeat ∧
+/// Effect::CastFromZone` entries — a strict subset of the population production already pays
+/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds CR 732.2a
+/// certification ASKS at the verdict door, and putting wall-clock cost on the same counter
+/// would re-base every metered row's pinned spend and make neither number readable.
+pub(crate) struct UpfrontOptionalGate {
+    /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
+    pub prompt_player: PlayerId,
+    /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
+    /// on it. That is not the same as "no preference stored": it is "no key exists".
+    pub key: Option<MayTriggerAutoChoiceKey>,
+}
+
+pub(crate) fn upfront_optional_gate(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    feasibility: OptionalFeasibility,
+) -> Option<UpfrontOptionalGate> {
+    if !ability.optional || ability.optional_for.is_some() {
+        return None;
+    }
+    // CR 608.2c + CR 608.2d + CR 603.12a: the three shapes that SUPPRESS the single up-front
+    // gate and fire optionality per iteration instead.
+    if has_kind_driven_repeat(ability)
+        || has_member_driven_repeat_after_hydration(state, ability)
+        || is_repeated_optional_payment(ability)
+    {
+        return None;
+    }
+    let infeasible = match feasibility {
+        OptionalFeasibility::Known(known) => known,
+        OptionalFeasibility::Probe => optional_effect_is_infeasible(state, ability),
+    };
+    if infeasible {
+        return None;
+    }
+    let prompt_player = optional_prompt_player(state, ability);
+    Some(UpfrontOptionalGate {
+        prompt_player,
+        key: ability
+            .may_trigger_origin
+            .clone()
+            .map(|origin| MayTriggerAutoChoiceKey {
+                player: prompt_player,
+                source_id: ability.source_id,
+                origin,
+            }),
+    })
+}
+
+/// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
+///
+/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression, the analysis's
+/// relief and production's own early return can no longer disagree about which mays are
+/// answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
+/// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
+/// is the fail-closed direction for every consumer.
+///
+/// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
+/// definition not run the feasibility probe itself.
+pub(crate) fn stored_may_answer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<AutoMayChoice> {
+    let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
+    state.may_trigger_auto_choice(gate.key.as_ref()?)
+}
+
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
@@ -6533,8 +6643,8 @@ pub(crate) fn resolve_player_for_context_ref(
     ability.controller
 }
 
-/// CR 117.3a: Determine which player receives the "may" prompt for an optional
-/// effect. Most optional effects go to the caster (CR 608.2d). Subject-anchored
+/// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
+/// prompt — for an optional effect. Most go to the caster. Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
 /// Trophy, Path to Exile, Ghost Quarter, Oblation, …) — route the prompt to the
 /// acting subject (the target permanent's controller). This mirrors the
@@ -9205,6 +9315,13 @@ fn resolve_chain_body(
     // affected player of the resolving replaced event (Zur's Weirding).
     if ability.optional {
         if let Some(scope) = ability.optional_for {
+            // COUPLING, recorded: `upfront_optional_gate` encodes this same fan-out
+            // pre-emption as `optional_for.is_some() ⇒ None`. The two agree because
+            // THIS returns first, not because either derives from the other. Moving
+            // or weakening this early return silently changes what the authority
+            // means at the gate below (CR 608.2d + CR 101.4). The `debug_assert!` at
+            // the gate is the executable half of this note.
+            //
             // Exhaustive match: there is no compiler exhaustiveness guard at the
             // other OpponentMayScope consumers, so this serves as the manual
             // guard. Adding a variant forces a decision here.
@@ -9278,23 +9395,38 @@ fn resolve_chain_body(
     // may" PER iteration via `drive_repeated_optional_payment`, not once up
     // front — suppress the single gate here exactly as the kind/member-driven
     // loops do.
-    if ability.optional
-        && !has_kind_driven_repeat(ability)
-        && !has_member_driven_repeat_after_hydration(state, ability)
-        && !is_repeated_optional_payment(ability)
-        && !optional_is_infeasible
-    {
+    //
+    // ADOPTION A: this branch IS `upfront_optional_gate`. The conjunct set is not restated
+    // here — that is what makes the function an authority rather than a fourth copy. The
+    // feasibility fact is handed over as `Known`, because `optional_is_infeasible` was
+    // already computed above for the `CastFromZone` decline early-return, and a re-probe
+    // would run the clone-bearing arm twice on production's hot resolve path.
+    if let Some(gate) = upfront_optional_gate(
+        state,
+        ability,
+        OptionalFeasibility::Known(optional_is_infeasible),
+    ) {
+        // The executable half of the `optional_for` coupling note above: this branch is
+        // reachable only because the CR 101.4 fan-out already returned, so the authority's
+        // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
+        // ability here. MEASURED across the whole `--lib` suite with an `unreachable!` in
+        // this position: zero firings.
+        debug_assert!(
+            ability.optional_for.is_none(),
+            "CR 608.2d + CR 101.4: the fan-out early return must have taken every \
+             `optional_for` ability before the up-front gate"
+        );
         let description = ability.description.clone();
-        let prompt_player = optional_prompt_player(state, ability);
-        let may_trigger_key =
-            ability
-                .may_trigger_origin
-                .clone()
-                .map(|origin| MayTriggerAutoChoiceKey {
-                    player: prompt_player,
-                    source_id: ability.source_id,
-                    origin,
-                });
+        let UpfrontOptionalGate {
+            prompt_player,
+            key: may_trigger_key,
+        } = gate;
+        // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
+        // not a duplicated authority: the KEY is what has to be built in one place, and it
+        // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
+        // authority with `Probe` and run the feasibility clone a second time, which is the
+        // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
+        // answer, one probe.
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice(key) {
                 resolve_optional_effect_decision(

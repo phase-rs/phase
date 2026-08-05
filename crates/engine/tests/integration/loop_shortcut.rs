@@ -8630,9 +8630,11 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
             .as_ref()
             .expect("a bounded offer publishes its per-period signature");
         assert_eq!(
-            per_cycle.frames_per_period, 1,
-            "{seats}p: a PERIOD-WIDTH tripwire, not a basis attribution. This cascade's \
-             certifying prior sits one retained frame back, so its MEASURED span is 1 — a drift \
+            per_cycle.frames_per_period, 2,
+            "{seats}p: a PERIOD-WIDTH tripwire, not a basis attribution. This cascade puts its \
+             two same-controller triggers on the stack through a CR 603.3b `OrderTriggers` \
+             window, and the answer-beat sampling site retains a frame there as well as at the \
+             settle — so ONE repetition now spans 2 retained frames. A drift \
              means the fixture changed shape and the row must be re-derived, not relaxed. It \
              establishes nothing about the basis in either direction: basis B derives k from 1 \
              upward, and since fix round 1 basis A measures its span too (2 on \
@@ -10241,16 +10243,8 @@ fn r5_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
 /// A `Fixed(count)` template pinning the Sanguine Bond trigger's `target opponent` to one
 /// seat for every iteration. The slot's source is the Bond itself, so `slot_source_prompted`
 /// matches the mid-drive `TriggerTargetSelection` the injector must answer.
-fn r5_pin_template(bond: ObjectId, seat: PlayerId, count: u32) -> DecisionTemplate {
-    let source = YieldTarget::ThisObject {
-        source_id: bond,
-        incarnation: None,
-        trigger_description: None,
-    };
-    let slot = DecisionSlot {
-        source: source.clone(),
-        index: 0,
-    };
+fn r5_pin_template(slot: DecisionSlot, seat: PlayerId, count: u32) -> DecisionTemplate {
+    let source = slot.source.clone();
     DecisionTemplate {
         owner: P0,
         decisions: vec![PinnedDecision::Targets {
@@ -10269,7 +10263,7 @@ fn r5_pin_template(bond: ObjectId, seat: PlayerId, count: u32) -> DecisionTempla
 ///
 /// The offer is the ENGINE's, read off `state.waiting_for` — never an out-of-band call to the
 /// offer predicate, which would only prove the predicate agrees with itself.
-fn r5_reach_offer() -> (GameRunner, ObjectId, ObjectId, Vec<i32>) {
+fn r5_reach_offer() -> (GameRunner, DecisionSlot, ObjectId, ObjectId, Vec<i32>) {
     let (mut runner, bond, hexproof_src, kickoff) = r5_board();
     let _ = runner.cast(kickoff).target_player(P1).resolve();
     let WaitingFor::LoopShortcut {
@@ -10282,33 +10276,60 @@ fn r5_reach_offer() -> (GameRunner, ObjectId, ObjectId, Vec<i32>) {
         );
     };
     assert_eq!(proposer, P0, "P0 has priority and proposes the shortcut");
-    // LAYER ATTRIBUTION, half one: this offer publishes NO decision points, so
-    // `handle_declare_shortcut`'s pin firewall (`if !offer.schema.points.is_empty()`) is
-    // provably not the refuser in the kill arm below. Whatever refuses there is downstream.
-    assert!(
-        schema.points.is_empty(),
-        "this offer publishes no points, so declare-time `validate_pins` never runs — the \
-         kill arm's refusal must therefore come from the drive; got {} points",
-        schema.points.len()
+    // SHAPE PIN, re-derived: the Bond's `target opponent` trigger resolves across a
+    // `TriggerTargetSelection` window, so the answer-beat sampling site announces its entry
+    // and the offer publishes exactly ONE CR 608.2b `Targets` point for the Bond's own slot.
+    // A drift here means the announced set changed shape and the callers must be re-derived,
+    // not relaxed.
+    //
+    // LAYER ATTRIBUTION NO LONGER RESTS ON EMPTINESS, and no shared helper replaces it — each
+    // caller measures the declare-time outcome ITSELF, on its own board. The kill arm of
+    // `a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets` asserts
+    // `WaitingFor::RespondToShortcut` immediately after its `DeclareShortcut` ("LAYER
+    // ATTRIBUTION, half two"), which proves the declare firewall INGESTED that declaration and
+    // therefore that the refusal it measures later is the DRIVE's; the r28 rows assert the
+    // complementary declare-time refusal on their own staged schemas.
+    assert_eq!(
+        schema.points.len(),
+        1,
+        "the R5 offer publishes the Bond's re-aimable `Targets` slot and nothing else; got \
+         {:?}",
+        schema.points
     );
+    assert!(
+        matches!(
+            schema.points[0].kind,
+            DecisionPointKind::Targets {
+                min_targets: 1,
+                max_targets: 1,
+                ..
+            }
+        ),
+        "the published point is the Bond trigger's single-player target slot; got {:?}",
+        schema.points[0].kind
+    );
+    // CR 732.2a: the ENGINE-issued slot is the pin authority. Hand-assembling one here
+    // silently drifted from it (`incarnation: None` vs the published `Some(0)`), which
+    // `validate_pins` then rejected — a test artefact, not an engine defect.
+    let pinned_slot = schema.points[0].slot.clone();
     let lives = vec![
         life(&runner, P0),
         life(&runner, P1),
         life(&runner, P2),
         life(&runner, P3),
     ];
-    (runner, bond, hexproof_src, lives)
+    (runner, pinned_slot, bond, hexproof_src, lives)
 }
 
 /// The per-cycle life the pinned seat loses, probed by an independent `Fixed(1)`
 /// materialization of this same board (one recurrence = one full cycle). Mirrors
 /// [`probe_drain_delta`]; nothing below is bound to a literal drain rate.
 fn r5_probe_delta() -> i32 {
-    let (mut runner, bond, _hexproof_src, l0) = r5_reach_offer();
+    let (mut runner, slot, _bond, _hexproof_src, l0) = r5_reach_offer();
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(1),
-            template: Some(r5_pin_template(bond, P1, 1)),
+            template: Some(r5_pin_template(slot.clone(), P1, 1)),
         })
         .expect("declare Fixed(1) with a Player pin");
     accept_all_opponents(&mut runner);
@@ -10436,11 +10457,11 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
     // ───────────────────────── CLEAN arm — the positive control ─────────────────────────
     // Identical board, hexproof source left in hand (its static does not function there), so the
     // ONLY difference from the kill arm is whether the refuser is on the battlefield.
-    let (mut clean, clean_bond, _clean_hexproof_src, clean_l0) = r5_reach_offer();
+    let (mut clean, clean_slot, _clean_bond, _clean_hexproof_src, clean_l0) = r5_reach_offer();
     clean
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(N),
-            template: Some(r5_pin_template(clean_bond, P1, N)),
+            template: Some(r5_pin_template(clean_slot.clone(), P1, N)),
         })
         .expect("declare Fixed(N) with a Player pin");
     accept_all_opponents(&mut clean);
@@ -10456,7 +10477,7 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
     );
 
     // ───────────────────────────────── KILL arm ─────────────────────────────────────────
-    let (mut runner, bond, hexproof_src, l0) = r5_reach_offer();
+    let (mut runner, slot, bond, hexproof_src, l0) = r5_reach_offer();
     assert!(
         !engine::game::static_abilities::player_has_hexproof(runner.state(), P1),
         "setup anti-vacuity: the pinned seat must START without hexproof, or the kill below \
@@ -10466,7 +10487,7 @@ fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(N),
-            template: Some(r5_pin_template(bond, P1, N)),
+            template: Some(r5_pin_template(slot.clone(), P1, N)),
         })
         .expect("declare Fixed(N) with a Player pin");
     // LAYER ATTRIBUTION, half two: the declare-time firewall INGESTED this declaration. The
@@ -10693,13 +10714,11 @@ fn a_recorded_loop_detect_sample_keeps_a_live_half_normalization_would_have_eras
 
 // ─────────── 5d U2 / R28 — the declared template's `owner` is ENGINE-BOUND ───────────
 
-/// The engine-issued offer's own point set, hand-assembled to match `r5_pin_template`'s slot.
-///
-/// The R5 board's live offer publishes an EMPTY schema (`r5_reach_offer` asserts it), so a
-/// NON-empty-schema declaration has to be staged. This is the tree's own idiom for staging a
-/// `LoopShortcut` wait; `offer.proposer` — the firewall's engine-issued comparand — still comes
-/// from `WaitingFor::LoopShortcut`, which is what the row is about.
-fn r28_nonempty_schema_offer(runner: &mut GameRunner, bond: ObjectId) {
+/// CR 732.2a: stage the live offer with an EMPTY point set, so arm (a″) can reach the
+/// `!offer.schema.points.is_empty()` block's SKIPPED path. Counterpart to
+/// [`r28_nonempty_schema_offer`]; `offer.proposer` still comes from the live
+/// `WaitingFor::LoopShortcut`, which is the firewall's engine-issued comparand.
+fn r28_empty_schema_offer(runner: &mut GameRunner) {
     let WaitingFor::LoopShortcut {
         proposer,
         predicted_winner,
@@ -10709,13 +10728,32 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, bond: ObjectId) {
     else {
         panic!("staged from the live offer, never from thin air");
     };
-    let slot = DecisionSlot {
-        source: YieldTarget::ThisObject {
-            source_id: bond,
-            incarnation: None,
-            trigger_description: None,
+    runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        certificate,
+        schema: ShortcutDecisionSchema {
+            points: vec![],
+            ..schema
         },
-        index: 0,
+    };
+}
+
+/// The engine-issued offer's own point set, hand-assembled to match `r5_pin_template`'s slot.
+///
+/// The R5 board's live offer publishes ONE `Targets` point whose `legal_targets` are minted
+/// from the live board; this stages the same shape with a FIXED target list so the row is
+/// insensitive to seat-population drift. `offer.proposer` — the firewall's engine-issued
+/// comparand — still comes from `WaitingFor::LoopShortcut`, which is what the row is about.
+fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        certificate,
+        schema,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("staged from the live offer, never from thin air");
     };
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer,
@@ -10761,8 +10799,8 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, bond: ObjectId) {
 #[test]
 fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
     for hostile in [false, true] {
-        let (mut runner, bond, _hexproof, _lives) = r5_reach_offer();
-        r28_nonempty_schema_offer(&mut runner, bond);
+        let (mut runner, slot, _bond, _hexproof, _lives) = r5_reach_offer();
+        r28_nonempty_schema_offer(&mut runner, slot.clone());
         let WaitingFor::LoopShortcut { schema, .. } = runner.state().waiting_for.clone() else {
             panic!("staged offer");
         };
@@ -10773,7 +10811,7 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
              `validate_pins` really run and (a′) proves they PASS"
         );
 
-        let mut template = r5_pin_template(bond, P1, 1);
+        let mut template = r5_pin_template(slot.clone(), P1, 1);
         if hostile {
             template.owner = P1;
         }
@@ -10845,19 +10883,29 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
 /// `validate_pins` both live inside it. Arms (a)/(a′) run on a non-empty schema and therefore
 /// pass whether the firewall is inside the block or outside it.
 ///
-/// The R5 offer's schema is empty (asserted by `r5_reach_offer`), so this arm reaches exactly
-/// that path.
+/// ⚠ **DISCLOSED REACHABILITY DOWNGRADE.** This arm used to run on the R5 offer's OWN empty
+/// schema — the empty-schema path was reached NATURALLY. It no longer is: the answer-beat
+/// sampling site announces the Bond's trigger entry, so the LIVE schema now publishes one
+/// `Targets` point (`r5_reach_offer` pins that shape). BOTH arms below therefore STAGE the
+/// empty schema through `r28_empty_schema_offer`, the same idiom `r28_nonempty_schema_offer`
+/// uses in the other direction. What survives the downgrade: `offer.proposer` — the firewall's
+/// engine-issued comparand — is still the live one, and the matched positive accepts an honest
+/// declaration on the SAME staged path, so the row still discriminates the firewall from "the
+/// staged path refuses everything". What does NOT survive: the claim that a real board reaches
+/// this path on its own. Treat that as unproven here until a fixture whose live offer publishes
+/// nothing is added.
 ///
 /// REVERT-PROBE: move the firewall INSIDE the `!offer.schema.points.is_empty()` block ⇒ the
 /// wrong-owner declaration is accepted here ⇒ **(a″) FLIPS TO FAIL** while (a)/(a′) stay green.
 #[test]
 fn r28_a_the_owner_firewall_is_reached_on_an_empty_schema_offer_too() {
     // matched positive first: the empty-schema path DOES accept an honest declaration.
-    let (mut runner, bond, _h, _l) = r5_reach_offer();
+    let (mut runner, slot, _bond, _h, _l) = r5_reach_offer();
+    r28_empty_schema_offer(&mut runner);
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(1),
-            template: Some(r5_pin_template(bond, P1, 1)),
+            template: Some(r5_pin_template(slot.clone(), P1, 1)),
         })
         .expect("declare");
     assert!(
@@ -10869,8 +10917,9 @@ fn r28_a_the_owner_firewall_is_reached_on_an_empty_schema_offer_too() {
          refusal below is the firewall and not the empty-schema path refusing everything"
     );
 
-    let (mut runner, bond, _h, _l) = r5_reach_offer();
-    let mut template = r5_pin_template(bond, P1, 1);
+    let (mut runner, slot, _bond, _h, _l) = r5_reach_offer();
+    r28_empty_schema_offer(&mut runner);
+    let mut template = r5_pin_template(slot.clone(), P1, 1);
     template.owner = P1;
     let result = runner
         .act(GameAction::DeclareShortcut {
@@ -10921,11 +10970,11 @@ fn r28_c_a_restored_proposal_with_a_foreign_template_owner_is_refused_at_consump
     for hostile in [false, true] {
         for trusted in [false, true] {
             let label = format!("hostile={hostile} trusted={trusted}");
-            let (mut runner, bond, _h, lives) = r5_reach_offer();
+            let (mut runner, slot, _bond, _h, lives) = r5_reach_offer();
             runner
                 .act(GameAction::DeclareShortcut {
                     count: IterationCount::Fixed(1),
-                    template: Some(r5_pin_template(bond, P1, 1)),
+                    template: Some(r5_pin_template(slot.clone(), P1, 1)),
                 })
                 .expect("declare opens APNAP");
 
@@ -10952,7 +11001,6 @@ fn r28_c_a_restored_proposal_with_a_foreign_template_owner_is_refused_at_consump
             // consequence here is that ingress I3 is reachable only for `per_cycle: None`
             // proposals, which is exactly the shipped `Some(template)` population. The guard
             // under test does not read `per_cycle`, so nulling it costs the row nothing.
-            proposal.per_cycle = None;
 
             // The TRUSTED arm must carry a real resolution-wire envelope, not a bare
             // `GameState` under a `"state"` key. Upstream #6933 made
@@ -11032,4 +11080,278 @@ fn r28_c_a_restored_proposal_with_a_foreign_template_owner_is_refused_at_consump
             }
         }
     }
+}
+
+// ─────── AI1 — the AI's bounded-declare candidate withdraws on a 0→1 schema ───────
+
+/// **AI1 — the generator's `Fixed(max)` candidate is keyed to the PUBLISHED PIN SET, measured
+/// in BOTH directions on ONE board.**
+///
+/// CR 732.2a. `ai_support::candidates` emits `DeclareShortcut { count: Fixed(max_iterations),
+/// template: None }` only `if schema.points.is_empty() && schema.is_bounded()`, because a
+/// `template: None` declaration fail-closes against a published pin set — the engine would
+/// ACCEPT it and then discard it, handing the search layer an action that looks legal and is
+/// not.
+///
+/// The R5 offer is exactly the board that MOVED: it used to publish nothing (so the `Fixed`
+/// candidate was emitted), and the answer-beat sampling site now announces the Bond's trigger
+/// entry, so it publishes one `Targets` point. This row is the pin for that transition.
+///
+/// * **arm (a), the live board:** one published point ⇒ the candidate set is `DeclineShortcut`
+///   alone, and specifically carries NO `Fixed` declaration.
+/// * **arm (b), the POSITIVE CONTROL, same board one field apart:** stage the schema's `points`
+///   empty ([`r28_empty_schema_offer`]) ⇒ the `Fixed` candidate RETURNS. Without this arm,
+///   arm (a) would be satisfied by a generator that had stopped emitting `Fixed` for any
+///   reason at all — including not running.
+///
+/// Both arms read the ENGINE's candidate set through `legal_actions`, the same seam
+/// `phase-ai`'s search calls, so this is not a re-implementation of the gate agreeing with
+/// itself. The row is deliberately NOT `#[ignore]`d: the two pre-existing `phase-ai` bounded
+/// rows are, and an ignored row reports `ok` while executing nothing.
+#[test]
+fn ai1_the_bounded_declare_candidate_withdraws_when_the_offer_publishes_a_pin() {
+    // ── arm (a): the LIVE offer, which now publishes one point ──
+    let (mut runner, _slot, _bond, _hexproof, _lives) = r5_reach_offer();
+    let WaitingFor::LoopShortcut { schema, .. } = runner.state().waiting_for.clone() else {
+        panic!("r5_reach_offer returns at the offer");
+    };
+    assert!(
+        schema.is_bounded(),
+        "REACH-GUARD: the `Fixed` candidate is gated on `is_bounded()` as well, so an unbounded \
+         offer would withhold it for the wrong reason"
+    );
+    assert_eq!(
+        schema.points.len(),
+        1,
+        "REACH-GUARD: the published pin set is the conjunct this row is about; got {:?}",
+        schema.points
+    );
+    let live = engine::ai_support::legal_actions(runner.state());
+    assert_eq!(
+        live,
+        vec![GameAction::DeclineShortcut],
+        "AI1(a): against a points-carrying bounded offer the ONLY legal candidate is the \
+         decline — a `template: None` declaration is accepted and then discarded by \
+         `handle_declare_shortcut`, which is worse than no candidate at all"
+    );
+
+    // ── arm (b): the POSITIVE CONTROL — the same board with an EMPTY point set ──
+    r28_empty_schema_offer(&mut runner);
+    let staged = engine::ai_support::legal_actions(runner.state());
+    assert!(
+        staged.iter().any(|a| matches!(
+            a,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(_),
+                template: None,
+            }
+        )),
+        "AI1(b) POSITIVE CONTROL: with `points` empty the generator MUST emit the \
+         `Fixed(max_iterations)` candidate again. Its absence here would mean arm (a) measured \
+         a generator that emits nothing rather than one keyed to the pin set. got {staged:?}"
+    );
+    assert!(
+        staged.contains(&GameAction::DeclineShortcut),
+        "AI1(b): the decline stays legal on both arms — only the `Fixed` candidate moves, which \
+         is what makes the pair one axis apart"
+    );
+}
+
+// ───── PR #7005 maintainer item: the answer-beat sampler records the SYNCHRONIZED window ─────
+
+/// CR 732.2a. `game::engine::apply_action`'s forced-window ANSWER sampler (the site gated on
+/// `answering_forced_window`) called `record_loop_detect_sample` BEFORE installing the
+/// pipeline's returned `wf`, while the settle sampler in `pass_priority_once_with_pipeline`
+/// records AFTER its `sync_waiting_for`. A frame minted at the answer site therefore carried
+/// the PRE-pipeline `waiting_for`/`priority_player` pair and a settle frame carried the synced
+/// one. That is a detection hazard, not cosmetics: `impl PartialEq for GameState` compares both
+/// fields and `normalize_for_loop` neutralizes neither, so a heterogeneous ring breaks
+/// `analysis::resource::ring_delta_signature`'s turn-position conjunct. The fix routes `wf`
+/// through `game::public_state::sync_waiting_for` — the canonical synchronizer, which also
+/// recomputes `priority_player` via `turn_control::authorized_submitter_for_player` — before
+/// the record, so both producers mint the same shape.
+///
+/// FIXTURE: the tracked `dina_conqueror_4p` dump, driven through the production `apply()` path,
+/// so every frame asserted below was minted by `record_loop_detect_sample` itself rather than
+/// staged by the test.
+///
+/// SITE ATTRIBUTION IS EXACT, not assumed. The answer site's own gate conjunct is
+/// `state.waiting_for.is_forced_cascade_window()` read BEFORE the action; the settle sampler is
+/// reachable only from `pass_priority_once_with_pipeline`, i.e. from a `Priority` window, which
+/// `is_forced_cascade_window` deliberately excludes. So "the pre-beat window was forced AND the
+/// ring grew" names the answer site and nothing else. MEASURED on this drive: 2 answer-beat
+/// mints (beats 5 and 14), 3 settle mints, offer at beat 19 over a 5-frame ring.
+///
+/// ⚠ WHAT THIS ROW DOES **NOT** CATCH, stated rather than implied. A PURE REVERT of the reorder
+/// leaves all three arms GREEN, and that is a measurement rather than an oversight: a
+/// `debug_assert_eq!` census on both fields at that position reported 0 divergences over 18,486
+/// lib + 4,487 integration rows, so no fixture in the corpus reaches the divergence. The row is
+/// consequently the STANDING pin — it fires the first time a beat does diverge — and its
+/// instrument is proved live by MUTANTS at the sampler instead of by the revert:
+/// * `state.priority_player = PlayerId(3);` after the sync ⇒ arm (2) FAILS at the first mint.
+/// * `state.waiting_for = WaitingFor::GameOver { winner: None };` after the sync ⇒ arm (1)
+///   FAILS at the first mint (arm (2) still passes, so the two arms are separately live).
+///
+/// Arm (3) is the BLAST-RADIUS pin: the certificate is byte-exact under the pure revert, which
+/// is what makes "this reorder does not perturb detection" a measurement.
+#[test]
+fn answer_beat_frames_carry_the_synced_window_and_the_offer_certificate_is_exact() {
+    use engine::analysis::resource::{PeriodicDelta, ResourceVector};
+
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/dina_conqueror_4p.json.gz"
+    )));
+
+    // ── REACH-GUARDS. Without these every assertion below is vacuous.
+    assert!(
+        state.loop_detection.samples(),
+        "reach-guard: a non-sampling mode never populates the ring, so neither a frame nor an \
+         offer could exist; got {:?}",
+        state.loop_detection
+    );
+    assert_eq!(
+        state.loop_detect_ring.len(),
+        0,
+        "reach-guard: the dump ships with an EMPTY ring — every frame asserted below was \
+         accumulated by THIS drive through the production producer, not restored from the dump"
+    );
+
+    let pin = engine_live_opponents(&state, P0).first().copied();
+    let mut answer_mints = 0usize;
+    let mut settle_mints = 0usize;
+    let mut offer_beat = None;
+    for beat in 0..400usize {
+        if matches!(
+            state.waiting_for,
+            WaitingFor::LoopShortcut {
+                predicted_winner: None,
+                ..
+            }
+        ) {
+            offer_beat = Some(beat);
+            break;
+        }
+        let answered_forced_window = state.waiting_for.is_forced_cascade_window();
+        let before = state.loop_detect_ring.len();
+        if dump_drive_one_beat(&mut state, pin).is_err() {
+            break;
+        }
+        if state.loop_detect_ring.len() == before {
+            continue;
+        }
+        if !answered_forced_window {
+            settle_mints += 1;
+            continue;
+        }
+        answer_mints += 1;
+        let frame = &state
+            .loop_detect_ring
+            .back()
+            .expect("the ring just grew, so it has a back element")
+            .live;
+        // ── (2) ITS PRIORITY PLAYER. Asserted FIRST so a mutation that touches only
+        // `priority_player` is caught by its own arm instead of being masked by arm (1).
+        assert_eq!(
+            frame.priority_player, frame.active_player,
+            "beat {beat}: `sync_waiting_for` recomputes `priority_player` from the window it \
+             installs, so an answer-beat frame must carry the post-sync submitter for the \
+             returned `Priority{{active_player}}` window, not whatever the pre-pipeline window \
+             left behind"
+        );
+        // ── (1) THE NEWEST SAMPLED STATE: the window the action RETURNS, never the forced one
+        // it answered.
+        assert_eq!(
+            frame.waiting_for,
+            WaitingFor::Priority {
+                player: frame.active_player
+            },
+            "beat {beat}: the sampler's own gate requires the RETURNED `wf` to be \
+             `Priority{{active_player}}`, so recording before the sync is the only way the \
+             frame can carry a different window — and `impl PartialEq for GameState` compares it"
+        );
+    }
+
+    assert!(
+        answer_mints > 0,
+        "reach-guard: the drive must mint at least one frame at the FORCED-WINDOW ANSWER site, \
+         else arms (1)/(2) never ran and this row passes vacuously; got answer={answer_mints} \
+         settle={settle_mints}"
+    );
+    let offer_beat = offer_beat.expect(
+        "reach-guard: the bounded offer must FIRE on this real 4p drain, else arm (3) asserts \
+         about a certificate that was never published",
+    );
+
+    // ── (3) THE RESULTING CERTIFICATE, EXACT. The destructure is EXHAUSTIVE on purpose: a new
+    // `LoopCertificate` field cannot slip past this pin unstated.
+    let (proposer, certificate, _schema) = bounded_offer_parts(&state);
+    assert_eq!(
+        proposer, P0,
+        "the offer beat {offer_beat} publishes the drain's controller as proposer"
+    );
+    let LoopCertificate {
+        unbounded,
+        win_kind,
+        mandatory,
+        residual_board_delta,
+        per_cycle,
+    } = certificate;
+    assert_eq!(
+        *unbounded,
+        vec![
+            ResourceAxis::Life(P0),
+            ResourceAxis::Life(P1),
+            ResourceAxis::Life(P2),
+            ResourceAxis::Life(P3),
+        ],
+        "CR 119.3: the Dina/Conqueror drain moves EVERY seat's life each period — the three \
+         opponents down and the controller up — so all four axes are unbounded"
+    );
+    assert_eq!(
+        *win_kind,
+        WinKind::LethalDamage,
+        "CR 704.5a: opponents reach 0 life"
+    );
+    assert!(
+        !*mandatory,
+        "CR 732.2a: the interactive offer exists only for an OPTIONAL loop"
+    );
+    assert_eq!(
+        *residual_board_delta,
+        BoardDelta::default(),
+        "CR 110.1: this cycle recycles its board exactly, so there is no non-recycled remainder"
+    );
+    let Some(PeriodicDelta {
+        frames_per_period,
+        delta,
+        victim_slot,
+    }) = per_cycle
+    else {
+        panic!(
+            "the bounded producer is the one that NARROWS the CR 704 bound, so it publishes \
+                a per-period signature; got None"
+        )
+    };
+    assert_eq!(
+        *frames_per_period, 2,
+        "one repetition spans two retained ring frames on this board — the gain-life \
+         resolution and the lose-life one"
+    );
+    assert!(
+        victim_slot.is_empty(),
+        "no decision slot is attributed a per-period life swing on this untargeted drain; \
+         got {victim_slot:?}"
+    );
+    let mut expected_delta = ResourceVector::default();
+    expected_delta.life.insert(P0, 1);
+    expected_delta.life.insert(P1, -1);
+    expected_delta.life.insert(P2, -1);
+    expected_delta.life.insert(P3, -1);
+    assert_eq!(
+        *delta, expected_delta,
+        "EXACT per-period signature: +1 to the controller, -1 to each opponent, and every \
+         other axis at rest. A ring whose frames disagreed on `waiting_for`/`priority_player` \
+         could not produce this signature at all, because `ring_delta_signature` compares the \
+         frames with `impl PartialEq for GameState`"
+    );
 }

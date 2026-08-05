@@ -293,11 +293,21 @@ mod verdict_memo {
                     .and_then(|p| crate::game::engine::entry_publishes_pin_slots(frame, entry, p));
                 let primary =
                     super::stack_entry_resolution_choice_freedom(frame, entry, &mut self.budget);
-                let residual = match published.as_ref().and_then(|p| p.may.as_ref()) {
-                    Some(_) => {
-                        super::optional_cleared_classification(frame, entry, &mut self.budget)
-                    }
-                    None => None,
+                // TWO bases need the optional-cleared re-classification, and they are
+                // MUTUALLY EXCLUSIVE by construction: `entry_publishes_pin_slots` guard (b)
+                // withholds the `may` slot exactly when a stored auto-choice already answers
+                // the CR 603.5 gate, so an auto-answered entry publishes NOTHING and would
+                // otherwise carry `residual: None` — the structural reason gate (6) could not
+                // relieve it. Computing the residual on the auto basis too is what makes
+                // `auto_may_choice_relief` able to read the same memo the pin relief reads.
+                let residual = if published.as_ref().and_then(|p| p.may.as_ref()).is_some()
+                    || matches!(
+                        super::auto_may_answer_for(frame, entry),
+                        Some(crate::types::game_state::AutoMayChoice::Accept)
+                    ) {
+                    super::optional_cleared_classification(frame, entry, &mut self.budget)
+                } else {
+                    None
                 };
                 self.memo.insert(
                     key,
@@ -638,9 +648,24 @@ pub struct PeriodicDelta {
     /// count. It has to, for the class [`ring_delta_signature`] certifies: that basis proves
     /// a periodic DELTA, not a recurring board, so the drive's board-recurrence predicates are
     /// false at every settle beat and `Fixed(n)`'s `n` would otherwise be structurally inert.
-    /// The count is measured the same way it is minted — the engine's single
-    /// `record_loop_detect_sample` call site is inside `pass_priority_once_with_pipeline`,
-    /// which is the function the drive steps.
+    /// The count is measured the same way it is minted, and that now takes TWO sites to
+    /// state: `record_loop_detect_sample` is called from the settle sampler in
+    /// `game::engine::pass_priority_once_with_pipeline` AND from the forced-window answer
+    /// site in `game::engine::apply_action`. `drive_one_shortcut_cycle` covers both — it
+    /// steps `pass_priority_once_with_pipeline` on its priority beats and answers every other
+    /// prompt through `inject_pinned_answer`. Of its FOUR arms, three end in `apply_action`
+    /// (`OrderTriggers`, `TriggerTargetSelection`, `OptionalEffectChoice`) and the fourth is
+    /// `_ => Err(RecastAbort)`, which returns before any frame advance — as do the early `Err`
+    /// exits inside the two template arms. So every path that returns `Ok` HAS dispatched
+    /// `apply_action`, and every path that does not aborts the drive rather than advancing it
+    /// uncounted.
+    ///
+    /// The drive advances `frames_this_cycle` in BOTH of ITS OWN arms — the active-player
+    /// `Priority` arm and the `inject_pinned_answer` arm, not to be confused with the four
+    /// above — each keyed on the ring's back allocation actually changing, so mint and measure
+    /// stay one-to-one. Before the second site existed this doc claimed a single call site;
+    /// that premise is dead, and the count would silently read a HALF period if only one of
+    /// the drive's two arms counted.
     ///
     /// Named for its unit on purpose: `game::engine::shortcut_drive_period` maps a
     /// TEMPLATE to a repeat count, which is a different quantity in the same subsystem.
@@ -1041,10 +1066,17 @@ impl ResourceVector {
     /// Life GAINS contribute nothing (`(-n).max(0)`), so a proposer gaining 5 while three
     /// opponents lose 1, 2 and 3 yields 3 — never 5, and never 6.
     ///
-    /// Extracted from `game::engine::try_offer_bounded_cycle_shortcut` so the max-vs-sum
-    /// fork has a callable seam: `victim_slot` is empty on every trajectory that offers
-    /// today, so this expression's value is dropped in production and no fixture reaches
-    /// it. `worst_seat_life_loss_is_the_max_seat_never_the_sum` is its only discriminator.
+    /// Extracted from `game::engine::try_offer_bounded_cycle_shortcut` so the max-vs-sum fork
+    /// has a callable seam. ⚠ THE NOTE THAT STOOD HERE — *"`victim_slot` is empty on every
+    /// trajectory that offers today … no fixture reaches it"* — IS FALSIFIED, and is replaced
+    /// rather than softened: once the answer-beat sampling site in `apply_action` announces
+    /// the entries a FORCED pre-priority window puts on the stack, a CR 608.2b `Targets`
+    /// declaration is announced like any other and `victim_slot` is NON-EMPTY on the F4
+    /// boards. `worst_seat_life_loss_is_the_max_seat_never_the_sum` is therefore no longer the
+    /// only discriminator: the real-dump rows re-derive this value through
+    /// `elimination_bounds` (`r1_the_bounded_offer_fires_on_the_real_f4_dump`), and
+    /// `b5f_the_declared_term_can_suppress_an_otherwise_legal_offer` measures it flipping a
+    /// live offer to `NoNarrowedLegalCount`.
     pub(crate) fn worst_seat_life_loss(&self) -> i64 {
         self.life.values().map(|&n| (-n).max(0)).max().unwrap_or(0)
     }
@@ -1285,8 +1317,11 @@ fn map_delta<K: Ord + Copy>(
 /// that moves no resource states no CR 704 threshold to bound. A certifying window that is
 /// not TURN-POSITION invariant ⇒ `None` (the CR 703.1 conjunct below). Reading the RING only
 /// — never the live `state` — keeps the compared frames homogeneous: every ring frame is a
-/// `normalize_for_loop` snapshot taken at `WaitingFor::Priority{active_player}`
-/// (`game::engine`'s sole `record_loop_detect_sample` call site), while the live state is not
+/// `normalize_for_loop` snapshot taken at `WaitingFor::Priority{active_player}`. That holds
+/// across BOTH of `game::engine`'s `record_loop_detect_sample` sites (the settle sampler in
+/// `pass_priority_once_with_pipeline` and the forced-window answer site in `apply_action`),
+/// because the two gate on the same `wf` conjunct — the homogeneity argument no longer rests
+/// on there being one site, it rests on that shared conjunct. Meanwhile the live state is not
 /// normalized. It does not consult a board predicate, but it DOES require the frames it
 /// compares to be homogeneous in turn position, which is what "homogeneous" above now means
 /// in full.
@@ -1987,6 +2022,70 @@ fn pinned_may_choice_relief(
     }
 }
 
+/// CR 603.5: is this entry's optional trigger ALREADY ANSWERED by a stored "don't ask
+/// again" auto-choice — and with which answer?
+///
+/// ADOPTION C. This used to re-derive the CR 603.5 gate's conjunct set here, which made it a
+/// THIRD copy: it asked the three repeat-shape predicates and the recipient authority
+/// directly, and — measured — it OMITTED both `optional_for` and the feasibility probe, so it
+/// called a may "answered" on two ability shapes where the gate never reads the store at all.
+/// It now delegates the whole question to `effects::stored_may_answer`, the consumer half of
+/// the one authority `resolve_chain_body`'s own branch and the mint's guard (b) both take.
+///
+/// NOT keyed to the proposer, and that survives the adoption: the gate asks whoever
+/// `optional_prompt_player` names, and a stored answer specifies that choice regardless of
+/// whose it is — a per-iteration window that never opens is specified for every seat at once
+/// (CR 732.2a).
+///
+/// `None` ⇒ no up-front gate opens, or it will PROMPT, or the ability carries no
+/// `may_trigger_origin` for a preference to key on. All are unspecified windows, which is the
+/// fail-closed direction.
+fn auto_may_answer_for(
+    frame: &GameState,
+    entry: &StackEntry,
+) -> Option<crate::types::game_state::AutoMayChoice> {
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+        return None;
+    };
+    crate::game::effects::stored_may_answer(frame, ability)
+}
+
+/// CR 732.2a + CR 603.5: relief basis ONE for gate (6)'s `MayPrompt` — the may this entry
+/// announces is answered by a stored auto-choice, so the shortcut opens no window there.
+///
+/// The SIBLING of [`pinned_may_choice_relief`] and deliberately its identical shape: both
+/// discharge exactly the `ability.optional` axis and both hand back the SAME
+/// optional-cleared residual for the caller to go on gating, because a specified `may`
+/// says nothing about the CR 616.1 replacement surface of the events it then proposes.
+/// The five OTHER reasons `ability_resolution_choice_freedom` returns `MayPrompt` — an
+/// `unless_pay`, a resolution-time target chooser, a modal header, a controller-choice
+/// repeat, a CR 701.34a proliferate sub-ability — keep returning `MayPrompt` as the
+/// residual and get no relief here, exactly as they get none from a pin.
+///
+/// ONLY `Accept` IS RELIEVED, and the asymmetry is not caution — it is what the residual
+/// MEANS. `optional_cleared_classification` re-classifies the ability as if it RESOLVED
+/// with its gate discharged, which is what a stored `Accept` produces. A stored `Decline`
+/// is equally prompt-free but produces the opposite board, so that residual would be a
+/// claim about events the shortcut never proposes. (It also cannot arise in a certified
+/// period: a declined `may` contributes none of the per-cycle delta the ring recurrence
+/// was built from.)
+fn auto_may_choice_relief(
+    frame: &GameState,
+    f: FrameIx,
+    entry: &StackEntry,
+    verdicts: &mut PeriodVerdicts<'_>,
+) -> Option<crate::game::resolution_prompt::ResolutionChoiceFreedom> {
+    use crate::game::resolution_prompt::ResolutionChoiceFreedom;
+    use crate::types::game_state::AutoMayChoice;
+    if !matches!(auto_may_answer_for(frame, entry)?, AutoMayChoice::Accept) {
+        return None;
+    }
+    match verdicts.verdict(f, entry).residual.as_ref()? {
+        ResolutionChoiceFreedom::MayPrompt => None,
+        residual @ ResolutionChoiceFreedom::FreeUnlessReplacements(_) => Some(residual.clone()),
+    }
+}
+
 /// Karp–Miller-style ω-acceleration (Karp–Miller 1969; Finkel et al. 2021), sound
 /// GIVEN the in-loop transition relation — the WHOLE beat: top-of-stack resolution
 /// (CR 608.1) with its resolution-time payments (CR 605.3a / CR 608.2g), trigger
@@ -2136,14 +2235,30 @@ pub(crate) fn stack_choices_are_all_specified<'a>(
         let primary = verdicts.verdict(f, entry).primary.clone();
         let verdict = match primary {
             crate::game::resolution_prompt::ResolutionChoiceFreedom::MayPrompt => {
-                match pinned_may_choice_relief(f, entry, verdicts, scope) {
+                // CR 603.5: TWO bases can specify a `may`, and they are mutually exclusive
+                // by construction — the mint's guard (b) publishes a `MayChoice` slot only
+                // for a may that has NO stored auto-choice, and withholds it for one that
+                // does. Asking the auto basis first is therefore an ordering of disjoint
+                // cases, not a precedence. An auto-answered may is the MOST determined a
+                // per-iteration choice can be; reading its slotless mint as "unspecified"
+                // was the defect.
+                let relief = auto_may_choice_relief(frame, f, entry, verdicts)
+                    .or_else(|| pinned_may_choice_relief(f, entry, verdicts, scope));
+                match relief {
                     Some(residual) => residual,
                     None => return false,
                 }
             }
             free => free,
         };
-        if !resolution_events_are_discharged(frame, verdict) {
+        if !resolution_events_are_discharged(frame, verdict.clone()) {
+            return false;
+        }
+        // CR 616.1 + CR 732.2a: the CANDIDATE-AUTHORITY half is a claim about the FUTURE —
+        // the shortcut's remaining repetitions resolve under the board that exists NOW, so a
+        // replacement definition that entered play after this frame was captured is invisible
+        // to the frame-side discharge above. Fail-closed second discharge against `state`.
+        if !std::ptr::eq(*frame, state) && !resolution_events_are_discharged(state, verdict) {
             return false;
         }
     }
@@ -5331,10 +5446,82 @@ mod tests {
         None
     }
 
+    /// PRODUCTION'S OWN CANDIDATE WALK, CONSUMED rather than imitated: this asks
+    /// [`crate::game::engine::candidate_windows`] — the very iterator
+    /// `certified_bounded_cycle_offer` walks — so the ORDER (newest-first), the span
+    /// arithmetic and the degenerate-pair filter are production's by construction. Returns
+    /// the first `idx` whose window drives item (4) AT ALL, with that window's certified
+    /// touch and its measured span.
+    ///
+    /// CR 732.2a: `frames_per_period` is a MEASURED span, so a row that hard-codes
+    /// `&live[live.len() - 2..]` is asserting `span == 1` without saying so — and reads a
+    /// HALF PERIOD the moment the sampling rate moves. It moved: the answer-beat sampler
+    /// retains a frame at forced-window ANSWER beats as well, which halves the newest
+    /// adjacent pair on the dellian dump.
+    ///
+    /// **PRECONDITION, NOT CONCLUSION.** `conjunct4_scans() > 0` says items (1)/(2)/(3)
+    /// passed on SOME production-shaped window so item (4) RAN; it admits `scans ∈ {1, 2}`,
+    /// which FAILS the caller's `scans > non_exempt` assertion. The search can therefore land
+    /// on a beat whose assertion fails — that is what keeps the caller non-vacuous.
+    ///
+    /// One FRESH container per candidate: the counter is cumulative, so a shared container
+    /// (which is what production carries) would make `> 0` unattributable after the first
+    /// candidate that scans.
+    fn newest_item4_window<'a>(
+        live: &[&'a GameState],
+        current: &'a GameState,
+        proposer: PlayerId,
+    ) -> Option<(usize, PeriodTouch<'a>, u32)> {
+        for (idx, span, window) in crate::game::engine::candidate_windows(live) {
+            let touch = certified_period_touch(window, current, PeriodCertification::BoardCovered);
+            let mut verdicts = PeriodVerdicts::for_period(live, current, proposer);
+            let _ = loop_states_cover_modulo_growth_pinned(
+                window[0],
+                current,
+                proposer,
+                &[],
+                &touch,
+                &mut verdicts,
+            );
+            if verdicts.conjunct4_scans() > 0 {
+                return Some((idx, touch, span));
+            }
+        }
+        None
+    }
+
     /// The construction requirement shared by every row that needs a REAL certified window
     /// carrying a non-empty observed-frozen prefix: a usable ring AND a newest candidate pair
     /// (`span == 1`, the shape §3 D2's walk reaches first) whose common prefix is
     /// index-stable.
+    ///
+    /// ⚠ THIS PREDICATE HARD-CODES `span == 1`, and the residual that leaves is SMALLER IN
+    /// COUNT AND LARGER IN KIND than "four authored-ring rows" claimed. MEASURED: exactly TWO
+    /// call sites remain — `r21_b_the_exemption_narrows_conjunct_six_by_exactly_the_frozen_set`
+    /// and `r27_a2_every_announced_pair_carries_an_unnormalized_evaluation_board` — and
+    /// NEITHER is an authored ring. Both drive the REAL `TRACKED_DUMPS` through
+    /// `drive_dump_until`, so both are exposed to the answer-beat sampler that can halve the
+    /// newest adjacent pair (the hazard [`newest_item4_window`] exists for). They stay because
+    /// at the beat this predicate SELECTS the hardcode is EXACT — not because a half period
+    /// would fail loudly, which it would not.
+    ///
+    /// MEASURED at the beat `drive_dump_until(gz, 80, has_frozen_window)` returns: `dina` beat
+    /// 6, `ring = 2`; `dellian` beat 5, `ring = 2`; and `candidate_windows` yields exactly ONE
+    /// candidate on each — `idx = 0`, `span = 1`, window length 2. With a two-frame ring
+    /// `&live[live.len() - 2..]` IS the whole ring, so there is no half period to read here.
+    ///
+    /// ⚠ THE REASON THAT STOOD HERE — *"both fail LOUD rather than silently on a half period …
+    /// each then asserts its own domain non-empty"* — IS UNPROVEN AND WRONG, and is replaced
+    /// rather than softened. The loud floors are real but do not cover this hazard: a half
+    /// period is a NON-degenerate window with non-empty domains, so neither
+    /// `drive_dump_until`'s reach-guard nor either row's domain-non-empty assertion
+    /// (`frozen_ids`/`announced` in the first, `announced` in the second) would fire on one,
+    /// and both rows' claims (a set-narrowing identity; a universal over announced pairs) are
+    /// span-INDEPENDENT, so on a half period they would PASS. The residual is therefore "exact
+    /// today, SILENT the day the sampling rate grows this ring past two frames" — a smaller
+    /// hazard than the old text claimed to have closed, and an honest one. The real-dump
+    /// item-(4) rows, which have no such measured guarantee, use [`newest_item4_window`]
+    /// instead.
     fn has_frozen_window(state: &GameState) -> bool {
         if state.loop_detect_ring.len() < 2 {
             return false;
@@ -10543,14 +10730,26 @@ mod tests {
     }
 
     /// PR-7 Phase 5b (PA-2A(e)) — CR 704.5a: the MAX-vs-SUM fork in `victim_slot`'s magnitude
-    /// derivation, which is otherwise UNTESTED and whose wrong answer surfaces in playtesting
-    /// as a wrong elimination bound rather than as a failure.
+    /// derivation, whose wrong answer surfaces in playtesting as a wrong elimination bound
+    /// rather than as a failure.
     ///
-    /// WHY IT NEEDS ITS OWN ROW: `victim_slot` is EMPTY on every trajectory that offers today
-    /// — dina, the ≥3p life drain and the F4 predicate all publish `points == 0` — so in
-    /// production `worst_seat_life_loss` is evaluated only where its value is collected into
-    /// an empty `Vec` and dropped. No fixture reaches the fork. Stated as a coverage hole in
-    /// the PR body; 5d's targeted class is its first production-path consumer.
+    /// WHY IT NEEDS ITS OWN ROW. ⚠ THE REASON THAT STOOD HERE — *"`victim_slot` is EMPTY on
+    /// every trajectory that offers today … all publish `points == 0` … no fixture reaches the
+    /// fork"* — IS FALSIFIED, and is replaced rather than softened: once the answer-beat
+    /// sampling site in `apply_action` announces the entries a FORCED pre-priority window puts
+    /// on the stack, a CR 608.2b `Targets` declaration is announced like any other, so on the
+    /// F4 boards `points` carries Torch's `Targets` point and `victim_slot` is NON-EMPTY. This
+    /// value is therefore no longer collected into an empty `Vec` and dropped — it reaches
+    /// `elimination_bounds` in production, `r1_the_bounded_offer_fires_on_the_real_f4_dump`
+    /// re-derives the published bound with a non-zero declared term, and
+    /// `b5f_the_declared_term_can_suppress_an_otherwise_legal_offer` measures it flipping a live
+    /// offer to `NoNarrowedLegalCount`.
+    ///
+    /// What those real-dump rows do NOT cover is THIS fork. Both take the magnitude off the
+    /// offer's own published `per_cycle.victim_slot`, so they track whatever the derivation
+    /// returns instead of discriminating between derivations — swap `max` for `sum` and their
+    /// expectations move with it. The max-vs-sum discrimination below is still this row's alone,
+    /// and that, not an absent production consumer, is why it stays.
     ///
     /// O4 DERIVE conformance — all THREE legs, not one:
     /// 1. **DERIVED, never compared to a literal.** `m` is bound from the return value and
@@ -13970,18 +14169,32 @@ mod tests {
     /// item (4) trips on IS ITSELF a frozen one, so the unmutated board already witnesses
     /// that item (4) does not consult the exemption.
     ///
+    /// ⚠ THE WINDOW IS PRODUCTION'S, NOT `len - 2`. The old selection asserted `span == 1`
+    /// silently, and the answer-beat sampler halved the newest adjacent pair on this dump:
+    /// MEASURED, a span-1 window scans **0** entries at every beat 0..79, while production's
+    /// first item-(4) candidate is **span 2** and scans 36. Both the search and the window now
+    /// come from [`newest_item4_window`], i.e. from `game::engine::candidate_windows`.
+    ///
     /// REVERT-PROBE: add a `frozen_ids` skip to item (4)'s closure ⇒ the scan can no longer
     /// reach index 35 and `conjunct4_scans` collapses to at most the non-exempt population
-    /// (2 on this board) ⇒ FLIPS.
+    /// (2 on this board) ⇒ FLIPS **while the search still succeeds and lands on the same
+    /// beat** — which is what proves the search is a precondition and not the assertion.
     #[test]
     fn r21_b_placement_b_item_four_scans_frozen_entries_that_conjunct_six_skips() {
-        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, has_frozen_window)
-            .expect("REACH-GUARD: the dellian drive must reach a window with a frozen prefix");
+        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, |s| {
+            let live: Vec<&GameState> = s.loop_detect_ring.iter().map(|f| &f.live).collect();
+            newest_item4_window(&live, s, s.active_player).is_some()
+        })
+        .expect(
+            "REACH-GUARD: the dellian drive must reach a beat whose production candidate window \
+             runs item (4) at all",
+        );
         let live: Vec<&GameState> = board.loop_detect_ring.iter().map(|f| &f.live).collect();
-        let window = &live[live.len() - 2..];
-        let prior = window[0];
         let proposer = board.active_player;
-        let cover = certified_period_touch(window, &board, PeriodCertification::BoardCovered);
+        let (idx, cover, span) = newest_item4_window(&live, &board, proposer)
+            .expect("the search predicate accepted this very board one line ago");
+        let window = &live[idx..];
+        let prior = window[0];
         let non_exempt = board.stack.len() - cover.frozen_ids.len();
         assert!(
             cover.frozen_ids.len() > non_exempt,
@@ -13998,9 +14211,9 @@ mod tests {
         let scans = v4.conjunct4_scans() as usize;
         assert!(
             scans > non_exempt,
-            "R21(b-placement-B) beat {beat}: item (4) scanned {scans} entries, which must \
-             EXCEED the {non_exempt} non-exempt ones — a scan that consulted `frozen_ids` \
-             could never get past them"
+            "R21(b-placement-B) beat {beat} (window idx {idx}, span {span}): item (4) scanned \
+             {scans} entries, which must EXCEED the {non_exempt} non-exempt ones — a scan that \
+             consulted `frozen_ids` could never get past them"
         );
         assert!(
             scans > 0 && scans < board.stack.len(),
@@ -14032,10 +14245,20 @@ mod tests {
         let mut v6 = PeriodVerdicts::for_period(&live, &board, proposer);
         let specified =
             stack_choices_are_all_specified(&board, proposer, &[], Some(&cover), &mut v6);
+        // The guard states what it actually needs: a gate that ASKED must have COMPLETED, and no
+        // answer was denied. MEASURED on production's own span-2 window the gate returns false
+        // with `denied=false` and `conjunct6_asks=0` — a structural refusal at a pre-ask
+        // conjunct, AFTER taking every one of the frozen skips. The exemption's COMPLETENESS is
+        // checked by the verbatim equality below, not here. (A truncation of the skip count is
+        // not a reachable failure mode: `note_conjunct6_frozen_skip`'s loop has no break and no
+        // early return — the gate's `return false`s live in the NEXT loop, which runs only after
+        // the counting loop has finished.)
         assert!(
-            specified,
-            "REACH-GUARD: the resolution gate must run to completion under the exempting \
-             certificate, else its skip count is a truncation"
+            !v6.denied() && specified == (v6.conjunct6_asks() > 0),
+            "REACH-GUARD: no answer may be denied, and a gate that ASKED must have completed. \
+             specified={specified} denied={} asks={}",
+            v6.denied(),
+            v6.conjunct6_asks()
         );
         assert_eq!(
             v6.conjunct6_frozen_skips() as usize,
@@ -14255,19 +14478,50 @@ mod tests {
     /// (dina, integration row `r16_the_offering_beats_probe_demand_is_exactly_measured`)
     /// spends 13 and is NOT denied. Same seam, same cap, opposite sides of the budget.
     ///
+    /// ⚠ THE SEARCH IS THE ROW'S OWN CONSTRUCTION REQUIREMENT, NOT `has_frozen_window`. "Mintable"
+    /// means the walk reached the METERED CLASSIFIER, i.e. `meter.spent > 0`. The old predicate
+    /// asserted `span == 1` on the newest pair and landed on the first ring-bearing beat, where
+    /// the mint spends 0 and never reaches the classifier at all. `meter.denied` was REJECTED as
+    /// a search predicate: `denied` can only latch after exhaustion, so `denied ⇒ spent == cap`
+    /// and the assertion would assert itself.
+    ///
     /// REVERT-PROBE: raise `PROBE_BUDGET` above dellian's unexempted demand (measured 96–107
     /// at these beats) ⇒ `denied` goes false ⇒ FLIPS. Lowering it cannot flip this arm, which
-    /// is exactly why the offering-beat row is a separate one.
+    /// is exactly why the offering-beat row is a separate one. **That revert-probe is SHIPPED
+    /// IN-ROW as a positive control** ([`ProbeCap::RaisedTwiceLinks`], the same board, one
+    /// argument apart): the meter provably returns `(x, false)` here, so `(cap, true)` is a
+    /// verdict about the SHIPPED cap and not a property of the instrument. Self-checking — if
+    /// the raised cap were still insufficient, `!raised.denied` fails loudly.
     #[test]
     fn r16_ii_b_a_non_offering_mintable_beat_saturates_the_probe_budget() {
         use crate::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
         use crate::types::game_state::WaitingFor;
 
-        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, has_frozen_window)
-            .expect("REACH-GUARD: the dellian drive must reach a mintable beat");
-        let proposer = board.active_player;
-        let mut at_priority = board.clone();
-        at_priority.waiting_for = WaitingFor::Priority { player: proposer };
+        /// The row's board construction, shared by the SEARCH and the measurement so the beat
+        /// the search accepted is byte-identically the beat the assertions read.
+        fn at_priority_of(s: &GameState) -> GameState {
+            let mut at_priority = s.clone();
+            at_priority.waiting_for = WaitingFor::Priority {
+                player: s.active_player,
+            };
+            at_priority
+        }
+
+        let (beat, board) = drive_dump_until(TRACKED_DUMPS[1].1, 80, |s| {
+            let (_, meter) = try_offer_bounded_cycle_shortcut_metered(
+                &at_priority_of(s),
+                false,
+                ProbeCap::Shipped,
+            );
+            meter.spent > 0
+        })
+        .expect("REACH-GUARD: the dellian drive must reach a beat the metered classifier runs on");
+        assert!(
+            beat > 0,
+            "ANTI-VACUITY: the search must have REJECTED at least one beat, else `spent > 0` is \
+             a tautology satisfied by beat 0 rather than a filter"
+        );
+        let at_priority = at_priority_of(&board);
         assert!(
             at_priority.last_loop_action_sequence.is_empty()
                 && at_priority.loop_detect_ring.len() >= 2,
@@ -14294,6 +14548,23 @@ mod tests {
             "R16(ii-b) beat {beat}: the max observable spend at the shipped cap IS the cap, \
              and the exhaustion is LATCHED so it can be attributed rather than inferred. \
              meter {meter:?}, stack {}",
+            at_priority.stack.len()
+        );
+
+        // ── ANTI-VACUITY: `spent > 0` does NOT imply saturation, proven ON THIS BOARD ───────
+        // The row's own revert-probe, shipped. One argument apart from the measurement above:
+        // same board, same seam, a cap of twice the board's link count.
+        let (_, raised) = try_offer_bounded_cycle_shortcut_metered(
+            &at_priority,
+            false,
+            ProbeCap::RaisedTwiceLinks,
+        );
+        assert!(
+            raised.spent > PROBE_BUDGET && !raised.denied,
+            "POSITIVE CONTROL: at a cap of twice the link count the SAME board must spend past \
+             the shipped cap WITHOUT latching exhaustion — otherwise `(cap, true)` above is a \
+             property of the instrument rather than a verdict about the shipped cap. \
+             raised {raised:?}, shipped cap {PROBE_BUDGET}, stack {}",
             at_priority.stack.len()
         );
     }
@@ -15668,6 +15939,198 @@ mod tests {
         frame
     }
 
+    // ───────────────────────────────────────────────────────────────────────────────────
+    // N3 — the CR 616.1 obligation is discharged against the LIVE board as well as the
+    // carrying frame, because the shortcut's remaining repetitions resolve under the board
+    // that exists NOW.
+    // ───────────────────────────────────────────────────────────────────────────────────
+
+    /// An OPTIONAL (or mandatory) `Draw` replacement definition, of exactly the shape
+    /// `find_applicable_replacements` draws for a `ProposedEvent::Draw`.
+    fn n3_draw_replacement(optional: bool) -> crate::types::ability::ReplacementDefinition {
+        use crate::types::ability::{
+            DrawReplacementScope, QuantityModification, ReplacementDefinition, ReplacementMode,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        let mut def = ReplacementDefinition::new(ReplacementEvent::Draw);
+        if optional {
+            def.mode = ReplacementMode::Optional { decline: None };
+        }
+        // CR 121.2: a Draw definition must declare its stage or the pipeline debug-asserts.
+        def.draw_scope = Some(DrawReplacementScope::IndividualDraw);
+        def.quantity_modification = Some(QuantityModification::Plus { value: 1 });
+        def
+    }
+
+    /// N3 — **A REPLACEMENT THAT ENTERED PLAY AFTER THE FRAME WAS CAPTURED STILL REFUSES.**
+    ///
+    /// CR 616.1 + CR 732.2a. Conjunct (6) classifies each announced entry on its CARRYING
+    /// FRAME, which is a retained ring sample and therefore a board from the PAST. Discharging
+    /// the resulting `FreeUnlessReplacements` obligation against that frame alone answers the
+    /// wrong question: the shortcut is a claim about the FUTURE, and every remaining repetition
+    /// resolves under the board that exists NOW. A definition that entered the battlefield
+    /// after the sample was taken is invisible to the frame-side discharge — and it is exactly
+    /// the CR 616.1 resolution-time choice CR 732.2a forbids a described sequence from
+    /// containing.
+    ///
+    /// The fixture makes the two boards differ in EXACTLY that field: every ring frame is
+    /// cloned before the definition is installed, so the def exists on `state` and nowhere
+    /// else. `announced_from_retained_sample` is the reach-guard that the pair really is
+    /// carried by a frame that is not `current` — without it every arm here would be about the
+    /// first discharge.
+    ///
+    /// | arm | where the def lives | mode | gate |
+    /// |---|---|---|---|
+    /// | (pos) | nowhere | — | **specified** |
+    /// | (live) | live board only | OPTIONAL | **refused** |
+    /// | (live-mandatory) | live board only | mandatory | **specified** |
+    /// | (both) | every frame AND live | OPTIONAL | **refused** |
+    ///
+    /// (live-mandatory) is what keys (live) to OPTIONALITY rather than to "a definition
+    /// exists"; (both) proves the frame-side discharge is still doing its own job, so (live)
+    /// is a strictly ADDED refusal and not a relocated one.
+    ///
+    /// REVERT-PROBE: delete the second `resolution_events_are_discharged(state, ..)` call ⇒
+    /// arm (live) certifies ⇒ FLIPS, while (pos), (live-mandatory) and (both) are unmoved.
+    #[test]
+    fn n3_a_replacement_installed_after_the_frame_was_captured_refuses_certification() {
+        let announced_id = 9310u64;
+        let build = |where_def: Option<(bool, bool)>| -> GameState {
+            // `where_def = Some((in_frames, optional))`.
+            let in_frames = where_def.is_some_and(|(f, _)| f);
+            let optional = where_def.is_some_and(|(_, o)| o);
+            let mut state = ring_announcing_on_its_newest_sample(
+                |st| {
+                    let src = announcing_ring_source(st, 931);
+                    if in_frames {
+                        st.objects
+                            .get_mut(&src)
+                            .expect("just inserted")
+                            .replacement_definitions
+                            .push(n3_draw_replacement(optional));
+                    }
+                },
+                |frame| {
+                    let src = ObjectId(931);
+                    let ability = crate::types::ability::ResolvedAbility::new(
+                        u2_draw_effect(),
+                        vec![],
+                        src,
+                        PlayerId(0),
+                    );
+                    frame.stack.push_back(announced_trigger_entry(
+                        announced_id,
+                        src,
+                        ability,
+                        None,
+                    ));
+                },
+            );
+            if where_def.is_some() && !in_frames {
+                state
+                    .objects
+                    .get_mut(&ObjectId(931))
+                    .expect("the announcing source is on the live board too")
+                    .replacement_definitions
+                    .push(n3_draw_replacement(optional));
+            }
+            state
+        };
+
+        let gate = |state: &GameState| -> bool {
+            // REACH-GUARD, run on every arm: the pair is carried by a retained frame that is
+            // NOT `current`, so the second discharge is reachable at all.
+            announced_from_retained_sample(state, announced_id);
+            let ring: Vec<&GameState> = state.loop_detect_ring.iter().map(|f| &f.live).collect();
+            let cover = certified_period_touch(
+                &ring[ring.len() - 2..],
+                state,
+                PeriodCertification::BoardEqualOnly,
+            );
+            let mut verdicts = PeriodVerdicts::for_period(&ring, state, PlayerId(0));
+            stack_choices_are_all_specified(state, PlayerId(0), &[], Some(&cover), &mut verdicts)
+        };
+
+        assert!(
+            gate(&build(None)),
+            "(pos) MATCHED POSITIVE, asserted first: with no replacement definition anywhere \
+             the announced mandatory draw is choice-free and the period certifies. Without \
+             this arm every refusal below could belong to an unrelated conjunct"
+        );
+        assert!(
+            !gate(&build(Some((false, true)))),
+            "(live) CR 616.1 + CR 732.2a: an OPTIONAL definition that exists on the LIVE board \
+             and on no retained frame is a real resolution-time choice for every remaining \
+             repetition. The frame-side discharge cannot see it — this is the arm the second \
+             discharge exists for"
+        );
+        assert!(
+            gate(&build(Some((false, false)))),
+            "(live-mandatory) the SAME live-only definition, MANDATORY, opens no choice and the \
+             period still certifies. Without this arm (live) would be keyed to `a definition \
+             exists` rather than to OPTIONALITY"
+        );
+        assert!(
+            !gate(&build(Some((true, true)))),
+            "(both) the definition present in every frame AND live still refuses — the \
+             frame-side discharge keeps doing its own job, so (live) is an ADDED refusal and \
+             not a relocated one"
+        );
+    }
+
+    /// N3, the `ptr::eq` short-circuit — **SKIPPING THE SECOND DISCHARGE WHEN THE CARRYING
+    /// FRAME *IS* THE LIVE BOARD COSTS NOTHING.**
+    ///
+    /// CR 616.1. The second discharge is guarded by `!std::ptr::eq(*frame, state)`, which is a
+    /// de-duplication and not a hole: when the announced pair is carried by `current` itself
+    /// the FIRST discharge already ran against that very board. This row exhibits that arm —
+    /// an entry on `current`'s own stack, no ring at all — and shows the optional definition is
+    /// still refused, on the same board shape where the guard suppresses the second call.
+    ///
+    /// Paired with a positive on the identical board one field apart (the mandatory mode), so
+    /// the refusal is attributable to the definition rather than to the `frames: &[]` shape.
+    #[test]
+    fn n3_b_a_live_carried_pair_is_still_discharged_by_the_first_call() {
+        let board = |optional: Option<bool>| -> GameState {
+            let (mut state, src) = u2_relief_board();
+            let entry = u2_shape_b_entry(src, 9311, u2_draw_effect(), |ability| {
+                // MANDATORY: an optional ability classifies `MayPrompt` and never reaches the
+                // discharge at all, which would make both arms below vacuous.
+                ability.optional = false;
+            });
+            if let Some(optional) = optional {
+                state
+                    .objects
+                    .get_mut(&src)
+                    .expect("u2's source is on the battlefield")
+                    .replacement_definitions
+                    .push(n3_draw_replacement(optional));
+            }
+            state.stack.push_back(entry);
+            state
+        };
+        let gate = |state: &GameState| -> bool {
+            let mut verdicts = PeriodVerdicts::for_period(&[], state, PlayerId(0));
+            stack_choices_are_all_specified(state, PlayerId(0), &[], None, &mut verdicts)
+        };
+
+        assert!(
+            gate(&board(None)),
+            "REACH-GUARD: with no definition the live-carried entry certifies, so the arms \
+             below are about the definition and not about the `frames: &[]` shape"
+        );
+        assert!(
+            gate(&board(Some(false))),
+            "a MANDATORY definition opens no CR 616.1 choice — the paired positive"
+        );
+        assert!(
+            !gate(&board(Some(true))),
+            "an OPTIONAL definition on a LIVE-CARRIED pair is still refused by the FIRST \
+             discharge, which is why the second one is guarded by `ptr::eq` rather than \
+             unconditional: the guard removes a duplicate call, never a refusal"
+        );
+    }
+
     /// R27 (a3) — THE BEHAVIOUR: A RETAINED SAMPLE DERIVES THE SAME EVENT SET THE LIVE BOARD
     /// DOES, AND THE NORMALIZED HALF DOES NOT.
     ///
@@ -15959,6 +16422,423 @@ mod tests {
             (1, Some(PeriodCertification::BoardEqualOnly)),
             "(b) ATTRIBUTION: the refusal is step (6)'s on the announced pair — certification \
              matched and conjunct (6) ran exactly once — not an earlier conjunct's"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────────
+    // F2 / N0 / A5 — one CR 603.5 authority, its two consumers, and the stored answer.
+    // ───────────────────────────────────────────────────────────────────────────────────
+
+    /// A5 / N0 — **A STORED `Accept` RELIEVES GATE (6). A STORED `Decline` DOES NOT.**
+    ///
+    /// CR 603.5 + CR 732.2a. The matched pair `r27_b` is one field short of: same board, same
+    /// key, ONE value different. It is the whole content of the auto-choice relief basis, and
+    /// it is the arm the user's own MODE1 board rides on — that capture carries a stored
+    /// "always take", so guard (b) withholds the pin slot and the ONLY thing that can specify
+    /// the window is this relief.
+    ///
+    /// | stored | pin published | gate (6) | offer |
+    /// |---|---|---|---|
+    /// | `Accept` | NO (guard (b) withholds it) | relieved by the AUTO basis | **OFFERS** |
+    /// | `Decline` | NO (same withholding) | not relieved | **`UnspecifiedChoiceWindow`** |
+    ///
+    /// THE ASYMMETRY IS NOT CAUTION, it is what the residual MEANS.
+    /// `optional_cleared_classification` re-classifies the ability as if it RESOLVED with its
+    /// gate discharged, which is what a stored `Accept` produces. A stored `Decline` is equally
+    /// prompt-free but produces the OPPOSITE board, so relieving it would hand the certificate
+    /// a claim about events the shortcut never proposes.
+    ///
+    /// The `Accept` arm is also the anti-vacuity control for the `Decline` arm: without it
+    /// "Decline refuses" is indistinguishable from a relief that never fires at all.
+    ///
+    /// REVERT-PROBE: delete the `auto_may_choice_relief` disjunct from gate (6) ⇒ the `Accept`
+    /// arm stops offering ⇒ FLIPS. TRIVIALIZE-PROBE: relieve on ANY stored answer (drop the
+    /// `matches!(.., Accept)` conjunct) ⇒ the `Decline` arm starts offering ⇒ FLIPS.
+    #[test]
+    fn a5_a_stored_accept_relieves_gate_six_and_a_stored_decline_does_not() {
+        use crate::game::engine::{
+            entry_publishes_pin_slots, try_offer_bounded_cycle_shortcut_metered,
+            BoundedOfferRefusal, ProbeCap,
+        };
+        use crate::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef,
+            TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+        };
+        use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        const SRC: ObjectId = ObjectId(940);
+        const ENTRY: u64 = 954;
+        let origin = MayTriggerOrigin::Definition {
+            definition_ref: TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(SRC, 3),
+                occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
+        };
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: SRC,
+            origin: origin.clone(),
+        };
+        let announce = {
+            let origin = origin.clone();
+            move |frame: &mut GameState| {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    SRC,
+                    PlayerId(0),
+                );
+                ability.optional = true;
+                ability.may_trigger_origin = Some(origin.clone());
+                frame
+                    .stack
+                    .push_back(announced_trigger_entry(ENTRY, SRC, ability, None));
+            }
+        };
+        let board = |stored: AutoMayChoice| {
+            let key = key.clone();
+            ring_announcing_on_its_newest_sample(
+                move |s| {
+                    announcing_ring_source(s, SRC.0);
+                    s.set_may_trigger_auto_choice(key.clone(), stored);
+                },
+                announce.clone(),
+            )
+        };
+
+        for stored in [AutoMayChoice::Accept, AutoMayChoice::Decline] {
+            let state = board(stored);
+            let frame = announced_from_retained_sample(&state, ENTRY);
+            // REACH-GUARD, on BOTH arms: the record is readable on the CARRYING frame under
+            // the key the authority builds, and guard (b) therefore withholds the pin. Without
+            // this the `Accept` arm could be offering through the ORDINARY pin basis, which
+            // would make the whole row about something else.
+            assert_eq!(
+                frame.may_trigger_auto_choice(&key),
+                Some(stored),
+                "REACH-GUARD [{stored:?}]: the stored answer must be readable on the carrying \
+                 frame, not only on `current`"
+            );
+            let entry = frame.stack.back().expect("the announced entry").clone();
+            assert!(
+                entry_publishes_pin_slots(frame, &entry, PlayerId(0))
+                    .is_none_or(|slots| slots.may.is_none()),
+                "REACH-GUARD [{stored:?}]: guard (b) must WITHHOLD the `MayChoice` slot for an \
+                 already-answered gate, so the auto basis is the only thing that can specify \
+                 this window"
+            );
+
+            let (outcome, meter) =
+                try_offer_bounded_cycle_shortcut_metered(&state, false, ProbeCap::Shipped);
+            match stored {
+                AutoMayChoice::Accept => assert!(
+                    outcome.is_ok(),
+                    "CR 603.5: a stored `Accept` makes the per-iteration window the MOST \
+                     determined a choice can be — it never opens — so gate (6) is specified \
+                     and the offer stands. got {outcome:?}, meter {meter:?}"
+                ),
+                AutoMayChoice::Decline => assert_eq!(
+                    outcome,
+                    Err(BoundedOfferRefusal::UnspecifiedChoiceWindow),
+                    "CR 732.2a: a stored `Decline` is equally prompt-free but produces the \
+                     OPPOSITE board, so the optional-cleared residual would describe events \
+                     the shortcut never proposes. Fail closed. meter {meter:?}"
+                ),
+            }
+        }
+    }
+
+    /// F2a — **ONE AUTHORITY, AND THE TWO ABILITY SHAPES THE THIRD COPY GOT WRONG.**
+    ///
+    /// CR 603.5 + CR 608.2d + CR 101.4. Before adoption, three places answered *"does this
+    /// ability open one up-front optional gate?"*: production's own branch in
+    /// `resolve_chain_body`, the mint's guard (b), and this module's `auto_may_answer_for`.
+    /// The latter two asked the same four predicates and OMITTED two conjuncts production has
+    /// — `optional_for` and the CR 608.2d feasibility probe — so on two ability shapes they
+    /// called a may "already answered" where production never reads the store at all.
+    ///
+    /// This row is that divergence, asserted at the authority. Every arm seeds a stored
+    /// `Accept` under exactly the key the old copy would have built, so an omitted conjunct
+    /// shows up as a WRONG ANSWER rather than as an absent one.
+    ///
+    /// | arm | one field different | gate | `stored_may_answer` |
+    /// |---|---|---|---|
+    /// | (P) plain optional | — | `Some` | `Some(Accept)` |
+    /// | (O) `optional_for: AnyOpponent` | CR 608.2d fan-out | `None` | **`None`** |
+    /// | (I) infeasible `RemoveCounter` | zero matching counters | `None` | **`None`** |
+    /// | (I-pos) the SAME `RemoveCounter`, feasible | one counter on the source | `Some` | `Some(Accept)` |
+    ///
+    /// (I-pos) is what keys (I) to FEASIBILITY rather than to the effect discriminant: the two
+    /// boards differ only in whether the source carries a `+1/+1` counter. (P) is the paired
+    /// positive for (O).
+    ///
+    /// It is also the row that EXERCISES `OptionalFeasibility::Probe` on both of its outcomes
+    /// — `stored_may_answer` passes `Probe`, so (I) and (I-pos) run the real probe and take
+    /// opposite branches. Without them the variant would be constructed but never decisive.
+    ///
+    /// REVERT-PROBE: delete `optional_for.is_some() ⇒ None` from the authority ⇒ (O) FLIPS.
+    /// Delete the feasibility conjunct ⇒ (I) FLIPS. Neither touches (P) or (I-pos).
+    #[test]
+    fn f2a_the_upfront_gate_authority_answers_the_two_shapes_the_third_copy_omitted() {
+        use crate::game::effects::{stored_may_answer, upfront_optional_gate, OptionalFeasibility};
+        use crate::types::ability::{
+            Effect, OpponentMayScope, QuantityExpr, ResolvedAbility, TargetFilter,
+            TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let src = ObjectId(CHURN_SRC);
+        let origin = MayTriggerOrigin::Definition {
+            definition_ref: TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(src, 0),
+                occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
+        };
+        // The key the OLD copy built: `optional_prompt_player` (P0 here) + source + origin.
+        // Seeded on every arm, so an omitted conjunct is a wrong answer and not a missing one.
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: src,
+            origin: origin.clone(),
+        };
+        let board = |counters: u32| {
+            let mut state = drain_state(4);
+            state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
+            if counters > 0 {
+                state
+                    .objects
+                    .get_mut(&src)
+                    .expect("drain_state seats the churn source")
+                    .counters
+                    .insert(CounterType::Plus1Plus1, counters);
+            }
+            state
+        };
+        let optional_ability = |effect: Effect| {
+            let mut ability = ResolvedAbility::new(effect, vec![], src, PlayerId(0));
+            ability.optional = true;
+            ability.may_trigger_origin = Some(origin.clone());
+            ability
+        };
+        let draw = || {
+            optional_ability(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            })
+        };
+        let remove_counter = || {
+            // `SelfRef` is CR 608.2c's printed-name anaphor: it resolves to the source
+            // object, so the feasibility probe reads THAT object's counters and the two
+            // boards below differ in exactly one field.
+            optional_ability(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            })
+        };
+
+        let plain = board(0);
+        assert!(
+            upfront_optional_gate(&plain, &draw(), OptionalFeasibility::Probe).is_some(),
+            "(P) MATCHED POSITIVE, asserted first: a plain optional ability DOES open one \
+             up-front gate. Without it every `None` below could be a broken authority"
+        );
+        assert_eq!(
+            stored_may_answer(&plain, &draw()),
+            Some(AutoMayChoice::Accept),
+            "(P) …and the stored preference answers it"
+        );
+
+        let mut fanned = draw();
+        fanned.optional_for = Some(OpponentMayScope::AnyOpponent);
+        assert!(
+            upfront_optional_gate(&plain, &fanned, OptionalFeasibility::Probe).is_none(),
+            "(O) CR 608.2d + CR 101.4: an `optional_for` ability opens an APNAP CASCADE of up \
+             to one window PER LIVING PLAYER, not one up-front gate — production returns at \
+             the fan-out before the gate is reached at all"
+        );
+        assert_eq!(
+            stored_may_answer(&plain, &fanned),
+            None,
+            "(O) THE DIVERGENCE: the store holds an `Accept` under exactly the key the third \
+             copy built, and the answer is still `None`, because the gate that preference \
+             would answer never opens"
+        );
+
+        assert!(
+            upfront_optional_gate(&plain, &remove_counter(), OptionalFeasibility::Probe).is_none(),
+            "(I) CR 608.2d: \"a player can't choose an impossible option\" — with zero matching \
+             counters the optional removal opens no window"
+        );
+        assert_eq!(
+            stored_may_answer(&plain, &remove_counter()),
+            None,
+            "(I) THE SECOND DIVERGENCE, on the same seeded store"
+        );
+
+        let stocked = board(1);
+        assert!(
+            upfront_optional_gate(&stocked, &remove_counter(), OptionalFeasibility::Probe)
+                .is_some(),
+            "(I-pos) THE FEASIBILITY CONTROL: the SAME ability on a board one counter \
+             different DOES open its gate. This is what keys (I) to feasibility rather than \
+             to the effect discriminant — and it is the arm that proves \
+             `OptionalFeasibility::Probe` reaches a decision, not merely a construction"
+        );
+        assert_eq!(
+            stored_may_answer(&stocked, &remove_counter()),
+            Some(AutoMayChoice::Accept),
+            "(I-pos) …and the same stored preference now answers it"
+        );
+
+        // `Known` is the mode production uses, and it must OVERRIDE the probe rather than
+        // re-run it — otherwise adoption A would pay the clone twice on every resolve.
+        assert!(
+            upfront_optional_gate(
+                &stocked,
+                &remove_counter(),
+                OptionalFeasibility::Known(true)
+            )
+            .is_none(),
+            "`Known(true)` suppresses the gate on a board the probe would call FEASIBLE, so \
+             the caller's already-computed answer is what is used"
+        );
+        assert!(
+            upfront_optional_gate(&plain, &remove_counter(), OptionalFeasibility::Known(false))
+                .is_some(),
+            "…and `Known(false)` admits it on a board the probe would call INFEASIBLE. The \
+             pair proves the probe is not re-run under `Known`"
+        );
+    }
+
+    /// F2b — **GUARD (b) WITHHOLDS A PIN THE CR 603.5 GATE CAN NEVER SPEND.**
+    ///
+    /// CR 732.2a + CR 608.2d. The mint publishes a `MayChoice` slot so a declaration can pin
+    /// the ONE up-front window an entry opens. Before adoption it minted that slot for two
+    /// shapes that open no such window: an `optional_for` fan-out (an APNAP cascade of up to
+    /// one window per living player — one slot standing for N prompts is exactly the
+    /// cardinality defect group (c) already argues against) and an infeasible optional (a pin
+    /// the gate can never spend, invisible even to a fail-closed inject arm).
+    ///
+    /// THE FIXTURE IS UNSEEDED ON PURPOSE. Every arm carries `may_trigger_origin: None`, so
+    /// guard (b)'s store conjunct is vacuously true on both the old predicate and the new one
+    /// and the ONLY thing that can move `may` is `optional_for` / feasibility. A SEEDED variant
+    /// is explicitly rejected: a stored answer makes the store conjunct false on every arm,
+    /// `may` is `None` for the stored-answer reason throughout, and the axis under test cannot
+    /// move at all.
+    ///
+    /// | arm | one field different | published `may` |
+    /// |---|---|---|
+    /// | (P) plain optional drain | — | **`Some`** |
+    /// | (O) `optional_for: AnyOpponent` | CR 608.2d fan-out | **`None`** |
+    /// | (I) infeasible optional `RemoveCounter` | zero matching counters | **`None`** |
+    /// | (I-pos) the SAME entry, feasible | one counter on the source | **`Some`** |
+    ///
+    /// Direction: strictly FEWER offers, never more.
+    ///
+    /// REVERT-PROBE: delete `optional_for.is_some() ⇒ None` from the authority ⇒ (O) publishes
+    /// ⇒ FLIPS. Delete the feasibility conjunct ⇒ (I) publishes ⇒ FLIPS. (P) and (I-pos) are
+    /// the paired positives that keep both negatives out of "the mint publishes nothing".
+    #[test]
+    fn f2b_guard_b_withholds_a_pin_the_cr_603_5_gate_can_never_spend() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::{
+            Effect, OpponentMayScope, QuantityExpr, ResolvedAbility, TargetFilter,
+        };
+        use crate::types::counter::CounterType;
+
+        let src = ObjectId(CHURN_SRC);
+        let board = |counters: u32| {
+            let mut state = drain_state(4);
+            if counters > 0 {
+                state
+                    .objects
+                    .get_mut(&src)
+                    .expect("drain_state seats the churn source")
+                    .counters
+                    .insert(CounterType::Plus1Plus1, counters);
+            }
+            state
+        };
+        let published_may = |state: &GameState, entry: &StackEntry| -> bool {
+            // REACH-GUARD baked into the reader: the entry must carry NO stored preference, so
+            // guard (b)'s store conjunct cannot be what moves the answer.
+            assert!(
+                entry
+                    .ability()
+                    .is_some_and(|a| a.may_trigger_origin.is_none()),
+                "UNSEEDED FIXTURE: an arm with a `may_trigger_origin` could be answered by the \
+                 store conjunct and the axis under test would be dominated"
+            );
+            entry_publishes_pin_slots(state, entry, PlayerId(0))
+                .is_some_and(|slots| slots.may.is_some())
+        };
+
+        let plain = board(0);
+        let p_entry = optional_drain(20);
+        assert!(
+            published_may(&plain, &p_entry),
+            "(P) MATCHED POSITIVE, asserted first: a plain optional drain publishes its \
+             CR 603.5 gate. Without it every withholding below is indistinguishable from a \
+             mint that publishes nothing"
+        );
+
+        let o_entry = {
+            let mut ability = p_entry
+                .ability()
+                .expect("the drain is a triggered ability")
+                .clone();
+            ability.optional_for = Some(OpponentMayScope::AnyOpponent);
+            churn_entry(21, 0, ability, None)
+        };
+        assert!(
+            !published_may(&plain, &o_entry),
+            "(O) CR 608.2d + CR 101.4 + CR 732.2a: a fan-out `may` is not ONE window — it is \
+             an APNAP cascade of up to one window per living player, and a shortcut must \
+             describe THE sequence of choices. One published slot cannot stand for N prompts"
+        );
+
+        let remove_counter_entry = |id: u64| {
+            // Shape (B), may-only: no declared target, so `build_target_slots` surfaces
+            // nothing and the entry publishes its CR 603.5 gate alone.
+            let mut ability = ResolvedAbility::new(
+                Effect::RemoveCounter {
+                    // CR 608.2c `SelfRef`: the probe reads the SOURCE's counters, which is
+                    // the one field (I) and (I-pos) differ in.
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+                vec![],
+                src,
+                PlayerId(0),
+            );
+            ability.optional = true;
+            churn_entry(id, 0, ability, None)
+        };
+        assert!(
+            !published_may(&plain, &remove_counter_entry(22)),
+            "(I) CR 608.2d: an infeasible optional opens no window at all, so a slot minted \
+             for it is a pin the gate can never spend — invisible even to a fail-closed \
+             inject arm, which is why the mint has to refuse it here"
+        );
+        assert!(
+            published_may(&board(1), &remove_counter_entry(23)),
+            "(I-pos) THE FEASIBILITY CONTROL: the byte-identical entry on a board one counter \
+             different DOES publish. (I) is therefore about feasibility and not about the \
+             effect discriminant or the shape-(B) route"
         );
     }
 
