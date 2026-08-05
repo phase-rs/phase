@@ -49,8 +49,7 @@
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
-    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token.",
-    "makeNonlegendary": "Rendi non leggendaria"
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
   "nextUp": {
     "label": "Prossimo",

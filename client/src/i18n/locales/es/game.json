@@ -49,8 +49,7 @@
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
     "tokenToughnessPlaceholder": "Toughness",
-    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token.",
-    "makeNonlegendary": "Hacer no legendaria"
+    "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
   "nextUp": {
     "label": "Sigue",

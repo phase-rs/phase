@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
 
 import type {
   AttachTarget,
@@ -136,7 +135,6 @@ function RemoveObjectForm({ onDispatch }: Props) {
 }
 
 function CreateTokenCopyForm({ onDispatch }: Props) {
-  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
   const [nonlegendary, setNonlegendary] = useState(false);
@@ -156,7 +154,7 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label={t("debugCreate.makeNonlegendary")}
+          label="Make nonlegendary"
         />
       </FieldRow>
       <SubmitButton

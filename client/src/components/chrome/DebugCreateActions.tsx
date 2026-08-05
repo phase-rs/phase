@@ -147,7 +147,6 @@ interface CardFaceShape {
 }
 
 function CreateCardForm({ onDispatch }: Props) {
-  const { t } = useTranslation("game");
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
@@ -268,7 +267,7 @@ function CreateCardForm({ onDispatch }: Props) {
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label={t("debugCreate.makeNonlegendary")}
+          label="Make nonlegendary"
         />
       </FieldRow>
       <SubmitButton
@@ -800,7 +799,7 @@ function CopyPermanentForm({ onDispatch }: Props) {
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label={t("debugCreate.makeNonlegendary")}
+          label="Make nonlegendary"
         />
       </FieldRow>
       <SubmitButton
