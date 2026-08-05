@@ -73,7 +73,23 @@ impl RootBinding {
 
     fn matches_pending(self, pending: &PendingCast) -> bool {
         match self {
-            Self::Cast { object_id } => pending.object_id == object_id,
+            // CR 601.2a vs CR 602.2b: a cast root must not authenticate against an
+            // ACTIVATION-sourced pending for the same object. `PendingCast` is built
+            // for activations too (`casting.rs:16251`, `engine_modes.rs:126`,
+            // `planeswalker.rs:300`), and the `Activation` arm below already checks
+            // both fields; this arm checked only the object, so a cast root could be
+            // judged against an activated ability's spine — a different tree, and one
+            // that may carry runtime-synthesized content clause (b2)(i) rails the
+            // guard against. This suppresses no legitimate `Reject`: any that fired
+            // through the untightened arm was computed from an activated ability's
+            // spine under a cast binding — the wrong tree by construction. Nor is
+            // the effect merely fail-open: on a non-match `bound_root_ability` falls
+            // through to the stack scan below it and can still bind the ANNOUNCED
+            // spell entry (`StackEntryKind::Spell { ability: Some(..) }`), which is
+            // the correct authority for a cast root.
+            Self::Cast { object_id } => {
+                pending.object_id == object_id && pending.activation_ability_index.is_none()
+            }
             Self::Activation {
                 source_id,
                 ability_index,
@@ -93,7 +109,12 @@ impl RootBinding {
 /// and `preview_fight_exchange` — and both are reached only through
 /// `preview_bound_exchange`, which first requires `is_target_sourced_self_damage`
 /// or `find_fight_leaf` to match the BOUND ability. A root whose source carries
-/// neither shape anywhere in the ability lists below therefore cannot be rejected.
+/// neither shape anywhere in the ability lists below therefore cannot be rejected
+/// — SO LONG AS the bound ability is composed only of those stored lists. It is
+/// not, in general: the binder composes STORED ⊕ SYNTHESIZED, and clause (b2)
+/// below enumerates the three seams that build a definition instead of storing
+/// one, with the disposition of each. That clause is part of this contract, not a
+/// caveat to it; read it before treating a `false` here as a proof.
 ///
 /// Completeness comes from [`crate::types::ability_visit::visit_ability_def`],
 /// the engine's single wildcard-free `AbilityDefinition`/`Effect` traversal: it
@@ -112,7 +133,100 @@ impl RootBinding {
 /// `GameObject`, is NOT a layer write railed by the `layers_dirty` gate above,
 /// and does NOT target a freshly created object (token/emblem). Also falsified by a
 /// new production site that constructs one of the two adverse shapes outside
-/// Oracle lowering. **AND** falsified by (c) below.
+/// Oracle lowering. **AND** falsified by (c) below. **AND** falsified by (b2).
+///
+/// (b2) THE BASIS MISMATCH — this is the load-bearing correction to the sentence
+/// above, and it applies to BOTH branches, not just activations. The guard's basis
+/// is the object's STORED ability lists; the binder composes STORED ⊕ SYNTHESIZED.
+/// The falsifier paragraph audits INSTALLATION, so a definition that is built
+/// rather than stored reaches the bind unseen by it AND by its re-audit grep,
+/// which matches only assignment and `&mut` borrow of an ability field. Three
+/// confirmed seams, each disposed differently and deliberately:
+///
+/// (i) SYNTHESIZED ON READ, DATA-DRIVEN (Activation) —
+/// `casting::activated_ability_definitions` (casting.rs:458) hands the AI indices
+/// `printed_len + offset` whose definitions are rebuilt per call from
+/// `effective_off_zone_keywords` + `database::synthesis` and stored in no field.
+/// RAILED at runtime by the `RootBinding::Activation` index gate below. A rail is
+/// required here rather than a note, because the payload is card-data-driven
+/// across `database/synthesis.rs` (~26k lines): it cannot be discharged by reading
+/// one function, so the gate must hold regardless of what those families come to
+/// synthesize.
+///
+/// (ii) SYNTHESIZED FROM A SCALAR, FIXED PAYLOAD (Cast) —
+/// `casting.rs:6938-6942` appends `awaken::build_awaken_rider(count: u32)`
+/// (effects/awaken.rs:48) to the bound spine on the Awaken variant. NOT railed,
+/// for two independent reasons, and BOTH are needed: (1) unreachable today —
+/// Awaken is elected by a separate `AlternativeCastDecision` GameAction
+/// (`handle_awaken_cost_choice_with_payment_mode`, casting.rs:8933), not inline
+/// during the root `CastSpell`, and `explore_target_children` follows only
+/// `GameAction::ChooseTarget { target: Some(_) }`; (2) the payload is CLOSED — a
+/// fixed `PutCounter` → `Animate` built by one 20-line function that can be read
+/// in full. Note what is deliberately NOT the argument: cost. A Cast-branch rail
+/// could discriminate on `Keyword::Awaken` rather than falling open on every
+/// cast, so it would be near-free, and "a rail is expensive" would be FALSE here.
+/// The reason is epistemic, not economic — reading `build_awaken_rider` in full
+/// discharges the question, which is precisely what cannot be done for (i).
+/// Discharged by a back-reference AT that function — the site where the payload
+/// would change — which is the direction (c) below records this comment as
+/// failing to provide.
+///
+/// READ (ii) AND (iii) TOGETHER: both go live under the SAME widening of
+/// `explore_target_children` past target selection, for DIFFERENT reasons — (ii)
+/// because its election is a separate GameAction, (iii) because its pending parks
+/// in `WaitingFor::SpliceOffer`. Anyone widening that exploration must rail BOTH.
+/// (ii) additionally needs a rail only if its payload stops being fixed; (iii)
+/// needs one unconditionally, because its payload is arbitrary card text.
+///
+/// (iii) MERGED FROM ANOTHER OBJECT (Cast) — `splice::append_to_sub_chain`
+/// (splice.rs:145) mutates the bound `PendingCast.ability` with
+/// `combined_spell_ability_def` read off a DIFFERENT object (the splice card in
+/// hand), whose payload is arbitrary card text and so COULD carry an adverse
+/// shape. Unreachable today: `target_selection_owner` returns `None` for
+/// `WaitingFor::SpliceOffer` and `explore_target_children` follows only
+/// `GameAction::ChooseTarget`. This one becomes live — and needs a rail, not a
+/// note — the moment that exploration widens past target selection.
+///
+/// The fourth append site in that same function is NOT a seam: the Fuse branch
+/// (casting.rs:6956-6978) merges `obj.back_face.abilities`, which the `back_face`
+/// arm below already chains, so it composes STORED content and is covered. It is
+/// listed here because an audit of the append sites will find it and needs the
+/// verdict, not because it falsifies anything.
+///
+/// So the falsifier is: a new site that makes a definition REACHABLE TO THE BIND
+/// without writing it to a `GameObject` field — synthesized, merged, or displaced
+/// (`cleave_form.abilities`, `game_object.rs:163`, holds the displaced printed
+/// list; `specialize_faces`, `game_object.rs:555`, installs faces through the same
+/// `apply_back_face_to_object` the `back_face` arm exists to cover, and is
+/// battlefield-gated at `specialize.rs:144` so it resolves after this window).
+/// AUDIT INSTRUMENT — deliberately NOT "what do
+/// `combined_spell_ability_def` / `activation_ability_definition` RETURN". That
+/// question cannot find (ii): `combined_spell_ability_def` returns at
+/// casting.rs:5990 and the awaken rider is appended at casting.rs:6940, ~950
+/// lines later in the same function, AFTER the return. A return-site instrument
+/// is blind to every post-return append by construction — the same shape of
+/// error as the sticker grep dissected above, which is why it is called out here
+/// rather than left as a footnote.
+/// Ask instead: WHAT DOES THE ABILITY LOOK LIKE AT THE POINT `PendingCast` IS
+/// CONSTRUCTED? That is the def the judges actually walk, it is downstream of
+/// every append, and it is position-independent. Concretely: read
+/// `prepare_spell_cast_with_variant_override_inner` from its
+/// `combined_spell_ability_def` call to its `PreparedSpellCast` construction and
+/// account for every mutation of `ability_def` on the way. At the time of writing
+/// that is eight sites — the initial read, one rebind, the Overload transform
+/// (`overload.rs:99-108` DROPS `damage_source`, so it can only remove the shape),
+/// the Awaken append (ii), and the four-line Fuse merge (stored, covered).
+/// PAYLOAD-DISMISSAL RULE — (i) and (ii) sit on OPPOSITE sides of this, so it is
+/// stated as a criterion rather than left for the reader to infer; without it the
+/// two clauses read as contradictory and a maintainer will pick whichever suits.
+/// Dismissing a seam on the grounds that its payload carries no adverse shape is
+/// ADMISSIBLE only when that payload is CLOSED — bounded by reading one
+/// non-data-driven function in full, as in (ii) (`build_awaken_rider`, 20 lines,
+/// fixed shape). It is NOT admissible over a data-driven surface: "no synthesized
+/// ability carries Fight today" across `database/synthesis.rs` (~26k lines) is a
+/// grep-level negative, not a closure over helper composition — which is exactly
+/// why (i) gets a runtime rail and (ii) does not. This guard's contract is that
+/// `false` PROVES non-rejection, and a grep is not a proof.
 ///
 /// Note what is deliberately NOT on that list: "an installer the cast path
 /// provably never calls." That clause was carried for three rounds with an
@@ -201,6 +315,28 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
     if state.layers_dirty.is_dirty() {
         return true;
     }
+    // CR 602.2b: an activated ability's announcement binds a definition chosen by
+    // `ability_index`, and `casting::activation_ability_definition` (casting.rs:497)
+    // resolves an index at or past `obj.abilities.len()` from four families that are
+    // SYNTHESIZED ON READ and written into no field entered below:
+    // `runtime_granted_cycling_abilities` (CR 702.29a),
+    // `runtime_granted_graveyard_activated_abilities`,
+    // `runtime_granted_top_of_library_plot_abilities` (CR 702.170f), and
+    // `runtime_granted_equip_abilities` (CR 702.6). The index is the ONLY thing that
+    // distinguishes them, so answering from the lists below would be answering about
+    // a definition they provably cannot contain. Fall open instead.
+    //
+    // This rail is load-bearing by CONSTRUCTION, not by payload: it holds no matter
+    // what those four families come to synthesize. Today none of them carries an
+    // adverse shape (cycling draws, embalm/eternalize/encore copy, plot exiles, equip
+    // attaches), so deleting this rail keeps every current fixture green — which is
+    // exactly why `activation_beyond_printed_abilities_falls_open` pins the index
+    // boundary directly rather than pinning a card.
+    if let RootBinding::Activation { ability_index, .. } = root {
+        if ability_index >= source.abilities.len() {
+            return true;
+        }
+    }
     // CR 613.1: the union of the printed and post-layer lists is a superset of
     // either, so a live removal cannot hide a shape the printed list carries.
     source
@@ -245,7 +381,17 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
 /// The leaf shape test. The `_ => false` arm is correct BECAUSE this predicate is
 /// an over-approximation whose default answer is "carries no adverse-exchange
 /// shape" — it is not a missed-arm hazard on `Effect`. The wildcard-free part of
-/// the guard is the traversal above it, not this leaf.
+/// the guard is the traversal above it, not this leaf. A NEW `Effect` variant
+/// cannot create a new `Reject`, because both judges hard-match named variants
+/// (`find_fight_leaf` → `Effect::Fight`; `is_target_sourced_self_damage` →
+/// `Effect::DealDamage`), so the reject set is closed under enum growth.
+///
+/// THE COUPLING THAT IS REAL RUNS THE OTHER WAY. This arm set must remain a
+/// SUPERSET of every shape those two judges can reject on. Widening either judge
+/// without widening this leaf silently narrows the guard below the reject set —
+/// no compile error, no failing test, and nothing in the FALSIFIER above fires,
+/// because that list audits ability INSTALLATION, not judge shape. The same
+/// invariant is restated at both judges; all three must move together.
 ///
 /// CR 701.14a: a Fight instruction makes two creatures deal damage to each other.
 /// CR 120.1: `damage_source: Some(DamageSource::Target)` attributes the damage to
@@ -542,6 +688,14 @@ fn preview_target_sourced_self_damage(
     })
 }
 
+/// INVARIANT (shared with `is_target_sourced_self_damage` and
+/// `effect_may_yield_adverse_exchange`): widening the shapes this judge can
+/// reject on REQUIRES widening `effect_may_yield_adverse_exchange` in the same
+/// change. That leaf is the clone-free precondition
+/// `root_may_yield_adverse_exchange` answers from, and it must stay a superset of
+/// this judge; if it narrows below, `search::root_action_is_allowed` returns early
+/// and this judge never runs, silently dropping the `Reject`. Nothing enforces
+/// this at compile time.
 fn find_fight_leaf(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
     if matches!(&ability.effect, Effect::Fight { .. }) {
         return Some(ability);
@@ -631,6 +785,13 @@ impl ExchangeRecipient {
     }
 }
 
+/// INVARIANT (shared with `find_fight_leaf` and
+/// `effect_may_yield_adverse_exchange`): widening the shapes this judge can reject
+/// on REQUIRES widening `effect_may_yield_adverse_exchange` in the same change.
+/// That leaf is the clone-free precondition `root_may_yield_adverse_exchange`
+/// answers from, and it must stay a superset of this judge; if it narrows below,
+/// `search::root_action_is_allowed` returns early and this judge never runs,
+/// silently dropping the `Reject`. Nothing enforces this at compile time.
 fn is_target_sourced_self_damage(ability: &ResolvedAbility) -> bool {
     let ability = match &ability.effect {
         // CR 601.2c: target-subject wording declares its damage-source target
@@ -1803,6 +1964,80 @@ mod tests {
         assert!(
             guard_answer(&state, spell),
             "deleting the `cleave_variant` chain arm silently loses every Reject reachable through a cleave text change"
+        );
+    }
+
+    /// H9c — the printed list is the layer-6 *input*, not the bind. CR 613.1: a
+    /// `RemoveAllAbilities` grant (Humility, Turn to Frog) empties `abilities`
+    /// while `base_abilities` still carries the printed shape, and the reducer
+    /// re-derives from the printed list. Pins the `base_abilities` chain arm,
+    /// which was the one arm of the four with no fixture of its own.
+    #[test]
+    fn base_abilities_only_shape_still_admits() {
+        let (mut state, spell) = guard_fixture(vec![]);
+        {
+            let source = state
+                .objects
+                .get_mut(&spell)
+                .expect("fixture spell must exist");
+            *Arc::make_mut(&mut source.base_abilities) = vec![fight_def()];
+        }
+        {
+            let source = state.objects.get(&spell).expect("fixture spell must exist");
+            assert!(
+                source.abilities.is_empty(),
+                "precondition: the post-layer list must be empty, or the `abilities` arm answers and this row passes for the wrong reason"
+            );
+            assert!(
+                source.back_face.is_none() && source.cleave_variant.is_none(),
+                "precondition: no second text authority, so only the `base_abilities` arm can answer"
+            );
+        }
+        assert!(
+            guard_answer(&state, spell),
+            "deleting the `base_abilities` chain arm silently loses every Reject on a source under a layer-6 ability removal"
+        );
+    }
+
+    /// H10 — the `RootBinding::Activation` index rail. CR 602.2b: the announced
+    /// ability is chosen by `ability_index`, and
+    /// `casting::activation_ability_definition` resolves an index at or past
+    /// `obj.abilities.len()` from four SYNTHESIZED-ON-READ families
+    /// (cycling CR 702.29a, graveyard-activated, plot CR 702.170f, equip CR 702.6)
+    /// that are written into no field the guard chains.
+    ///
+    /// Pins the INDEX BOUNDARY, not a card: none of those four families carries an
+    /// adverse shape today, so a card-shaped fixture would stay green with the rail
+    /// deleted. Both halves are load-bearing — the in-range half proves the fixture
+    /// still discriminates, so the out-of-range half cannot pass vacuously.
+    #[test]
+    fn activation_beyond_printed_abilities_falls_open() {
+        let (state, spell) = guard_fixture(vec![benign_def()]);
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "reach guard: a dirty lattice makes the guard fall open before it reads the index"
+        );
+        let printed_len = state
+            .objects
+            .get(&spell)
+            .expect("fixture spell must exist")
+            .abilities
+            .len();
+        assert_eq!(
+            printed_len, 1,
+            "precondition: exactly one printed ability, so index 1 is the first synthesized slot"
+        );
+        let activation = |ability_index: usize| GameAction::ActivateAbility {
+            source_id: spell,
+            ability_index,
+        };
+        assert!(
+            !root_may_yield_adverse_exchange(&state, &activation(0)),
+            "non-vacuity: an in-range index over a benign printed list must still answer `false`, or the out-of-range row proves nothing"
+        );
+        assert!(
+            root_may_yield_adverse_exchange(&state, &activation(printed_len)),
+            "deleting the `RootBinding::Activation` index rail answers a runtime-granted activation from lists that provably cannot contain its definition"
         );
     }
 }
