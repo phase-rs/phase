@@ -125,7 +125,7 @@ fn sanar_vivid_parses_library_reveal_then_per_color_exile() {
         "expected ForEachCategory(ExileFromPool), got {:?}",
         exile.effect
     );
-    // CR 608.2c + CR 614.6: "you may cast the exiled cards this turn" is an
+    // CR 608.2c + CR 607.2a: "you may cast the exiled cards this turn" is an
     // anaphor on the cards the per-category exile published, so it must bind to
     // the chain-local tracked set restricted to the members whose producer
     // action was an exile — NOT `ParentTarget` (which the resolver reads out of
@@ -267,7 +267,7 @@ fn answer_zone_choice(
         .expect("the per-category pick must be accepted");
 }
 
-/// CR 608.2c + CR 614.6 + CR 601.3 (issue: "exiling more than one card at a
+/// CR 608.2c + CR 607.2a + CR 601.3 (issue: "exiling more than one card at a
 /// time isn't working"). The reported symptom was that Sanar exiled every
 /// revealed card and granted every one of them a cast permission.
 ///
@@ -294,7 +294,9 @@ fn sanar_vivid_grants_only_the_per_color_picks() {
         outcome.final_waiting_for()
     );
 
-    // WUBRG iteration (CR 105.1): blue member first, then red.
+    // WUBRG iteration: blue member first, then red. This is the engine's own
+    // canonical color order, not a rule — CR 105.1 only names the five colors
+    // and mandates no iteration order.
     answer_zone_choice(&mut runner, &[board.blue_spell], &[board.blue_spell]);
     answer_zone_choice(&mut runner, &[board.red_spell], &[board.red_spell]);
     runner.advance_until_stack_empty();
@@ -453,7 +455,7 @@ fn praetors_grasp_shape_grants_the_exiled_card_and_strands_nothing() {
     }
 }
 
-/// CR 608.2c + CR 614.6 building-block fixture for `tracked_set_cast_candidates`:
+/// CR 608.2c + CR 607.2a building-block fixture for `tracked_set_cast_candidates`:
 /// a `TrackedSetFiltered` cast anaphor must apply BOTH of its gates — the
 /// producer-action cause AND the inner type filter — to every published member.
 ///
@@ -644,7 +646,7 @@ fn sanar_vivid_per_color_exile_offers_revealed_library_cards() {
 const EXILE_THEN_COUNTERS_THEN_CAST: &str = "Exile the top two cards of your library. Put a \
 +1/+1 counter on each creature you control. You may cast the exiled cards this turn.";
 
-/// CR 608.2c + CR 614.6 hostile multi-authority fixture: two publishers merge
+/// CR 608.2c + CR 607.2a hostile multi-authority fixture: two publishers merge
 /// into ONE chain tracked set, and only one of them exiled.
 ///
 /// `publish_tracked_set` EXTENDS the chain set, so the `PutCounterAll` clause

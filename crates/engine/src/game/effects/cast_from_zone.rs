@@ -65,9 +65,11 @@ pub(crate) fn looked_at_controller_library_cards(
 /// `change_zone::resolve` makes for the identical filter shape. Its ladder has
 /// four rungs, and all four are safe here:
 ///   1. the active chain set (`chain_tracked_set_id`) — a tracked-set shape;
-///   2. the combat-damage source filter (CR 510.2) — yields
-///      `SpecificObject`/`Or`, which the `let … else` below rejects, so a
-///      combat-damage anaphor casts nothing rather than something arbitrary;
+///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
+///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
+///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
+///      The `let … else` below rejects every one of those, so a combat-damage
+///      anaphor casts nothing rather than something arbitrary;
 ///   3. the latest non-empty published set — a tracked-set shape;
 ///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
 ///      passes the shape check but indexes a key that can never exist, because

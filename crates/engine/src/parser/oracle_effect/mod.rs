@@ -25765,8 +25765,16 @@ fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<Control
     }
 }
 
-/// CR 608.2c + CR 614.6: Does this clause, at resolution, publish tracked-set
+/// CR 608.2c + CR 607.2a: Does this clause, at resolution, publish tracked-set
 /// members stamped with [`ThisWayCause::Exiled`]?
+///
+/// CR 607.2a is the linked-ability rule this implements: an activated or
+/// triggered ability that *instructs a player to exile* is linked to an ability
+/// referring to "the exiled cards", and the second refers ONLY to cards put in
+/// exile as a result of that instruction. Cause-filtering by
+/// [`ThisWayCause::Exiled`] is how that restriction is enforced. (CR 607.2b is
+/// the replacement-effect variant and does not apply — these cards exile on
+/// resolution, not by replacing an event.)
 ///
 /// This is the predicate a CAST anaphor ("you may cast the exiled cards this
 /// turn") must be bound against, because the binding it produces is
@@ -25794,22 +25802,44 @@ fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<Control
 /// (`chain_clause_is_exile_producer`) already enumerates this producer on its
 /// own arm.
 ///
+/// CR 603.7a: this spells the shapes out rather than delegating to
+/// [`is_exile_effect`], which recurses into `Effect::CreateDelayedTrigger`.
+/// That recursion is right for the WIDE question below — `strip_temporal_suffix`
+/// wraps a previous clause's real exile into the delayed node, so the chain did
+/// publish a set — but wrong here: a delayed trigger's exile happens in a LATER
+/// resolution, so nothing is stamped when THIS clause resolves and a
+/// `caused_by: Exiled` anaphor bound after it would match nothing.
+///
 /// The `publishes_exiled_cause_at_resolution` ⟶ `this_way_cause_for_effect`
 /// correspondence is pinned by
 /// `exiled_cause_publishers_all_stamp_exiled_at_runtime` in this module's tests.
 pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
-    is_exile_effect(effect)
-        || matches!(
-            effect,
-            Effect::ForEachCategory {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        } | Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        } | Effect::ExileTop { .. }
+            | Effect::ForEachCategory {
                 action: crate::types::ability::ForEachCategoryAction::ExileFromPool { .. },
                 ..
             }
-        )
+    )
 }
 
+/// `is_exile_effect` is listed separately from
+/// [`publishes_exiled_cause_at_resolution`] rather than being subsumed by it:
+/// only the former recurses into `CreateDelayedTrigger`, and dropping that
+/// recursion here would take six scopes whose sole producer is a delayed
+/// wrapper (`conqueror's galleon`, `end-blaze epiphany`, `fire giant's fury`,
+/// `priority boarding`, `storm herald`, `waltz of rage`) back to the
+/// unrewritten `ParentTarget` binding.
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
-    publishes_exiled_cause_at_resolution(effect)
+    is_exile_effect(effect)
+        || publishes_exiled_cause_at_resolution(effect)
         || is_battlefield_return_effect(effect)
         || is_token_creating_effect(effect)
         || is_mass_coerce_static(effect)
@@ -26334,7 +26364,7 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     }
 }
 
-/// CR 608.2c + CR 614.6: the cause-filtered sibling of
+/// CR 608.2c + CR 607.2a: the cause-filtered sibling of
 /// [`rewrite_filter_parent_to_tracked_set`], used for the CAST anaphor only.
 ///
 /// `publish_tracked_set` EXTENDS the chain set rather than replacing it
@@ -26418,7 +26448,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect, cast_anaphor_is_ex
         // with `target: ParentTarget`; this rewrite binds them to the
         // tracked exile set during chain stitching.
         //
-        // CR 614.6: when the chain's publishers stamp `Exiled`, narrow the
+        // CR 607.2a: when the chain's publishers stamp `Exiled`, narrow the
         // binding to those members — see
         // `rewrite_filter_parent_to_exiled_tracked_set` for why a bare binding
         // is destructive here and nowhere else.
@@ -32555,7 +32585,7 @@ pub(crate) fn parse_effect_chain_ir(
         let needs_tracked_set = any_prior_publishes
             && (contains_explicit_tracked_set_pronoun(&lower_check)
                 || contains_implicit_tracked_set_pronoun(&lower_check));
-        // CR 608.2c + CR 614.6: same walk, narrower predicate — does any prior
+        // CR 608.2c + CR 607.2a: same walk, narrower predicate — does any prior
         // clause publish members stamped `Exiled`? Only then may a cast anaphor
         // narrow to `caused_by: Exiled`.
         let cast_anaphor_is_exiled = builder.clauses().iter().any(|c| {
