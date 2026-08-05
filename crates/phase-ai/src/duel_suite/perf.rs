@@ -792,6 +792,7 @@ pub fn print_repro_margin(report: &ReproMarginReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::duel_suite::DeckRef;
     use std::collections::BTreeSet;
 
     /// The narrowed `card_data_hash` (`ai_perf_gate::gate_card_data_hash`) is only
@@ -810,10 +811,18 @@ mod tests {
             let matchup = crate::duel_suite::find_matchup(id)
                 .unwrap_or_else(|| panic!("gate scenario {id:?} must resolve to a matchup"));
             for deck in [&matchup.p0, &matchup.p1] {
-                // Both `DeckRef` variants are compile-time fixed: `Inline` is a
-                // Rust builder, `Snapshot` a committed, `frozen_date`-stamped
-                // file. `resolve_deck_ref` never consults the card pool, so if a
-                // pool-derived variant is ever added this call is where it lands.
+                // Exhaustive and wildcard-free ON PURPOSE: the compiler is the
+                // census here, not the card count below. Both current variants
+                // are fixed at compile time — `Inline` is a Rust builder,
+                // `Snapshot` a committed, `frozen_date`-stamped file — and a
+                // future pool-derived variant would resolve perfectly well and
+                // land inside the band, so no runtime assertion can catch it.
+                // Adding a `DeckRef` variant must break THIS match, because
+                // `gate_card_data_hash`'s narrowing is unsound for any deck the
+                // card pool can move.
+                match deck {
+                    DeckRef::Inline { .. } | DeckRef::Snapshot { .. } => {}
+                }
                 let cards = crate::duel_suite::resolve_deck_ref(deck).unwrap_or_else(|err| {
                     panic!("gate scenario {id:?} deck {deck:?} must resolve without a card pool: {err}")
                 });

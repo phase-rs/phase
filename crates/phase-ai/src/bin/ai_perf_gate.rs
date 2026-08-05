@@ -27,7 +27,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -420,7 +420,13 @@ fn gate_card_data_hash(data_root: &Path) -> Option<String> {
     let hash = match File::create(&tmp)
         .map_err(|e| e.to_string())
         .and_then(|file| {
-            serde_json::to_writer(BufWriter::new(file), &subset).map_err(|e| e.to_string())
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &subset).map_err(|e| e.to_string())?;
+            // `BufWriter` discards errors from its drop-time flush, so a failed
+            // final write would leave a TRUNCATED subset that `git hash-object`
+            // still hashes — yielding a well-formed provenance stamp for content
+            // that was never written. Flush explicitly and fail closed instead.
+            writer.flush().map_err(|e| e.to_string())
         }) {
         Ok(()) => match tmp.to_str() {
             Some(path) => command_output("git", &["hash-object", path]),
