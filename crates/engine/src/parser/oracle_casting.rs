@@ -6,7 +6,7 @@ use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
@@ -222,7 +222,22 @@ fn parse_self_flash_option(
 
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
         if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
-            option = option.cost(parse_oracle_cost(cost_text));
+            // CR 601.2f: the rider names the additional cost as a GERUND ("by
+            // discarding a card") — de-gerund via the shared cost authority. A
+            // present-but-unmodeled cost DECLINES the whole option (return None),
+            // mirroring the graveyard `AdditionalCostRider::Unmodeled` decline in
+            // `oracle_static/restriction.rs`. Falling through to the cost-less
+            // `Some(option)` tail below would grant flash while silently skipping
+            // the required additional cost AND be marked supported=true by coverage
+            // (`build_casting_option_item` treats a `None` cost as supported) —
+            // strictly more permissive than the printed text. Declining keeps the
+            // spell sorcery-speed and leaves the dropped cost as an honest coverage
+            // gap (the unconsumed line falls through to gap detection).
+            let cost = parse_gerund_cost(cost_text);
+            if matches!(cost, AbilityCost::Unimplemented { .. }) {
+                return None;
+            }
+            option = option.cost(cost);
             return Some(option);
         }
     }
@@ -1655,6 +1670,50 @@ Trample";
             } if sac.requirement.fixed_count() == Some(2) => {}
             other => panic!("expected Sacrifice(count=2) alt-cost, got {other:?}"),
         }
+    }
+
+    /// CR 601.2f: a self-flash rider that names its additional cost as a GERUND
+    /// ("as though it had flash by discarding a card in addition to paying its
+    /// other costs") must de-gerund the cost via the shared authority and carry a
+    /// concrete Discard cost — not the `Unimplemented` the old imperative-only
+    /// `parse_oracle_cost(cost_text)` produced. Class completeness for the
+    /// "cast … by <gerund> in addition to …" family alongside the graveyard rider.
+    #[test]
+    fn self_flash_by_gerund_additional_cost_carries_discard() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by discarding a card in addition to paying its other costs.",
+            "Test Card",
+        )
+        .expect("self-flash rider should parse");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                cost: Some(AbilityCost::Discard { .. }),
+                condition: None,
+            } => {}
+            other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+        }
+    }
+
+    /// The paired negative: an unmodeled gerund cost on the self-flash rider must
+    /// DECLINE the whole option (return `None`), mirroring the graveyard
+    /// `AdditionalCostRider::Unmodeled` decline — NOT emit a cost-less flash grant
+    /// (which coverage would falsely mark supported). Asserting `is_none()` is the
+    /// load-bearing, discriminating check: it flips to failure the instant the
+    /// guard falls through to the cost-less `Some(option)` tail. A `!matches!(cost,
+    /// Some(Unimplemented))` assertion would pass vacuously for that exact
+    /// (dishonest) `cost == None` outcome, so it cannot catch the regression.
+    #[test]
+    fn self_flash_by_unmodeled_gerund_declines_option() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by frobnicating a card in addition to paying its other costs.",
+            "Test Card",
+        );
+        assert!(
+            option.is_none(),
+            "an unmodeled gerund additional cost must decline the whole self-flash \
+             option (honest coverage gap), not emit a cost-less flash grant: {option:?}"
+        );
     }
 
     #[test]
