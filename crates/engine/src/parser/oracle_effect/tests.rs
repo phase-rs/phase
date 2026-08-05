@@ -22561,6 +22561,23 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
     // accepted by `chain_clause_is_exile_producer` and must stay rejected here.
     let uncaused_exilers = [
         Effect::HeistExile,
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: Some(Zone::Exile),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+            source: crate::types::ability::DigSource::default(),
+        },
+        Effect::ExileHaunting {
+            target: TargetFilter::Any,
+        },
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: None },
         Effect::RevealUntil {
             player: TargetFilter::Controller,
             filter: TargetFilter::Any,

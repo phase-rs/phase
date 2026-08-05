@@ -93,12 +93,26 @@ fn tracked_set_cast_candidates(
     let Some(members) = state.tracked_object_sets.get(&id) else {
         return Vec::new();
     };
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
     let mut seen = HashSet::new();
-    members
+    let deduped: Vec<ObjectId> = members
         .iter()
         .copied()
         .filter(|obj_id| seen.insert(*obj_id))
+        .collect();
+    // CR 607.2a + CR 608.2c: bind the filter's object-scope reads to exactly the
+    // published set, mirroring the two `ExiledBySource` sites below. Building the
+    // context from `ability` directly would carry `ability.targets` — for Sanar,
+    // the whole reveal window the chain seam injected — so a residual leg that
+    // reads object scope (a `ParentTarget`-relative comparison, a same-name or
+    // shares-a-type leg) would evaluate against the injected window rather than
+    // the members actually published. Latent today (all 51 cards bind
+    // `filter: Any`, which reads no object scope) and closed here so it stays that
+    // way.
+    let mut scoped_ability = ability.clone();
+    scoped_ability.targets = deduped.iter().copied().map(TargetRef::Object).collect();
+    let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    deduped
+        .into_iter()
         .filter(|obj_id| crate::game::filter::matches_target_filter(state, *obj_id, &bound, &ctx))
         .collect()
 }
