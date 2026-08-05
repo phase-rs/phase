@@ -8,6 +8,7 @@ use engine::types::phase::Phase;
 const VEYRAN_DOUBLER_ORACLE: &str = "If you casting or copying an instant or sorcery spell causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const CAST_WITNESS_ORACLE: &str = "Whenever you cast an instant or sorcery spell, add {R}.";
 const CAST_THIS_SPELL_ORACLE: &str = "When you cast this spell, draw a card.";
+const PROWESS_WITNESS_ORACLE: &str = "Prowess";
 const SIMPLE_SPELL_ORACLE: &str = "Draw a card.";
 const CHATTERSTORM_ORACLE: &str = "Convoke\n\
 Create a 1/1 green Squirrel creature token.\n\
@@ -78,6 +79,40 @@ fn veyran_doubles_cast_trigger_of_battlefield_permanent() {
     assert_eq!(
         witness_triggers, 2,
         "Veyran must double a cast-triggered ability from a controlled permanent"
+    );
+}
+
+/// CR 702.108a + CR 603.2d: Keyword-synthesized triggers do not capture a
+/// source context, but their live battlefield source still qualifies for
+/// Veyran's permanent scope.
+#[test]
+fn veyran_doubles_prowess_without_captured_source_context() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Veyran, Voice of Duality", 2, 2, VEYRAN_DOUBLER_ORACLE);
+    let prowess_witness = scenario
+        .add_creature_from_oracle(P0, "Prowess Witness", 1, 1, PROWESS_WITNESS_ORACLE)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Simple Spell", false, SIMPLE_SPELL_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let commit = runner.cast(spell).commit();
+    let prowess_triggers = commit
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            entry.source_id == prowess_witness
+                && matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+        })
+        .count();
+
+    assert_eq!(
+        prowess_triggers, 2,
+        "Veyran must double Prowess while its source remains on the battlefield"
     );
 }
 
