@@ -385,7 +385,7 @@ export function DebugPanel() {
                         kind: "turn_start",
                         turn_number: target.turn_number,
                       })}
-                    className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                    className="flex min-h-11 items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
                   >
                     <span>Turn {target.turn_number}</span>
                     <span
