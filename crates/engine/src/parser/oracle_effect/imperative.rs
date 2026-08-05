@@ -206,6 +206,24 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
         return TargetFilter::ParentTargetOwner;
     }
 
+    // CR 401.1 + CR 608.2c: "the top card of each player's library" — each player
+    // owns their own library, so this names one library per player. Mark the
+    // per-player scope with `ScopedPlayer` so the look-then-exile idiom's
+    // materialized `ExileTop` lifts to a `player_scope: All` fan-out (the same
+    // shape the direct "exile the top card of each player's library" path gets via
+    // `parse_library_player_suffix`, the single authority for this phrase→scope
+    // mapping). Anchored on the possessive-of form so a stray later mention of a
+    // library in a multi-clause remainder can't false-match.
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("of each player's library"),
+        tag::<_, _, OracleError<'_>>("of each player's library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::ScopedPlayer;
+    }
+
     TargetFilter::Controller
 }
 

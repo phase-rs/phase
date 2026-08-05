@@ -188,6 +188,7 @@ mod exhibition_tidecaller_target_player_mill;
 mod exile_dynamic_from_top;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;
+mod extract_power_each_player_exile;
 mod eyetwitch_learn_decline_lesson;
 mod fact_or_fiction_pile_separation;
 mod fantastic_four_bounded_loop;
