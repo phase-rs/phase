@@ -6,8 +6,9 @@ use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
 const VEYRAN_DOUBLER_ORACLE: &str = "If you casting or copying an instant or sorcery spell causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
-const CAST_WITNESS_ORACLE: &str = "Whenever you cast an instant or sorcery spell, draw a card.";
+const CAST_WITNESS_ORACLE: &str = "Whenever you cast an instant or sorcery spell, add {R}.";
 const CAST_THIS_SPELL_ORACLE: &str = "When you cast this spell, draw a card.";
+const SIMPLE_SPELL_ORACLE: &str = "Draw a card.";
 const CHATTERSTORM_ORACLE: &str = "Convoke\n\
 Create a 1/1 green Squirrel creature token.\n\
 Storm (When you cast this spell, copy it for each spell cast before it this turn. You may choose new targets for the copies.)";
@@ -19,9 +20,6 @@ fn veyran_does_not_double_storm() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Veyran, Voice of Duality", 2, 2, VEYRAN_DOUBLER_ORACLE);
-    let witness = scenario
-        .add_creature_from_oracle(P0, "Cast Witness", 1, 1, CAST_WITNESS_ORACLE)
-        .id();
     let chatterstorm = scenario
         .add_spell_to_hand_from_oracle(P0, "Chatterstorm", false, CHATTERSTORM_ORACLE)
         .with_mana_cost(ManaCost::zero())
@@ -43,7 +41,32 @@ fn veyran_does_not_double_storm() {
             )
         })
         .count();
-    let witness_triggers = state
+
+    assert_eq!(
+        storm_triggers, 1,
+        "Veyran must not double Storm because Storm belongs to the spell, not a permanent"
+    );
+}
+
+/// CR 603.2d: Veyran doubles a cast-triggered ability of a controlled
+/// battlefield permanent.
+#[test]
+fn veyran_doubles_cast_trigger_of_battlefield_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Veyran, Voice of Duality", 2, 2, VEYRAN_DOUBLER_ORACLE);
+    let witness = scenario
+        .add_creature_from_oracle(P0, "Cast Witness", 1, 1, CAST_WITNESS_ORACLE)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Simple Spell", false, SIMPLE_SPELL_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let commit = runner.cast(spell).commit();
+    let witness_triggers = commit
+        .state()
         .stack
         .iter()
         .filter(|entry| {
@@ -55,10 +78,6 @@ fn veyran_does_not_double_storm() {
     assert_eq!(
         witness_triggers, 2,
         "Veyran must double a cast-triggered ability from a controlled permanent"
-    );
-    assert_eq!(
-        storm_triggers, 1,
-        "Veyran must not double Storm because Storm belongs to the spell, not a permanent"
     );
 }
 
