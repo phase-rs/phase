@@ -253,8 +253,13 @@ export function DeckList({
             >
               <span
                 className={`text-fuchsia-50 ${onCardHover ? "cursor-pointer" : ""}`}
-                onClick={() => onCardHover?.({ name })}
-                {...mouseHoverPreview(onCardHover, { name })}
+                onClick={() =>
+                  onCardHover?.({ name, scryfallId: cardDataCache.get(name)?.id })
+                }
+                {...mouseHoverPreview(onCardHover, {
+                  name,
+                  scryfallId: cardDataCache.get(name)?.id,
+                })}
               >
                 {name}
               </span>

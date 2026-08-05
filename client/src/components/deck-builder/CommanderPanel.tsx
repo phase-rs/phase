@@ -63,6 +63,10 @@ export function CommanderPanel({
 }: CommanderPanelProps) {
   const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
+  const hoverInfo = (name: string) => ({
+    name,
+    scryfallId: cardDataCache.get(name)?.id,
+  });
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0)
     + commanders.length
     + (signatureSpell ? 1 : 0);
@@ -93,7 +97,7 @@ export function CommanderPanel({
           return (
             <div
               key={name}
-              {...mouseHoverPreview(onCardHover, { name })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-purple-300">
@@ -137,7 +141,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetCommander(name)}
-              {...mouseHoverPreview(onCardHover, { name })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="block w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40"
             >
               {name}
@@ -153,7 +157,7 @@ export function CommanderPanel({
           </h5>
           {signatureSpell ? (
             <div
-              {...mouseHoverPreview(onCardHover, { name: signatureSpell })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(signatureSpell))}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-purple-300">{signatureSpell}</span>
@@ -173,7 +177,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetSignatureSpell(name)}
-              {...mouseHoverPreview(onCardHover, { name })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="block min-h-11 w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-300"
             >
               {name}
@@ -189,7 +193,7 @@ export function CommanderPanel({
           </h5>
           {companion ? (
             <div
-              {...mouseHoverPreview(onCardHover, { name: companion })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(companion))}
               className="flex items-center justify-between rounded bg-blue-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-blue-300">{companion}</span>
@@ -207,7 +211,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetCompanion(name)}
-              {...mouseHoverPreview(onCardHover, { name })}
+              {...mouseHoverPreview(onCardHover, hoverInfo(name))}
               className="block min-h-11 w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
             >
               {name}

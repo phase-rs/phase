@@ -75,7 +75,7 @@ export function useInspectHoverProps() {
       // complementary: an unrecognized pointerType still hovers, and only a
       // known finger gets the long-press substitute.
       onPointerDown: (e: React.PointerEvent) => {
-        if (e.pointerType !== "touch") return;
+        if (e.pointerType !== "touch" || !e.isPrimary || e.button !== 0) return;
         pressedIdRef.current = id;
         pressedPlacementRef.current = e.currentTarget.closest("[data-card-preview-dock='side']")
           ? "side"

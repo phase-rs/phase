@@ -129,12 +129,35 @@ describe("LimitedDeckBuilder", () => {
       pointerType: "touch",
     });
     act(() => vi.advanceTimersByTime(500));
-    fireEvent.click(card);
+    fireEvent.click(card, { detail: 0 });
 
     expect(screen.getByTestId("hover-preview")).toHaveTextContent("Wind Drake");
     expect(screen.getByRole("meter", { name: "Mana value 3" })).toHaveAttribute(
       "aria-valuenow",
       "0",
+    );
+  });
+
+  it("does not suppress activation after a canceled long press", () => {
+    vi.useFakeTimers();
+    render(<Harness />);
+
+    const card = screen.getByRole("button", { name: /wind drake/i });
+    fireEvent.pointerDown(card, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(500));
+    fireEvent.pointerCancel(card, { pointerId: 1, pointerType: "touch" });
+    fireEvent.click(card, { detail: 0 });
+
+    expect(screen.getByRole("meter", { name: "Mana value 3" })).toHaveAttribute(
+      "aria-valuenow",
+      "1",
     );
   });
 });

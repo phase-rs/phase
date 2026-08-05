@@ -21,6 +21,16 @@ function ModalHoverPropsHarness() {
   );
 }
 
+function TwoCardHoverPropsHarness() {
+  const hoverProps = useInspectHoverProps();
+  return (
+    <>
+      <div data-testid="card-one" {...hoverProps(OBJECT_ID)} />
+      <div data-testid="card-two" {...hoverProps(OBJECT_ID + 1)} />
+    </>
+  );
+}
+
 // React derives onPointerEnter/onPointerLeave from pointerover/pointerout, which
 // is what fireEvent.pointerEnter/pointerLeave fire — a hand-built
 // `new PointerEvent("pointerenter")` would reach no handler at all.
@@ -132,6 +142,30 @@ describe("useInspectHoverProps", () => {
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().previewSticky).toBe(false);
+  });
+
+  it("keeps the first touch as the armed preview target", () => {
+    render(<TwoCardHoverPropsHarness />);
+
+    fireEvent.pointerDown(screen.getByTestId("card-one"), {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    fireEvent.pointerDown(screen.getByTestId("card-two"), {
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+      isPrimary: false,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
   });
 
   it("keeps the long-press preview open when the finger lifts", () => {
