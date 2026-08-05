@@ -4992,7 +4992,7 @@ fn affected_objects_with_causes(
 /// stamped onto the tracked-set members it publishes. Derived purely from the
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
-fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
+pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
     use crate::types::zones::Zone;
     // CR 400.7: a generic zone change names a "this way" verb only for the
     // destinations a consumer references — Exile (exiled), Battlefield

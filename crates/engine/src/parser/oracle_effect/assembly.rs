@@ -76,11 +76,11 @@ use super::{
     has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
     parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider,
-    publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
-    rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
-    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback,
+    publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
+    publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
+    retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -2431,9 +2431,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
                 if has_tracked_ref {
+                    // CR 608.2c + CR 614.6: same walk, narrower predicate —
+                    // does any prior clause publish members stamped `Exiled`?
+                    // Only then may a cast anaphor narrow to
+                    // `caused_by: Exiled`.
+                    let cast_anaphor_is_exiled = defs
+                        .iter()
+                        .any(|d| publishes_exiled_cause_at_resolution(&d.effect));
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
-                        rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                        rewrite_parent_targets_to_tracked_set(
+                            &mut current.effect,
+                            cast_anaphor_is_exiled,
+                        );
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
