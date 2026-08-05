@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { useLongPress } from "../../hooks/useLongPress";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
@@ -53,17 +54,26 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
+  const hoverInfo = {
+    name: card.name,
+    sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
+  };
+  const { handlers, firedRef } = useLongPress(() => onHover(hoverInfo));
+
+  const handleClick = () => {
+    if (firedRef.current) {
+      firedRef.current = false;
+      return;
+    }
+    onClick();
+  };
 
   return (
     <button
-      onClick={onClick}
-      onMouseEnter={() =>
-        onHover({
-          name: card.name,
-          sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
-        })
-      }
+      onClick={handleClick}
+      onMouseEnter={() => onHover(hoverInfo)}
       onMouseLeave={() => onHover(null)}
+      {...handlers}
       className={`relative cursor-pointer overflow-hidden rounded-[14px] ring-1 ring-white/10 transition-all duration-150 hover:scale-[1.02] hover:ring-white/20
         ${dimmed ? "opacity-70 hover:opacity-90" : ""}`}
     >

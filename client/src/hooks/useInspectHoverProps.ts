@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import type React from "react";
 
 import { useUiStore } from "../stores/uiStore.ts";
+import type { PreviewPlacement } from "../stores/uiStore.ts";
 import { useLongPress } from "./useLongPress.ts";
 import type { ObjectId } from "../adapter/types.ts";
 
@@ -39,12 +40,18 @@ export function useInspectHoverProps() {
   // Which card most recently began a press — lets the single shared long-press
   // timer resolve the correct id on fire (one active pointer at a time).
   const pressedIdRef = useRef<ObjectId | null>(null);
+  const pressedPlacementRef = useRef<PreviewPlacement>("cursor");
   const { handlers: longPressHandlers, firedRef } = useLongPress(
     useCallback(() => {
       if (pressedIdRef.current != null) {
         // Long-press is explicit intent (a hold past the timer), so bypass hover
         // latency and show the sticky preview immediately, mirroring useCardHover.
-        inspectObject(pressedIdRef.current, undefined, "immediate");
+        inspectObject(
+          pressedIdRef.current,
+          undefined,
+          "immediate",
+          pressedPlacementRef.current,
+        );
         setPreviewSticky(true);
       }
     }, [inspectObject, setPreviewSticky]),
@@ -70,11 +77,19 @@ export function useInspectHoverProps() {
       onPointerDown: (e: React.PointerEvent) => {
         if (e.pointerType !== "touch") return;
         pressedIdRef.current = id;
+        pressedPlacementRef.current = e.currentTarget.closest("[data-card-preview-dock='side']")
+          ? "side"
+          : "cursor";
         armLongPress(e);
       },
       onPointerEnter: (e: React.PointerEvent) => {
         if (e.pointerType === "touch") return;
-        inspectObject(id);
+        inspectObject(
+          id,
+          undefined,
+          "hover",
+          e.currentTarget.closest("[data-card-preview-dock='side']") ? "side" : "cursor",
+        );
       },
       onPointerLeave: (e: React.PointerEvent) => {
         cancelLongPress(e);

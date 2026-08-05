@@ -6,6 +6,7 @@ import {
   getCombinedColorIdentity,
 } from "./commanderUtils";
 import { mouseHoverPreview } from "./hoverPreview";
+import type { CardHoverHandler } from "./hoverPreview";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -35,7 +36,7 @@ interface CommanderPanelProps {
   companionCandidates?: string[] | null;
   onSetCompanion?: (cardName: string) => void;
   onRemoveCompanion?: () => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   /** Engine evaluateDeckCompatibility reasons for the active format. */
   formatValidationReasons?: string[];
 }
@@ -92,7 +93,7 @@ export function CommanderPanel({
           return (
             <div
               key={name}
-              {...mouseHoverPreview(onCardHover, name)}
+              {...mouseHoverPreview(onCardHover, { name })}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-purple-300">
@@ -136,7 +137,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetCommander(name)}
-              {...mouseHoverPreview(onCardHover, name)}
+              {...mouseHoverPreview(onCardHover, { name })}
               className="block w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40"
             >
               {name}
@@ -152,7 +153,7 @@ export function CommanderPanel({
           </h5>
           {signatureSpell ? (
             <div
-              {...mouseHoverPreview(onCardHover, signatureSpell)}
+              {...mouseHoverPreview(onCardHover, { name: signatureSpell })}
               className="flex items-center justify-between rounded bg-purple-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-purple-300">{signatureSpell}</span>
@@ -172,7 +173,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetSignatureSpell(name)}
-              {...mouseHoverPreview(onCardHover, name)}
+              {...mouseHoverPreview(onCardHover, { name })}
               className="block min-h-11 w-full truncate rounded bg-purple-800/40 px-2 py-1 text-left text-xs text-purple-300 hover:bg-purple-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-300"
             >
               {name}
@@ -188,7 +189,7 @@ export function CommanderPanel({
           </h5>
           {companion ? (
             <div
-              {...mouseHoverPreview(onCardHover, companion)}
+              {...mouseHoverPreview(onCardHover, { name: companion })}
               className="flex items-center justify-between rounded bg-blue-900/30 px-2 py-1.5"
             >
               <span className="text-sm font-medium text-blue-300">{companion}</span>
@@ -206,7 +207,7 @@ export function CommanderPanel({
             <button
               key={name}
               onClick={() => onSetCompanion(name)}
-              {...mouseHoverPreview(onCardHover, name)}
+              {...mouseHoverPreview(onCardHover, { name })}
               className="block min-h-11 w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
             >
               {name}

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 
@@ -19,6 +19,12 @@ vi.mock("../../../stores/draftStore", () => ({
       autoSuggestLands: async () => {},
       submitDeck: async () => {},
     }),
+}));
+
+vi.mock("../../card/HoverCardPreview", () => ({
+  HoverCardPreview: ({ card }: { card: { name: string } | null }) => (
+    <div data-testid="hover-preview">{card?.name}</div>
+  ),
 }));
 
 type BuilderView = NonNullable<NonNullable<Parameters<typeof LimitedDeckBuilder>[0]>["view"]>;
@@ -81,6 +87,11 @@ function Harness() {
 }
 
 describe("LimitedDeckBuilder", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
   it("updates mana curve when a card is added from pool", () => {
     render(<Harness />);
 
@@ -102,5 +113,28 @@ describe("LimitedDeckBuilder", () => {
     expect(screen.getByText("Academy Ruins")).toBeInTheDocument();
     expect(screen.queryByText("Plains")).not.toBeInTheDocument();
     expect(screen.queryByText("Island")).not.toBeInTheDocument();
+  });
+
+  it("opens a preview on touch long press without moving the card", () => {
+    vi.useFakeTimers();
+    render(<Harness />);
+
+    const card = screen.getByRole("button", { name: /wind drake/i });
+    fireEvent.pointerDown(card, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(500));
+    fireEvent.click(card);
+
+    expect(screen.getByTestId("hover-preview")).toHaveTextContent("Wind Drake");
+    expect(screen.getByRole("meter", { name: "Mana value 3" })).toHaveAttribute(
+      "aria-valuenow",
+      "0",
+    );
   });
 });

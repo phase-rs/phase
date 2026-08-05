@@ -12,6 +12,15 @@ function HoverPropsHarness() {
   return <div data-testid="card" {...hoverProps(OBJECT_ID)} />;
 }
 
+function ModalHoverPropsHarness() {
+  const hoverProps = useInspectHoverProps();
+  return (
+    <div data-card-preview-dock="side">
+      <div data-testid="card" {...hoverProps(OBJECT_ID)} />
+    </div>
+  );
+}
+
 // React derives onPointerEnter/onPointerLeave from pointerover/pointerout, which
 // is what fireEvent.pointerEnter/pointerLeave fire — a hand-built
 // `new PointerEvent("pointerenter")` would reach no handler at all.
@@ -20,7 +29,12 @@ describe("useInspectHoverProps", () => {
     vi.useFakeTimers();
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
     usePreferencesStore.setState({ cardPreviewMode: "follow", cardPreviewHoverDelayMs: 0 });
-    useUiStore.setState({ inspectedObjectId: null, hoveredObjectId: null, previewSticky: false });
+    useUiStore.setState({
+      inspectedObjectId: null,
+      hoveredObjectId: null,
+      previewPlacement: "cursor",
+      previewSticky: false,
+    });
   });
 
   afterEach(() => {
@@ -50,6 +64,14 @@ describe("useInspectHoverProps", () => {
     fireEvent.pointerEnter(screen.getByTestId("card"), { pointerType: "mouse" });
 
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
+  });
+
+  it("docks previews opened from a modal", () => {
+    render(<ModalHoverPropsHarness />);
+
+    fireEvent.pointerEnter(screen.getByTestId("card"), { pointerType: "mouse" });
+
+    expect(useUiStore.getState().previewPlacement).toBe("side");
   });
 
   // A pen genuinely hovers, so it is deliberately treated like a mouse; only
