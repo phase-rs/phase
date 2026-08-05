@@ -240,7 +240,6 @@ const DrawerCard = memo(function DrawerCard({
   onPlay,
   onDebugOpen,
 }: DrawerCardProps) {
-  const { t } = useTranslation("game");
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
