@@ -130,7 +130,7 @@ vi.mock("../../game/dispatch.ts", () => ({
   currentSnapshot: new Map(),
 }));
 
-vi.mock("../../stores/gameStore", () => ({
+vi.mock("../../stores/gameStore", async () => ({
   useGameStore: Object.assign(
     vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
       selector({
@@ -152,11 +152,16 @@ vi.mock("../../stores/gameStore", () => ({
     { setState: mockSetGameState },
   ),
   clearGame: vi.fn(),
-  // The real predicate, not a stub: GamePage's `takebackAudience` is derived
-  // through it, and a stubbed version would let a wrong mode-set pass.
-  hasRemoteHumans: (mode: string | null) =>
-    mode === "online" || mode === "p2p-host" || mode === "p2p-join"
-    || mode === "draft-match" || mode === "spectate",
+  // The real predicate, and `importActual` is what makes that claim true.
+  // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
+  // only in this module; re-deriving it here as `mode === "online" || …` would
+  // pass while the real predicate classified a mode differently — exactly the
+  // failure the `takebackAudience` assertions below exist to catch. Only the
+  // predicate is taken: `useGameStore` stays the mock above, so the real
+  // zustand store is imported but never rendered against.
+  hasRemoteHumans: (
+    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+  ).hasRemoteHumans,
   loadActiveGame: vi.fn(() => null),
   saveActiveGame: vi.fn(),
   clearActiveGame: vi.fn(),

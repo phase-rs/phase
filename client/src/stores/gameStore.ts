@@ -120,20 +120,21 @@ export function isAuthorityRemote(mode: GameMode | null): boolean {
  * are safe when false — there is nobody else's game to disturb and no hidden
  * info to leak across a wire.
  *
- * **This predicate has no production caller today, deliberately.** Every gate
- * that reads `gameMode` asks the authority question above; the company
- * question is what the merged predicate silently got *wrong* for `native-ai`,
- * and naming it is the fix. It is exported rather than left implicit so that
- * the next gate needing "are other humans watching?" has an answer to call
- * instead of an `||` to append — and so the classification is observable, which
- * is what lets a test prove the two axes actually disagree for `native-ai`.
- * Without it a test could still tabulate `isAuthorityRemote` across all eight
- * modes and go red on any classification change; that test would not be
- * vacuous, it would just be a no-op restatement of the behaviour before the
- * split, unable to say anything about the axis this change exists to name.
- * No lint flags unused exports here (`client/eslint.config.js` configures only
- * `@typescript-eslint/no-unused-vars`, and there is no knip), so this comment,
- * not a suppression, is the honest handling.
+ * **First and only production consumer: `GamePage`'s `takebackAudience`.**
+ * `GamePage` passes `hasRemoteHumans(storeGameMode) ? "table" : "solo"` to
+ * `GameMenu`, which is what makes the desktop solo-vs-AI menu entry read "Undo
+ * Last Action" rather than "Request Takeback". That gate is the company
+ * question, not the authority one: `native-ai` is `authority: "wire"` (the
+ * sidecar owns the state) but has no other human at the table, and asking
+ * `isAuthorityRemote` there would label a solo undo as a request to somebody.
+ * That mislabelling is exactly what the merged predicate got wrong, and
+ * splitting the two axes is the fix.
+ *
+ * Every *other* gate that reads `gameMode` still asks the authority question
+ * above; keep it that way. Reach for this one only when the question really is
+ * "are other humans watching?", and prefer calling it over appending an `||` to
+ * a mode list — the string union is frozen taxonomy, and a hand-rolled list
+ * silently misses the next mode added.
  *
  * Do not repurpose it for transport questions: `canRestoreCheckpoints`
  * (`DebugPanel.tsx`) looks like a company gate but is really "does this

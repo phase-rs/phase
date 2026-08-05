@@ -3477,8 +3477,13 @@ async fn draft_pack_generator_for_start(
 /// and spectator fan-out as a normal action's. Pure extraction — no behavioural
 /// delta on the shipped path.
 ///
-/// `rewind_targets` is captured under the same lock as the results themselves;
-/// it cannot be recomputed here because this function holds no session.
+/// `rewind_targets` and `eliminated` are both captured under the same lock as
+/// the results themselves, and both **after** `run_ai` — neither can be
+/// recomputed here because this function holds no session. Taking either from a
+/// pre-`run_ai` value would ship a list one transition stale: the AI's follow-up
+/// can cross a turn (adding a rewind boundary) or finish a player off (adding an
+/// elimination), and every `StateUpdate` in the batch would then contradict the
+/// state travelling with it.
 async fn broadcast_ai_results(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
@@ -3664,9 +3669,17 @@ async fn broadcast_takeback_approved(
                     legal_actions_by_object: object_action_payloads(&p_by_object),
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                     viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
-                    // Captured under the same lock as the rollback: an approved
-                    // rewind prunes the ring, so the pre-rollback list would
-                    // advertise boundaries that no longer exist.
+                    // Captured by the caller under the same lock as the
+                    // rollback, and — like the shipped action path's own
+                    // capture — *after* its `run_ai`, not before. Both halves
+                    // matter. Under the lock, because an approved rewind prunes
+                    // the ring and a list read outside it could advertise
+                    // boundaries that no longer exist. After `run_ai`, because
+                    // `run_ai` is itself a capture site: an AI follow-up that
+                    // crosses a turn adds a boundary, and a pre-`run_ai` read
+                    // would ship a list already one behind the state travelling
+                    // with it. The list is a live session affordance, not a
+                    // projection of `snapshot`.
                     rewind_targets: rewind_targets.clone(),
                 });
             }
@@ -6210,7 +6223,14 @@ async fn handle_client_message(
             } else {
                 Vec::new()
             };
+            // Both read AFTER `run_ai`, matching the shipped action path: an AI
+            // follow-up can cross a turn (new rewind boundary) or finish a
+            // player off (new elimination), and the AI fan-out below must not
+            // describe the state as it stood before its own results.
+            // `snapshot.0` is the *pre*-`run_ai` rollback state, so sourcing
+            // eliminations from it would be exactly that staleness.
             let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately, in the
             // same lock as the rollback itself — otherwise SQLite still
             // holds the pre-rollback `GameState` until some later action
@@ -6260,7 +6280,6 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
-                    let eliminated = snapshot.0.eliminated_players.clone();
                     broadcast_takeback_approved(
                         connections,
                         game_spectators,
@@ -6322,7 +6341,10 @@ async fn handle_client_message(
             } else {
                 Vec::new()
             };
+            // Read AFTER `run_ai` for the same reason as the `RequestTakeback`
+            // arm above.
             let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately — see the
             // matching comment in the `RequestTakeback` arm above.
             if approved_snapshot.is_some() {
@@ -6350,7 +6372,6 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
-                    let eliminated = snapshot.0.eliminated_players.clone();
                     broadcast_takeback_approved(
                         connections,
                         game_spectators,

@@ -3675,6 +3675,188 @@ mod tests {
         assert!(session.ai_session.is_none(), "`None` must stay `None`");
     }
 
+    /// A **driven-AI** sidecar fixture: seat 1 is not merely listed in
+    /// `ai_seats`, it carries a real `AiConfig`, which is what makes `run_ai`
+    /// actually choose and apply actions rather than bail on
+    /// `MissingAiConfig`. The AI bookkeeping mirrors
+    /// `run_ai_is_noop_while_takeback_is_pending` above;
+    /// `single_user_game` supplies the `HostingMode::SingleUser` stamp and the
+    /// padded libraries.
+    fn single_user_game_vs_ai() -> (SessionManager, String, String, PlayerId) {
+        let (mut mgr, code, token0, _token1) = single_user_game();
+        let ai_seat = PlayerId(1);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.ai_seats.insert(ai_seat);
+        session.ai_configs.insert(
+            ai_seat,
+            phase_ai::config::create_config_for_players(AiDifficulty::Easy, Platform::Native, 2),
+        );
+        (mgr, code, token0, ai_seat)
+    }
+
+    /// Drives the fixture until **`run_ai` itself** publishes a turn boundary
+    /// whose active player is the AI seat, and returns that turn number.
+    ///
+    /// The split is the whole point: the human seat goes through the real
+    /// `handle_action` path and the AI seat goes through `session.run_ai()` —
+    /// never by hand. On a wire session that is exactly the production shape,
+    /// and it is what puts the crossing into the AI's turn inside `run_ai`: in
+    /// a two-player game the last player to pass in the active player's end
+    /// step is the *non*-active one, so the human's own turn is ended by the
+    /// AI's pass, which only `run_ai` submits.
+    ///
+    /// The before/after diff around the `run_ai` call is the attribution: an
+    /// option that was absent before it and present after it can only have come
+    /// from `run_ai`'s own results.
+    fn drive_until_run_ai_opens_an_ai_turn(
+        mgr: &mut SessionManager,
+        code: &str,
+        token0: &str,
+        ai_seat: PlayerId,
+    ) -> u32 {
+        for _ in 0..40 {
+            let session = mgr.sessions.get_mut(code).unwrap();
+            let before: Vec<u32> = session
+                .rewind_options()
+                .iter()
+                .map(|option| option.turn_number)
+                .collect();
+            let ai_results = session.run_ai();
+            let gained = session.rewind_options().into_iter().find(|option| {
+                option.active_player == ai_seat && !before.contains(&option.turn_number)
+            });
+            if let Some(option) = gained {
+                assert!(
+                    !ai_results.is_empty(),
+                    "a boundary appeared across a `run_ai` call that returned nothing — \
+                     the fixture is not measuring what it claims to"
+                );
+                return option.turn_number;
+            }
+            let waiting = session.state.waiting_for.clone();
+            match waiting {
+                WaitingFor::Priority { player } if player == ai_seat => panic!(
+                    "the AI seat holds priority but `run_ai` produced nothing — \
+                     the fixture cannot drive the AI at all"
+                ),
+                WaitingFor::Priority { .. } => {}
+                other => panic!("fixture stalled outside Priority: {other:?}"),
+            }
+            mgr.handle_action(code, token0, GameAction::PassPriority)
+                .expect("the human seat passes through the real transition handler");
+        }
+        panic!("`run_ai` never opened an AI-active turn boundary");
+    }
+
+    /// **R5 + R14 — the `run_ai` capture site and the G5 freeze fix.**
+    ///
+    /// Every other capture test in this module drives *both* seats by hand
+    /// through `handle_action` and never calls `run_ai()`. On a wire session the
+    /// AI's priority passes come from `run_ai`, so in production the transition
+    /// that crosses into the AI's turn happens inside it — and the headline
+    /// affordance ("rewind to the start of the AI's turn") rests entirely on the
+    /// `observe_transition` call in `run_ai`'s per-result map. This test is the
+    /// only coverage of that line.
+    ///
+    /// It then carries the G5 half: if a rewind onto an AI-active boundary did
+    /// not resume the AI, a user who rewound there would get a stalled game.
+    ///
+    /// **Revert probe (run, not asserted from memory):** deleting
+    /// `self.observe_transition(&r.events, &r.state);` from `run_ai` makes
+    /// `drive_until_run_ai_opens_an_ai_turn` exhaust its budget and panic with
+    /// "`run_ai` never opened an AI-active turn boundary" — the boundary is
+    /// never published at all.
+    #[test]
+    fn a_turn_opened_inside_run_ai_is_rewindable_and_resumes_instead_of_freezing() {
+        let (mut mgr, code, token0, ai_seat) = single_user_game_vs_ai();
+        let ai_turn = drive_until_run_ai_opens_an_ai_turn(&mut mgr, &code, &token0, ai_seat);
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // **The discriminating guard.** `run_ai` pushes no `takeback_history`
+        // entries — only `handle_action` does. So if this turn's boundary had
+        // come from the hand-driven path rather than from `run_ai`'s own
+        // results, the action ring would already carry an entry sitting in it.
+        // Read here, before the human acts again: once the human passes inside
+        // the AI's turn, `handle_action` pushes one legitimately.
+        assert!(
+            session
+                .takeback_history
+                .iter()
+                .all(|(_, snapshot)| snapshot.turn_number != ai_turn),
+            "no action-ring entry may sit in turn {ai_turn} — the boundary must have come \
+             from `run_ai`'s own results, not from the `handle_action` capture site"
+        );
+        assert!(
+            !session.takeback_history.is_empty(),
+            "reach guard: the action ring is populated, so the assertion above is a \
+             statement about this turn and not about an empty collection"
+        );
+        // Q3's headline: the boundary is offered, and labelled with the AI seat.
+        assert!(
+            session.rewind_options().contains(&RewindOption {
+                turn_number: ai_turn,
+                active_player: ai_seat,
+            }),
+            "the AI-active boundary must be published: {:?}",
+            session.rewind_options()
+        );
+
+        assert_eq!(
+            session.request_takeback(
+                PlayerId(0),
+                RewindTarget::TurnStart {
+                    turn_number: ai_turn
+                }
+            ),
+            Ok(TakebackOutcome::Approved),
+            "seat 0 is the sole human — nobody to ask"
+        );
+        assert_eq!(session.state.turn_number, ai_turn);
+        assert_eq!(
+            session.state.active_player, ai_seat,
+            "the rewind must land on the AI's turn — otherwise the G5 half below is vacuous"
+        );
+
+        // **G5.** Nothing else on the approved path drives the AI, so if this
+        // returns empty the desktop table is frozen: the AI holds priority and
+        // no client action will ever arrive to move it.
+        let waiting_before = session.state.waiting_for.clone();
+        let resumed = session.run_ai();
+        assert!(
+            !resumed.is_empty(),
+            "a rewind onto an AI-active boundary must resume the AI, not freeze the game"
+        );
+        assert_ne!(
+            session.state.waiting_for, waiting_before,
+            "the AI must have actually advanced the state past its own priority"
+        );
+
+        // **Paired negative.** A rewind landing on *human* priority must leave
+        // `run_ai` a no-op — the resume above is a consequence of where the
+        // rewind landed, not something the approved path does unconditionally.
+        let (mut mgr, code, token0, ai_seat) = single_user_game_vs_ai();
+        drive_until_run_ai_opens_an_ai_turn(&mut mgr, &code, &token0, ai_seat);
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(PlayerId(0), RewindTarget::LastAction),
+            Ok(TakebackOutcome::Approved)
+        );
+        assert!(
+            matches!(session.state.waiting_for, WaitingFor::Priority { player } if player == PlayerId(0)),
+            "reach guard: this rewind must land on the human's priority, or the \
+             negative below proves nothing — got {:?}",
+            session.state.waiting_for
+        );
+        let waiting_before = session.state.waiting_for.clone();
+        let turn_before = session.state.turn_number;
+        assert!(
+            session.run_ai().is_empty(),
+            "with the human on priority the AI has nothing to do"
+        );
+        assert_eq!(session.state.waiting_for, waiting_before, "state unchanged");
+        assert_eq!(session.state.turn_number, turn_before);
+    }
+
     // ── Sandbox capability tests ─────────────────────────────────────────
 
     fn create_sandbox_game(mgr: &mut SessionManager) -> (String, String) {
