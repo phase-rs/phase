@@ -6,7 +6,8 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
-import { CardPreview, type CardHoverInfo } from "../card/CardPreview";
+import type { CardHoverInfo } from "../card/CardPreview";
+import { HoverCardPreview } from "../card/HoverCardPreview";
 import { ManaCurve } from "./ManaCurve";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -248,9 +249,8 @@ export function LimitedDeckBuilder({
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        sourcePrinting={hoveredCard?.sourcePrinting}
+      <HoverCardPreview
+        card={hoveredCard}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />

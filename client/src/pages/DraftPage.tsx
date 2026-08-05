@@ -4,8 +4,8 @@ import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
-import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -372,7 +372,7 @@ export function DraftPage() {
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
-        <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+        <HoverCardPreview card={hoveredCard} />
       )}
 
       {/* Centered MenuShell column — identical framing to home/setup/online so

@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router";
 
 import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
-import { CardPreview } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { DeckBuilder } from "../components/deck-builder/DeckBuilder";
 import type { BrowserLegalityFilter, CardSearchFilters } from "../components/deck-builder/CardSearch";
 import { DECK_CONSTRUCTION_FORMATS } from "../data/formatRegistry";
@@ -132,9 +132,8 @@ export function DeckBuilderPage() {
         onSearchFiltersChange={handleSearchFiltersChange}
         onResetSearch={handleResetSearch}
       />
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        scryfallId={hoveredCard?.scryfallId}
+      <HoverCardPreview
+        card={hoveredCard}
         onDismiss={useCallback(() => setHoveredCard(null), [])}
         mobileLayout="compact"
       />
