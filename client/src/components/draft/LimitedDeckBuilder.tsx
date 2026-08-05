@@ -220,6 +220,7 @@ export function LimitedDeckBuilder({
   const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+  const [addableQuery, setAddableQuery] = useState("");
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
@@ -243,6 +244,12 @@ export function LimitedDeckBuilder({
   const addableCards = view?.addable_cards?.length
     ? view.addable_cards
     : BASIC_LANDS.map((land) => land.name);
+  const filteredAddableCards = useMemo(() => {
+    const query = addableQuery.trim().toLowerCase();
+    return query
+      ? addableCards.filter((name) => name.toLowerCase().includes(query))
+      : addableCards;
+  }, [addableCards, addableQuery]);
   const deckValid = totalCards >= minDeckSize;
 
   if (!view) return null;
@@ -328,8 +335,16 @@ export function LimitedDeckBuilder({
                 </button>
               )}
             </div>
+            <input
+              type="search"
+              value={addableQuery}
+              onChange={(event) => setAddableQuery(event.target.value)}
+              placeholder={t("limitedDeck.searchAddableCards")}
+              aria-label={t("limitedDeck.searchAddableCards")}
+              className="mb-3 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+            />
             <div className="flex flex-col gap-2">
-              {addableCards.map((name) => (
+              {filteredAddableCards.map((name) => (
                 <LandRow
                   key={name}
                   name={name}

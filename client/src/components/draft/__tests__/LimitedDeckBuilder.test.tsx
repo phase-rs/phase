@@ -44,7 +44,7 @@ const TEST_VIEW: BuilderView = {
   cards_per_pack: 14,
   pack_count: 3,
   min_deck_size: 40,
-  addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
+  addable_cards: ["Plains", "Island", "Academy Ruins"],
   timer_remaining_ms: null,
   standings: [],
   current_round: 0,
@@ -88,5 +88,17 @@ describe("LimitedDeckBuilder", () => {
     fireEvent.click(screen.getByRole("button", { name: /wind drake/i }));
 
     expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
+  });
+
+  it("filters custom addable cards by name", () => {
+    render(<Harness />);
+
+    fireEvent.change(screen.getByPlaceholderText("Search addable cards..."), {
+      target: { value: "academy" },
+    });
+
+    expect(screen.getByText("Academy Ruins")).toBeInTheDocument();
+    expect(screen.queryByText("Plains")).not.toBeInTheDocument();
+    expect(screen.queryByText("Island")).not.toBeInTheDocument();
   });
 });

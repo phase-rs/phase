@@ -300,6 +300,7 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
+  const draftView = useDraftStore((s) => s.view);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -429,7 +430,12 @@ export function DraftPage() {
         )}
 
         {phase === "drafting" && !introDismissed && (
-          <DraftIntro mode="quick" onContinue={() => setIntroDismissed(true)} />
+          <DraftIntro
+            mode="quick"
+            packCount={draftView?.pack_count}
+            cardsPerPack={draftView?.cards_per_pack}
+            onContinue={() => setIntroDismissed(true)}
+          />
         )}
 
         {phase === "drafting" && introDismissed && (
