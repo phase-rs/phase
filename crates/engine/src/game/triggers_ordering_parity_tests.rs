@@ -218,8 +218,14 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // disjoint — owner-misaligned copies route to different libraries entirely, and
     // same-owner copies contend only for the top/bottom slot, where identical
     // same-name cards commute up to relabeling. The "may" and the top-or-bottom pick
-    // are resolution-time choices made by the one batch controller in either order
-    // (CR 603.5). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
+    // are resolution-time choices (CR 603.5) made by the batch's one controller in
+    // either order: production ordering groups are partitioned per-controller
+    // (`trigger_order_controller` / `begin_trigger_ordering`, triggers.rs; CR 603.3b
+    // — each player orders only the triggers THEY control, cross-controller
+    // placement being APNAP-fixed, not chosen), the premise the §5 batch rows model
+    // as `ControllerUniformity::Uniform` — single-controller BY CONSTRUCTION, not an
+    // artifact of the Phase+OnlyDuringYourTurn privacy predicate (same-event S2
+    // only). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
     // lands in `RwProfile::conservative()` (maximal reads/writes + fail-closed
     // `reads_member_bound`), refusing batch-T1 and tripping the feed rows, so no
     // in-scope recognizer proves the self-scoped move context-free (Valakut
