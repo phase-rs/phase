@@ -75,8 +75,8 @@ impl RootBinding {
         match self {
             // CR 601.2a vs CR 602.2b: a cast root must not authenticate against an
             // ACTIVATION-sourced pending for the same object. `PendingCast` is built
-            // for activations too (`casting.rs:16251`, `engine_modes.rs:126`,
-            // `planeswalker.rs:300`), and the `Activation` arm below already checks
+            // for activations too (the `PendingCast::new` sites in `casting`,
+            // `engine_modes`, and `planeswalker`), and the `Activation` arm already checks
             // both fields; this arm checked only the object, so a cast root could be
             // judged against an activated ability's spine — a different tree, and one
             // that may carry runtime-synthesized content clause (b2)(i) rails the
@@ -154,8 +154,8 @@ impl RootBinding {
 /// synthesize.
 ///
 /// (ii) SYNTHESIZED FROM A SCALAR, FIXED PAYLOAD (Cast) —
-/// `casting.rs:6938-6942` appends `awaken::build_awaken_rider(count: u32)`
-/// (effects/awaken.rs:48) to the bound spine on the Awaken variant. NOT railed,
+/// the Awaken branch of `casting::prepare_spell_cast_with_variant_override_inner`
+/// appends `awaken::build_awaken_rider(count: u32)` to the bound spine. NOT railed,
 /// for two independent reasons, and BOTH are needed: (1) unreachable today —
 /// Awaken is elected by a separate `AlternativeCastDecision` GameAction
 /// (`handle_awaken_cost_choice_with_payment_mode`, casting.rs:8933), not inline
@@ -187,23 +187,25 @@ impl RootBinding {
 /// `GameAction::ChooseTarget`. This one becomes live — and needs a rail, not a
 /// note — the moment that exploration widens past target selection.
 ///
-/// The fourth append site in that same function is NOT a seam: the Fuse branch
-/// (casting.rs:6956-6978) merges `obj.back_face.abilities`, which the `back_face`
+/// The fourth append site in that same function is NOT a seam: its Fuse branch
+/// merges `obj.back_face.abilities`, which the `back_face`
 /// arm below already chains, so it composes STORED content and is covered. It is
 /// listed here because an audit of the append sites will find it and needs the
 /// verdict, not because it falsifies anything.
 ///
 /// So the falsifier is: a new site that makes a definition REACHABLE TO THE BIND
 /// without writing it to a `GameObject` field — synthesized, merged, or displaced
-/// (`cleave_form.abilities`, `game_object.rs:163`, holds the displaced printed
-/// list; `specialize_faces`, `game_object.rs:555`, installs faces through the same
-/// `apply_back_face_to_object` the `back_face` arm exists to cover, and is
-/// battlefield-gated at `specialize.rs:144` so it resolves after this window).
+/// (`GameObject::cleave_form`, a `CleaveFormState`, holds the displaced printed
+/// list; `GameObject::specialize_faces` installs faces through the same
+/// `printed_cards::apply_back_face_to_object` the `back_face` arm exists to cover,
+/// and `specialize::specialize_permanent` gates it on the battlefield so it
+/// resolves after this window).
 /// AUDIT INSTRUMENT — deliberately NOT "what do
 /// `combined_spell_ability_def` / `activation_ability_definition` RETURN". That
-/// question cannot find (ii): `combined_spell_ability_def` returns at
-/// casting.rs:5990 and the awaken rider is appended at casting.rs:6940, ~950
-/// lines later in the same function, AFTER the return. A return-site instrument
+/// question cannot find (ii): the `combined_spell_ability_def` call sits near the
+/// TOP of `prepare_spell_cast_with_variant_override_inner` and the
+/// `awaken::append_awaken_rider` call ~950 lines LATER in that same function,
+/// after that return has already happened. A return-site instrument
 /// is blind to every post-return append by construction — the same shape of
 /// error as the sticker grep dissected above, which is why it is called out here
 /// rather than left as a footnote.
@@ -214,7 +216,8 @@ impl RootBinding {
 /// `combined_spell_ability_def` call to its `PreparedSpellCast` construction and
 /// account for every mutation of `ability_def` on the way. At the time of writing
 /// that is eight sites — the initial read, one rebind, the Overload transform
-/// (`overload.rs:99-108` DROPS `damage_source`, so it can only remove the shape),
+/// (`overload::transform_effect_in_place` DROPS `damage_source` on its
+/// `DealDamage` -> `DamageAll` arm, so it can only remove the shape),
 /// the Awaken append (ii), and the four-line Fuse merge (stored, covered).
 /// PAYLOAD-DISMISSAL RULE — (i) and (ii) sit on OPPOSITE sides of this, so it is
 /// stated as a criterion rather than left for the reader to infer; without it the

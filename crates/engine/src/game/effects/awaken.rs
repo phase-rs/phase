@@ -46,7 +46,8 @@ use crate::types::keywords::Keyword;
 /// itself carries no duration and `animate::resolve` reads `ability.duration`
 /// (defaulting to `UntilEndOfTurn` when absent).
 ///
-/// AI COUPLING — read before changing this payload. `casting.rs:6938-6942` appends
+/// AI COUPLING — read before changing this payload. The Awaken branch of
+/// `casting::prepare_spell_cast_with_variant_override_inner` appends
 /// this rider to the bound spine, so it is SYNTHESIZED content that reaches the
 /// bind without ever being written to a `GameObject` ability field.
 /// `ai_support::targeted_exchange::root_may_yield_adverse_exchange` is a
