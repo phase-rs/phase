@@ -1265,3 +1265,107 @@ fn modal_mode_tracking_resets_on_new_turn() {
     // Game-scoped should persist.
     assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 0)));
 }
+
+/// CR 603.3d: "If a choice is required when the triggered ability goes on the
+/// stack but no legal choices can be made for it ... the ability is simply
+/// removed from the stack." Removing it must release EVERY in-flight
+/// construction cursor, including `pending_trigger_event_batch`.
+///
+/// Regression: Nimble Obstructionist ("When you cycle this card, counter target
+/// activated or triggered ability you don't control") cycled with nothing legal
+/// to counter took this drop path. The drop cleared `pending_trigger` and
+/// `pending_trigger_firing` but leaked the batch, latching a dead `Cycled`
+/// event into the game state permanently — it then poisoned the trigger event
+/// context of every later trigger that paused for a choice (firing "whenever a
+/// player cycles" / "whenever you draw" observers for a cycle that never
+/// happened) and permanently failed the settled-state gate that lets contiguous
+/// inert trigger runs skip priority.
+#[test]
+fn no_legal_target_trigger_drop_releases_pending_trigger_event_batch() {
+    let mut state = GameState::new_two_player(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    let source_id = create_object(
+        &mut state,
+        CardId(20),
+        PlayerId(0),
+        "Cycled Trigger Source".to_string(),
+        Zone::Graveyard,
+    );
+
+    // The battlefield is deliberately empty, so a creature-targeting trigger has
+    // no legal target at choose-time — the CR 603.3d removal branch.
+    let ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        },
+        Vec::new(),
+        source_id,
+        PlayerId(0),
+    );
+
+    let cycled_event = GameEvent::Cycled {
+        player_id: PlayerId(0),
+        object_id: source_id,
+    };
+    let pending = crate::game::triggers::PendingTrigger {
+        source_id,
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ability),
+        timestamp: 1,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(cycled_event.clone()),
+        modal: None,
+        mode_abilities: vec![],
+        description: Some("When you cycle this card, counter target ability".to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    };
+    let pending_for_state = pending.clone();
+    let mut setup_events = Vec::new();
+    let entry_id = crate::game::triggers::push_pending_trigger_to_stack(
+        &mut state,
+        pending,
+        &mut setup_events,
+    );
+    state.pending_trigger = Some(Box::new(pending_for_state));
+    mark_ordinary_pending_trigger_construction(&mut state, entry_id);
+    // Production installs the carrier AFTER the push (the push drains it), which
+    // is exactly the state a paused construction is re-entered in.
+    state.pending_trigger_event_batch = vec![cycled_event];
+
+    // Non-vacuity guard: the assertion below is only meaningful if the carrier is
+    // actually populated going in. `push_pending_trigger_to_stack` DRAINS the
+    // batch, so a future reordering of this fixture would silently turn the
+    // regression assert into a tautology that passes with the fix reverted.
+    assert!(
+        !state.pending_trigger_event_batch.is_empty(),
+        "fixture must enter the drop path with a populated carrier"
+    );
+
+    let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+        .expect("no-legal-target drop is not an engine error");
+
+    assert!(
+        waiting.is_none(),
+        "CR 603.3d: a trigger with no legal target must not surface a prompt"
+    );
+    assert!(
+        state.pending_trigger_event_batch.is_empty(),
+        "CR 603.3d: removing the ability must release its event-batch carrier, \
+         not latch a dead event into the game state"
+    );
+    assert!(state.pending_trigger.is_none());
+    assert!(state.pending_trigger_entry.is_none());
+    assert!(state.pending_trigger_firing.is_none());
+}

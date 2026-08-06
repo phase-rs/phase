@@ -6454,10 +6454,25 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // UntilTurnBoundary: auto-submit empty attackers unless the user
-            // flagged this phase as a stop.
-            WaitingFor::DeclareAttackers { player, .. }
-                if end_of_turn_active(state, *player) && !state.phase_stop_hit(*player) =>
+            // CR 508.1a: "The active player chooses which creatures that they
+            // control, IF ANY, will attack." When no creature can legally attack,
+            // the empty declaration is the ONLY legal declaration — there is no
+            // choice to make. Parking on the prompt strands the game on a decision
+            // whose entire legal-action set is a single no-op submission, which the
+            // player must click through every combat (and which an automated seat
+            // may never submit at all). Mirrors the `DeclareBlockers` arm below,
+            // which already auto-submits whenever there is nothing to choose.
+            //
+            // `UntilTurnBoundary` additionally auto-submits when candidates DO
+            // exist — that is the player's standing pre-commitment to attack with
+            // nothing. A phase stop overrides both: an explicit request to pause
+            // here is honored even when the declaration is forced.
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                ..
+            } if !state.phase_stop_hit(*player)
+                && (valid_attacker_ids.is_empty() || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
@@ -11508,8 +11523,22 @@ fn apply_retarget(
     Ok(state.waiting_for.clone())
 }
 
-/// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
-/// was declined before mode choice.
+/// CR 603.3c + CR 603.3d + CR 608.2c: Single authority for dropping a
+/// mid-construction triggered ability — an optional modal declined before mode
+/// choice, or CR 603.3d's "if a choice is required when the triggered ability
+/// goes on the stack but no legal choices can be made for it ... the ability is
+/// simply removed from the stack."
+///
+/// Every in-flight construction cursor must be released together. The event
+/// batch is the paused trigger's carrier: `begin_pending_trigger_target_selection`
+/// re-reads `pending_trigger_event_batch` as the event context for whichever
+/// trigger is being constructed, and the pause paths write it straight back. A
+/// drop that clears the trigger but leaks the batch therefore leaves a dead
+/// event latched in state, where it (a) poisons the event context of every
+/// later trigger that pauses for a choice, and (b) permanently fails the
+/// `inert_trigger_batch_state_is_settled` gate that lets contiguous inert
+/// trigger runs skip priority. Mirrors `triggers::abandon_ceased_pending_trigger`,
+/// which already releases all four cursors on the error-recovery path.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     super::stack::pop_uncommitted_pending_trigger_entry(
         state,
@@ -11517,6 +11546,7 @@ pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
     );
     state.pending_trigger = None;
     state.pending_trigger_firing = None;
+    state.pending_trigger_event_batch.clear();
 }
 
 /// Clear optionality after the controller accepts a "you may choose N" gate so
@@ -11610,12 +11640,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mode_abilities,
                 &unavailable_modes,
             ) else {
-                super::stack::pop_uncommitted_pending_trigger_entry(
-                    state,
-                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-                );
-                state.pending_trigger = None;
-                state.pending_trigger_firing = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             };
 
@@ -11633,12 +11658,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                  dispatch_pending_trigger_context must resolve it inline",
             );
             if modal.selection.is_random() {
-                super::stack::pop_uncommitted_pending_trigger_entry(
-                    state,
-                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-                );
-                state.pending_trigger = None;
-                state.pending_trigger_firing = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             }
 
@@ -11651,12 +11671,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // dead branch — kept as a defensive cleanup for any
             // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
-                super::stack::pop_uncommitted_pending_trigger_entry(
-                    state,
-                    super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-                );
-                state.pending_trigger = None;
-                state.pending_trigger_firing = None;
+                drop_mid_construction_pending_trigger(state);
                 return Ok(None);
             }
 
@@ -11770,12 +11785,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
         // cursor.
-        super::stack::pop_uncommitted_pending_trigger_entry(
-            state,
-            super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
-        );
-        state.pending_trigger = None;
-        state.pending_trigger_firing = None;
+        drop_mid_construction_pending_trigger(state);
         return Ok(None);
     };
     Ok(Some(WaitingFor::TriggerTargetSelection {
@@ -15654,7 +15664,31 @@ mod stage2_injector_tests {
                 // PR #7041's typed trigger-provenance initializers sit above the
                 // first three effects producers and this engine producer. CI
                 // re-derived the same five writes at these coordinates.
-                "game/engine.rs:11697".to_string(),
+                //
+                // CR 603.3d CARRIER-RELEASE FIX: `:11697 ⇒ :11712`. Pure line movement from
+                // two edits in this file, neither of which mints a prompt: the empty-attackers
+                // auto-submit guard in `run_auto_pass_loop` (`:6457`, +15) and the collapse of
+                // four duplicated mid-construction drop blocks into calls to
+                // `drop_mid_construction_pending_trigger` (`:11511` +14 for its doc comment,
+                // `:11519` +1 for the `pending_trigger_event_batch.clear()` line, then -5 at
+                // each of `:11613`/`:11636`/`:11654`). Those six hunks sum to +15 and
+                // 11697 + 15 = 11712 exactly. The fourth collapsed block (`:11773`, also -5)
+                // sits BELOW this producer and therefore cannot move it, which is why the sum
+                // is +15 rather than the whole-file +10.
+                //
+                // LOCATED BY CONTENT, as this log requires: `:11712` hashes to sha256
+                // `8a544e878d3e77fb…`, the same prefix carried for this producer since
+                // `a6d1a0e62`, and it is the ONLY line in the file matching the producer shape
+                // outside `#[cfg(test)]`. Still inside `begin_pending_trigger_target_selection`,
+                // which moved `:11548 ⇒ :11578` by the +30 of the three hunks above the function
+                // itself — the same arithmetic re-derived against a different anchor.
+                //
+                // SET PRESERVATION: the other four entries are byte-identical AND in place
+                // (`effects/` and `scoped_library_search.rs` are untouched by this change), and
+                // the two tests this change adds contain no line matching the needle, so the
+                // total stays 37 and the partition stays 5/7/25. A drop path releasing a
+                // construction cursor cannot mint a CR 603.5 prompt.
+                "game/engine.rs:11712".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
