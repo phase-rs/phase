@@ -2067,6 +2067,7 @@ dependencies = [
 name = "phase-ai"
 version = "0.47.0"
 dependencies = [
+ "flate2",
  "mimalloc",
  "phase-engine",
  "rand 0.9.4",
