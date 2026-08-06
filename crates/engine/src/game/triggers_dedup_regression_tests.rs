@@ -3808,6 +3808,27 @@ fn owner_collected_filter_never_drops_non_zone_change_events() {
 /// `filter_already_collected_trigger_events_from`'s contract, made executable so
 /// no future author can re-assert occurrence-exactness without deliberately
 /// updating this row.
+///
+/// THIS ROW DESCRIBES A `#[cfg(test)]`-ONLY INPUT, NOT A PRODUCTION LOSS. Both
+/// events come from `zone_change_event`, which builds its record with
+/// `ZoneChangeRecord::test_minimal` — a `#[cfg(test)]` constructor whose own doc
+/// says *"Production code must use `GameObject::snapshot_for_zone_change`"*. It
+/// pins `turn_zone_change_index` at `0` for BOTH events and leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`. In production,
+/// two byte-identical `ZoneChanged` denote ONE occurrence emitted twice, so
+/// dropping both is the CORRECT answer for this input.
+///
+/// Distinct production occurrences are separated by `turn_zone_change_index` in
+/// EVERY family, and additionally by `object_id` (a top-level field of the
+/// event, sibling to `record`), by `entered_incarnation` (battlefield
+/// destinations only), and by
+/// `trigger_source_context.identity.reference.incarnation` (only where the path
+/// bumps the incarnation) — with the within-library reposition family the
+/// exception in which only the index survives. Those links are pinned by
+/// `occurrence_exact_witness_consumes_the_occurrence_its_witness_names` (U5,
+/// below), by `within_library_repositions_are_separated_only_by_the_occurrence_index`
+/// (in `game/zones.rs`), and by `parked_delivery_records_carry_distinct_occurrence_indices`
+/// (in `tests/integration/search_delivery_observer_dedup.rs`).
 #[test]
 fn owner_collected_filter_counts_contexts_not_occurrences() {
     let mut state = setup();
@@ -3835,5 +3856,109 @@ fn owner_collected_filter_counts_contexts_not_occurrences() {
         0,
         "the queued witness is a min(queued_copies, slice_copies) BOUND, and is \
          NOT occurrence-exact"
+    );
+}
+
+/// U5 — the witness consumes the occurrence IT NAMES, not merely one of that shape.
+///
+/// CR 603.2c sentence 2. Two DISTINCT occurrences of one object are separated in
+/// production by `turn_zone_change_index` always, and by up to three further
+/// fields depending on the family (`object_id`, `entered_incarnation`,
+/// `trigger_source_context.identity.reference.incarnation`). This row isolates the
+/// one that is live for EVERY family and lives inside `ZoneChangeRecord`'s
+/// equality — `turn_zone_change_index`, assigned per-occurrence by
+/// `restrictions::record_zone_change`. `ZoneChangeRecord::test_minimal` leaves
+/// `trigger_source_context` and `entered_incarnation` as `None`, and both events
+/// here share one `ObjectId`, so the index is the SOLE difference.
+///
+/// A production analogue of this shape DOES exist — a within-library reposition
+/// (CR 400.7 zero-bump branch, `zones.rs:1809-1812`) neutralizes the same three
+/// fields — see `within_library_repositions_are_separated_only_by_the_occurrence_index`
+/// in `zones.rs`. That row IS red under a `turn_zone_change_index`-excluding
+/// `PartialEq`, but it pins the zones EMIT link; a production fixture for the
+/// FILTER-AUTHORITY link pinned here is CONSTRUCTIBLE but is deliberately NOT
+/// built: the only known route depends on a duplicate-id
+/// `SelectCards` payload that the `EffectZoneChoice` arm fails to reject, and
+/// every sibling validator rejects such a payload with an error. So once that
+/// gap is closed the action is REJECTED, the row fails to construct, and it goes
+/// RED — the row would be testing the validation gap, not the invariant. The
+/// behavioural pin therefore lives here.
+///
+/// The witness names the SECOND occurrence, so the survivor must be the FIRST.
+/// The survivor is identified by a RAW FIELD READ, not by `GameEvent` equality:
+/// an equality-based assertion would itself be evaluated under the very
+/// `PartialEq` a regression would break, and would pass either way.
+///
+/// Goes red if a future change drops `turn_zone_change_index` out of
+/// `ZoneChangeRecord` equality (e.g. a manual `impl PartialEq` that skips it), or
+/// if the filter regresses to set membership.
+#[test]
+fn occurrence_exact_witness_consumes_the_occurrence_its_witness_names() {
+    let mut state = setup();
+
+    let first_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 0,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+    let second_event = GameEvent::ZoneChanged {
+        object_id: ObjectId(7),
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            turn_zone_change_index: 1,
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Library), Zone::Battlefield)
+        }),
+    };
+
+    assert_ne!(
+        first_event, second_event,
+        "CR 400.7: turn_zone_change_index is the ONLY field separating these two \
+         occurrences of one object, and it MUST participate in GameEvent equality"
+    );
+
+    let events = vec![first_event.clone(), second_event.clone()];
+
+    // Reach-guard: with an empty queue the filter body still runs and keeps both
+    // events. Without this the main assertion below would also be satisfied by a
+    // function that returned everything. NOT revert-failing under F-EQ.
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the reach-guard needs an empty queue"
+    );
+    assert_eq!(
+        zone_change_count(&filter_already_collected_trigger_events_from(
+            &state,
+            &events,
+            0,
+            &[]
+        )),
+        2,
+        "reach-guard: with no queued witness the filter keeps both occurrences"
+    );
+
+    // The witness names the SECOND occurrence.
+    state
+        .deferred_triggers
+        .push(queued_context_for(second_event.clone()));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        survivors.len(),
+        1,
+        "one witness consumes exactly one occurrence"
+    );
+    let GameEvent::ZoneChanged { record, .. } = &survivors[0] else {
+        panic!("the survivor must be the ZoneChanged that no witness named");
+    };
+    assert_eq!(
+        record.turn_zone_change_index, 0,
+        "CR 603.2c: the witness named occurrence 1, so occurrence 0 must survive; \
+         reading the index RAW (not via GameEvent equality) is what makes this \
+         assertion survive a broken ZoneChangeRecord PartialEq"
     );
 }
