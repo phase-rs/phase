@@ -526,6 +526,33 @@ mod tests {
     }
 
     #[test]
+    fn admits_each_copy_of_a_selected_nonbasic_land() {
+        let db = fixture_db();
+        let mut pool = wu_pool();
+        let mut second_dual = instance("On Color Dual", &[], 0, "Land — Plains Island");
+        second_dual.instance_id = "id-on-color-dual-2".to_string();
+        pool.push(second_dual);
+
+        let deck = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            8,
+            &DeckAddableCards::standard_basics(),
+        );
+        let selected_dual_count = deck
+            .main_deck
+            .iter()
+            .filter(|name| name.as_str() == "On Color Dual")
+            .count();
+        let basic_land_count: u8 = deck.lands.values().sum();
+
+        assert_eq!(selected_dual_count, 2);
+        assert_eq!(basic_land_count, 2, "each selected dual replaces one basic");
+        assert_eq!(deck.main_deck.len() + basic_land_count as usize, 8);
+    }
+
+    #[test]
     fn no_card_db_admits_no_nonbasics() {
         // Without a card DB the produced colors are unknown, so no nonbasic is
         // admitted (the manabase falls back to basics only).
