@@ -3930,6 +3930,23 @@ fn collect_pending_triggers_with_collection(
         // off-battlefield fire (CR 113.6) is the `TriggerIndex` retain guard's
         // job — it excludes the case by construction rather than observing it
         // after the fact.
+        //
+        // WHAT THIS DIFFERENTIAL CAN AND CANNOT SEE, stated plainly so nobody
+        // mistakes it for coverage of the reported bug:
+        //   - CAN see: an object whose live zone IS the battlefield but which is
+        //     absent from `state.battlefield` (so absent from the index). It is
+        //     in the shadow only, and surfaces as a `dropped` row.
+        //   - CANNOT see: the REPORTED shape — live zone off the battlefield
+        //     while still in `state.battlefield`. That object is excluded from
+        //     the live-zone shadow and present in production candidates, so it
+        //     lands only in `production - shadow`, the removed direction. The
+        //     retain guard in `trigger_index::candidates_for_event` is the only
+        //     detector for it.
+        // Caveat on the surviving direction: `zones::absorb_component` produces
+        // zone-battlefield objects that are correctly absent from
+        // `state.battlefield`, so a trigger match on a merged/melded component
+        // would raise a `dropped` row that is NOT a silent drop. Latent today —
+        // the full suite is green — but do not misdiagnose it as one.
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {

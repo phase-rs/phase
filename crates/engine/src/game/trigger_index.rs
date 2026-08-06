@@ -43,8 +43,18 @@
 //! zone, and the event; in release builds — including the `server-release`
 //! profile the multiplayer server ships, which inherits
 //! `debug-assertions = false` — it is corrected silently and recorded only by a
-//! `tracing::warn!` on the drop path. That log line is the sole production
-//! evidence a recurrence leaves.
+//! `tracing::warn!` on the drop path. That log line is the sole recurrence
+//! evidence on the SERVER; `engine-wasm` initialises no `tracing` subscriber, so
+//! the browser build records nothing at all.
+//!
+//! SCOPE: this contains the TRIGGER consequence of the desync, not the desync.
+//! The underlying maintenance defect is not found. If the disagreement is
+//! "still in `state.battlefield`, live zone elsewhere", then every other
+//! consumer of `state.battlefield` — the CR 704 SBA pass, combat declaration,
+//! `game/filter.rs` battlefield queries, and the rendered board — still treats
+//! the object as a permanent. Only the trigger path is guarded here.
+//! Reconciling at `battlefield_phased_in_ids` would contain all consumers at one
+//! seam; that is deliberately out of scope for this change.
 
 use smallvec::SmallVec;
 
@@ -1218,9 +1228,21 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
             // index. So a candidate whose LIVE zone is no longer the battlefield
             // is a stale entry and must not be handed back. This is the same
             // predicate `reindex_object_triggers` already enforces on the
-            // maintenance side of this module; corroborated by
-            // `derived_views::is_live_battlefield_object`, whose semantic is
-            // mirrored here without that helper's O(|battlefield|) `contains`.
+            // maintenance side of this module.
+            //
+            // ONE DIRECTION, not an equivalence. `derived_views::is_live_battlefield_object`
+            // is the CONJUNCTION of `state.battlefield.contains(id)` and
+            // `obj.zone == Battlefield`; this checks only the second conjunct.
+            // Dropping the first is not merely an O(|battlefield|) saving — it
+            // is a weaker predicate, and the gap has a real producer:
+            // `zones::absorb_component` removes a merged/melded component from
+            // `state.battlefield` and then sets its zone BACK to `Battlefield`,
+            // so a component can be zone-battlefield while not a battlefield
+            // member. `reindex_object_triggers` admits on `obj.zone` alone, so
+            // that shape can enter the index and this retain passes it through.
+            // Uncontained here by choice: the reported bug is the opposite
+            // direction, and a `contains` on every candidate is a real hot-path
+            // cost for a shape with no current reindexing caller.
             //
             // CR 603.10a look-back sources are unaffected: a permanent observing
             // its own departure, a self-exploiting creature, and co-departed
@@ -1231,9 +1253,16 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
             // `debug_assertions` builds have already panicked above with the full
             // diagnosis; release builds (including `server-release`, which the
             // multiplayer server ships and which inherits
-            // `debug-assertions = false`) silently correct it here. This log line
-            // is the ONLY production evidence a recurrence leaves. It is on the
+            // `debug-assertions = false`) silently correct it here. It is on the
             // drop branch, so it costs nothing unless the defect actually occurs.
+            //
+            // This is the only recurrence evidence ON THE SERVER. It is NOT
+            // evidence in the browser: `engine-wasm` has no `tracing-subscriber`
+            // dependency and initialises no subscriber, so `tracing` events there
+            // go to the no-op dispatcher and this line emits nothing. A recurrence
+            // in a WASM release build is corrected silently and invisibly — and
+            // that is the surface most players are on, so absence of warnings in
+            // production is NOT evidence the desync stopped happening.
             // NOTE: this runs BEFORE the `sort_unstable_by_key`/`dedup` below, so
             // one stale id in several buckets logs more than once per consult, and
             // every subsequent consult re-logs while the desync persists — count
@@ -1658,8 +1687,12 @@ mod tests {
 
     /// Row 11 — the exact desync shape the env-gated differential is
     /// structurally blind to: the id is off-battlefield by `obj.zone` while
-    /// still present in `state.battlefield`, so it lands in both the shadow and
-    /// the production population and cancels out of the difference.
+    /// still present in `state.battlefield`. The differential's shadow is drawn
+    /// from the live `obj.zone`, so this object is absent from the shadow and
+    /// present in production candidates — it lands only in `production - shadow`,
+    /// the direction that was removed for having a false-positive floor. So the
+    /// differential cannot see THIS shape at all, and this guard is the only
+    /// detector for it.
     #[test]
     fn off_battlefield_source_still_in_the_battlefield_vector_is_not_a_candidate() {
         let mut state = GameState::new_two_player(42);
