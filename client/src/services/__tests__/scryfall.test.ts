@@ -1071,7 +1071,9 @@ curl() {
 ${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg} 2> "${stderr}"
 echo "RC=$?"
 echo "MV_CALLED=\${MV_CALLED:-0}"
-echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
+# BSD wc -l left-pads its count ("       0") where GNU wc -l does not, so strip
+# the padding here to keep the TMP_COUNT= assertions exact on macOS and Linux.
+echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l | tr -d '[:space:]')"
 `;
 
     const out = execFileSync("bash", ["-c", finalScript], {
