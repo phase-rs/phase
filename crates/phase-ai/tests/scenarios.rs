@@ -116,7 +116,7 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
         GameAction::ChooseManaColor {
             choice: engine::types::game_state::ManaChoice::Combination(vec![
                 ManaType::White,
-                ManaType::Blue,
+                ManaType::White,
                 ManaType::Red,
                 ManaType::Green,
             ]),
