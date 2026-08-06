@@ -679,6 +679,7 @@ function PodDeckBuilder() {
   const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
   const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  const submissionError = useMultiplayerDraftStore((s) => s.error);
 
   return (
     <LimitedDeckBuilder
@@ -689,6 +690,7 @@ function PodDeckBuilder() {
       onRemoveFromDeck={removeFromDeck}
       onSetLandCount={setLandCount}
       onSubmitDeck={submitDeck}
+      submissionError={submissionError}
       showSuggestions={false}
     />
   );

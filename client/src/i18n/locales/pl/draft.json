@@ -108,6 +108,8 @@
     "autoLands": "Automatyczne ziemie",
     "suggestDeck": "Zaproponuj talię",
     "submitDeck": "Zatwierdź talię",
+    "validationTitle": "Talia wymaga uwagi",
+    "submitFailed": "Nie można zatwierdzić talii",
     "removeCard": "Usuń {{name}}",
     "addCard": "Dodaj {{name}}",
     "cardCount": "/ {{min}} kart",

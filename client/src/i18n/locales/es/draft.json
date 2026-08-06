@@ -108,6 +108,8 @@
     "autoLands": "Tierras automáticas",
     "suggestDeck": "Sugerir mazo",
     "submitDeck": "Enviar mazo",
+    "validationTitle": "El mazo necesita atención",
+    "submitFailed": "No se pudo enviar el mazo",
     "removeCard": "Quitar {{name}}",
     "addCard": "Añadir {{name}}",
     "cardCount": "/ {{min}} cartas",

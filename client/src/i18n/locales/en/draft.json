@@ -108,6 +108,8 @@
     "autoLands": "Auto Lands",
     "suggestDeck": "Suggest Deck",
     "submitDeck": "Submit Deck",
+    "validationTitle": "Deck needs attention",
+    "submitFailed": "Unable to submit deck",
     "removeCard": "Remove {{name}}",
     "addCard": "Add {{name}}",
     "cardCount": "/ {{min}} cards",

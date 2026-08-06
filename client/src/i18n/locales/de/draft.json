@@ -108,6 +108,8 @@
     "autoLands": "Auto-Länder",
     "suggestDeck": "Deck vorschlagen",
     "submitDeck": "Deck einreichen",
+    "validationTitle": "Das Deck benötigt Aufmerksamkeit",
+    "submitFailed": "Deck konnte nicht eingereicht werden",
     "removeCard": "{{name}} entfernen",
     "addCard": "{{name}} hinzufügen",
     "cardCount": "/ {{min}} Karten",

@@ -108,6 +108,8 @@
     "autoLands": "Terrenos Automáticos",
     "suggestDeck": "Sugerir Deck",
     "submitDeck": "Enviar Deck",
+    "validationTitle": "O deck precisa de atenção",
+    "submitFailed": "Não foi possível enviar o deck",
     "removeCard": "Remover {{name}}",
     "addCard": "Adicionar {{name}}",
     "cardCount": "/ {{min}} cartas",

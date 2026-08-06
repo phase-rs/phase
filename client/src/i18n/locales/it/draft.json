@@ -108,6 +108,8 @@
     "autoLands": "Terre automatiche",
     "suggestDeck": "Suggerisci mazzo",
     "submitDeck": "Invia mazzo",
+    "validationTitle": "Il mazzo richiede attenzione",
+    "submitFailed": "Impossibile inviare il mazzo",
     "removeCard": "Rimuovi {{name}}",
     "addCard": "Aggiungi {{name}}",
     "cardCount": "/ {{min}} carte",

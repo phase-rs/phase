@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -197,6 +197,7 @@ interface LimitedDeckBuilderProps {
   onRemoveFromDeck?: (cardName: string) => void;
   onSetLandCount?: (landName: string, count: number) => void;
   onSubmitDeck?: () => Promise<void> | void;
+  submissionError?: string | null;
   showSuggestions?: boolean;
 }
 
@@ -208,6 +209,7 @@ export function LimitedDeckBuilder({
   onRemoveFromDeck,
   onSetLandCount,
   onSubmitDeck,
+  submissionError = null,
   showSuggestions = true,
 }: LimitedDeckBuilderProps = {}) {
   const { t } = useTranslation("draft");
@@ -231,6 +233,7 @@ export function LimitedDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [addableQuery, setAddableQuery] = useState("");
+  const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
@@ -251,9 +254,7 @@ export function LimitedDeckBuilder({
 
   const totalCards = mainDeck.length + totalLands;
   const minDeckSize = view?.min_deck_size ?? 40;
-  const addableCards = view?.addable_cards?.length
-    ? view.addable_cards
-    : BASIC_LANDS.map((land) => land.name);
+  const addableCards = view?.addable_cards ?? BASIC_LANDS.map((land) => land.name);
   const filteredAddableCards = useMemo(() => {
     const query = addableQuery.trim().toLowerCase();
     return query
@@ -261,6 +262,21 @@ export function LimitedDeckBuilder({
       : addableCards;
   }, [addableCards, addableQuery]);
   const deckValid = totalCards >= minDeckSize;
+  const displayedSubmissionError = submissionError ?? localSubmissionError;
+
+  useEffect(() => {
+    setLocalSubmissionError(null);
+  }, [mainDeck, landCounts]);
+
+  const handleSubmit = async () => {
+    setLocalSubmissionError(null);
+    try {
+      await submitDeck();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
+    }
+  };
 
   if (!view) return null;
 
@@ -386,7 +402,7 @@ export function LimitedDeckBuilder({
 
             <button
               type="button"
-              onClick={submitDeck}
+              onClick={() => void handleSubmit()}
               disabled={!deckValid}
               className={menuButtonClass({
                 tone: "emerald",
@@ -397,6 +413,15 @@ export function LimitedDeckBuilder({
             >
               {t("limitedDeck.submitDeck")}
             </button>
+            {displayedSubmissionError && (
+              <p
+                role="alert"
+                className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-100"
+              >
+                <span className="font-medium">{t("limitedDeck.validationTitle")}: </span>
+                {displayedSubmissionError}
+              </p>
+            )}
           </section>
         </div>
       </div>

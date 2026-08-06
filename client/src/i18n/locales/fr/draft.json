@@ -108,6 +108,8 @@
     "autoLands": "Terrains auto",
     "suggestDeck": "Suggérer un deck",
     "submitDeck": "Soumettre le deck",
+    "validationTitle": "Le deck nécessite votre attention",
+    "submitFailed": "Impossible de soumettre le deck",
     "removeCard": "Retirer {{name}}",
     "addCard": "Ajouter {{name}}",
     "cardCount": "/ {{min}} cartes",

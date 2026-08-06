@@ -115,6 +115,23 @@ describe("LimitedDeckBuilder", () => {
     expect(screen.queryByText("Island")).not.toBeInTheDocument();
   });
 
+  it("does not substitute basic lands when the engine exposes no addable cards", () => {
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, addable_cards: [] }}
+        mainDeck={[]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Add Plains" })).not.toBeInTheDocument();
+  });
+
   it("opens a preview on touch long press without moving the card", () => {
     vi.useFakeTimers();
     render(<Harness />);
@@ -158,6 +175,29 @@ describe("LimitedDeckBuilder", () => {
     expect(screen.getByRole("meter", { name: "Mana value 3" })).toHaveAttribute(
       "aria-valuenow",
       "1",
+    );
+  });
+
+  it("shows the engine validation reason when deck submission fails", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={TEST_VIEW}
+        mainDeck={Array.from({ length: 40 }, () => "Wind Drake")}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={async () => {
+          throw new Error("card 'Watery Grave' is not in the drafted pool");
+        }}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Submit Deck" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Deck needs attention: card 'Watery Grave' is not in the drafted pool",
     );
   });
 });
