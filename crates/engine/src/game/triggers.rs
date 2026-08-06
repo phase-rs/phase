@@ -3904,7 +3904,25 @@ fn collect_pending_triggers_with_collection(
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {
-                for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
+                // CR 113.6: "Abilities of an instant or sorcery spell usually function only
+                // while that object is on the stack. Abilities of all other objects usually
+                // function only while that object is on the battlefield." The shadow
+                // population is derived from the LIVE `obj.zone`, not from `state.battlefield`
+                // — `trigger_source_ids_for_zone` and `TriggerIndex::rebuild_from_battlefield`
+                // share `state.battlefield` as their sole authority
+                // (`GameState::battlefield_phased_in_ids` never reads `obj.zone`), so a shadow
+                // drawn from it cannot expose a `state.battlefield` / `obj.zone` divergence in
+                // EITHER direction. Mirrors the inline-mana differential's population in
+                // `resolve_tap_mana_triggers_inline`.
+                // CR 702.26b parity with `battlefield_phased_in_ids` is kept via `is_phased_in`
+                // so phased-out permanents do not become spurious `shadow - production` rows.
+                let shadow_population: Vec<ObjectId> = state
+                    .objects
+                    .iter()
+                    .filter(|(_, obj)| obj.zone == Zone::Battlefield && obj.is_phased_in())
+                    .map(|(id, _)| *id)
+                    .collect();
+                for obj_id in shadow_population {
                     if !live_battlefield_source_was_present_at_event(event, obj_id) {
                         continue;
                     }
@@ -3932,10 +3950,26 @@ fn collect_pending_triggers_with_collection(
                     .difference(&production_matched)
                     .copied()
                     .collect();
+                let phantom: Vec<(ObjectId, usize)> = production_matched
+                    .difference(&shadow_matched)
+                    .copied()
+                    .collect();
+                let phantom_zones: Vec<(ObjectId, usize, Option<Zone>)> = phantom
+                    .iter()
+                    .map(|(id, idx)| (*id, *idx, state.objects.get(id).map(|o| o.zone)))
+                    .collect();
                 debug_assert!(
-                    dropped.is_empty(),
-                    "TriggerIndex under-approximation (CR 603.2 silent trigger drop): \
-                     event={event:?} dropped_matches={dropped:?} \
+                    dropped.is_empty() && phantom.is_empty(),
+                    // CR 603.2 over-approximation is correctness-preserving only for CANDIDATE
+                    // VISITS, never for MATCHES. `dropped` = silent trigger drop (index missed a
+                    // real trigger) OR an object whose live zone is Battlefield while it is
+                    // absent from `state.battlefield` (the inverse desync). `phantom` = the index
+                    // produced a match the live-zone battlefield scan would not — a source fired
+                    // from off the battlefield, violating CR 113.6.
+                    "TriggerIndex match-set divergence: event={event:?} \
+                     dropped(under-approximation, CR 603.2 silent drop)={dropped:?} \
+                     phantom(over-approximation, CR 113.6 off-battlefield fire; \
+                     (object_id, trig_idx, live_zone))={phantom_zones:?} \
                      candidates_visited={candidates:?}",
                 );
             }
