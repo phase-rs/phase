@@ -104,16 +104,9 @@ expression: "&lowered"
         "sub_ability": {
           "kind": "Spell",
           "effect": {
-            "type": "DamageEachPlayer",
-            "amount": {
-              "type": "Ref",
-              "qty": {
-                "type": "EventContextAmount"
-              }
-            },
-            "player_filter": {
-              "type": "Opponent"
-            }
+            "type": "Unimplemented",
+            "name": "mass_move_total_damage",
+            "description": "~ deals that much damage to each opponent"
           },
           "cost": null,
           "sub_ability": null,

@@ -9164,40 +9164,54 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     None
 }
 
-/// CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k: an intervening-if that reads the
-/// source's linked-exile pool ("if there are cards exiled with ~") introduces
-/// that pool as the plural-anaphor antecedent for the effect body ("put THEM
-/// into their owner's graveyard" sweeps the pool). Number-scoped on purpose:
-/// only bare PLURAL pronouns bind to the pool (see
-/// `ParseContext::plural_object_pronoun_ref`).
+/// CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k: an intervening-if introduces the
+/// source's linked-exile pool as the plural-anaphor antecedent ONLY when the
+/// condition semantically ENTAILS a nonempty pool — a gate that can hold with
+/// zero linked cards ("if there are no cards exiled with ~", EQ 0) must not hand
+/// a plural "them" a provably-empty referent set. Entailment (counts are
+/// cardinalities, >= 0), canonical orientation only (pool ref on lhs, Fixed rhs):
+///   GE n (n>=1) | GT n (n>=0) | EQ n (n>=1) | NE 0  -> entails
+///   LE / LT / EQ 0 / NE n>=1 / non-Fixed rhs        -> never entails
+/// Polarity: `Not { .. }` never derives (deliberately conservative per review —
+/// Not(EQ 0) does entail nonempty, but no corpus card exercises it; add the
+/// flip only with a discriminating card). `And` entails if ANY conjunct does;
+/// `Or` entails only if it is non-empty AND ALL branches do.
 fn trigger_plural_object_pronoun_ref_for_intervening_if(
     if_condition: &Option<TriggerCondition>,
 ) -> Option<TargetFilter> {
-    fn reads_linked_exile_pool(condition: &TriggerCondition) -> bool {
+    fn entails_nonempty_linked_exile_pool(condition: &TriggerCondition) -> bool {
         match condition {
             TriggerCondition::QuantityComparison {
                 lhs,
-                comparator: _,
+                comparator,
                 rhs,
-            } => expr_reads_linked_exile_pool(lhs) || expr_reads_linked_exile_pool(rhs),
-            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
-                conditions.iter().any(reads_linked_exile_pool)
+            } => {
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource
+                    }
+                ) && match (comparator, rhs) {
+                    (Comparator::GE, QuantityExpr::Fixed { value }) => *value >= 1,
+                    (Comparator::GT, QuantityExpr::Fixed { value }) => *value >= 0,
+                    (Comparator::EQ, QuantityExpr::Fixed { value }) => *value >= 1,
+                    (Comparator::NE, QuantityExpr::Fixed { value }) => *value == 0,
+                    _ => false,
+                }
             }
-            TriggerCondition::Not { condition } => reads_linked_exile_pool(condition),
+            TriggerCondition::And { conditions } => {
+                conditions.iter().any(entails_nonempty_linked_exile_pool)
+            }
+            TriggerCondition::Or { conditions } => {
+                !conditions.is_empty() && conditions.iter().all(entails_nonempty_linked_exile_pool)
+            }
+            TriggerCondition::Not { .. } => false,
             _ => false,
         }
     }
-    fn expr_reads_linked_exile_pool(expr: &QuantityExpr) -> bool {
-        matches!(
-            expr,
-            QuantityExpr::Ref {
-                qty: QuantityRef::CardsExiledBySource
-            }
-        )
-    }
     if_condition
         .as_ref()
-        .filter(|condition| reads_linked_exile_pool(condition))
+        .filter(|condition| entails_nonempty_linked_exile_pool(condition))
         .map(|_| TargetFilter::ExiledBySource)
 }
 

@@ -15405,6 +15405,29 @@ mod stage2_injector_tests {
                 //     total still **37**, partition still **5/7/25** — and the other two
                 //     entries (`scoped_library_search.rs:452`, `engine.rs:11549`) did not move
                 //     at all, both re-read and sha256-confirmed in place.
+                //   Valakut #7047 fix round (this branch): `:9456 ⇒ :9440`, −16, and ONLY
+                //     that entry moved. LOCAL, not upstream — the CI-vs-local diagnosis in
+                //     the header does not apply. Cause: the `QuantityExpr::any_ref`
+                //     relocation — `quantity_expr_any_ref`'s 16-line traversal `match` moved
+                //     to `QuantityExpr::any_ref` (`types/ability.rs`) and the free function
+                //     kept as a one-line delegation; content unchanged. The file's ONLY two
+                //     hunks both sit above this producer and below the other two:
+                //     `@@ -7512,5 +7512,4 @@` (doc-comment rewrite, −1) and
+                //     `@@ -7521,16 +7520 @@` (the `match` body ⇒ the delegation, −15) —
+                //     summing to −16, the whole-file delta is also −16 (+5/−21), so nothing
+                //     moved below, and predicted `9456 − 16 = 9440` equals the observed
+                //     coordinate exactly. Identity re-established, not assumed: the producer
+                //     at `:9440` is sha256-identical (`eb2d5e19…2bac86`) to
+                //     `8166e288b:effects/mod.rs:9456`, and it is still inside the enclosing
+                //     function this row NAMES, `resolve_chain_body` (opens :8481 here, :8497
+                //     at 8166e288b — itself −16). Set preservation: the other four entries
+                //     did not move — `:6175`/`:6252` sit above both hunks and are
+                //     sha256-confirmed in place; `scoped_library_search.rs:452` lives in a
+                //     file this round does not touch, and both of this round's engine.rs
+                //     hunks (this entry itself + the pin edit) sit below the
+                //     `engine.rs:11583` producer row and therefore cannot move it — both
+                //     re-read and sha-confirmed in place. Total still 37, partition still
+                //     5/7/25.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -15419,7 +15442,7 @@ mod stage2_injector_tests {
                 // and is offered as a follow-up rather than taken unannounced mid-review.
                 "game/effects/mod.rs:6175".to_string(),
                 "game/effects/mod.rs:6252".to_string(),
-                "game/effects/mod.rs:9456".to_string(),
+                "game/effects/mod.rs:9440".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

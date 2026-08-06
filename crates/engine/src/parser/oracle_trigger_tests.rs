@@ -26716,6 +26716,248 @@ fn elder_brain_they_draw_binds_to_defending_player() {
 }
 
 // ---------------------------------------------------------------------------
+// Entailment-gated plural-antecedent derivation — direct unit tests over the
+// private `trigger_plural_object_pronoun_ref_for_intervening_if` helper
+// (directly callable here via `use super::*`, since this file is mounted as
+// a child module of `oracle_trigger` at `oracle_trigger.rs:17850`). CR 603.4
+// + CR 406.6 + CR 607.2a + CR 608.2k. U1-U11 exercise the fix's comparator ×
+// polarity × orientation entailment table; U5 (EQ 0), U6 (Not{GE 1}), and the
+// mixed-Or case inside U11 are REVERT-FAILING against the shipped
+// comparator-blind, `Not`-recursing helper.
+// ---------------------------------------------------------------------------
+
+/// Build a canonical `CardsExiledBySource <comparator> <value>` condition —
+/// the orientation every corpus condition emits (pool ref on lhs, Fixed on
+/// rhs; verified this round via `make_quantity_comparison` /
+/// `oracle_nom::condition`'s exiled-with family).
+fn cards_exiled_by_source_cmp(comparator: Comparator, value: i32) -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CardsExiledBySource,
+        },
+        comparator,
+        rhs: QuantityExpr::Fixed { value },
+    }
+}
+
+/// U1 — GE against a nonzero threshold (1 and 3) entails a nonempty pool: the
+/// bare existential ("if there are cards exiled with ~") and the counted form
+/// (The Mysterious Sphere's GE 3) both derive.
+#[test]
+fn u1_ge_nonzero_threshold_entails() {
+    for n in [1, 3] {
+        assert_eq!(
+            trigger_plural_object_pronoun_ref_for_intervening_if(&Some(
+                cards_exiled_by_source_cmp(Comparator::GE, n)
+            )),
+            Some(TargetFilter::ExiledBySource),
+            "GE {n} must entail a nonempty pool"
+        );
+    }
+}
+
+/// U2 — EQ against a nonzero threshold (1) entails a nonempty pool: "if
+/// there is exactly one card exiled with ~" pins the pool to size 1, which is
+/// nonempty.
+#[test]
+fn u2_eq_nonzero_threshold_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::EQ,
+            1
+        ))),
+        Some(TargetFilter::ExiledBySource),
+        "EQ 1 must entail a nonempty pool"
+    );
+}
+
+/// U3 — GT against any non-negative threshold (0) entails a nonempty pool:
+/// "more than zero" is the strict form of the bare existential.
+#[test]
+fn u3_gt_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::GT,
+            0
+        ))),
+        Some(TargetFilter::ExiledBySource),
+        "GT 0 must entail a nonempty pool"
+    );
+}
+
+/// U4 — NE 0 ("not zero") entails a nonempty pool.
+#[test]
+fn u4_ne_zero_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::NE,
+            0
+        ))),
+        Some(TargetFilter::ExiledBySource),
+        "NE 0 must entail a nonempty pool"
+    );
+}
+
+/// U5 (U-EQ0) — REVERT-FAILING: "if there are NO cards exiled with ~" (EQ 0)
+/// pins the pool to size 0 — a provably-EMPTY pool must never be handed a
+/// plural "them" antecedent (Search the City's clause-level EQ-0 pole is the
+/// polarity sibling this trigger-scope gate must not derive on). The shipped
+/// comparator-blind helper ignores the comparator and derives `Some` here.
+#[test]
+fn u5_eq_zero_never_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::EQ,
+            0
+        ))),
+        None,
+        "EQ 0 must NOT entail a nonempty pool — a provably-empty pool cannot feed a plural antecedent"
+    );
+}
+
+/// U6 (U-Not) — REVERT-FAILING: `Not { GE 1 }` ("it is not true that there
+/// are cards exiled with ~") must not derive — deliberately conservative per
+/// the review (`Not(EQ 0)` DOES entail nonempty, but no corpus card exercises
+/// the flip, so `Not` never derives until a discriminating card justifies
+/// it). The shipped helper recurses INTO `Not` positively and derives `Some`
+/// here.
+#[test]
+fn u6_not_never_entails() {
+    let condition = TriggerCondition::Not {
+        condition: Box::new(cards_exiled_by_source_cmp(Comparator::GE, 1)),
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(condition)),
+        None,
+        "Not{{GE 1}} must NOT entail — polarity is deliberately conservative"
+    );
+}
+
+/// U7 — LE / LT never entail: both admit zero as a satisfying count (LE 0
+/// literally requires zero; LT 1 is the strict form of the same bound).
+#[test]
+fn u7_le_and_lt_never_entail() {
+    for condition in [
+        cards_exiled_by_source_cmp(Comparator::LE, 0),
+        cards_exiled_by_source_cmp(Comparator::LT, 1),
+    ] {
+        assert_eq!(
+            trigger_plural_object_pronoun_ref_for_intervening_if(&Some(condition.clone())),
+            None,
+            "{condition:?} must NOT entail a nonempty pool"
+        );
+    }
+}
+
+/// U8 — NE against a nonzero value (2) does not entail: "not exactly 2" is
+/// satisfied by zero, so it cannot license a plural antecedent.
+#[test]
+fn u8_ne_nonzero_never_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::NE,
+            2
+        ))),
+        None,
+        "NE 2 must NOT entail a nonempty pool"
+    );
+}
+
+/// U9 — GE 0 does not entail: every count satisfies "zero or more", so it
+/// carries no existential information.
+#[test]
+fn u9_ge_zero_never_entails() {
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(cards_exiled_by_source_cmp(
+            Comparator::GE,
+            0
+        ))),
+        None,
+        "GE 0 must NOT entail a nonempty pool"
+    );
+}
+
+/// U10 — a non-`Fixed` rhs (e.g. another dynamic quantity) never entails: the
+/// entailment table only classifies the canonical pool-ref-lhs/Fixed-rhs
+/// orientation every corpus condition emits; anything else is conservatively
+/// unclassified rather than guessed at.
+#[test]
+fn u10_non_fixed_rhs_never_entails() {
+    let condition = TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CardsExiledBySource,
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(condition)),
+        None,
+        "a non-Fixed rhs must NOT entail a nonempty pool"
+    );
+}
+
+/// U11 — `And`/`Or` composition: `And` entails if ANY conjunct entails
+/// (`SourceInZone` + GE 1 — the GE 1 branch alone is enough); `Or` entails
+/// only if it is non-empty AND ALL branches entail (GE 1 + GE 3 both entail,
+/// so the disjunction does; the mixed GE1/EQ0 case below is U-mixed-Or, the
+/// REVERT-FAILING negative). The empty `Or` is a reach-guard for the
+/// `!conditions.is_empty()` vacuous-`all()` trap.
+#[test]
+fn u11_and_or_composition() {
+    let and_condition = TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::SourceInZone {
+                zone: Zone::Battlefield,
+            },
+            cards_exiled_by_source_cmp(Comparator::GE, 1),
+        ],
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(and_condition)),
+        Some(TargetFilter::ExiledBySource),
+        "And entails if ANY conjunct entails"
+    );
+
+    let or_all_entail = TriggerCondition::Or {
+        conditions: vec![
+            cards_exiled_by_source_cmp(Comparator::GE, 1),
+            cards_exiled_by_source_cmp(Comparator::GE, 3),
+        ],
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(or_all_entail)),
+        Some(TargetFilter::ExiledBySource),
+        "Or entails when ALL branches entail"
+    );
+
+    // U-mixed-Or (REVERT-FAILING): one non-entailing branch (EQ 0) must sink
+    // the whole disjunction — the shipped helper's `any()` derives `Some`
+    // here (GE 1 alone matches, comparator-blind).
+    let or_mixed = TriggerCondition::Or {
+        conditions: vec![
+            cards_exiled_by_source_cmp(Comparator::GE, 1),
+            cards_exiled_by_source_cmp(Comparator::EQ, 0),
+        ],
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(or_mixed)),
+        None,
+        "Or must NOT entail when any branch fails to entail (mixed GE1/EQ0)"
+    );
+
+    // Empty `Or` reach-guard: must not vacuously entail via `all()` on `[]`.
+    let or_empty = TriggerCondition::Or { conditions: vec![] };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(or_empty)),
+        None,
+        "an empty Or must NOT entail (vacuous-all guard)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Existential exiled-with-source intervening-if — the bare-plural existential
 // axis ("there are [no] cards exiled with [source]") plus the plural anaphor
 // it introduces ("put THEM ..."). CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k.
@@ -26736,12 +26978,33 @@ fn chain_has_unimplemented(ability: &AbilityDefinition) -> bool {
             .is_some_and(chain_has_unimplemented)
 }
 
+/// Recursive Unimplemented COUNT over an ability chain (sub + else
+/// branches). Trace C (Mysterious Sphere) precedent generalized from a bool
+/// membership check to an exact count, so a reach-guard can assert "exactly
+/// N Unimplemented nodes in this parse" and cannot pass vacuously on a parse
+/// that leaked extra gaps elsewhere in the chain.
+fn count_unimplemented_in_chain(ability: &AbilityDefinition) -> usize {
+    usize::from(matches!(*ability.effect, Effect::Unimplemented { .. }))
+        + ability
+            .sub_ability
+            .as_deref()
+            .map_or(0, count_unimplemented_in_chain)
+        + ability
+            .else_ability
+            .as_deref()
+            .map_or(0, count_unimplemented_in_chain)
+}
+
 /// SHAPE (P2) — Valakut Exploration trigger 2: the bare existential
 /// intervening-if is hoisted to the trigger condition (CR 603.4), the swept
 /// plural anaphor binds to the linked-exile pool as a mass move
 /// (CR 608.2k + CR 406.6 + CR 607.2a), and the conjoined ", then ~ deals that
-/// much damage to each opponent" clause survives as a chained sub-ability
-/// reading the moved count (CR 608.2c later-text-reads-earlier-action).
+/// much damage to each opponent" clause is caught by the coverage-honesty
+/// gate (issue #7046): it parses to a NAMED, fragment-carrying
+/// `Effect::Unimplemented` marker rather than a raw `DamageEachPlayer` node,
+/// because the runtime cannot yet supply that consumer with the completed
+/// sweep's TOTAL (CR 608.2c) — only each recipient's OWN swept-card count
+/// (Trace D, `install_previous_effect_counts_by_player`).
 #[test]
 fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
     let parsed = parse_oracle_text(
@@ -26784,42 +27047,65 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
         }
     }
 
-    // CR 608.2c: the trailing damage clause is chained, reading the moved
-    // count (Whirlpool Drake's `, then` + EventContextAmount shape;
-    // DamageEachPlayer verified live on Shadowheart, Cleric of War).
+    // Coverage-honesty gate (issue #7046): the trailing damage clause is
+    // still chained (`, then` -> ContinuationStep, same link Whirlpool
+    // Drake's ", then draw that many cards" chain carries), but its effect
+    // is the strict-failure marker, not `DamageEachPlayer`.
     let damage = execute
         .sub_ability
         .as_ref()
         .expect("damage clause must chain after the sweep");
-    // The `, then` boundary chains a resolution step of the same instruction
-    // (CR 608.2c in-order) — the same default `ContinuationStep` link
-    // Whirlpool Drake's ", then draw that many cards" chain carries.
     assert_eq!(damage.sub_link, SubAbilityLink::ContinuationStep);
     match &*damage.effect {
-        Effect::DamageEachPlayer {
-            amount:
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-            player_filter: PlayerFilter::Opponent,
-        } => {}
-        other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
-    }
-
-    // Reach-guard: zero Unimplemented across the whole parse — the negative
-    // assertions above cannot pass vacuously via a failed parse.
-    for trigger in &parsed.triggers {
-        if let Some(execute) = trigger.execute.as_deref() {
+        Effect::Unimplemented { name, description } => {
+            assert_eq!(
+                name,
+                crate::parser::oracle_effect::assembly::MASS_MOVE_TOTAL_DAMAGE_GAP,
+                "the damage rider must carry the mass-move-total-damage marker name"
+            );
             assert!(
-                !chain_has_unimplemented(execute),
-                "trigger chain leaked Unimplemented: {execute:?}"
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("deals that much damage to each opponent")),
+                "the marker's description must carry the verbatim clause, got {description:?}"
             );
         }
+        other => {
+            panic!("expected the strict-failure Unimplemented marker (issue #7046), got {other:?}")
+        }
     }
-    for ability in &parsed.abilities {
-        assert!(
-            !chain_has_unimplemented(ability),
-            "ability chain leaked Unimplemented: {ability:?}"
+
+    // Reach-guard (Trace C, Mysterious Sphere, generalized to an exact
+    // count): EXACTLY one Unimplemented across the whole parse, and it is
+    // trigger 2's execute.sub_ability — the marker assertion above cannot
+    // pass vacuously via a failed/over-gated parse elsewhere in the chain.
+    let total_unimplemented: usize = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .map(count_unimplemented_in_chain)
+        .sum::<usize>()
+        + parsed
+            .abilities
+            .iter()
+            .map(count_unimplemented_in_chain)
+            .sum::<usize>();
+    assert_eq!(
+        total_unimplemented, 1,
+        "expected exactly one Unimplemented node across the whole parse"
+    );
+    assert!(
+        matches!(&*damage.effect, Effect::Unimplemented { .. }),
+        "the sole Unimplemented node must be trigger 2's execute.sub_ability"
+    );
+    // Trigger 1 (landfall) must carry zero — the sweep/condition negatives
+    // above cannot pass vacuously via an unrelated gap on the OTHER trigger.
+    let landfall = &parsed.triggers[0];
+    if let Some(landfall_execute) = landfall.execute.as_deref() {
+        assert_eq!(
+            count_unimplemented_in_chain(landfall_execute),
+            0,
+            "trigger 1 (landfall) must carry zero Unimplemented"
         );
     }
 }
@@ -27063,4 +27349,195 @@ fn river_songs_diary_singular_it_keeps_parent_target_chain() {
         } => {}
         other => panic!("expected CastFromZone over ParentTarget (the chosen card), got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// F1 gate hostile fixtures (P8-P11) — each shares SOME axis with Valakut
+// Exploration's ChangeZoneAll -> DamageEachPlayer{EventContextAmount}
+// pairing (same producer, same consumer, or same amount-reading shape) but
+// must NOT gate, so the F1 scoping (immediate chain + exact consumer +
+// EventContextAmount-reading amount) is proven precise, not merely present.
+// Each carries a positive shape reach-guard plus a zero-Unimplemented guard.
+// ---------------------------------------------------------------------------
+
+/// SHAPE (P8) — Shadowheart, Cleric of War: same CONSUMER shape
+/// (`DamageEachPlayer{EventContextAmount, Opponent}`) as Valakut's gated
+/// rider, but EVENT-fed ("whenever you lose life during your turn") — there
+/// is no `ChangeZoneAll` predecessor at all, so the gate's `defs.last()`
+/// match arm cannot fire. Must stay ungated.
+#[test]
+fn shadowheart_cleric_of_war_event_fed_damage_stays_ungated() {
+    let parsed = parse_oracle_text(
+        "Deathtouch\nAt the beginning of your end step, Shadowheart, Cleric of War deals 1 damage to each player.\nWhenever you lose life during your turn, Shadowheart deals that much damage to each opponent.",
+        "Shadowheart, Cleric of War",
+        &["Deathtouch".to_string()],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Elf".to_string(), "Cleric".to_string()],
+    );
+    let life_lost = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::LifeLost)
+        .expect("the life-lost trigger must parse");
+    let execute = life_lost.execute.as_ref().expect("execute ability");
+    match &*execute.effect {
+        Effect::DamageEachPlayer {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            player_filter: PlayerFilter::Opponent,
+        } => {}
+        other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert_eq!(
+                count_unimplemented_in_chain(execute),
+                0,
+                "event-fed DamageEachPlayer{{ECA}} must never gate: {execute:?}"
+            );
+        }
+    }
+}
+
+/// SHAPE (P9) — Whirlpool Drake: same PRODUCER shape (a mass move immediately
+/// followed by an `EventContextAmount`-reading consumer chain), but the
+/// consumer is `Draw`, not `DamageEachPlayer`, AND an intervening `Shuffle`
+/// sits between the `ChangeZoneAll` and the `Draw{ECA}` — so `defs.last()` at
+/// the `Draw` clause's build time is the `Shuffle` def, never the
+/// `ChangeZoneAll`. Must stay ungated.
+#[test]
+fn whirlpool_drake_mass_move_fed_draw_chain_stays_ungated() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhen this creature enters, shuffle the cards from your hand into your library, then draw that many cards.\nWhen this creature dies, shuffle the cards from your hand into your library, then draw that many cards.",
+        "Whirlpool Drake",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Drake".to_string()],
+    );
+    let etb = &parsed.triggers[0];
+    let execute = etb.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "head effect must remain the exile-hand ChangeZoneAll, got {:?}",
+        execute.effect
+    );
+    let shuffle = execute
+        .sub_ability
+        .as_ref()
+        .expect("shuffle must remain chained after the mass move");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "expected Shuffle, got {:?}",
+        shuffle.effect
+    );
+    let draw = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("draw must remain chained after the shuffle");
+    match &*draw.effect {
+        Effect::Draw {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            ..
+        } => {}
+        other => panic!("expected Draw(EventContextAmount), got {other:?}"),
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert_eq!(
+                count_unimplemented_in_chain(execute),
+                0,
+                "mass-move-fed Draw chain (behind an intervening Shuffle) must never gate: {execute:?}"
+            );
+        }
+    }
+}
+
+/// SHAPE (P10) — Caldera Breaker: same PRODUCER shape, and the consumer
+/// IMMEDIATELY follows the mass move (no intervening step) and DOES read
+/// `EventContextAmount` — but the consumer is `DealDamage` (an
+/// object-targeted scalar resolve), not `DamageEachPlayer`, so the gate's
+/// consumer-shape match arm cannot fire. Correct today by construction: the
+/// library pool is single-owner (CR 400.3), so max-over-owners equals the
+/// total. Must stay ungated (verified zero-Unimplemented at head).
+#[test]
+fn caldera_breaker_mass_move_fed_deal_damage_stays_ungated() {
+    let parsed = parse_oracle_text(
+        "Trample\nWhen Caldera Breaker enters, exile all Mountain cards from your library. When you do, Caldera Breaker deals that much damage to target creature or planeswalker an opponent controls.\nWhen Caldera Breaker dies, put all cards exiled with it onto the battlefield under their owner's control. Conjure four cards named Volcanic Geyser into your library, then shuffle.",
+        "Caldera Breaker",
+        &["Trample".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Golem".to_string()],
+    );
+    let etb = &parsed.triggers[0];
+    let execute = etb.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "head effect must remain the exile-Mountains ChangeZoneAll, got {:?}",
+        execute.effect
+    );
+    let damage = execute
+        .sub_ability
+        .as_ref()
+        .expect("damage clause must remain chained after the mass move");
+    match &*damage.effect {
+        Effect::DealDamage {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            ..
+        } => {}
+        other => panic!("expected DealDamage(EventContextAmount), got {other:?}"),
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            assert_eq!(
+                count_unimplemented_in_chain(execute),
+                0,
+                "DealDamage (object-recipient) consumer must never gate: {execute:?}"
+            );
+        }
+    }
+}
+
+/// SHAPE (P11) — SYNTHETIC building-block negative (not verbatim Oracle text
+/// of a printed card, unlike P8-P10 and P2): the EXACT same
+/// `ChangeZoneAll` -> `DamageEachPlayer` pairing as Valakut, immediately
+/// chained, but with a FIXED amount ("deals 2 damage") instead of "that
+/// much" — the gate's honesty concern is specific to a per-recipient
+/// consumer reading the per-OWNER table via `EventContextAmount`; a literal
+/// fixed amount never touches that channel. Must stay ungated.
+#[test]
+fn synthetic_fixed_amount_damage_rider_after_mass_move_stays_ungated() {
+    let def = parse_trigger_line(
+        "At the beginning of your end step, exile all cards from your graveyard, then this permanent deals 2 damage to each opponent.",
+        "Synthetic Sweeper",
+    );
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(&*execute.effect, Effect::ChangeZoneAll { .. }),
+        "head effect must remain the exile-graveyard ChangeZoneAll, got {:?}",
+        execute.effect
+    );
+    let damage = execute
+        .sub_ability
+        .as_ref()
+        .expect("damage clause must remain chained after the mass move");
+    match &*damage.effect {
+        Effect::DamageEachPlayer {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player_filter: PlayerFilter::Opponent,
+        } => {}
+        other => panic!("expected DamageEachPlayer(Fixed(2), Opponent), got {other:?}"),
+    }
+    assert_eq!(
+        count_unimplemented_in_chain(execute),
+        0,
+        "a fixed-amount damage rider must never gate: {execute:?}"
+    );
 }
