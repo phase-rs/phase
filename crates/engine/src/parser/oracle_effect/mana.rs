@@ -3061,21 +3061,6 @@ mod tests {
     }
 
     #[test]
-    fn sunken_ruins_pattern_parses_as_combinations() {
-        // CR 605.3b: Shadowmoor/Eventide filter land shape.
-        let options = extract_combinations("Add {U}{U}, {U}{B}, or {B}{B}")
-            .expect("should parse filter-land pattern");
-        assert_eq!(
-            options,
-            vec![
-                vec![ManaColor::Blue, ManaColor::Blue],
-                vec![ManaColor::Blue, ManaColor::Black],
-                vec![ManaColor::Black, ManaColor::Black],
-            ]
-        );
-    }
-
-    #[test]
     fn all_ten_filter_land_color_pairs_parse() {
         // Exhaustively cover the Shadowmoor/Eventide cycle.
         let pairs: &[(&str, ManaColor, ManaColor)] = &[
