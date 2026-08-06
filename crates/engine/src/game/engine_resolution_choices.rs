@@ -567,6 +567,13 @@ fn batch_or_drain_observer_triggers(
     events: &mut Vec<GameEvent>,
     event_slice_start: usize,
     event_slice_end: usize,
+    // CR 603.2c: `true` declares that `events[event_slice_start..event_slice_end]`
+    // is exactly one completed logical zone-change owner's completion slice.
+    // `LogicalZoneChangeGroup::append_delivery_events` retains EVERY `ZoneChanged`
+    // in the slice it is handed, so within such a slice a blanket drop is
+    // equivalent to per-occurrence suppression. A collector whose slice is not
+    // owner-bounded must use
+    // `triggers::filter_already_collected_trigger_events_from` instead.
     zone_changes_are_logically_owned: bool,
 ) -> Option<ResolutionChoiceOutcome> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -611,15 +618,30 @@ fn batch_or_drain_observer_triggers(
 /// continuation drains, park ETB/dies/discards observers for the next priority
 /// checkpoint instead of dispatching them while the test harness (or UI) may
 /// still be inside the same `SelectCards` action (issue #5336).
+///
+/// CR 603.2c: this slice spans the whole continuation drain, so it holds both
+/// the delivery's logical zone-change owner's occurrences (already collected by
+/// `change_zone::resolve` / `zone_pipeline::move_objects_simultaneously_then`)
+/// AND zone changes no owner allocated a group for. It is therefore NOT
+/// owner-bounded and cannot blanket-drop `ZoneChanged` the way
+/// `batch_or_drain_observer_triggers` does; it consults the shared ownership
+/// authority instead. That authority's ledger half applies to every event kind,
+/// matching the generic priority scan. Without it a fetched land's landfall/ETB
+/// observers fire twice.
 fn park_search_observer_triggers(
     state: &mut GameState,
     events: &[GameEvent],
     events_before_drain: usize,
 ) -> ResolutionChoiceOutcome {
-    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-        .iter()
+    let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        events,
+        events_before_drain,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let trigger_events: Vec<GameEvent> = uncollected_events
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
     if !trigger_events.is_empty() {
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);

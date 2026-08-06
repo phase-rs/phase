@@ -8276,6 +8276,107 @@ pub(crate) fn filter_consumed_trigger_events(
     filter_consumed_trigger_events_from(events, 0, consumed)
 }
 
+/// CR 603.2c: Remove from `events[event_start..]` the occurrences a trigger
+/// collector has already taken, so a second collector over the same raw slice
+/// cannot fire the same observers twice.
+///
+/// Two witnesses answer "already collected", and neither is sufficient alone:
+///
+/// 1. `consumed` — occurrences explicitly claimed by
+///    [`mark_logical_zone_events_consumed_before_priority`]. Required wherever an
+///    intervening `drain_deferred_trigger_queue` has already emptied
+///    `deferred_triggers`. Only three owners mark, and their ordinals are NOT
+///    uniformly exact: `effects/mod.rs` passes the whole action buffer (exact);
+///    `zone_pipeline.rs`'s synchronous-completion site passes a sub-slice, so its
+///    ordinals are rebased; and `zone_pipeline.rs`'s batch-drain site passes the
+///    whole buffer only after `drain_pending_batch_deliveries` has moved it out
+///    and re-assembled it, so its ordinals are computed against a re-ordered
+///    buffer. See the warning on [`filter_consumed_trigger_events_from`].
+/// 2. `state.deferred_triggers` — the `ZoneChanged` values carried by contexts
+///    that [`complete_logical_zone_trigger_collection`] and
+///    [`append_and_collect_logical_zone_trigger_segment`] already queued. This is
+///    the only witness for the four owners that deliberately do NOT mark
+///    (`effects/change_zone.rs` x2, `engine_resolution_choices.rs` x2). Do NOT
+///    "fix" that asymmetry by adding `mark_`: claiming an occurrence also hides
+///    it from `check_delayed_triggers` (`engine_priority.rs`), which would
+///    silently kill the CR 603.7b leaves-the-battlefield delayed family (an
+///    ability triggers only the next time its trigger event occurs; hide the
+///    event and it never triggers).
+///
+/// WITNESS 2 IS A BOUND, NOT AN OCCURRENCE COUNT. `deferred_triggers` holds one
+/// context per matching observer, not one entry per occurrence (every zone-change
+/// collection site pushes one `PendingTriggerContext::batched` per matched
+/// `(object_id, trig_idx)`, and for a non-batched trigger `matched.trigger_events`
+/// is the singleton `vec![event.clone()]`, so one context is one witness copy; a
+/// batched trigger carries its whole matched batch, which yields more witnesses,
+/// never fewer), so N observers of ONE occurrence contribute N copies of that
+/// value. Consuming
+/// witnesses one-for-one therefore removes at most `min(queued_copies,
+/// slice_copies)` — never more than the set-membership filter this replaces at
+/// the priority scan, which removed every copy. It is NOT occurrence-exact and
+/// does NOT by itself discharge CR 603.2c's second sentence ("it can trigger
+/// repeatedly if one event contains multiple occurrences"): if a slice holds a
+/// byte-identical `ZoneChanged` that no owner collected alongside one that two
+/// observers saw, both are dropped. At the priority scan that residual is no
+/// larger than the filter this replaces; at the search-delivery park there is no
+/// prior `ZoneChanged` filter at all, so the residual is new there and is bounded
+/// by byte-identical `ZoneChanged` duplicates being unreachable inside one
+/// collector slice. An occurrence-exact witness is NOT available here: the only
+/// exact record is `LogicalZoneChangeGroup::all_origin_occurrences`, and a
+/// completed owner's group is a caller-owned local that is gone before this runs
+/// (`GameState` holds a group only inside the two *paused* frames,
+/// `PendingChangeZoneIteration` and `PendingBatchDeliveries`).
+///
+/// A collector whose slice is provably exactly one owner's completion slice does
+/// NOT need this — a blanket `ZoneChanged` drop is equivalent there, and that is
+/// what `engine_resolution_choices::batch_or_drain_observer_triggers`
+/// (owner-bounded slice + `zone_changes_are_logically_owned`) and the resumed
+/// `ChangeZone` drain in `effects/mod.rs` do. `park_search_observer_triggers`'
+/// slice spans a whole continuation drain and can hold zone changes no owner
+/// allocated a group for, so it must consult this instead.
+///
+/// Three further raw-slice collectors exist. [`park_observer_triggers_if_paused`]
+/// and [`collect_and_drain_observer_triggers_if_settled`] are not on any path that
+/// follows a logical zone-change owner today. The third — `engine_priority`'s
+/// exile-return pass — ALREADY follows one (`check_exile_returns` delivers through
+/// `zone_pipeline::move_objects_simultaneously_then`, which completes and marks),
+/// and it applies the ledger half ONLY, not the queued-context witness. It is safe
+/// today solely because that owner marks; if `zone_pipeline` ever stops marking —
+/// which is the right call for four of the seven owners, per witness 2 above — that
+/// collector is exposed. A future caller that puts any of the three after a
+/// `complete_logical_zone_trigger_collection` must route it through here.
+pub(crate) fn filter_already_collected_trigger_events_from(
+    state: &GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    consumed: &[ConsumedTriggerEventOccurrence],
+) -> Vec<GameEvent> {
+    let mut queued_zone_change_witnesses: Vec<&GameEvent> = state
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .collect();
+    filter_consumed_trigger_events_from(events, event_start, consumed)
+        .into_iter()
+        .filter(|event| {
+            if !matches!(event, GameEvent::ZoneChanged { .. }) {
+                return true;
+            }
+            match queued_zone_change_witnesses
+                .iter()
+                .position(|queued| *queued == event)
+            {
+                Some(index) => {
+                    queued_zone_change_witnesses.remove(index);
+                    false
+                }
+                None => true,
+            }
+        })
+        .collect()
+}
+
 /// CR 603.2c + CR 510.2: Expand a multi-fire `WheneverEvent` `DamageDone`
 /// trigger's aggregate `CombatDamageDealtToPlayer` matches into one synthetic
 /// per-source `DamageDealt` event per matching (source, defending player)

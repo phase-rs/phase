@@ -13535,10 +13535,22 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_trigger_order: Option<PendingTriggerOrder>,
 
-    /// CR 603.3b: PhaseChanged occurrences whose delayed triggers were merged
-    /// into a simultaneous normal-trigger ordering batch before priority. The
-    /// generic delayed-trigger pass filters these exact occurrences so the same
-    /// delayed ability is not dispatched again. Transient engine coordination,
+    /// CR 603.2c: Event occurrences already collected before a player would
+    /// receive priority — including the `PhaseChanged` delayed/normal merge, an
+    /// activation trigger collection (`casting_costs.rs`,
+    /// `engine_priority::stage_pending_activation_trigger_events`), a dispatched
+    /// batch's consumed events, and the `ZoneChanged` occurrences claimed by
+    /// `triggers::mark_logical_zone_events_consumed_before_priority`. Consumed by
+    /// `triggers::filter_consumed_trigger_events{,_from}` and
+    /// `triggers::filter_already_collected_trigger_events_from`, so the same
+    /// occurrence is neither re-collected nor re-dispatched. Ordinals are exact
+    /// only when the marking owner passed the whole, un-reordered action buffer;
+    /// one `zone_pipeline.rs` owner passes a sub-slice (rebased ordinals) and the
+    /// other marks after its buffer has been re-assembled by the batch drain.
+    /// NOTE: this ledger is ALSO the delayed-trigger input filter
+    /// (`engine_priority.rs`) — claiming an occurrence hides it from
+    /// `check_delayed_triggers` too, which is why only three of the seven logical
+    /// zone-change owners mark (CR 603.7b). Transient engine coordination,
     /// cleared at action/pipeline boundaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_before_priority_trigger_events:

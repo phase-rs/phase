@@ -866,6 +866,7 @@ mod scarab_god_regression;
 mod scholarship_sponsor;
 mod screaming_nemesis_combat_damage_multi_trigger;
 mod screaming_nemesis_life_lock;
+mod search_delivery_observer_dedup;
 mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;
 mod selenia_vigilance_grant;
