@@ -111,6 +111,19 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
         contract.contains_action(&state_before, &run[0].action),
         "the controller must submit the exact action from player two's contract"
     );
+    assert_eq!(
+        run[0].action,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Red,
+                ManaType::Green,
+            ]),
+            count: 1,
+        },
+        "the capped domain still maximizes the captured hand and deck color demand"
+    );
     assert!(
         !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
         "applying the choice must advance beyond Cosmic Crucible's mana prompt"

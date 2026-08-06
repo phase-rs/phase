@@ -2400,25 +2400,33 @@ fn resolving_effect_mana_choice(
         }
     };
 
-    preferred
-        .and_then(|preferred| {
-            issued_actions
-                .iter()
-                .find(|issued| {
-                    matches!(issued, GameAction::ChooseManaColor { .. })
-                        && issued.cmp_stable(&preferred).is_eq()
-                })
-                .cloned()
+    let preferred_issued = preferred.and_then(|preferred| {
+        issued_actions
+            .iter()
+            .find(|issued| {
+                matches!(issued, GameAction::ChooseManaColor { .. })
+                    && issued.cmp_stable(&preferred).is_eq()
+            })
+            .cloned()
+    });
+    if preferred_issued.is_some() || !has_mana_demand(hand_demand, deck_demand) {
+        return preferred_issued;
+    }
+
+    // `AnyCombination` is deliberately capped by the engine. A preferred
+    // product beyond that finite domain is not an action the boundary can
+    // accept, so rank only the issued products by the same demand signal.
+    issued_actions
+        .iter()
+        .filter_map(|issued| {
+            issued_mana_rank(issued, hand_demand, deck_demand).map(|rank| (issued, rank))
         })
-        // `AnyCombination` is deliberately capped by the engine. A preferred
-        // product beyond that finite domain is not an action the boundary can
-        // accept, so use the first stable engine-issued response instead.
-        .or_else(|| {
-            issued_actions
-                .iter()
-                .find(|issued| matches!(issued, GameAction::ChooseManaColor { .. }))
-                .cloned()
+        .max_by(|(left, left_rank), (right, right_rank)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| right.cmp_stable(left))
         })
+        .map(|(issued, _)| issued.clone())
 }
 
 /// Preserve the engine-issued option order for a mana ability. Mana production
@@ -2515,6 +2523,24 @@ fn mana_product_rank(
         .map(|(produced, demand)| (*produced).min(demand))
         .sum();
     (hand, deck, std::cmp::Reverse(colors.to_vec()))
+}
+
+/// Score one engine-issued flexible-mana response by the same demand model as
+/// the raw preference. The caller owns the finite action domain (CR 106.3).
+fn issued_mana_rank(
+    action: &GameAction,
+    hand_demand: [u32; 5],
+    deck_demand: [u32; 5],
+) -> Option<(u32, u32, std::cmp::Reverse<Vec<ManaType>>)> {
+    let GameAction::ChooseManaColor { choice, .. } = action else {
+        return None;
+    };
+    Some(match choice {
+        ManaChoice::SingleColor(color) => {
+            mana_product_rank(std::slice::from_ref(color), hand_demand, deck_demand)
+        }
+        ManaChoice::Combination(colors) => mana_product_rank(colors, hand_demand, deck_demand),
+    })
 }
 
 fn mana_type_rank(
@@ -6687,7 +6713,7 @@ mod tests {
     }
 
     fn issued_actions(state: &GameState, owner: PlayerId) -> Vec<GameAction> {
-        AiDecisionContract::issue(state, owner)
+        build_decision_context_for_semantic_owner(state, owner)
             .candidates
             .into_iter()
             .map(|candidate| candidate.action)
@@ -6865,7 +6891,7 @@ mod tests {
     }
 
     #[test]
-    fn resolving_effect_mana_uses_the_first_issued_product_when_the_combination_cap_excludes_its_preference(
+    fn resolving_effect_mana_ranks_issued_products_when_the_combination_cap_excludes_its_preference(
     ) {
         let mut state = resolving_effect_any_combination_state(
             vec![
@@ -6888,10 +6914,15 @@ mod tests {
             generic: 0,
         };
         let issued = issued_actions(&state, P0);
-        let expected = issued
-            .first()
-            .cloned()
-            .expect("the engine must issue a bounded mana-product domain");
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+                ManaType::Green,
+                ManaType::Green,
+            ]),
+            count: 1,
+        };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
         assert_eq!(
@@ -6902,7 +6933,7 @@ mod tests {
         assert_eq!(
             resolving_effect_mana_choice(&state, P0, &issued),
             Some(expected.clone()),
-            "a preference outside the capped domain must fall back to the first stable issued action"
+            "a preference outside the capped domain must select the best issued product"
         );
         assert_eq!(
             deterministic_choice(&state, P0, &config, &issued, None),
@@ -6924,10 +6955,10 @@ mod tests {
         };
         *player = P1;
         let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let expected = issued_actions(&state, P1)
-            .into_iter()
-            .next()
-            .expect("the semantic owner must receive a mana-choice candidate");
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        };
 
         assert_eq!(
             score_candidates(&state, P0, &config),
