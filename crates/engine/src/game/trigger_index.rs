@@ -1189,7 +1189,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
         // synthetic probe event that has nothing to do with the stale object;
         // conflating them would misdirect the first person to hit this.
         debug_assert!(
-            true || stale.is_empty(),
+            stale.is_empty(),
             "TriggerIndex holds off-battlefield candidates (CR 113.6): \
              stale=(object_id, live_zone){stale:?} consulted_for_event={event:?}",
         );
