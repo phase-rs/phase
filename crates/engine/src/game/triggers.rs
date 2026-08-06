@@ -3894,13 +3894,42 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 603.2 over-approximation differential test (debug-only): after the
+        // CR 603.2 under-approximation differential test (debug-only): after the
         // production loop completes, run a SHADOW battlefield scan with the
         // pre-event-snapshot dedup sets. Compare matched `(source_id, trig_idx)`
         // contexts — every match found by the legacy full scan must appear in
         // the index path's match set. Vanilla creatures visited by the legacy
         // scan but invisible to the index by design return zero matches and
         // do not enter the comparison.
+        //
+        // ONE DIRECTION ONLY, deliberately. The inverse (`production - shadow`,
+        // an index match the live-zone scan would not produce) was implemented,
+        // measured, and removed: it produced 78 failures across the suite, none
+        // of them off-battlefield fires (every offender's live zone was
+        // `Battlefield`). Do not reinstate it without addressing both of these.
+        //
+        //   1. CONFIRMED, and by design. `candidates_for_event` injects the
+        //      phase-out source into its output and exempts it from the
+        //      `is_phased_out` retain per the CR 702.26b carve-out, because the
+        //      event is emitted after the status flip. Any shadow keeping
+        //      `battlefield_phased_in_ids` parity necessarily excludes it, so
+        //      every `PermanentPhasedOut` with a matching trigger is a false
+        //      positive that correct behavior guarantees.
+        //   2. UNDIAGNOSED. A second class exists — the observed failures include
+        //      logical-zone collection cases, which #1 does not explain. Ruled
+        //      out by inspection: `LogicalZoneTriggerCollection` is `Copy` over an
+        //      immutable `&LogicalZoneChangeGroup` and `admits_source_visit` is
+        //      pure, so production cannot consume it; the dedup sets key on
+        //      `(obj_id, trig_idx)`, so a shadow visit cannot suppress another
+        //      object; `observe_object_taps` is the sole tap-ledger writer and
+        //      runs once per slice before this loop, so both passes read the same
+        //      count. The cause is genuinely not established.
+        //
+        // #1 alone is disqualifying: a `debug_assert!` cannot have a structural
+        // false-positive floor that correct behavior produces. Detecting an
+        // off-battlefield fire (CR 113.6) is the `TriggerIndex` retain guard's
+        // job — it excludes the case by construction rather than observing it
+        // after the fact.
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {
@@ -3911,8 +3940,10 @@ fn collect_pending_triggers_with_collection(
                 // — `trigger_source_ids_for_zone` and `TriggerIndex::rebuild_from_battlefield`
                 // share `state.battlefield` as their sole authority
                 // (`GameState::battlefield_phased_in_ids` never reads `obj.zone`), so a shadow
-                // drawn from it cannot expose a `state.battlefield` / `obj.zone` divergence in
-                // EITHER direction. Mirrors the inline-mana differential's population in
+                // drawn from it lands the same desynced object in BOTH match sets, where it
+                // cancels. Drawing from the live zone is what lets an object present in
+                // `obj.zone` but absent from `state.battlefield` surface as a `dropped` row.
+                // Mirrors the inline-mana differential's population in
                 // `resolve_tap_mana_triggers_inline`.
                 // CR 702.26b parity with `battlefield_phased_in_ids` is kept via `is_phased_in`
                 // so phased-out permanents do not become spurious `shadow - production` rows.
@@ -3950,26 +3981,21 @@ fn collect_pending_triggers_with_collection(
                     .difference(&production_matched)
                     .copied()
                     .collect();
-                let phantom: Vec<(ObjectId, usize)> = production_matched
-                    .difference(&shadow_matched)
-                    .copied()
-                    .collect();
-                let phantom_zones: Vec<(ObjectId, usize, Option<Zone>)> = phantom
+                let dropped_zones: Vec<(ObjectId, usize, Option<Zone>)> = dropped
                     .iter()
                     .map(|(id, idx)| (*id, *idx, state.objects.get(id).map(|o| o.zone)))
                     .collect();
                 debug_assert!(
-                    dropped.is_empty() && phantom.is_empty(),
-                    // CR 603.2 over-approximation is correctness-preserving only for CANDIDATE
-                    // VISITS, never for MATCHES. `dropped` = silent trigger drop (index missed a
-                    // real trigger) OR an object whose live zone is Battlefield while it is
-                    // absent from `state.battlefield` (the inverse desync). `phantom` = the index
-                    // produced a match the live-zone battlefield scan would not — a source fired
-                    // from off the battlefield, violating CR 113.6.
-                    "TriggerIndex match-set divergence: event={event:?} \
-                     dropped(under-approximation, CR 603.2 silent drop)={dropped:?} \
-                     phantom(over-approximation, CR 113.6 off-battlefield fire; \
-                     (object_id, trig_idx, live_zone))={phantom_zones:?} \
+                    dropped.is_empty(),
+                    // CR 603.2 over-approximation is correctness-preserving for CANDIDATE
+                    // VISITS, so a candidate the index offers and the shadow does not is not
+                    // asserted on. `dropped` is the load-bearing direction: the index missed a
+                    // real trigger (silent drop), or the source's live zone is Battlefield
+                    // while it is absent from `state.battlefield`. The live zone travels in
+                    // the payload so the second case is diagnosable without a debugger.
+                    "TriggerIndex under-approximation (CR 603.2 silent trigger drop): \
+                     event={event:?} \
+                     dropped(object_id, trig_idx, live_zone)={dropped_zones:?} \
                      candidates_visited={candidates:?}",
                 );
             }
