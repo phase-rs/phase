@@ -14417,47 +14417,6 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// Board-wide graveyard replacements keep their external typed filter.
-    #[test]
-    fn graveyard_exile_card_subject_stays_external_nontoken() {
-        use crate::types::ability::{FilterProp, TypedFilter};
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Leyline of the Void",
-        )
-        .expect("Leyline-style exile must parse");
-        assert_eq!(
-            def.valid_card,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NonToken])
-            ))
-        );
-    }
-
-    /// Regression: exile-branch must remain fully backward-compatible after the
-    /// dispatcher refactor. Rest in Peace / Leyline-style wording.
-    #[test]
-    fn replacement_graveyard_exile_branch_still_parses() {
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Rest in Peace",
-        )
-        .expect("exile branch must parse");
-        let execute = def.execute.as_ref().unwrap();
-        assert!(matches!(
-            *execute.effect,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ));
-        assert!(
-            execute.sub_ability.is_none(),
-            "exile branch has no post-redirect sub_ability"
-        );
-    }
-
     #[test]
     fn shock_land_watery_grave() {
         let def = parse_replacement_line(
@@ -16409,21 +16368,31 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        match &def.valid_card {
-            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
-                assert!(
-                    properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 730.3e)"
-                );
-                assert!(
-                    !properties.contains(&FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    }),
-                    "any-graveyard scope must not add an owner constraint"
-                );
+        // Exact equality: the "a card" subject must exclude tokens (CR 730.3e) and the
+        // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
+        // no `Owned { Opponent }` and no other property.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::NonToken])
+            ))
+        );
+        // Regression: the exile branch stays backward-compatible after the dispatcher
+        // refactor — Rest in Peace / Leyline-style wording redirects to exile with no
+        // post-redirect sub-ability.
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
             }
-            other => panic!("Expected Typed filter with NonToken, got {other:?}"),
-        }
+        ));
+        assert!(
+            execute.sub_ability.is_none(),
+            "exile branch has no post-redirect sub_ability"
+        );
     }
 
     #[test]
@@ -17871,10 +17840,22 @@ mod tests {
                 match target {
                     TargetFilter::Typed(tf) => {
                         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                        // Clone's filter must not gain a spurious InZone { Battlefield } —
+                        // the engine-side `find_copy_targets` defaults to the battlefield
+                        // when the filter has no InZone property. Preserving the empty
+                        // properties list keeps the filter shape identical to pre-change
+                        // Clone behaviour.
+                        assert!(
+                            tf.properties.is_empty(),
+                            "Clone's filter must not carry InZone; got {:?}",
+                            tf.properties
+                        );
                     }
                     other => panic!("Expected Typed creature filter, got {other:?}"),
                 }
             }
+            // A non-tapped clone (Phantasmal Image class) must keep `BecomeCopy` as the
+            // top-level effect — it must NOT compose through Tap.
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
     }
@@ -18212,22 +18193,6 @@ mod tests {
     }
 
     #[test]
-    fn clone_without_tapped_still_direct_become_copy() {
-        // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        assert!(
-            matches!(&*execute.effect, Effect::BecomeCopy { .. }),
-            "non-tapped clone must have BecomeCopy as top-level, got {:?}",
-            execute.effect
-        );
-    }
-
-    #[test]
     fn clone_uses_self_ref_normalization() {
         // "this creature" should be normalized to "~" by replace_self_refs
         let def = parse_replacement_line(
@@ -18344,10 +18309,15 @@ mod tests {
             Effect::BecomeCopy {
                 mana_value_limit,
                 additional_modifications,
+                duration,
                 ..
             } => {
                 assert_eq!(*mana_value_limit, None);
                 assert!(additional_modifications.is_empty());
+                // Regression: the Phantasmal Image class uses "enter as a copy of" and
+                // must continue producing a permanent copy after the verb split was
+                // generalised to also accept "become a copy of".
+                assert_eq!(*duration, None, "Clone must produce a permanent copy");
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
@@ -18453,25 +18423,6 @@ mod tests {
                     }),
                     "expected AddKeyword(Haste), got {additional_modifications:?}"
                 );
-            }
-            other => panic!("Expected BecomeCopy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn phantasmal_image_clone_has_no_duration() {
-        // Regression: the Phantasmal Image class uses "enter as a copy of" and
-        // must continue producing a permanent copy (duration: None) after the
-        // verb split was generalised to also accept "become a copy of".
-        let def = parse_replacement_line(
-            "You may have this creature enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        match &*execute.effect {
-            Effect::BecomeCopy { duration, .. } => {
-                assert_eq!(*duration, None, "Clone must produce a permanent copy");
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
@@ -19559,33 +19510,6 @@ mod tests {
                 assert_eq!(*target, TargetFilter::ParentTarget);
             }
             other => panic!("expected ChangeZone(Exile), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn zone_qualifier_defaults_to_battlefield_for_classic_clones() {
-        // Clone's filter must not gain a spurious InZone { Battlefield } — the
-        // engine-side `find_copy_targets` defaults to the battlefield when the
-        // filter has no InZone property. Preserving the empty properties list
-        // keeps the filter shape identical to pre-change Clone behaviour.
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
-            panic!("expected BecomeCopy");
-        };
-        match target {
-            TargetFilter::Typed(tf) => {
-                assert!(
-                    tf.properties.is_empty(),
-                    "Clone's filter must not carry InZone; got {:?}",
-                    tf.properties
-                );
-            }
-            other => panic!("expected Typed filter, got {other:?}"),
         }
     }
 
