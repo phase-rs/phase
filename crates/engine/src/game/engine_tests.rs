@@ -3966,9 +3966,14 @@ fn integration_full_turn_cycle() {
         }
     ));
 
-    // Pass priority from player 1 (both passed, stack empty -> advance)
+    // Pass priority from player 1 (both passed, stack empty -> BeginCombat).
     let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // Should skip combat phases and land at PostCombatMain
+    assert_eq!(state.phase, Phase::BeginCombat);
+
+    // Beginning of combat has its own priority window. With no attackers, the
+    // subsequent forced empty declaration skips only blockers and damage.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
     // Pass through post-combat main
@@ -5915,7 +5920,12 @@ fn full_turn_integration_with_mulligan() {
     // Pass priority through the rest of the turn
     // PreCombatMain: P0 passes
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // PreCombatMain: P1 passes -> advances to PostCombatMain
+    // PreCombatMain: P1 passes -> BeginCombat priority.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::BeginCombat);
+    // BeginCombat: both pass. No attackers are declared, so only Declare
+    // Blockers and Combat Damage are skipped before PostCombatMain.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
