@@ -1479,8 +1479,8 @@ impl GameRunner {
         self.advance_to_phase(Phase::Upkeep);
     }
 
-    /// Declare attackers (CR 508.1). Must be called when the engine is at
-    /// `WaitingFor::DeclareAttackers` (use [`GameRunner::advance_to_combat`]).
+    /// Declare attackers (CR 508.1). Accepts the scenario driver's established
+    /// shorthand for passing an empty beginning-of-combat priority window.
     /// Each entry is `(attacker, defender)` where `defender` is an
     /// [`AttackTarget`](crate::game::combat::AttackTarget) — a player,
     /// planeswalker, or battle (CR 508.1b).
@@ -1488,13 +1488,10 @@ impl GameRunner {
         &mut self,
         attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
     ) -> Result<ActionResult, EngineError> {
-        apply_as_current(
-            &mut self.state,
-            GameAction::DeclareAttackers {
-                attacks: attacks.to_vec(),
-                bands: vec![],
-            },
-        )
+        self.act(GameAction::DeclareAttackers {
+            attacks: attacks.to_vec(),
+            bands: vec![],
+        })
     }
 
     /// CR 702.103b: put `attachment` onto `host` in its BESTOWED AURA FORM —

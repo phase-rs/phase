@@ -334,23 +334,21 @@ fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
             .card_types
             .core_types
             .push(CoreType::Creature);
-        state
-            .objects
-            .get_mut(&source_id)
-            .unwrap()
-            .trigger_definitions
-            .push(
-                TriggerDefinition::new(TriggerMode::Phase)
-                    .phase(Phase::BeginCombat)
-                    .execute(AbilityDefinition::new(
-                        AbilityKind::Activated,
-                        Effect::GainLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                            player: TargetFilter::Controller,
-                        },
-                    ))
-                    .trigger_zones(vec![Zone::Battlefield]),
-            );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.power = Some(1);
+        source.toughness = Some(1);
+        source.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .phase(Phase::BeginCombat)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .trigger_zones(vec![Zone::Battlefield]),
+        );
     }
 
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();

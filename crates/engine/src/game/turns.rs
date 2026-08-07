@@ -3031,6 +3031,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::phase::{PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
     use std::sync::Arc;
@@ -7465,6 +7466,13 @@ mod tests {
     fn empty_combat_reaches_post_combat_main_after_priority_and_declaration() {
         let mut state = setup();
         state.phase = Phase::BeginCombat;
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::DeclareAttackers,
+                scope: PhaseStopScope::OwnTurn,
+            }],
+        );
 
         let mut events = Vec::new();
         let waiting = auto_advance(&mut state, &mut events);
