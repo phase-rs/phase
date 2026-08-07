@@ -8396,13 +8396,124 @@ pub(crate) fn filter_consumed_trigger_events(
 /// byte-identical `ZoneChanged` that no owner collected alongside one that two
 /// observers saw, both are dropped. At the priority scan that residual is no
 /// larger than the filter this replaces; at the search-delivery park there is no
-/// prior `ZoneChanged` filter at all, so the residual is new there and is bounded
-/// by byte-identical `ZoneChanged` duplicates being unreachable inside one
-/// collector slice. An occurrence-exact witness is NOT available here: the only
-/// exact record is `LogicalZoneChangeGroup::all_origin_occurrences`, and a
+/// prior `ZoneChanged` filter at all, so the residual is new there — and for
+/// DISTINCT occurrences within one turn it is EMPTY, which is proved under
+/// "OCCURRENCE EXACTNESS" below rather than assumed. An occurrence-exact witness
+/// is NOT available here: the only exact record is
+/// `LogicalZoneChangeGroup::all_origin_occurrences`, and a
 /// completed owner's group is a caller-owned local that is gone before this runs
 /// (`GameState` holds a group only inside the two *paused* frames,
 /// `PendingChangeZoneIteration` and `PendingBatchDeliveries`).
+///
+/// OCCURRENCE EXACTNESS — PROVED WITHIN ONE TURN, WITH ITS BASIS AND ITS BOUNDS.
+/// CR 400.7 + CR 603.2c. Two byte-identical `ZoneChanged` in one slice denote
+/// ONE occurrence emitted twice — precisely what this filter should drop — and
+/// two DISTINCT occurrences are never byte-identical, because
+/// `ZoneChangeRecord::turn_zone_change_index` participates in `GameEvent`
+/// equality and is unique per occurrence within a turn. All FOUR production
+/// sites that construct a `ZoneChanged` into an event buffer ship the index
+/// `restrictions::record_zone_change` assigned: `move_to_zone`'s tail,
+/// `record_and_emit_entry_from_no_zone`, the library-insert path
+/// `move_to_library_at_index`, and `merge.rs`'s CR 730.3c component split. That
+/// recorder is the SOLE grower of `state.zone_changes_this_turn` (it reads
+/// `len()`, stamps, then pushes) and the ledger never shrinks mid-turn, so two
+/// distinct occurrences in one turn carry distinct indices and the `position()`
+/// match below cannot cross-consume them.
+///
+/// THE BASIS IS THE INDEX. The other three separators are FAMILY-DEPENDENT and
+/// must not be read as an unconditional conjunction:
+///   * `turn_zone_change_index` — the basis; live for EVERY family.
+///   * `GameEvent::ZoneChanged::object_id` — a TOP-LEVEL field, sibling to
+///     `record`, so it separates distinct objects independently of record
+///     equality. Dead when ONE object repeats a transition.
+///   * `ZoneChangeRecord::entered_incarnation` — separates battlefield
+///     re-entries of one object. `None`, and therefore inert, for every
+///     non-battlefield destination.
+///   * `trigger_source_context.identity.reference.incarnation` — separates two
+///     snapshots of one object taken at different incarnations. Inert on any
+///     path that does not bump the incarnation.
+///
+/// EXCEPTION — THE WITHIN-ZONE REPOSITION FAMILY. For `move_to_library_at_index`
+/// with `from == Zone::Library` (the CR 400.7 zero-bump branch at
+/// `zones.rs:1809-1812`, emit at `zones.rs:1829`; CR 701.20b — revealing a card
+/// does not move it) all THREE additional separators are dead at once and
+/// `turn_zone_change_index` is the SOLE discriminator. Those events are
+/// reachable as witnesses here — library-destination `ChangesZoneAll` observers
+/// exist in the card pool and `zone_change_clause_matches`
+/// (`trigger_matchers.rs:1091-1130`) has no same-zone guard — AND inside a
+/// `park_search_observer_triggers` slice, via the tutor-to-top class
+/// (`SearchLibrary` -> `Shuffle` -> `PutAtLibraryPosition{Top}`).
+///
+/// SCOPE: LIVE PLAY. Four residuals remain open, are filed as issues, and are
+/// NOT closed by this filter:
+///   * R1 — the index is PER-TURN. `zone_changes_this_turn` is cleared at
+///     `turns.rs:1253`, while `start_next_turn` does NOT clear
+///     `state.deferred_triggers`, so a witness that survives a turn boundary
+///     could in principle alias a reset index. The queue is bounded only by
+///     drain-at-priority (`drain_deferred_trigger_queue_unchecked`), by the
+///     CR 724 end-the-turn / end-the-combat-phase EFFECTS, and by elimination
+///     — NOT by the turn boundary.
+///     For the within-zone reposition family the two incarnation
+///     fields add NO cross-turn protection, because they were never advanced.
+///   * R2 — deserialized states bypass the recorder.
+///     `PersistedGameState::into_game_state` (`types/game_state.rs:9024`)
+///     reconstructs `ZoneChanged` straight into live buffers with
+///     `#[serde(default)]` indices, so a restored state can carry index `0` on
+///     distinct occurrences. Pre-existing and out of scope here.
+///   * R3 — `zone_change_clause_matches` (`trigger_matchers.rs:1091-1130`) has
+///     no same-zone guard, so a library-destination `ChangesZoneAll` observer
+///     fires on a within-library reposition, which CR 400.7 / CR 701.20b say is
+///     not a zone change. The record is ALSO written to the ledger
+///     unconditionally (`zones.rs:1818-1819`), so
+///     `QuantityRef::ZoneChangeCountThisTurn` / `ZoneChangeAggregateThisTurn`
+///     (`game/quantity.rs:4125-4165`) over-count and the ledger-subscript
+///     consumers (`types/ability.rs:23726`, `:23841`) see phantom rows. Gating
+///     the matcher alone would NOT fix those.
+///   * R4 — the `EffectZoneChoice` `SelectCards` arm
+///     (`engine_resolution_choices.rs:4493-4540`) validates length, membership
+///     and current zone but NOT uniqueness, unlike its FIVE sibling arms:
+///     `engine_resolution_choices.rs:833` (keep-on-top), `:864` (dig), `:2891`
+///     (pile A), `:6409` (`EachPlayerCopyChosen`), and `mulligan.rs:561`
+///     (bottom selection), the last of which answers the SAME
+///     `GameAction::SelectCards` variant. A duplicate id therefore reaches
+///     `move_library_origin_cards_in_selection_order`
+///     (`engine_resolution_choices.rs:6941`) and repositions one object twice
+///     inside one loop. That is a boundary-validation gap, not a filter defect.
+///
+/// CARVE-OUT: `game/stack.rs:3608` builds a production `ZoneChanged` carrying
+/// index `0`, but it is a local probe passed only to
+/// `trigger_index::candidates_for_event` — it never enters a `Vec<GameEvent>`,
+/// never reaches `state.deferred_triggers`, and is therefore outside the scope
+/// of the invariant above by construction.
+///
+/// PINNED BY THREE TESTS, none of which covers the whole:
+///   * `occurrence_exact_witness_consumes_the_occurrence_its_witness_names`
+///     (`triggers_dedup_regression_tests.rs`) pins the EQUALITY link at this
+///     authority, using `ZoneChangeRecord::test_minimal` records in which the
+///     other three separators are `None`. A PRODUCTION fixture for this link is
+///     CONSTRUCTIBLE but deliberately NOT built: the only known route depends on
+///     the R4 validation gap, and when R4 is fixed the action would be REJECTED,
+///     so such a row would fail to construct and go RED — coupling it to a
+///     validation gap rather than to the invariant.
+///   * `within_library_repositions_are_separated_only_by_the_occurrence_index`
+///     (`game/zones.rs`) pins the exception family at the library-insert emit
+///     site with the real mover: zero bump, `entered_incarnation` `None` on
+///     both, identical `trigger_source_context`, consecutive indices.
+///   * `parked_delivery_records_carry_distinct_occurrence_indices`
+///     (`tests/integration/search_delivery_observer_dedup.rs`) pins the
+///     allocator->event fidelity link in production on ONE emit path only
+///     (`zone_pipeline` -> `move_to_zone` ordinary arm -> `zones.rs:1362`). It
+///     is a sentinel, not a census over the four emit sites.
+///
+/// KNOWN UNCLOSED GUARD GAP, deliberately out of scope here:
+/// `apply_resolved_zone_change` compares the recorder's return value against
+/// `command.turn_zone_change_index` — a SIBLING FIELD of the command — at
+/// `zones.rs:946-953`, and never against
+/// `command.zone_change_record.turn_zone_change_index`, which is the copy that
+/// actually becomes the event (`zones.rs:1199` -> `:1362`). So the emitted
+/// event's index has NO production guard on any path. Extending that comparison
+/// is the class-wide fix and would cover every path through
+/// `resolve_and_apply_zone_change` at once.
 ///
 /// A collector whose slice is provably exactly one owner's completion slice does
 /// NOT need this — a blanket `ZoneChanged` drop is equivalent there, and that is

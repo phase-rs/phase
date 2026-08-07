@@ -23,7 +23,16 @@
 //! occurrences." Row `two_land_search_delivery_fires_landfall_twice` pins the
 //! second sentence so the fix is not over-applied into a blanket suppression.
 //!
-//! HARNESS NOTE — every park-path row here passes priority before asserting.
+//! HARNESS NOTE — every park-path row that asserts what the parked observers
+//! DID passes priority first (H1, H2, H5, H6, N1, N2). Two park-path rows
+//! deliberately assert PRE-drain and must NOT pass, because a pass runs the
+//! drain, empties the queue and makes the assertion vacuous: N5
+//! (`parked_delivery_records_carry_distinct_occurrence_indices`) asserts on the
+//! parked queue's CONTENTS, behind the `assert_observers_were_parked`
+//! reach-guard; and N4 (`fetch_with_no_legal_target_parks_nothing`) asserts the
+//! queue is EMPTY on a fail-to-find, which is also what licenses its no-firing
+//! assertion without a pass. H3, H4 and N3 are NOT park paths; they reach the
+//! stack in-action or through `advance_until_stack_empty`.
 //! `park_search_observer_triggers` deliberately defers its observers to the NEXT
 //! priority checkpoint (issue #5336): the parked action returns
 //! `ResolutionChoiceOutcome::WaitingForWithParkedObservers`, which sets
@@ -634,4 +643,153 @@ fn fetch_with_no_legal_target_parks_nothing() {
         (3, 3),
         "no land entered, so landfall must not fire"
     );
+}
+
+// ---------------------------------------------------------------------------
+// N5 — CR 400.7 + CR 603.2c: the two occurrences parked by ONE search delivery
+//      carry DISTINCT `turn_zone_change_index` values, each agreeing with the
+//      ledger row `restrictions::record_zone_change` wrote for it.
+//
+//      SCOPE — this row is a SENTINEL ON ONE EMIT PATH, NOT A CENSUS.
+//      Its Harrow fixture traverses:
+//        change_zone::resolve -> execute_zone_move_with_applied_terminal
+//        -> deliver_replaced_zone_change -> zones::move_to_zone (ordinary arm)
+//        -> resolve_and_apply_zone_change (zones.rs:826)
+//        -> zones.rs:1199 -> emit at zones.rs:1362.
+//      A regression at the other three production emit sites — zones.rs:1430
+//      (`from: None` entries), zones.rs:1829 (library insert; covered instead by
+//      `within_library_repositions_are_separated_only_by_the_occurrence_index`
+//      in game/zones.rs), or merge.rs:689 (CR 730.3c split) — is NEVER EXECUTED
+//      by this fixture and will NOT turn it red.
+//
+//      WHY IT IS NONETHELESS LOAD-BEARING: the `TurnRecordIndexMismatch` guard
+//      at zones.rs:946-953 validates the COMMAND's `turn_zone_change_index`
+//      field against the allocator, never the RECORD's copy — and the record's
+//      copy is what becomes the event (zones.rs:1199 -> :1362). So the emitted
+//      index has no production guard on any path.
+//      `GameObject::snapshot_for_zone_change` seeds `turn_zone_change_index: 0`
+//      (game_object.rs:1983), so "an emit site forgot to stamp it" is the
+//      natural failure mode this row detects, not a contrived one.
+//
+//      It deliberately does NOT pin the equality link: raw field reads bypass
+//      `PartialEq`. That link is pinned at the authority layer by
+//      `occurrence_exact_witness_consumes_the_occurrence_its_witness_names`.
+//
+//      NO PRIORITY PASS — DELIBERATE, AND THE EXCEPTION THE HARNESS NOTE ABOVE
+//      NAMES. This row asserts on the PRE-DRAIN parked queue, not on a
+//      post-drain effect, so `assert_observers_were_parked` (which requires a
+//      NON-EMPTY `deferred_triggers`) is its positive reach-guard. Passing
+//      priority first would run the drain, empty the queue, and make every
+//      assertion below vacuous — the exact opposite of what the harness note
+//      protects against for post-drain rows. `fetch_with_no_legal_target_parks_nothing`
+//      already asserts on `deferred_triggers` the same way.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parked_delivery_records_carry_distinct_occurrence_indices() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Kazandu Mammoth", Zone::Battlefield, db);
+    // Harrow is an Instant with "sacrifice a land" as an additional cost.
+    let harrow = scenario.add_real_card(P0, "Harrow", Zone::Hand, db);
+    let spare = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Library, db);
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_mana(&mut runner, 1, 0, 2);
+
+    runner
+        .cast(harrow)
+        .sacrifice_with(&[spare])
+        .search_first_legal()
+        .resolve();
+
+    // Reach-guards: the delivery really happened, and the observers really are
+    // sitting in the PRE-drain parked queue.
+    assert_eq!(
+        runner.state().objects[&forest].zone,
+        Zone::Battlefield,
+        "both basics must have been delivered"
+    );
+    assert_eq!(
+        runner.state().objects[&island].zone,
+        Zone::Battlefield,
+        "both basics must have been delivered"
+    );
+    assert_observers_were_parked(&runner);
+
+    // Every `ZoneChanged` the parked contexts carry, paired with the occurrence
+    // index its record was stamped with. `GameEvent` is spelled out rather than
+    // imported so this row adds no import to the module.
+    let parked: Vec<(ObjectId, usize)> = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::ZoneChanged {
+                object_id, record, ..
+            } => Some((*object_id, record.turn_zone_change_index)),
+            _ => None,
+        })
+        .collect();
+
+    let indices_for = |land: ObjectId| -> Vec<usize> {
+        parked
+            .iter()
+            .filter(|(id, _)| *id == land)
+            .map(|(_, index)| *index)
+            .collect()
+    };
+    let forest_indices = indices_for(forest);
+    let island_indices = indices_for(island);
+
+    // Third reach-guard: a record was located for EACH land, so the assertions
+    // below cannot pass vacuously on an empty iterator.
+    assert!(
+        !forest_indices.is_empty(),
+        "the parked queue must carry a ZoneChanged for the delivered Forest"
+    );
+    assert!(
+        !island_indices.is_empty(),
+        "the parked queue must carry a ZoneChanged for the delivered Island"
+    );
+    assert!(
+        forest_indices
+            .iter()
+            .all(|index| *index == forest_indices[0])
+            && island_indices
+                .iter()
+                .all(|index| *index == island_indices[0]),
+        "N observers of ONE occurrence contribute N copies of the SAME value, so \
+         every copy for one object must carry the same occurrence index"
+    );
+
+    // CR 603.2c sentence 2: two lands entering is TWO occurrences, and
+    // `restrictions::record_zone_change` allocates a distinct index for each.
+    assert_ne!(
+        forest_indices[0], island_indices[0],
+        "CR 400.7 + CR 603.2c: two distinct occurrences in ONE park slice must \
+         carry DISTINCT turn_zone_change_index values, or the queued-context \
+         witness could cross-consume them"
+    );
+
+    // Each emitted event's index must agree with the ledger row the allocator
+    // wrote for it — the two-storage contract. An emit site that ships the `0`
+    // placeholder instead of the allocator's value breaks this.
+    for (land, index) in [(forest, forest_indices[0]), (island, island_indices[0])] {
+        let record = runner
+            .state()
+            .zone_changes_this_turn
+            .get(index)
+            .unwrap_or_else(|| panic!("the emitted index {index} must address a real ledger row"));
+        assert_eq!(
+            record.object_id, land,
+            "the index carried by the emitted event must address THAT object's \
+             own ledger row (zone_changes_this_turn[{index}])"
+        );
+    }
 }
