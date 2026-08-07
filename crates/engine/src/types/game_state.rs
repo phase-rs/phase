@@ -7607,6 +7607,41 @@ fn decode_persisted_resolution_state(value: serde_json::Value) -> Result<GameSta
     GameStateDecode::decode_persisted_resolution_state(value, GameStateDecodeMode::PersistedRaw)
 }
 
+fn migrate_legacy_batched_zone_change_trigger_fired(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let state = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    let turn_number = state
+        .get("turn_number")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|turn| u32::try_from(turn).ok())
+        .ok_or_else(|| "persisted game state has an invalid turn_number".to_string())?;
+    let Some(entries) = state.get_mut("batched_zone_change_trigger_fired") else {
+        return Ok(());
+    };
+    let entries = entries
+        .as_array_mut()
+        .ok_or_else(|| "batched_zone_change_trigger_fired must be an array".to_string())?;
+    for entry in entries {
+        let tuple = entry.as_array_mut().ok_or_else(|| {
+            "batched_zone_change_trigger_fired entries must be tuple arrays".to_string()
+        })?;
+        match tuple.len() {
+            2 => tuple.insert(1, serde_json::Value::from(turn_number)),
+            3 => {}
+            _ => {
+                return Err(
+                    "batched_zone_change_trigger_fired entries must have two or three fields"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn delayed_install_origins(state: &GameState) -> impl Iterator<Item = DelayedTriggerOrigin> + '_ {
     state
         .resolved_rules_journal
@@ -15242,6 +15277,7 @@ impl GameStateDecode {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
         }
+        migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
@@ -21748,6 +21784,46 @@ mod tests {
                 base_set: TriggerBaseSetInstanceRef::INITIAL,
                 printed_index,
             },
+        }
+    }
+
+    #[test]
+    fn persisted_batched_zone_change_pairs_migrate_in_raw_and_trusted_envelopes() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let definition_ref = printed_trigger_ref(0);
+        state.batched_zone_change_trigger_fired.insert((
+            definition_ref.clone(),
+            state.turn_number,
+            3,
+        ));
+
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+
+        for mut persisted in [raw, trusted] {
+            let state = if persisted.get("state").is_some() {
+                persisted
+                    .get_mut("state")
+                    .expect("trusted envelope contains state")
+            } else {
+                &mut persisted
+            };
+            state["batched_zone_change_trigger_fired"][0]
+                .as_array_mut()
+                .expect("marker serializes as a tuple array")
+                .remove(1);
+
+            let restored = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect("legacy pair marker migrates at the persistence boundary")
+                .into_game_state();
+            assert!(restored.batched_zone_change_trigger_fired.contains(&(
+                definition_ref.clone(),
+                19,
+                3
+            )));
         }
     }
 

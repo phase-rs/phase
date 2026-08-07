@@ -3713,17 +3713,12 @@ fn zone_change_count(events: &[GameEvent]) -> usize {
         .count()
 }
 
-fn zone_change_event_at_turn(
-    object_id: ObjectId,
-    recorded_turn_number: u32,
-    turn_zone_change_index: usize,
-) -> GameEvent {
+fn recorded_zone_change_event(state: &mut GameState, object_id: ObjectId) -> GameEvent {
     let mut event = zone_change_event(object_id);
     let GameEvent::ZoneChanged { record, .. } = &mut event else {
         unreachable!("zone_change_event always returns ZoneChanged");
     };
-    record.recorded_turn_number = recorded_turn_number;
-    record.turn_zone_change_index = turn_zone_change_index;
+    crate::game::restrictions::record_zone_change(state, record);
     event
 }
 
@@ -3731,7 +3726,7 @@ fn zone_change_event_at_turn(
 fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
     let mut state = setup();
     let old_turn = state.turn_number;
-    let old_event = zone_change_event_at_turn(ObjectId(7), old_turn, 0);
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
     state
         .deferred_triggers
         .push(queued_context_for(old_event.clone()));
@@ -3743,7 +3738,11 @@ fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
     );
 
     crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
-    let new_event = zone_change_event_at_turn(ObjectId(7), state.turn_number, 0);
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
     assert_eq!(
         filter_already_collected_trigger_events_from(&state, &[new_event.clone()], 0, &[]),
         vec![new_event],
@@ -3763,9 +3762,9 @@ fn batched_zone_change_replay_guard_tracks_all_three_record_keys() {
         (definition, definition_ref)
     };
     let events = vec![
-        zone_change_event_at_turn(ObjectId(7), state.turn_number, 0),
-        zone_change_event_at_turn(ObjectId(8), state.turn_number, 1),
-        zone_change_event_at_turn(ObjectId(9), state.turn_number, 2),
+        recorded_zone_change_event(&mut state, ObjectId(7)),
+        recorded_zone_change_event(&mut state, ObjectId(8)),
+        recorded_zone_change_event(&mut state, ObjectId(9)),
     ];
 
     assert!(batched_zone_change_replay_guard_applies(
