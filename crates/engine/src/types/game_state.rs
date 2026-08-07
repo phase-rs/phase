@@ -7642,6 +7642,260 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
     Ok(())
 }
 
+/// CR 400.7 + CR 603.2c: a persisted `ZoneChanged` must retain the identity of
+/// the ledger occurrence that produced it. The live allocator writes the
+/// current turn and the ledger position together, but historical payloads may
+/// omit either field and deserialize them as zero.
+///
+/// This runs on serialized state before `ResolutionStateWire` materializes it,
+/// because Raw and Trusted persistence are both fallible at that boundary.
+/// Rebinding an event after deserialization would be too late: `into_game_state`
+/// is infallible and callers could already observe an ambiguous trigger event.
+fn reconcile_persisted_zone_change_occurrences(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    let state = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    let turn_number = persisted_turn_number(state)?;
+    let ledger = state
+        .entry("zone_changes_this_turn".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "zone_changes_this_turn must be an array".to_string())?;
+
+    let mut occurrences = Vec::with_capacity(ledger.len());
+    for (index, record) in ledger.iter_mut().enumerate() {
+        let record = record
+            .as_object_mut()
+            .ok_or_else(|| "zone_changes_this_turn entries must be objects".to_string())?;
+        match record.get("recorded_turn_number") {
+            Some(recorded_turn)
+                if json_u32(recorded_turn).is_some_and(|turn| turn == turn_number) => {}
+            Some(_) => {
+                return Err(
+                    "zone_changes_this_turn contains a record from another turn".to_string()
+                );
+            }
+            None => {
+                record.insert(
+                    "recorded_turn_number".to_string(),
+                    serde_json::Value::from(turn_number),
+                );
+            }
+        }
+        record.insert(
+            "turn_zone_change_index".to_string(),
+            serde_json::Value::from(index),
+        );
+        occurrences.push(PersistedZoneChangeOccurrence {
+            index,
+            fingerprint: zone_change_fingerprint(record)?,
+        });
+    }
+
+    let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
+    visit_persisted_zone_changed_records(value, &mut |record| {
+        reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
+    })?;
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PersistedZoneChangeOccurrence {
+    index: usize,
+    fingerprint: serde_json::Value,
+}
+
+fn persisted_turn_number(
+    state: &serde_json::Map<String, serde_json::Value>,
+) -> Result<u32, String> {
+    state
+        .get("turn_number")
+        .and_then(json_u32)
+        .ok_or_else(|| "persisted game state has an invalid turn_number".to_string())
+}
+
+fn json_u32(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+fn json_usize(value: &serde_json::Value) -> Option<usize> {
+    value.as_u64().and_then(|value| usize::try_from(value).ok())
+}
+
+fn zone_change_fingerprint(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    if !record.contains_key("object_id")
+        || !record.contains_key("from_zone")
+        || !record.contains_key("to_zone")
+    {
+        return Err("ZoneChanged record is missing its zone-change shape".to_string());
+    }
+    let mut fingerprint = record.clone();
+    fingerprint.remove("turn_zone_change_index");
+    fingerprint.remove("recorded_turn_number");
+    Ok(serde_json::Value::Object(fingerprint))
+}
+
+fn reconcile_persisted_zone_changed_record(
+    record: &mut serde_json::Value,
+    current_turn: u32,
+    occurrences: &[PersistedZoneChangeOccurrence],
+    seen: &mut HashMap<(u32, usize), serde_json::Value>,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "ZoneChanged record must be an object".to_string())?;
+    let fingerprint = zone_change_fingerprint(record)?;
+    let recorded_turn = record.get("recorded_turn_number").and_then(json_u32);
+    let index = record.get("turn_zone_change_index").and_then(json_usize);
+
+    let (recorded_turn, index) = match recorded_turn {
+        Some(turn) if turn < current_turn => {
+            let index = index.ok_or_else(|| {
+                "prior-turn ZoneChanged record is missing its occurrence index".to_string()
+            })?;
+            (turn, index)
+        }
+        Some(turn) if turn > current_turn => {
+            return Err("ZoneChanged record is stamped from a future turn".to_string());
+        }
+        Some(turn) if turn == current_turn => {
+            if let Some(index) = index {
+                if occurrences
+                    .get(index)
+                    .is_some_and(|occurrence| occurrence.fingerprint == fingerprint)
+                {
+                    (turn, index)
+                } else {
+                    reconcile_current_turn_zone_changed_record(
+                        record,
+                        current_turn,
+                        &fingerprint,
+                        occurrences,
+                    )?
+                }
+            } else {
+                reconcile_current_turn_zone_changed_record(
+                    record,
+                    current_turn,
+                    &fingerprint,
+                    occurrences,
+                )?
+            }
+        }
+        None => reconcile_current_turn_zone_changed_record(
+            record,
+            current_turn,
+            &fingerprint,
+            occurrences,
+        )?,
+        Some(_) => unreachable!("future turns return above"),
+    };
+
+    match seen.entry((recorded_turn, index)) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(fingerprint);
+        }
+        std::collections::hash_map::Entry::Occupied(entry) if *entry.get() == fingerprint => {}
+        std::collections::hash_map::Entry::Occupied(_) => {
+            return Err("ZoneChanged occurrence key is shared by conflicting records".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// A coherent pair can remain as-is even when two historical ledger rows are
+/// byte-identical: persistence cannot distinguish copied carriers of one
+/// occurrence from a lost second occurrence. Only a record that needs a new
+/// binding must identify exactly one ledger row.
+fn reconcile_current_turn_zone_changed_record(
+    record: &mut serde_json::Map<String, serde_json::Value>,
+    current_turn: u32,
+    fingerprint: &serde_json::Value,
+    occurrences: &[PersistedZoneChangeOccurrence],
+) -> Result<(u32, usize), String> {
+    let candidates = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.fingerprint == *fingerprint)
+        .collect::<Vec<_>>();
+    let [occurrence] = candidates.as_slice() else {
+        return Err(match candidates.len() {
+            0 => "current-turn ZoneChanged record has no ledger occurrence".to_string(),
+            _ => "ZoneChanged record ambiguously matches multiple ledger occurrences".to_string(),
+        });
+    };
+    record.insert(
+        "recorded_turn_number".to_string(),
+        serde_json::Value::from(current_turn),
+    );
+    record.insert(
+        "turn_zone_change_index".to_string(),
+        serde_json::Value::from(occurrence.index),
+    );
+    Ok((current_turn, occurrence.index))
+}
+
+/// Visits only actual serialized `GameEvent::ZoneChanged` payloads. The
+/// externally-tagged form is retained for current state snapshots; accepting
+/// the internally-tagged form keeps the migration compatible with wire payloads
+/// written by older event codecs.
+fn visit_persisted_zone_changed_records(
+    value: &mut serde_json::Value,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_persisted_zone_changed_records(value, visit)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(record) = serialized_zone_changed_record_mut(object) {
+                visit(record)?;
+                return Ok(());
+            }
+            for value in object.values_mut() {
+                visit_persisted_zone_changed_records(value, visit)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn serialized_zone_changed_record_mut(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+) -> Option<&mut serde_json::Value> {
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("ZoneChanged") {
+        let data = value.get_mut("data")?.as_object_mut()?;
+        return data.get_mut("record");
+    }
+    let data = value.get_mut("ZoneChanged")?.as_object_mut()?;
+    data.get_mut("record")
+}
+
+fn validate_restored_zone_change_replay_keys(state: &GameState) -> Result<(), String> {
+    for (_, recorded_turn, index) in &state.batched_zone_change_trigger_fired {
+        if *recorded_turn != state.turn_number {
+            return Err("batched zone-change replay key is from another turn".to_string());
+        }
+        let record = state.zone_changes_this_turn.get(*index).ok_or_else(|| {
+            "batched zone-change replay key points outside the current ledger".to_string()
+        })?;
+        if record.recorded_turn_number != *recorded_turn || record.turn_zone_change_index != *index
+        {
+            return Err(
+                "batched zone-change replay key disagrees with the current ledger".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn delayed_install_origins(state: &GameState) -> impl Iterator<Item = DelayedTriggerOrigin> + '_ {
     state
         .resolved_rules_journal
@@ -15278,9 +15532,11 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        reconcile_persisted_zone_change_occurrences(&mut value)?;
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
+        validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
         reject_zero_bound_shortcut_offer(&state)?;
@@ -21791,6 +22047,15 @@ mod tests {
     fn persisted_batched_zone_change_pairs_migrate_in_raw_and_trusted_envelopes() {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 19;
+        for index in 0..=3 {
+            state
+                .zone_changes_this_turn
+                .push_back(persisted_zone_change_record(
+                    ObjectId(9_200 + index as u64),
+                    state.turn_number,
+                    index,
+                ));
+        }
         let definition_ref = printed_trigger_ref(0);
         state.batched_zone_change_trigger_fired.insert((
             definition_ref.clone(),
@@ -22284,6 +22549,270 @@ mod tests {
             panic!("legacy deferred fixture retains its zone-change event");
         };
         assert_eq!(record.recorded_turn_number, 0);
+    }
+
+    fn persisted_zone_change_record(
+        object_id: ObjectId,
+        turn: u32,
+        index: usize,
+    ) -> ZoneChangeRecord {
+        ZoneChangeRecord {
+            recorded_turn_number: turn,
+            turn_zone_change_index: index,
+            ..ZoneChangeRecord::test_minimal(object_id, Some(Zone::Battlefield), Zone::Graveyard)
+        }
+    }
+
+    fn persisted_zone_change_event(record: ZoneChangeRecord) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id: record.object_id,
+            from: record.from_zone,
+            to: record.to_zone,
+            record: Box::new(record),
+        }
+    }
+
+    fn persisted_state_payload_mut(value: &mut serde_json::Value) -> &mut serde_json::Value {
+        if value.get("state").is_some() {
+            value
+                .get_mut("state")
+                .expect("trusted fixture has an inner state")
+        } else {
+            value
+        }
+    }
+
+    fn erase_persisted_event_occurrence_fields(value: &mut serde_json::Value) {
+        let mut erased = 0;
+        visit_persisted_zone_changed_records(value, &mut |record| {
+            let record = record
+                .as_object_mut()
+                .expect("serialized ZoneChanged record is an object");
+            record.remove("recorded_turn_number");
+            record.remove("turn_zone_change_index");
+            erased += 1;
+            Ok(())
+        })
+        .expect("fixture event traversal succeeds");
+        assert!(
+            erased > 0,
+            "fixture contains a serialized ZoneChanged event"
+        );
+    }
+
+    fn restored_deferred_zone_change_keys(state: &GameState) -> Vec<(u32, usize)> {
+        state.deferred_triggers[0]
+            .trigger_events
+            .iter()
+            .map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => {
+                    (record.recorded_turn_number, record.turn_zone_change_index)
+                }
+                _ => panic!("fixture stores only ZoneChanged events"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn persisted_zone_change_events_reconcile_in_raw_and_trusted_envelopes() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let first = persisted_zone_change_record(ObjectId(9_101), 19, 0);
+        let second = persisted_zone_change_record(ObjectId(9_102), 19, 1);
+        state.zone_changes_this_turn.push_back(first.clone());
+        state.zone_changes_this_turn.push_back(second.clone());
+        state.deferred_triggers[0].trigger_events = vec![
+            persisted_zone_change_event(first),
+            persisted_zone_change_event(second),
+        ];
+
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+
+        for mut persisted in [raw, trusted] {
+            erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+            let restored = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect("unique legacy event records reconcile")
+                .into_game_state();
+            assert_eq!(
+                restored_deferred_zone_change_keys(&restored),
+                vec![(19, 0), (19, 1)]
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_zone_change_collision_rebinds_only_unique_ledger_records() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let first = persisted_zone_change_record(ObjectId(9_111), 19, 0);
+        let mut second = persisted_zone_change_record(ObjectId(9_112), 19, 0);
+        second.name = "Distinct second occurrence".to_string();
+        state.zone_changes_this_turn.push_back(first.clone());
+        state.zone_changes_this_turn.push_back(second.clone());
+        state.deferred_triggers[0].trigger_events = vec![
+            persisted_zone_change_event(first),
+            persisted_zone_change_event(second),
+        ];
+
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("unique records repair a stale collision")
+            .into_game_state();
+        assert_eq!(
+            restored_deferred_zone_change_keys(&restored),
+            vec![(19, 0), (19, 1)]
+        );
+        assert_eq!(
+            restored
+                .zone_changes_this_turn
+                .iter()
+                .map(|record| record.turn_zone_change_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn persisted_zone_change_preserves_stamped_prior_turn_event() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let current = persisted_zone_change_record(ObjectId(9_121), 19, 0);
+        let prior = persisted_zone_change_record(ObjectId(9_121), 18, 0);
+        state.zone_changes_this_turn.push_back(current);
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(prior)];
+
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("stamped prior-turn event remains valid")
+            .into_game_state();
+        assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(18, 0)]);
+    }
+
+    #[test]
+    fn persisted_zone_change_rejects_ambiguous_legacy_event_in_both_envelopes() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_131), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(record)];
+
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("raw fixture serializes");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("trusted fixture serializes");
+        for mut persisted in [raw, trusted] {
+            erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+            let error = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect_err("ambiguous historical event must fail closed");
+            assert!(error.to_string().contains("ambiguously matches"));
+        }
+    }
+
+    #[test]
+    fn persisted_zone_change_rejects_future_turn_and_bad_batched_replay_key() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_141), 19, 0);
+        state.zone_changes_this_turn.push_back(record.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(record)];
+
+        let mut future = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("fixture serializes");
+        let future_state = persisted_state_payload_mut(&mut future);
+        visit_persisted_zone_changed_records(future_state, &mut |record| {
+            record
+                .as_object_mut()
+                .expect("event record is an object")
+                .insert(
+                    "recorded_turn_number".to_string(),
+                    serde_json::Value::from(20),
+                );
+            Ok(())
+        })
+        .expect("fixture traversal succeeds");
+        let error = serde_json::from_value::<PersistedGameState>(future)
+            .expect_err("future occurrence must fail");
+        assert!(error.to_string().contains("future turn"));
+
+        state
+            .batched_zone_change_trigger_fired
+            .insert((printed_trigger_ref(9), 19, 1));
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        let error = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("out-of-range batched key must fail");
+        assert!(error.to_string().contains("outside the current ledger"));
+    }
+
+    #[test]
+    fn persisted_zone_change_traverses_direct_queue_and_stack_carriers() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_151), 19, 0);
+        let event = persisted_zone_change_event(record.clone());
+        state.zone_changes_this_turn.push_back(record);
+        state.deferred_entry_events = vec![event.clone()];
+        state.pending_trigger_event_batch = vec![event.clone()];
+        state.current_trigger_event = Some(event.clone());
+        state.current_trigger_events = vec![event.clone()];
+        state
+            .pending_trigger
+            .as_mut()
+            .expect("fixture has pending trigger")
+            .trigger_event = Some(event.clone());
+        state.deferred_triggers[0].pending.trigger_event = Some(event.clone());
+        state.deferred_triggers[0].trigger_events = vec![event.clone()];
+        state
+            .stack_trigger_event_batches
+            .insert(ObjectId(9_003), vec![event.clone()]);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut state
+            .stack
+            .back_mut()
+            .expect("fixture has stack entry")
+            .kind
+        else {
+            panic!("fixture stack entry is triggered");
+        };
+        *trigger_event = Some(event);
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("all serialized carrier records reconcile")
+            .into_game_state();
+
+        let mut restored_wire = serde_json::to_value(PersistedGameState::Raw(Box::new(restored)))
+            .expect("restored fixture serializes");
+        let mut keys = Vec::new();
+        visit_persisted_zone_changed_records(
+            persisted_state_payload_mut(&mut restored_wire),
+            &mut |record| {
+                let record = record
+                    .as_object()
+                    .expect("serialized event record is an object");
+                keys.push((
+                    record
+                        .get("recorded_turn_number")
+                        .and_then(json_u32)
+                        .expect("carrier has recorded turn"),
+                    record
+                        .get("turn_zone_change_index")
+                        .and_then(json_usize)
+                        .expect("carrier has occurrence index"),
+                ));
+                Ok(())
+            },
+        )
+        .expect("carrier traversal succeeds");
+        assert!(keys.len() >= 8, "fixture reaches each selected carrier");
+        assert!(keys.iter().all(|key| *key == (19, 0)));
     }
 
     fn trigger_continuation_fixture() -> GameState {
