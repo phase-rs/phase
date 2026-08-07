@@ -238,6 +238,11 @@ fn jeweled_amulet_bounced_mid_stack_does_not_note_on_new_incarnation() {
         1,
         "reach-guard: the note ability must be sitting on the stack, unresolved"
     );
+    assert_eq!(
+        pool_total(&runner, P0),
+        0,
+        "reach-guard: the activation cost must consume the red mana before the bounce"
+    );
     let incarnation_before = runner.state().objects[&amulet].incarnation;
 
     // (2) Interject: bounce the amulet through the real bounce resolver
@@ -524,6 +529,19 @@ fn jeweled_amulet_copied_activation_does_not_note_original_payment() {
         .back()
         .expect("reach-guard: the activation must be on the stack")
         .id;
+    let original_payment = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == original_entry_id)
+        .and_then(|entry| entry.ability())
+        .and_then(|ability| ability.noted_mana_payment.as_ref())
+        .expect("reach-guard: the original activation must retain its payment snapshot");
+    assert_eq!(
+        original_payment.types,
+        vec![ManaType::Red],
+        "reach-guard: the original activation must carry its paid red mana"
+    );
 
     // (2) Copy it — mirrors what Lithoform Engine's "{2}, {T}: Copy target
     // activated or triggered ability you control" drives through the real
