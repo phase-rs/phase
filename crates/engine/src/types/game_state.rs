@@ -7695,7 +7695,7 @@ fn reconcile_persisted_zone_change_occurrences(
     }
 
     let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
-    visit_persisted_zone_changed_records(value, &mut |record| {
+    visit_persisted_live_zone_changed_records(state, &mut |record| {
         reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
     })?;
 
@@ -7839,18 +7839,63 @@ fn reconcile_current_turn_zone_changed_record(
     Ok((current_turn, occurrence.index))
 }
 
-/// Visits only actual serialized `GameEvent::ZoneChanged` payloads. The
-/// externally-tagged form is retained for current state snapshots; accepting
-/// the internally-tagged form keeps the migration compatible with wire payloads
-/// written by older event codecs.
-fn visit_persisted_zone_changed_records(
+/// Visits `ZoneChanged` records in live event carriers only. The occurrence
+/// ledger is consumed by active trigger, stack, prompt, and continuation work;
+/// append-only journal entries are historical evidence and must not be rebound
+/// to the current turn's ledger.
+fn visit_persisted_live_zone_changed_records(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    // The resolution-stack and legacy roots contain all paused delivery and
+    // continuation event contexts. Keep this list at GameState's live-carrier
+    // boundary: recursively visiting the whole state would also rewrite
+    // `resolved_rules_journal` snapshots.
+    const LIVE_EVENT_CARRIER_FIELDS: &[&str] = &[
+        "deferred_entry_events",
+        "pending_trigger",
+        "pending_trigger_event_batch",
+        "deferred_triggers",
+        "pending_trigger_order",
+        "consumed_before_priority_trigger_events",
+        "pending_attack_trigger_events",
+        "stack",
+        "waiting_for",
+        "resolution_stack",
+        "current_trigger_event",
+        "resolving_stack_entry",
+        "current_trigger_events",
+        "stack_trigger_event_batches",
+        "pending_cost_move_resume",
+        "pending_deferred_life_cost_resume",
+        "pending_discard_for_cost",
+        // V1 persisted active-frame fields are normalized by ResolutionStateWire
+        // after this migration runs, so their event contexts remain live here.
+        "pending_continuation",
+        "pending_choose_zone_trigger_context",
+        "pending_optional_trigger_event",
+    ];
+
+    for field in LIVE_EVENT_CARRIER_FIELDS {
+        if let Some(value) = state.get_mut(*field) {
+            visit_persisted_zone_changed_records_in_value(value, visit)?;
+        }
+    }
+    Ok(())
+}
+
+/// Visits only actual serialized `GameEvent::ZoneChanged` payloads within one
+/// known-live carrier. The externally-tagged form is retained for current state
+/// snapshots; accepting the internally-tagged form keeps the migration
+/// compatible with wire payloads written by older event codecs.
+fn visit_persisted_zone_changed_records_in_value(
     value: &mut serde_json::Value,
     visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
-                visit_persisted_zone_changed_records(value, visit)?;
+                visit_persisted_zone_changed_records_in_value(value, visit)?;
             }
         }
         serde_json::Value::Object(object) => {
@@ -7859,7 +7904,7 @@ fn visit_persisted_zone_changed_records(
                 return Ok(());
             }
             for value in object.values_mut() {
-                visit_persisted_zone_changed_records(value, visit)?;
+                visit_persisted_zone_changed_records_in_value(value, visit)?;
             }
         }
         _ => {}
@@ -22584,7 +22629,10 @@ mod tests {
 
     fn erase_persisted_event_occurrence_fields(value: &mut serde_json::Value) {
         let mut erased = 0;
-        visit_persisted_zone_changed_records(value, &mut |record| {
+        let state = value
+            .as_object_mut()
+            .expect("persisted fixture has a state object");
+        visit_persisted_live_zone_changed_records(state, &mut |record| {
             let record = record
                 .as_object_mut()
                 .expect("serialized ZoneChanged record is an object");
@@ -22725,7 +22773,10 @@ mod tests {
         let mut future = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
             .expect("fixture serializes");
         let future_state = persisted_state_payload_mut(&mut future);
-        visit_persisted_zone_changed_records(future_state, &mut |record| {
+        let future_state = future_state
+            .as_object_mut()
+            .expect("persisted fixture has a state object");
+        visit_persisted_live_zone_changed_records(future_state, &mut |record| {
             record
                 .as_object_mut()
                 .expect("event record is an object")
@@ -22791,28 +22842,69 @@ mod tests {
         let mut restored_wire = serde_json::to_value(PersistedGameState::Raw(Box::new(restored)))
             .expect("restored fixture serializes");
         let mut keys = Vec::new();
-        visit_persisted_zone_changed_records(
-            persisted_state_payload_mut(&mut restored_wire),
-            &mut |record| {
-                let record = record
-                    .as_object()
-                    .expect("serialized event record is an object");
-                keys.push((
-                    record
-                        .get("recorded_turn_number")
-                        .and_then(json_u32)
-                        .expect("carrier has recorded turn"),
-                    record
-                        .get("turn_zone_change_index")
-                        .and_then(json_usize)
-                        .expect("carrier has occurrence index"),
-                ));
-                Ok(())
-            },
-        )
+        let restored_state = persisted_state_payload_mut(&mut restored_wire)
+            .as_object_mut()
+            .expect("persisted fixture has a state object");
+        visit_persisted_live_zone_changed_records(restored_state, &mut |record| {
+            let record = record
+                .as_object()
+                .expect("serialized event record is an object");
+            keys.push((
+                record
+                    .get("recorded_turn_number")
+                    .and_then(json_u32)
+                    .expect("carrier has recorded turn"),
+                record
+                    .get("turn_zone_change_index")
+                    .and_then(json_usize)
+                    .expect("carrier has occurrence index"),
+            ));
+            Ok(())
+        })
         .expect("carrier traversal succeeds");
         assert!(keys.len() >= 8, "fixture reaches each selected carrier");
         assert!(keys.iter().all(|key| *key == (19, 0)));
+    }
+
+    #[test]
+    fn persisted_zone_change_ignores_historical_journal_events_but_rejects_live_events() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let historical = persisted_zone_change_event(persisted_zone_change_record(
+            ObjectId(9_161),
+            state.turn_number,
+            0,
+        ));
+
+        let mut archived_entry = state
+            .stack
+            .back()
+            .expect("fixture has a stack entry")
+            .clone();
+        archived_entry.id = ObjectId(9_162);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut archived_entry.kind
+        else {
+            panic!("fixture stack entry is triggered");
+        };
+        *trigger_event = Some(historical.clone());
+        crate::game::stack::push_to_stack(&mut state, archived_entry, &mut Vec::new());
+        state
+            .stack
+            .pop_back()
+            .expect("journaled stack entry remains removable from the live stack");
+        state.stack_trigger_firings.remove(&ObjectId(9_162));
+
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("historical stack entry serializes in the resolved-rules journal");
+        serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("historical journal event is not a live occurrence carrier");
+
+        state.deferred_entry_events = vec![historical];
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("live carrier fixture serializes");
+        let error = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("a live current-turn event without a ledger occurrence must fail");
+        assert!(error.to_string().contains("no ledger occurrence"));
     }
 
     fn trigger_continuation_fixture() -> GameState {
