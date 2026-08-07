@@ -7856,6 +7856,17 @@ fn reconcile_persisted_zone_changed_record(
                 )?
             }
         }
+        // Predates `recorded_turn_number`: historical active-resolution
+        // carriers can retain an event absent from their old per-turn ledger.
+        // It has no authoritative occurrence key to validate or invent, so
+        // preserve serde's `(0, index)` compatibility representation. Explicit
+        // zero/current stamps remain strict below.
+        None if !occurrences
+            .iter()
+            .any(|occurrence| occurrence.fingerprint == fingerprint) =>
+        {
+            return Ok(())
+        }
         None => reconcile_current_turn_zone_changed_record(
             record,
             current_turn,
@@ -22932,7 +22943,42 @@ mod tests {
             .expect("fixture serializes");
         let error = serde_json::from_value::<PersistedGameState>(persisted)
             .expect_err("out-of-range batched key must fail");
-        assert!(error.to_string().contains("outside the current ledger"));
+        assert!(error.to_string().contains("pruned ledger row"));
+    }
+
+    #[test]
+    fn persisted_zone_change_preserves_unkeyed_legacy_active_resolution_event() {
+        let record = persisted_zone_change_record(ObjectId(9_145), 19, 0);
+        let mut event = serde_json::to_value(persisted_zone_change_event(record))
+            .expect("fixture event serializes");
+        let event_record = event["data"]["record"]
+            .as_object_mut()
+            .expect("fixture ZoneChanged event has a record");
+        event_record.remove("recorded_turn_number");
+        event_record.remove("turn_zone_change_index");
+
+        let mut state = serde_json::json!({
+            "turn_number": 19,
+            "zone_changes_this_turn": [],
+            "resolving_stack_entry": {
+                "kind": { "data": { "trigger_event": event } }
+            },
+        });
+        reconcile_persisted_zone_change_occurrences(&mut state, &[])
+            .expect("an unkeyed legacy active-resolution event remains loadable");
+
+        let record = state["resolving_stack_entry"]["kind"]["data"]["trigger_event"]["data"]
+            ["record"]
+            .as_object()
+            .expect("fixture event record remains present");
+        assert!(
+            record.get("recorded_turn_number").is_none(),
+            "unmatchable legacy event must not be rebound to a fabricated current occurrence"
+        );
+        assert!(
+            record.get("turn_zone_change_index").is_none(),
+            "unmatchable legacy event retains no invented ledger index"
+        );
     }
 
     #[test]
