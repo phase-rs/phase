@@ -5399,6 +5399,63 @@ mod tests {
             .expect("the reducer must issue the test spell root cast")
     }
 
+    /// Drive the AI through a real cast of Self-Destruct where the opponent has
+    /// BOTH a big body the 2/2 source cannot kill (a non-lethal waste) and a
+    /// small body it CAN kill (a clean lethal kill). The tactical target
+    /// selection must pick the lethal small body over the survivable big one.
+    #[test]
+    fn self_destruct_target_selection_prefers_lethal_over_nonlethal_body() {
+        use engine::parser::oracle::parse_oracle_text;
+
+        let mut state = make_state();
+        add_mana(&mut state, P0, ManaType::Red, 1);
+        let spell = add_spell_to_hand(&mut state, P0, "Self-Destruct", 1);
+        let parsed = parse_oracle_text(
+            SELF_DESTRUCT_ORACLE,
+            "Self-Destruct",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        *Arc::make_mut(&mut state.objects.get_mut(&spell).unwrap().abilities) = parsed.abilities;
+
+        // The AI's damage source: a 2/2 Bird token (deals X = power = 2).
+        let bird = add_creature(&mut state, P0, 2, 2);
+        // Opponent's board:
+        // a 3/3 Cloud of Darkness the 2 damage cannot kill ...
+        let cloud = add_creature(&mut state, P1, 3, 3);
+        // ... and lethal 0/1 Wizards the 2 damage destroys outright.
+        let wizard_a = add_creature(&mut state, P1, 0, 1);
+        let wizard_b = add_creature(&mut state, P1, 0, 1);
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(7);
+
+        // Drive the AI through the full decision sequence (cast → source target
+        // → recipient target), exactly as the game loop replays candidate
+        // actions, and record every object it picks as a ChooseTarget target.
+        let mut picked: Vec<ObjectId> = Vec::new();
+        for _ in 0..20 {
+            let Some(action) = choose_action(&state, P0, &config, &mut rng) else {
+                break;
+            };
+            if let GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(id)),
+            } = &action
+            {
+                picked.push(*id);
+            }
+            if engine::game::engine::apply_as_current(&mut state, action).is_err() {
+                break;
+            }
+        }
+
+        assert!(
+            picked.contains(&wizard_a) || picked.contains(&wizard_b),
+            "the AI must pick a lethal 0/1 Wizard as the Self-Destruct recipient (got picked targets {picked:?}, bird={bird:?} cloud={cloud:?})"
+        );
+    }
+
     #[test]
     fn choose_action_rejects_bad_self_destruct_before_cast_and_keeps_source_in_hand() {
         let (state, spell) = self_destruct_state(2, 3);
