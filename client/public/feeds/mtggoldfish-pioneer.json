@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-06T00:00:00Z",
+  "updated": "2026-08-07T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1135,36 +1135,12 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 3,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Moon-Circuit Hacker"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "Darkslick Shores"
+          "name": "Island"
         },
         {
           "count": 4,
@@ -1172,7 +1148,39 @@
         },
         {
           "count": 4,
+          "name": "Darkslick Shores"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
+        },
+        {
+          "count": 2,
           "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Moon-Circuit Hacker"
+        },
+        {
+          "count": 2,
+          "name": "Blade of the Oni"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 3,
@@ -1180,19 +1188,31 @@
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 4,
           "name": "Spyglass Siren"
         },
         {
           "count": 1,
-          "name": "Go for the Throat"
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 1,
+          "name": "Nowhere to Run"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 3,
+          "name": "Multiversal Passage"
         },
         {
           "count": 1,
@@ -1200,57 +1220,49 @@
         },
         {
           "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Tasigur, the Golden Fang"
-        },
-        {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 2,
-          "name": "Blade of the Oni"
+          "name": "Mutavault"
         },
         {
           "count": 4,
-          "name": "Kaito, Bane of Nightmares"
+          "name": "Gloomlake Verge"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Path of Peril"
-        },
-        {
-          "count": 2,
-          "name": "Languish"
-        },
-        {
-          "count": 4,
-          "name": "Leyline of the Void"
-        },
-        {
           "count": 2,
           "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Elegy Acolyte"
         },
         {
           "count": 2,
           "name": "Duress"
         },
         {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Languish"
+        },
+        {
           "count": 2,
           "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 1,
+          "name": "Path of Peril"
+        },
+        {
+          "count": 1,
+          "name": "Gix's Command"
+        },
+        {
+          "count": 1,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 3,
+          "name": "Leyline of the Void"
         }
       ]
     },
