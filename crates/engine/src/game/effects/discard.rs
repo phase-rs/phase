@@ -30,7 +30,7 @@ fn retire_discard_frame(
     state: &mut GameState,
     frame_id: crate::types::identifiers::DiscardFrameId,
 ) {
-    if let Some(frame) = state.resolution_stack.take_active_discard().flatten() {
+    if let Ok(Some(frame)) = state.resolution_stack.take_active_discard() {
         debug_assert_eq!(frame.id, frame_id);
     }
 }
