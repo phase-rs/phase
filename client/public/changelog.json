@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 187,
+      "date": "2026-08-06",
+      "title": "Library searches stop double-triggering",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Fetch lands, Cultivate, Harrow, and other library searches now trigger landfall and enters-the-battlefield abilities once per actual zone change\n• Trigger sources accidentally retained in off-battlefield caches no longer fire from other zones, fixing the Locust God class of issue\n• Triggered mana abilities resolve correctly during spell payment, mana-spent information survives to relevant follow-up abilities, and prepared copies remain on the stack through targeting\n\n⚔️ Combat & Gameplay\n• Loop shortcuts now preserve their owner and offer state reliably, keep the ∞ badge visible while a collapse is pending, and avoid stalls on empty attacker prompts\n• Desktop solo-versus-AI games gain repeatable turn-boundary undo\n\n🖥️ Interface\n• Amount prompts reject invalid input consistently, storm copy counts are clearer, and card-hover preferences now carry across deck and draft views\n\n🤖 AI\n• AI continues forward through unmodeled target prompts and selects legal, higher-value choices when flexible mana is offered",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1534976803062546573"
+    },
+    {
       "id": 186,
       "date": "2026-08-04",
       "title": "Lady Loki joins the chaos",
