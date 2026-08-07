@@ -205,7 +205,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "public_revealed_cards",
         "player_actions_this_way",
         "city_blessing",
-        "enduring_story",
     ] {
         add_spec(
             &mut specs,
@@ -217,6 +216,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "enduring_story",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
     add_spec(
         &mut specs,
         game_state,
@@ -835,7 +843,7 @@ fn unordered_map_key_types(ty: &Type) -> Vec<String> {
         return Vec::new();
     };
     match segment.ident.to_string().as_str() {
-        "Option" | "Vec" | "Arc" => first_type_argument(segment)
+        "Option" | "Vec" | "Arc" | "Box" => first_type_argument(segment)
             .map(unordered_map_key_types)
             .unwrap_or_default(),
         "HashMap" => {
@@ -860,7 +868,7 @@ fn hash_shape(ty: &Type) -> Option<String> {
     let segment = path.path.segments.last()?;
     let name = segment.ident.to_string();
     match name.as_str() {
-        "Option" | "Vec" | "Arc" => {
+        "Option" | "Vec" | "Arc" | "Box" => {
             hash_shape(first_type_argument(segment)?).map(|inner| format!("{name}<{inner}>"))
         }
         "HashSet" => Some(

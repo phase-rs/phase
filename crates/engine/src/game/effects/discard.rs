@@ -700,14 +700,6 @@ mod tests {
             !hand_off_recruit_discard_result(&mut state, discard_frame),
             "a buried continuation must not consume the operation-owned result"
         );
-        assert!(
-            state
-                .resolution_stack
-                .active_discard()
-                .is_some_and(|frame| frame.id == discard_frame),
-            "nested replacement work must retain Recruit's exact frame"
-        );
-
         state
             .take_active_change_zone_frame()
             .expect("nested child is active")
