@@ -55,8 +55,8 @@ use crate::types::interaction::{
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaType, SpecialAction,
-    SpellCostCriterion, ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceSelection, ManaType,
+    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -2445,10 +2445,47 @@ fn loop_shortcut_projection(
     }
     let count = match schema.iteration_count {
         crate::analysis::decision_template::IterationCount::Fixed(suggested) => {
+            // CR 732.2a (MagicCompRules.txt:6372): the picker's ceiling is the offer's own
+            // CR 704 bound, never the raw global safety limit — a count above it would
+            // specify a sequence containing an elimination, which is a conditional action.
+            // The engine owns this number; the frontend renders it. An unnarrowed offer
+            // states `MAX_SHORTCUT_CYCLES`; a bounded offer states less. Either way this is
+            // the offer's own bound, clamped at the same authority.
+            //
+            // CR 704.5a (MagicCompRules.txt:5492): `elimination_bounds` returns `0` to
+            // mean "no legal repetition exists and the caller must not offer". A
+            // published offer carrying
+            // `0` is an authority violation, not a number to repair — clamping it to `1`
+            // renders a one-iteration offer whose single iteration eliminates a player
+            // mid-proposal. Reject it in EVERY build: a `debug_assert!` disappears from
+            // release, which is precisely where the clamp is what the player sees.
+            //
+            // THIS GUARD IS ALSO LOAD-BEARING AGAINST A PANIC, not merely against a bad
+            // offer. With the lower clamp replaced by `.min(MAX_SHORTCUT_CYCLES)` below,
+            // a `0` authority yields `max == 0`, and `suggested.clamp(1, max)` is then
+            // `Ord::clamp(1, 0)`, whose `assert!(min <= max)` is a PLAIN assert that
+            // survives release (measured: an `-O` build of `5u32.clamp(1, 0)` panics with
+            // `min > max. min = 1, max = 0`). Removing this guard turns a malformed
+            // restored dump into an engine panic.
+            //
+            // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has exactly two call
+            // sites and both pass `MAX_SHORTCUT_CYCLES`; the per-viewer projection in
+            // `game/visibility.rs` only re-projects an existing schema's value; and
+            // `ShortcutDecisionSchema::default().max_iterations == default_max_iterations()
+            // == MAX_SHORTCUT_CYCLES` (`analysis/decision_template.rs`), which is also the
+            // `#[serde(default)]` for a pre-bound save. The only way `0`
+            // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
+            // guard is therefore the fail-closed twin of item E: a latent hole shut before
+            // it opens.
+            if schema.max_iterations == 0 {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES);
             InteractionShortcutCountSpec::Fixed {
                 min: 1,
-                max: MAX_SHORTCUT_CYCLES,
-                suggested: suggested.clamp(1, MAX_SHORTCUT_CYCLES),
+                max,
+                suggested: suggested.clamp(1, max),
             }
         }
         crate::analysis::decision_template::IterationCount::UntilLethal => {
@@ -4154,6 +4191,49 @@ fn push_object_list(
     }
 }
 
+/// Label one mana action with the mana its own reducer would actually produce.
+/// `resolve` is the caller-supplied authority — the exact function the reducer
+/// for that action variant uses to revalidate the frozen selection — so a label
+/// can never be derived through a sibling surface's selection form. A stale or
+/// no-longer-legal selection resolves to no produced-mana surface, matching the
+/// reducer's own refusal to activate it.
+fn push_produced_mana_surfaces(
+    surfaces: &mut Vec<InteractionPresentationSurface>,
+    state: &GameState,
+    selection: &ManaSourceSelection,
+    resolve: fn(
+        &GameState,
+        PlayerId,
+        &ManaSourceSelection,
+    ) -> Result<mana_sources::ManaSourceOption, EngineError>,
+) {
+    let Some(player) = state
+        .objects
+        .get(&selection.source.object_id)
+        .map(|object| object.controller)
+    else {
+        return;
+    };
+    let Ok(option) = resolve(state, player, selection) else {
+        return;
+    };
+    for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
+        .into_iter()
+        .enumerate()
+    {
+        surfaces.push(InteractionPresentationSurface::Mana {
+            role: InteractionRoleCode::ProducedMana,
+            index: Some(index as u32),
+            symbols: vec![mana_type_code(unit.mana_type).to_string()],
+            restrictions: unit
+                .restrictions
+                .iter()
+                .map(interaction_mana_restriction)
+                .collect(),
+        });
+    }
+}
+
 /// Exhaustive, viewer-filtered projection of the fields that distinguish one
 /// exact action candidate from its siblings. This is intentionally action
 /// aware: adding a `GameAction` variant is a compile-time obligation here.
@@ -4177,35 +4257,37 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
-        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
-            let Some(player) = state
-                .objects
-                .get(&selection.source.object_id)
-                .map(|object| object.controller)
-            else {
-                return;
-            };
-            let Ok(option) =
-                mana_sources::live_mana_source_option_for_selection(state, player, selection)
-            else {
-                return;
-            };
-            for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
-                .into_iter()
-                .enumerate()
-            {
-                surfaces.push(InteractionPresentationSurface::Mana {
-                    role: InteractionRoleCode::ProducedMana,
-                    index: Some(index as u32),
-                    symbols: vec![mana_type_code(unit.mana_type).to_string()],
-                    restrictions: unit
-                        .restrictions
-                        .iter()
-                        .map(interaction_mana_restriction)
-                        .collect(),
-                });
-            }
-        }
+        // The two public mana-action surfaces carry deliberately different
+        // selection forms, so each must be labelled through the same authority
+        // that will execute it.
+        //
+        // `TapLandForMana` is minted by `activatable_mana_actions_for_player`
+        // from `ManaSourceOption::semantic_selection` — one *concrete* row per
+        // producible color — and is executed by `handle_tap_land_for_mana` via
+        // `live_land_mana_option_for_selection`.
+        //
+        // `ActivateManaSource` is minted from
+        // `activatable_mana_source_selections`, whose `manual_selection_for_option`
+        // intentionally collapses a flexible source to `Colorless` +
+        // `DeferredColorChoice` so the ordinary mana-choice resolver asks for the
+        // color, and is executed by `activate_mana_source_selection` via
+        // `live_mana_source_option_for_selection`.
+        //
+        // Resolving one through the other's authority can never match a flexible
+        // source, which silently produced an unlabelled action (issue #6944:
+        // City of Brass). Keep each arm paired with its own reducer's resolver.
+        GameAction::TapLandForMana { selection } => push_produced_mana_surfaces(
+            surfaces,
+            state,
+            selection,
+            mana_sources::live_land_mana_option_for_selection,
+        ),
+        GameAction::ActivateManaSource { selection } => push_produced_mana_surfaces(
+            surfaces,
+            state,
+            selection,
+            mana_sources::live_mana_source_option_for_selection,
+        ),
         GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
         | GameAction::UntapLandForMana { .. }
@@ -7889,6 +7971,21 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
     }
 }
 
+/// Wire-boundary bounds for one inbound submission, evaluated without touching
+/// game state.
+///
+/// Transports call this at the wire so a rejection is answered before the
+/// dispatcher does identity work; [`submit_interaction`] re-runs it via
+/// [`resolve_interaction_response`], so no caller can skip it and no transport
+/// can drift from these bounds by restating them.
+pub fn bound_interaction_submission(
+    submission: &InteractionSubmission,
+) -> Result<(), InteractionSubmitError> {
+    bound_string(submission.interaction_id.as_str())?;
+    validate_response_bounds(&submission.response)?;
+    Ok(())
+}
+
 fn slot_for_submission<'a>(
     state: &'a GameState,
     actor: PlayerId,
@@ -8801,6 +8898,18 @@ fn materialize_loop_shortcut_response(
             .iter()
             .map(|point| point.slot.clone())
             .collect::<Vec<_>>();
+        // TRAP REMOVAL, NOT A BUG FIX — recorded so the next reader does not "correct" this
+        // literal into `shortcut_validated_range(..)` and then wonder what changed. This
+        // decoder emits only `Player` and `ByIdentity` pins, both of which resolve
+        // INDEPENDENTLY of `iteration`, so validating at index 0 alone is correct by
+        // construction here: a wider range would re-resolve the same pin to the same value.
+        // It is also strictly weaker than the declare-path firewall rather than a second
+        // hole — `1` is a prefix of any range that path validates. It cannot mint a
+        // `Fixed(0)` either: the count-spec projection's `Fixed` arm hard-codes `min: 1`
+        // beside its `debug_assert!(schema.max_iterations >= 1, ..)` and its clamp.
+        // ⚠ Navigation trap: `shortcut_drive_period`'s doc enumerates its own consumers, and
+        // this site consumes `validate_pins` WITHOUT consuming that helper, so it is
+        // invisible from there.
         if predictability_gate(template, &required).is_err()
             || validate_pins(authoritative_schema, template, 1, authoritative_state).is_err()
         {
@@ -9286,8 +9395,7 @@ pub fn resolve_interaction_response(
     actor: PlayerId,
     submission: &InteractionSubmission,
 ) -> Result<GameAction, InteractionSubmitError> {
-    bound_string(submission.interaction_id.as_str())?;
-    validate_response_bounds(&submission.response)?;
+    bound_interaction_submission(submission)?;
     slot_for_submission(state, actor, &submission.interaction_id)?;
     let filtered = visibility::filter_state_for_viewer(state, actor);
     let (action, _) = materialize_response(

@@ -82,6 +82,38 @@ pub struct BestowFormState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
 
+/// Serde adapter for presence-only unit markers stored in optional fields.
+///
+/// The owning fields retain `#[serde(default)]` so an absent field restores as
+/// `None`, while a present legacy `null` reaches this adapter and restores the
+/// marker. Canonical serialization omits `None` through the fields'
+/// `skip_serializing_if` attributes and represents `Some(_)` as `true`.
+///
+/// This adapter must not be used for markers that carry payload. Adding payload
+/// requires a deliberately versioned wire representation rather than silently
+/// discarding it behind this presence bit.
+mod unit_marker_option_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(value.is_some())
+    }
+
+    pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: Default,
+        D: Deserializer<'de>,
+    {
+        match Option::<bool>::deserialize(deserializer)? {
+            Some(true) | None => Ok(Some(T::default())),
+            Some(false) => Ok(None),
+        }
+    }
+}
+
 /// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
 /// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
 /// `merged_components.len()` alone cannot, since a two-creature mutate also
@@ -515,7 +547,11 @@ pub struct GameObject {
     pub back_face: Option<BackFaceData>,
 
     /// Digital-only Specialize: specialized faces keyed by added color pip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_map"
+    )]
     pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
 
     /// Digital-only Specialize: set after specializing; prevents re-specializing.
@@ -726,7 +762,11 @@ pub struct GameObject {
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
     /// CR 702.103e–g (illegal target, unattach, zone exit).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bestow_form: Option<BestowFormState>,
 
     /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
@@ -739,7 +779,11 @@ pub struct GameObject {
     /// the stack (cast for its mutate cost). Set by `apply_mutate_form`; cleared
     /// by `revert_mutate_form` when the target is illegal at resolution
     /// (CR 702.140b). Does not persist onto the merged permanent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mutate_form: Option<MutateFormState>,
 
     /// CR 730.2 + CR 702.140c: The ordered list of card/token `ObjectId`s that
@@ -932,13 +976,21 @@ pub struct GameObject {
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
     /// Multiple players can goad the same creature, creating additional combat requirements.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub goaded_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.35a: Which players have detained this permanent. A detained permanent
     /// can't attack or block and its activated abilities can't be activated until the
     /// detaining player's next turn. Cleared during layer evaluation like goaded_by.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub detained_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.60a: Whether this creature is currently suspected.
@@ -970,7 +1022,11 @@ pub struct GameObject {
     /// memory of its previous existence). `Option<PreparedState>` over a bool
     /// per project idiom (no bool flags). Assign when WotC publishes SOS CR
     /// update.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prepared: Option<PreparedState>,
 
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end

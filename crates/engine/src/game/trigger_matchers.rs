@@ -1883,6 +1883,19 @@ fn attack_target_matches(
         if !attack_target_type_matches(target, filter) {
             return false;
         }
+        // CR 725.1: "attacks the monarch" additionally requires the defending
+        // player to currently hold the monarch designation. The monarch is a
+        // dynamic single-player identity, so it cannot be evaluated by the pure
+        // type matcher above — it is checked here against `state.monarch`. If no
+        // player is the monarch (CR 725.1), the trigger does not fire (The Spear
+        // of Bashenga).
+        if matches!(filter, crate::types::triggers::AttackTargetFilter::Monarch) {
+            let defending_player =
+                attack_target_defending_player(state, target, fallback_defending_player);
+            if state.monarch != Some(defending_player) {
+                return false;
+            }
+        }
     }
 
     if trigger.valid_target.is_some() {
@@ -1913,6 +1926,12 @@ pub(super) fn attack_target_type_matches(
         ) | (
             crate::types::triggers::AttackTargetFilter::Battle,
             crate::game::combat::AttackTarget::Battle(_)
+        ) | (
+            // CR 725.1: "attacks the monarch" is a Player-type attack; the
+            // monarch-identity constraint is applied statefully in
+            // `attack_target_matches` (The Spear of Bashenga).
+            crate::types::triggers::AttackTargetFilter::Monarch,
+            crate::game::combat::AttackTarget::Player(_)
         )
     )
 }
@@ -5007,6 +5026,60 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// Issue #5249 — The Spear of Bashenga: "Whenever equipped creature attacks
+    /// the monarch, ...". `AttackTargetFilter::Monarch` is a Player-type attack
+    /// whose defending player must currently hold the monarch designation
+    /// (CR 725.1). The identity check is stateful (`state.monarch`), so it lives
+    /// in `attack_target_matches`, not the pure type matcher. Attacking the
+    /// monarch matches; attacking a non-monarch player does not; and with no
+    /// monarch in the game (CR 725.1) it never matches — the revert canary.
+    #[test]
+    fn attack_target_matches_monarch_requires_monarch_defender() {
+        let mut state = setup();
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Monarch);
+        let source_id = ObjectId(99);
+
+        // P1 is the monarch; attacking P1 matches.
+        state.monarch = Some(PlayerId(1));
+        assert!(
+            attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking the monarch (P1) must match"
+        );
+
+        // P0 is NOT the monarch; attacking P0 must NOT match (the reported bug).
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+                PlayerId(0),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking a non-monarch player must NOT match"
+        );
+
+        // No monarch in the game (CR 725.1) → never matches, even for the
+        // fallback defending player.
+        state.monarch = None;
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "with no monarch, the monarch attack-target filter must never match"
+        );
     }
 
     /// CR 701.31 / CR 701.31d / CR 901.11: the unified `match_planeswalked` matcher
@@ -8165,48 +8238,28 @@ mod tests {
     }
 
     #[test]
-    fn changes_zone_origin_zones_matches_library_source() {
-        // CR 603.10a: Laelia-style — source can be library OR graveyard.
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
+    fn changes_zone_origin_zones_matches_each_listed_source() {
+        // CR 603.10a: Laelia-style — source can be library OR graveyard. Every zone in
+        // `origin_zones` must match; `match_changes_zone` treats the list as a
+        // set-membership constraint (`OriginConstraint::OneOf`).
+        for origin in [Zone::Library, Zone::Graveyard] {
+            let state = setup();
+            let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
+            trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
+            trigger.destination = Some(Zone::Exile);
 
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Library,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
-    }
-
-    #[test]
-    fn changes_zone_origin_zones_matches_graveyard_source() {
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
-
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Graveyard,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+            let event =
+                zone_changed_event(ObjectId(5), origin, Zone::Exile, Vec::new(), Vec::new());
+            assert!(
+                match_changes_zone(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "listed origin {origin:?} → Exile must match"
+            );
+        }
     }
 
     #[test]
@@ -12194,6 +12247,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         (state, ability_id)
@@ -13138,6 +13192,7 @@ mod tests {
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
                 die_result: None,
+                provenance: None,
             },
         });
 

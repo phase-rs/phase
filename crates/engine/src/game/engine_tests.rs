@@ -18,7 +18,7 @@ use crate::types::format::FormatConfig;
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, PendingCast, ProductionOverride, TargetSelectionProgress,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
@@ -199,6 +199,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -215,10 +216,15 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             source_name: "Pinger".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
+    state
+        .stack_trigger_firings
+        .insert(entry_id, TriggerFiring::Ordinary);
+    state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
     let stack_len_before = state.stack.len();
 
     let result = begin_pending_trigger_target_selection(&mut state);
@@ -2414,6 +2420,7 @@ fn push_token_trigger(
             source_name: "Token".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     entry_id
@@ -7679,6 +7686,40 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         );
     }
 
+    // CR 605.1b + CR 605.4a: Two simultaneous triggered mana abilities
+    // reproduce the ordering-shaped group from Leyline of Abundance /
+    // Badgermole Cub boards. They must resolve immediately, not pause the
+    // in-flight payment on OrderTriggers.
+    let multiplier = create_object(
+        &mut state,
+        CardId(102),
+        PlayerId(0),
+        "Mana Multiplier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&multiplier).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.entered_battlefield_turn = Some(1);
+        let trigger = || {
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::TriggerEventManaType,
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .valid_target(TargetFilter::Controller)
+        };
+        obj.trigger_definitions.push(trigger());
+        obj.trigger_definitions.push(trigger());
+    }
+
     let result = apply_as_current(
         &mut state,
         GameAction::ActivateAbility {
@@ -7703,6 +7744,11 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     assert!(state.stack.is_empty());
     // Object should be tapped
     assert!(state.objects.get(&obj_id).unwrap().tapped);
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "the base mana plus both triggered mana abilities must resolve inline"
+    );
 }
 
 #[test]

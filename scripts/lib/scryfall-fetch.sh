@@ -35,13 +35,45 @@ scryfall_validate_json() {
   jq -e 'type' "$1" >/dev/null 2>&1
 }
 
-# scryfall_download URL FILE — download URL with retries to a unique temp,
-# validate it, then atomically rename into place. The temp+rename keeps
-# concurrent writers (setup.sh fetches default-cards.json from two scripts at
-# once) and interrupted/throttled downloads from corrupting or clobbering a
-# good FILE — readers only ever see the old or new complete file.
+# scryfall_finalize_download TMP FILE VALIDATOR — atomically install TMP, or
+# accept an existing valid FILE when a concurrent writer wins a Windows rename
+# race. On an actual failure, preserve the move diagnostic for the caller.
+scryfall_finalize_download() {
+  local tmp="$1" file="$2" validator="$3" move_error
+  move_error=$(mktemp "${file}.mv-error.XXXXXX")
+  if mv -f "$tmp" "$file" 2>"$move_error"; then
+    rm -f "$move_error"
+    return 0
+  fi
+  if [ -f "$file" ] && ( "$validator" "$file" ); then
+    rm -f "$tmp" "$move_error"
+    return 0
+  fi
+  echo "scryfall: could not rename $tmp into $file:" >&2
+  cat "$move_error" >&2
+  rm -f "$tmp" "$move_error"
+  return 1
+}
+
+# scryfall_download URL FILE [VALIDATOR] — download URL with retries to a
+# unique temp, validate it, then atomically rename into place. The temp+rename
+# keeps concurrent writers (setup.sh fetches default-cards.json from two
+# scripts at once) and interrupted/throttled downloads from corrupting or
+# clobbering a good FILE — readers only ever see the old or new complete file.
+#
+# VALIDATOR is the name of a function to run instead of the default
+# scryfall_validate_json when deciding whether a downloaded/pre-existing FILE
+# is trustworthy enough to keep (e.g. a caller that needs a specific
+# top-level key, not just "is this JSON"). It gates both the common path --
+# the freshly-downloaded tmp file BEFORE the mv into FILE, so a body that
+# fails it never lands where a later non-validating reader would trust it --
+# and the mv-failure recovery path below, which re-checks a pre-existing
+# FILE left behind by a concurrent writer. scryfall_validate_json itself
+# always gates the freshly-downloaded tmp file first -- that check exists to
+# catch a throttled/truncated Cloudflare body, a transport-level concern
+# independent of the caller's semantic shape.
 scryfall_download() {
-  local url="$1" file="$2" tmp
+  local url="$1" file="$2" validator="${3:-scryfall_validate_json}" tmp
   tmp=$(mktemp "${file}.XXXXXX")
   if ! "${SCRYFALL_CURL[@]}" -o "$tmp" "$url"; then
     rm -f "$tmp"
@@ -52,7 +84,20 @@ scryfall_download() {
     rm -f "$tmp"
     return 1
   fi
-  mv -f "$tmp" "$file"
+  # Caller-supplied semantic validation runs on the tmp file, before the mv.
+  # Skipped for the default validator: the identical bytes already passed the
+  # identical check above, and default_cards.json-sized bodies make a second
+  # full jq parse measurably wasteful. Run in a subshell for the same
+  # scope-isolation reason as the recovery path below.
+  if [ "$validator" != scryfall_validate_json ] && ! ( "$validator" "$tmp" ); then
+    echo "scryfall: download of $url failed $validator" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  # POSIX rename silently replaces FILE even if another process has it open,
+  # while Windows can reject the losing writer. The shared finalizer preserves
+  # that concurrent-writer recovery for both JSON and JSONL bulk downloads.
+  scryfall_finalize_download "$tmp" "$file" "$validator"
 }
 
 # jq prelude shared by the gen-scryfall-*.sh transforms. Prepend it to a jq
@@ -77,12 +122,12 @@ def js_downcase:
   | implode;
 '
 
-# scryfall_download_jsonl_gzip URL FILE — download Scryfall's gzip-compressed
+# scryfall_download_jsonl_gzip URL FILE [VALIDATOR] — download Scryfall's gzip-compressed
 # JSON Lines bulk format, validate its card-object records, and stream it into
 # the JSON array the generators consume. The temp+rename has the same atomicity
-# guarantee as scryfall_download.
+# guarantee and optional semantic validator as scryfall_download.
 scryfall_download_jsonl_gzip() {
-  local url="$1" file="$2" archive tmp
+  local url="$1" file="$2" validator="${3:-scryfall_validate_json}" archive tmp
   archive=$(mktemp "${file}.jsonl.gz.XXXXXX")
   tmp=$(mktemp "${file}.XXXXXX")
   if ! "${SCRYFALL_CURL[@]}" -o "$archive" "$url"; then
@@ -96,16 +141,22 @@ scryfall_download_jsonl_gzip() {
     rm -f "$archive" "$tmp"
     return 1
   fi
+  if [ "$validator" != scryfall_validate_json ] && ! ( "$validator" "$tmp" ); then
+    echo "scryfall: download of $url failed $validator" >&2
+    rm -f "$archive" "$tmp"
+    return 1
+  fi
   rm -f "$archive"
-  mv -f "$tmp" "$file"
+  scryfall_finalize_download "$tmp" "$file" "$validator"
 }
 
-# scryfall_fetch_bulk TYPE FILE — resolve and download a bulk-data export by
+# scryfall_fetch_bulk TYPE FILE [VALIDATOR] — resolve and download a bulk-data export by
 # type (e.g. oracle_cards, default_cards). Prefer Scryfall's legacy JSON array
 # download when present; otherwise normalize its JSON Lines export to that
-# same array shape for existing generators.
+# same array shape for existing generators. VALIDATOR is applied to either
+# completed output shape before it is promoted.
 scryfall_fetch_bulk() {
-  local type="$1" file="$2" metadata uri jsonl_uri
+  local type="$1" file="$2" validator="${3:-scryfall_validate_json}" metadata uri jsonl_uri
   metadata=$("${SCRYFALL_CURL[@]}" "https://api.scryfall.com/bulk-data" \
     | jq -cer --arg t "$type" '.data[] | select(.type == $t) | {
       download_uri,
@@ -114,12 +165,12 @@ scryfall_fetch_bulk() {
     || return 1
   uri=$(jq -r '.download_uri // empty' <<< "$metadata")
   if [ -n "$uri" ]; then
-    scryfall_download "$uri" "$file"
+    scryfall_download "$uri" "$file" "$validator"
     return
   fi
   jsonl_uri=$(jq -r '.jsonl_download_uri // empty' <<< "$metadata")
   if [ -n "$jsonl_uri" ]; then
-    scryfall_download_jsonl_gzip "$jsonl_uri" "$file"
+    scryfall_download_jsonl_gzip "$jsonl_uri" "$file" "$validator"
     return
   fi
   echo "scryfall: no bulk download URI for type '$type'" >&2

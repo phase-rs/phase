@@ -517,30 +517,19 @@ fn apply_pending_counter_post_action(
             // replacement-processed counters finish.
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
-            crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
             // CR 603.6a: finalize the deferred ZoneChanged here, once the
             // token's counters have actually settled, so ETB trigger
             // observers (Altar of the Brood, Soul Warden, etc.) see the
             // Incubator's final counter count rather than firing early on a
             // pre-replacement-choice snapshot (issue #4238).
-            if let Some(zone_change_record) = state.objects.get(&object_id).map(|obj| {
-                obj.snapshot_for_zone_change(
-                    object_id,
-                    None,
-                    crate::types::zones::Zone::Battlefield,
-                )
-            }) {
-                state
-                    .zone_changes_this_turn
-                    .push_back(zone_change_record.clone());
-                events.push(GameEvent::ZoneChanged {
-                    object_id,
-                    from: None,
-                    to: crate::types::zones::Zone::Battlefield,
-                    record: Box::new(zone_change_record),
-                });
-            }
+            //
+            // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the emit through the single
+            // `from: None → Battlefield` authority so the emitted record carries this turn's real
+            // zone-change index instead of the `0` placeholder. The authority calls
+            // `record_battlefield_entry` itself, so the co-located call that used to sit above is
+            // deleted — keeping it would double-count `battlefield_entries_this_turn`.
+            crate::game::zones::record_and_emit_entry_from_no_zone(state, object_id, events);
             true
         }
         PendingCounterPostAction::FinalizeTokenEntry {
@@ -557,7 +546,6 @@ fn apply_pending_counter_post_action(
             // delayed sacrifice trigger.
             super::token::inject_resolved_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
-            crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
             if let Some(host) = attach_to {
                 match host {
@@ -569,7 +557,23 @@ fn apply_pending_counter_post_action(
                     }
                 }
             }
-            push_token_entry_events(state, events, object_id, name, source_id);
+            // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the
+            // single `from: None → Battlefield` authority so the emitted `ZoneChanged` carries
+            // this turn's real zone-change index. The authority calls `record_battlefield_entry`
+            // itself, so the co-located call that used to precede the attachment block is
+            // deleted; that also moves the CR 608.2i snapshot point to AFTER `attach_to`'s
+            // synchronous layer flush, so an attached token's entry row records its post-flush
+            // characteristics (sanctioned by `battlefield_entry_record_for`'s own doc).
+            //
+            // OBJECT-GONE: if the token is no longer in `state.objects` when its parked counters
+            // settle, this route reports NOTHING — no CR 400.7 row, no `ZoneChanged`, and no
+            // `TokenCreated`. No guard here: `push_committed_token_entry_events` withholds
+            // `TokenCreated` on the authority's own `None` verdict, which is the same predicate
+            // that keeps `restrictions::record_token_created` above from writing a row. See that
+            // function's doc for the wrong-trigger-fire measurement this prevents.
+            super::token::push_committed_token_entry_events(
+                state, object_id, name, source_id, events,
+            );
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
                 let sacrifice_token = DelayedTrigger {
                     condition: DelayedTriggerCondition::AtNextPhase {
@@ -588,10 +592,11 @@ fn apply_pending_counter_post_action(
                     controller,
                     source_id,
                     one_shot: true,
+                    provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
                 };
-                crate::game::triggers::install_delayed_trigger(state, sacrifice_token);
+                crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
             }
-            state.last_created_token_ids.push(object_id);
+            super::token::record_last_created_token(state, object_id);
             true
         }
         PendingCounterPostAction::ContinueTokenCreation {
@@ -635,13 +640,28 @@ fn apply_pending_counter_post_action(
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
-            crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
-            push_token_entry_events(state, events, object_id, name, source_id);
-            state.last_created_token_ids.push(object_id);
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids.push(object_id);
-            }
+            // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the
+            // single `from: None → Battlefield` authority so the emitted `ZoneChanged` carries
+            // this turn's real zone-change index. The authority calls `record_battlefield_entry`
+            // itself, so the co-located call that used to live here is deleted — keeping it would
+            // double-count `battlefield_entries_this_turn` for every `FinalizeCopyTokenEntry`
+            // token.
+            //
+            // OBJECT-GONE: same contract as the `FinalizeTokenEntry` arm above — a token that is
+            // no longer in `state.objects` when its parked counters settle reports nothing,
+            // because `push_committed_token_entry_events` gates `TokenCreated` on the authority's
+            // `None` verdict, so it never disagrees with the existence-guarded
+            // `record_token_created` ledger write immediately above it.
+            super::token::push_committed_token_entry_events(
+                state, object_id, name, source_id, events,
+            );
+            // The anaphora slot has TWO destinations on this route — ledger 3 and the in-flight
+            // copy batch's `created_ids`, which `token_copy.rs`'s drain assigns WHOLESALE back onto
+            // ledger 3 — so one guarded call owns both. Guarding the ledger write and pushing the
+            // buffer as a separate statement republished the withheld id and overwrote the guarded
+            // list with it.
+            super::token::record_last_created_copy_batch_token(state, object_id);
             true
         }
         PendingCounterPostAction::ContinueCopyTokenCreation {
@@ -714,17 +734,34 @@ fn apply_pending_counter_post_action(
             remaining_count,
             events,
         ),
-        PendingCounterPostAction::EmitCommittedCopyTokenEntry {
-            object_id,
-            name,
-            source_id,
-        } => {
-            super::token::push_committed_token_entry_events(
-                state, object_id, name, source_id, events,
-            );
+        PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id } => {
+            // CR 400.7 + CR 616.1: the ETB-counter ordering choice is answered and `BecomeCopy`
+            // has run (or, on the pre-`BecomeCopy` commit pause, the copy chain was abandoned and
+            // this is as realized as that route gets), so realize the entry inside the drain —
+            // before the rest of this action, whether or not that action settles.
+            //
+            // MEASURED redundancy, stated rather than implied: when the drain's action DOES settle
+            // to `Priority` (the Faithful Watchdog fixture in
+            // `tests/integration/token_zone_change_index.rs`, and every route the current card pool
+            // reaches), `token::realize_settled_token_battlefield_entry` realizes it anyway — from
+            // inside `apply_action` ahead of that action's CR 603.2 scan, and, for handlers that
+            // never reach that pipeline, from `apply_action_boundary_core`, which now runs
+            // `run_post_action_pipeline_from` over the slice it appended. Deleting this call AND the
+            // in-`apply_action` one flips no test. It is kept for a drain that does NOT settle in
+            // its own action, where this is the only in-action realization point, and because the
+            // in-`apply_action` call orders the CR 400.7 row ahead of that action's CR 704.3 SBA
+            // pass (CR 704.5f). `false` means an earlier convergence point already realized it
+            // (structurally idempotent, `Option::take_if`), which is not an error.
+            let _ = super::token::flush_pending_token_battlefield_entry(state, object_id, events);
             if !state.last_created_token_ids.contains(&object_id) {
-                state.last_created_token_ids.push(object_id);
+                super::token::record_last_created_token(state, object_id);
             }
+            // DELIBERATELY NOT `record_last_created_copy_batch_token`: this arm RE-SYNCS the batch
+            // buffer to the whole guarded ledger rather than appending one id, and the two are not
+            // interchangeable — the buffer accumulates across batches while the ledger is reset per
+            // batch. Copying the ledger cannot publish an id the ledger's own guard withheld, so
+            // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
+            // which is what `state.last_created_token_ids` is after the call above.
             let created_ids = state.last_created_token_ids.clone();
             if let Some(pending) = state.active_copy_token_mut() {
                 pending.created_ids = created_ids;
@@ -812,31 +849,6 @@ fn apply_pending_counter_post_action(
             true
         }
     }
-}
-
-fn push_token_entry_events(
-    state: &GameState,
-    events: &mut Vec<GameEvent>,
-    object_id: ObjectId,
-    name: String,
-    source_id: ObjectId,
-) {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return;
-    };
-    let zone_change_record =
-        obj.snapshot_for_zone_change(object_id, None, crate::types::zones::Zone::Battlefield);
-    events.push(GameEvent::ZoneChanged {
-        object_id,
-        from: None,
-        to: crate::types::zones::Zone::Battlefield,
-        record: Box::new(zone_change_record),
-    });
-    events.push(GameEvent::TokenCreated {
-        object_id,
-        name,
-        source_id,
-    });
 }
 
 /// CR 122.1 + CR 122.6: Apply an already-accepted counter addition and record
@@ -6212,5 +6224,468 @@ mod tests {
             Some(1),
             "destination must receive the counter after move"
         );
+    }
+
+    /// COHERENCE INVARIANT for EVERY route that defers a token-entry emit past a pause: **none
+    /// reports a creation the others do not.** The tuple is `(TokenCreated events,
+    /// created_tokens_this_turn rows, last_created_token_ids entries)` — all THREE ledgers a token
+    /// creation writes, not the two that share a guard.
+    ///
+    /// The third entry is why this assertion is a 3-tuple. Gating the emit on the authority's
+    /// `record.is_some()` verdict made the event agree with `created_tokens_this_turn` and
+    /// `players_who_created_token_this_turn`, but `last_created_token_ids` — the
+    /// `TargetFilter::LastCreated` anaphora slot — was written unguarded on every one of these
+    /// routes, so the gone path read `(0, 0, 1)`: the change FLIPPED which ledger the event
+    /// disagreed with instead of removing the disagreement, and a 2-tuple is exactly the projection
+    /// under which that is invisible. `token::record_last_created_token` now carries the same
+    /// existence predicate; MEASURED at the pre-fix tip, this test fails on its first arm with
+    /// `left: (0, 0, 1)` against `right: (0, 0, 0)`.
+    ///
+    /// `restrictions::record_token_created` is existence-guarded, so if the emit is not gated on
+    /// the same predicate a vanished token puts a live trigger event
+    /// (`trigger_matchers::match_token_created`, keyed in `trigger_index`) on the wire that no
+    /// ledger row backs — and that matcher then skips its CR 111.2 controller filter entirely, so
+    /// it fires for a controller it should have rejected (measurement in
+    /// `token::push_committed_token_entry_events`'s doc). This restores the pre-change behaviour
+    /// of the deleted `counters::push_token_entry_events`, whose `let Some(obj) = … else { return;
+    /// }` head emitted nothing on the gone path.
+    ///
+    /// COVERAGE IS THE WHOLE CLASS, not an enumeration of files. The single predicate lives inside
+    /// `token::push_committed_token_entry_events`, the ONLY production emit of
+    /// `GameEvent::TokenCreated`, so every one of its EIGHT callers inherits it. The five arms
+    /// below are the five callers whose emit is separated from the object's creation by a pause —
+    /// i.e. every caller on which the object can genuinely be gone. The remaining three emit
+    /// inside the same call that created the object —
+    /// `token::apply_create_token_after_replacement_with_created_ids`,
+    /// `gift_delivery::create_gift_token`, and
+    /// `token_copy::apply_copy_token_after_replacement_with_created_ids` — and the latter two
+    /// additionally `.expect(…)` the record so a vanished object panics rather than disagreeing
+    /// silently.
+    ///
+    /// NO CR settles whether a token that never successfully entered should fire a creation
+    /// trigger, because the situation is unreachable in rules terms: CR 704.3 checks state-based
+    /// actions only "whenever a player would get priority", so nothing can remove the token between
+    /// its creation and the CR 603.6a enters-the-battlefield check. The gone arm is a defensive
+    /// engine artifact of deferring the emit past a replacement pause, and the engineering
+    /// requirement on it is internal agreement, not a rules verdict.
+    ///
+    /// TWO-SIDED, each mutant failing the SAME gone-path assertion on EVERY arm:
+    /// * MUTANT-DROP — delete the `if record.is_some()` in `push_committed_token_entry_events` ⇒
+    ///   `token_created` reads 1 while both turn ledgers read 0.
+    /// * MUTANT-TRIVIALIZE — keep the branch's shape, make it `if true` ⇒ same flip, same
+    ///   assertion.
+    /// * MUTANT-DROP-3 — delete the `contains_key` in `token::record_last_created_token` ⇒ the
+    ///   gone path reads `(0, 0, 1)`, which is the pre-fix behaviour and the third entry's own
+    ///   revert probe.
+    ///
+    /// All three leave the `(1, 1, 1)` positive control passing, so no mutant is caught merely by a
+    /// fixture that never ran the arm.
+    #[test]
+    fn a_vanished_counter_paused_token_reports_neither_creation_event_nor_ledger_row() {
+        /// The five routes whose token-entry emit is deferred past a pause. All are driven through
+        /// their production entry point: every arm is a `PendingCounterPostAction` variant
+        /// dispatched by `apply_pending_counter_post_action`, and the last one parks its entry
+        /// through that same dispatcher and is then realized by
+        /// `token::flush_pending_token_battlefield_entry`, exactly as
+        /// `token::realize_settled_token_battlefield_entry` does from `apply_action`.
+        enum Route {
+            FinalizeTokenEntry,
+            FinalizeCopyTokenEntry,
+            ApplyCopyTokenModificationsAndFinalize,
+            LiminalEntryEmit,
+            LiminalEntryFlush,
+        }
+
+        fn run(route: &Route, present: bool) -> (usize, usize, usize) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Token Source".to_string(),
+                Zone::Battlefield,
+            );
+            let object_id = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Saproling".to_string(),
+                Zone::Battlefield,
+            );
+            let liminal_entry =
+                |entry_events| PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    object_id,
+                    name: "Saproling".to_string(),
+                    source_id,
+                    controller: PlayerId(0),
+                    enters_attacking: false,
+                    attach_to: None,
+                    sacrifice_at: None,
+                    created_ids: Vec::new(),
+                    ability_injection:
+                        crate::types::game_state::LiminalTokenAbilityInjection::ResolvedToken,
+                    entry_events,
+                };
+            let action = match route {
+                Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    object_id,
+                    name: "Saproling".to_string(),
+                    enters_attacking: false,
+                    source_id,
+                    controller: PlayerId(0),
+                },
+                Route::FinalizeTokenEntry => PendingCounterPostAction::FinalizeTokenEntry {
+                    object_id,
+                    name: "Saproling".to_string(),
+                    attach_to: None,
+                    sacrifice_at: None,
+                    source_id,
+                    controller: PlayerId(0),
+                },
+                // Empty `remaining_modifications`: `apply_token_modifications` returns `true` on an
+                // empty slice, so the resume reaches its emit tail — the statement under test —
+                // without needing an `, except` body.
+                Route::ApplyCopyTokenModificationsAndFinalize => {
+                    PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        object_id,
+                        name: "Saproling".to_string(),
+                        enters_attacking: false,
+                        source_id,
+                        controller: PlayerId(0),
+                        remaining_modifications: Vec::new(),
+                    }
+                }
+                Route::LiminalEntryEmit => {
+                    liminal_entry(crate::types::game_state::TokenEntryEventEmission::Emit)
+                }
+                Route::LiminalEntryFlush => {
+                    liminal_entry(crate::types::game_state::TokenEntryEventEmission::Suppress)
+                }
+            };
+            if !present {
+                // CR 704.5f is the live way to get here (a 0-toughness copy buried while its
+                // counter-ordering prompt was open); removing the object models the same end state
+                // without staging a whole SBA pass. Removed BEFORE the resume, which is where the
+                // window actually is: the object is committed to the battlefield before the
+                // counter replacement pauses, so it can only vanish while the prompt is open.
+                state.objects.remove(&object_id);
+                state.battlefield.retain(|id| *id != object_id);
+            }
+            let mut events = Vec::new();
+            apply_pending_counter_post_action(&mut state, action, &mut events);
+            if matches!(route, Route::LiminalEntryFlush) {
+                assert!(
+                    state
+                        .pending_token_battlefield_entry
+                        .as_ref()
+                        .is_some_and(|pending| pending.object_id == object_id),
+                    "REACH-GUARD: the Suppress arm must have parked the entry, or the flush below \
+                     is a no-op and its counts prove nothing"
+                );
+                assert!(
+                    crate::game::effects::token::flush_pending_token_battlefield_entry(
+                        &mut state,
+                        object_id,
+                        &mut events,
+                    ),
+                    "REACH-GUARD: the flush must consume the parked entry"
+                );
+            }
+            (
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::TokenCreated { .. }))
+                    .count(),
+                state.created_tokens_this_turn.len(),
+                state.last_created_token_ids.len(),
+            )
+        }
+
+        for (route, arm) in [
+            (Route::FinalizeTokenEntry, "counters::FinalizeTokenEntry"),
+            (
+                Route::FinalizeCopyTokenEntry,
+                "counters::FinalizeCopyTokenEntry",
+            ),
+            (
+                Route::ApplyCopyTokenModificationsAndFinalize,
+                "counters::ApplyCopyTokenModificationsAndFinalize -> \
+                 token_copy::apply_remaining_token_modifications_after_counter_pause",
+            ),
+            (
+                Route::LiminalEntryEmit,
+                "counters::FinalizeCommittedLiminalTokenEntry (entry_events: Emit)",
+            ),
+            (
+                Route::LiminalEntryFlush,
+                "counters::FinalizeCommittedLiminalTokenEntry (entry_events: Suppress) -> \
+                 token::flush_pending_token_battlefield_entry",
+            ),
+        ] {
+            // POSITIVE CONTROL — the instrument can report non-zero, so the zeros below are a
+            // measurement and not a fixture that never ran the arm.
+            assert_eq!(
+                run(&route, true),
+                (1, 1, 1),
+                "{arm}: with the token still on the battlefield the route emits exactly one \
+                 TokenCreated AND writes exactly one created_tokens_this_turn row AND publishes \
+                 exactly one last_created_token_ids entry"
+            );
+
+            // THE INVARIANT: event and ALL THREE ledgers agree on the gone path too.
+            assert_eq!(
+                run(&route, false),
+                (0, 0, 0),
+                "{arm}: a vanished token must emit NO TokenCreated and appear in NO token-creation \
+                 ledger, because the object it names does not exist. Dropping the \
+                 `if record.is_some()` in `push_committed_token_entry_events` yields (1, 0, 0) — a \
+                 live creation trigger event backed by an empty ledger. Dropping \
+                 `token::record_last_created_token`'s existence guard yields (0, 0, 1) — a dead \
+                 object id published into the `TargetFilter::LastCreated` anaphora slot"
+            );
+        }
+    }
+
+    /// The SIXTH `last_created_token_ids` writer, and the one the five arms above do not reach:
+    /// `PendingCounterPostAction::EmitCommittedCopyTokenEntry`.
+    ///
+    /// Its shape differs, which is why it gets its own assertion rather than a sixth arm. The
+    /// CR 400.7 row and the `created_tokens_this_turn` write happen UPSTREAM of the counter pause
+    /// on this route, so the 3-tuple invariant above does not describe it — on the gone path this
+    /// variant legitimately leaves an earlier turn-ledger row alone and its `flush` is a no-op.
+    /// What DOES apply is the third ledger on its own: a `TargetFilter::LastCreated` reference must
+    /// never name an object that is no longer in `state.objects`.
+    ///
+    /// Two-sided on the guard it covers: deleting `contains_key` in
+    /// `token::record_last_created_token` flips the gone row from 0 to 1 while leaving the positive
+    /// control at 1, so the assertion discriminates rather than merely running.
+    #[test]
+    fn a_vanished_copy_token_is_not_published_to_the_last_created_anaphora_slot() {
+        fn run(present: bool) -> (bool, usize) {
+            let mut state = GameState::new_two_player(42);
+            let object_id = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Copy Token".to_string(),
+                Zone::Battlefield,
+            );
+            assert!(
+                state.last_created_token_ids.is_empty(),
+                "REACH-GUARD: the slot must start empty, or the count below is not attributable to \
+                 this dispatch"
+            );
+            if !present {
+                state.objects.remove(&object_id);
+                state.battlefield.retain(|id| *id != object_id);
+            }
+            let mut events = Vec::new();
+            let handled = apply_pending_counter_post_action(
+                &mut state,
+                PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id },
+                &mut events,
+            );
+            (
+                handled,
+                state
+                    .last_created_token_ids
+                    .iter()
+                    .filter(|id| **id == object_id)
+                    .count(),
+            )
+        }
+
+        // POSITIVE CONTROL — this dispatch does publish the slot, so the zero below is a
+        // measurement and not a variant that was never matched.
+        assert_eq!(
+            run(true),
+            (true, 1),
+            "EmitCommittedCopyTokenEntry with the token present must publish it exactly once to \
+             `last_created_token_ids`"
+        );
+        assert_eq!(
+            run(false),
+            (true, 0),
+            "EmitCommittedCopyTokenEntry with the token gone must publish NOTHING: \
+             `TargetFilter::LastCreated` resolves through `state.objects`, so a dead id here is a \
+             \"the token you created\" reference to an object that never finished entering"
+        );
+    }
+
+    /// The COPY-BATCH BUFFER half of the same invariant, and the one every test above is
+    /// structurally blind to.
+    ///
+    /// WHY A SEPARATE TEST RATHER THAN A SIXTH ARM. Every fixture above builds
+    /// `GameState::new_two_player(42)`, whose resolution stack has no `ResolutionFrame::CopyToken`,
+    /// so `state.active_copy_token_mut()` returns `None` and the copy-batch branch these two routes
+    /// carry is NEVER ENTERED. Those tests fail when the ledger-3 guard is reverted, which proves
+    /// they are sensitive to the lines that changed — it does not prove they reach the branch where
+    /// the guard can be defeated. Sensitivity is not coverage, and the gap it left was real: the
+    /// guard shipped with an UNGUARDED `pending.created_ids.push(id)` one line below it at both
+    /// sites, republishing the id the guard had just withheld.
+    ///
+    /// WHAT MAKES THE BUFFER LOAD-BEARING: `token_copy::drain_copy_token_resolution` ends with
+    /// `state.last_created_token_ids = pending.created_ids;` — an ASSIGNMENT. So a dead id in the
+    /// buffer does not merely duplicate ledger 3, it OVERWRITES the guarded ledger with the
+    /// unguarded list. This test therefore measures the state after that drain, which is the
+    /// user-visible end state a `TargetFilter::LastCreated` reference actually reads.
+    ///
+    /// REACHABILITY IS DEMONSTRATED, NOT ASSERTED. The frame is seeded with a SURVIVOR id that
+    /// exists only in the buffer, never in ledger 3 before the drain. `survivor_rows == 1` after
+    /// the drain is reachable only if the `Some(pending)` branch's container was published, so
+    /// deleting the `if let Some(pending)` body inside
+    /// `token::record_last_created_copy_batch_token` fails the PRESENT row (the token's own id
+    /// never reaches the buffer, so it is gone after the wholesale assign) while the survivor
+    /// column still proves the drain itself ran.
+    ///
+    /// TWO-SIDED, each mutant failing the SAME named assertion — the `gone` row's `dead_rows == 0`:
+    /// * MUTANT-DROP — delete the `if !record_last_created_token(…) { return; }` early return in
+    ///   `token::record_last_created_copy_batch_token`, i.e. the exact shape that shipped.
+    /// * MUTANT-TRIVIALIZE — keep every branch, replace `state.objects.contains_key(&object_id)`
+    ///   in `token::record_last_created_token` with `true`.
+    ///
+    /// Both leave the PRESENT row passing, so neither is caught by a fixture that never ran.
+    #[test]
+    fn a_vanished_token_never_reaches_the_anaphora_slot_through_the_copy_batch_buffer() {
+        use crate::types::game_state::PendingCopyTokenResolution;
+        use std::collections::VecDeque;
+
+        /// The two routes that publish a single just-created id while a copy batch is in flight.
+        enum Route {
+            /// `counters.rs`'s own arm.
+            FinalizeCopyTokenEntry,
+            /// Dispatched by `counters.rs` into
+            /// `token_copy::apply_remaining_token_modifications_after_counter_pause`.
+            ApplyCopyTokenModificationsAndFinalize,
+        }
+
+        /// `(dead id rows in the buffer, dead id rows in ledger 3 after the drain, survivor rows in
+        /// ledger 3 after the drain)`.
+        fn run(route: &Route, present: bool) -> (usize, usize, usize) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Token Source".to_string(),
+                Zone::Battlefield,
+            );
+            // An earlier batch's token. It lives ONLY in the buffer, so its presence in ledger 3
+            // after the drain is proof the buffer was published there.
+            let survivor = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Earlier Copy".to_string(),
+                Zone::Battlefield,
+            );
+            let object_id = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Copy Token".to_string(),
+                Zone::Battlefield,
+            );
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![survivor],
+                remaining: VecDeque::new(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id,
+            });
+            assert!(
+                state.active_copy_token().is_some(),
+                "REACH-GUARD: without an active CopyToken frame the branch under test is dead code \
+                 and every count below would be vacuous"
+            );
+            assert!(
+                state.last_created_token_ids.is_empty(),
+                "REACH-GUARD: ledger 3 must start empty, or the rows below are not attributable to \
+                 this dispatch"
+            );
+            let action = match route {
+                Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    object_id,
+                    name: "Copy Token".to_string(),
+                    enters_attacking: false,
+                    source_id,
+                    controller: PlayerId(0),
+                },
+                Route::ApplyCopyTokenModificationsAndFinalize => {
+                    PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        object_id,
+                        name: "Copy Token".to_string(),
+                        enters_attacking: false,
+                        source_id,
+                        controller: PlayerId(0),
+                        remaining_modifications: Vec::new(),
+                    }
+                }
+            };
+            if !present {
+                // CR 704.5f: the live shape is a 0-toughness copy buried while its counter-ordering
+                // prompt was open. Removed BEFORE the resume, which is where the window is.
+                state.objects.remove(&object_id);
+                state.battlefield.retain(|id| *id != object_id);
+            }
+            let mut events = Vec::new();
+            apply_pending_counter_post_action(&mut state, action, &mut events);
+            let buffered = state
+                .active_copy_token()
+                .expect("REACH-GUARD: the dispatch must not consume the CopyToken frame")
+                .created_ids
+                .iter()
+                .filter(|id| **id == object_id)
+                .count();
+            // The frame has no remaining batches, so this drain is exactly the terminal
+            // `state.last_created_token_ids = pending.created_ids;` assignment and nothing else.
+            crate::game::effects::token_copy::drain_pending_copy_token_resolution(
+                &mut state,
+                &mut events,
+            );
+            let rows = |wanted: ObjectId| {
+                state
+                    .last_created_token_ids
+                    .iter()
+                    .filter(|id| **id == wanted)
+                    .count()
+            };
+            (buffered, rows(object_id), rows(survivor))
+        }
+
+        for (route, arm) in [
+            (
+                Route::FinalizeCopyTokenEntry,
+                "counters::FinalizeCopyTokenEntry",
+            ),
+            (
+                Route::ApplyCopyTokenModificationsAndFinalize,
+                "counters::ApplyCopyTokenModificationsAndFinalize -> \
+                 token_copy::apply_remaining_token_modifications_after_counter_pause",
+            ),
+        ] {
+            // POSITIVE CONTROL + REACHABILITY DEMONSTRATION. The buffer column can only be 1 if the
+            // `Some(pending)` branch executed, and the survivor column can only be 1 if the drain
+            // published that buffer onto ledger 3.
+            assert_eq!(
+                run(&route, true),
+                (1, 1, 1),
+                "{arm}: with the token present it must reach the copy batch's `created_ids` AND \
+                 survive the drain's wholesale assignment onto `last_created_token_ids`, alongside \
+                 the earlier batch's token. Deleting the `if let Some(pending)` body in \
+                 `token::record_last_created_copy_batch_token` drops this to (0, 0, 1)"
+            );
+
+            // THE INVARIANT.
+            assert_eq!(
+                run(&route, false),
+                (0, 0, 1),
+                "{arm}: a vanished token must not enter the copy batch's `created_ids`, because \
+                 the drain assigns that buffer WHOLESALE onto `last_created_token_ids` — so an \
+                 unguarded buffer push both republishes the id ledger 3's guard withheld and \
+                 destroys the guarded ledger. The survivor row must stay 1: the drain still runs \
+                 and still publishes, which is what makes the two zeros a measurement of the guard \
+                 rather than of a drain that never happened"
+            );
+        }
     }
 }

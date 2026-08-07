@@ -738,8 +738,10 @@ pub(crate) fn move_object_with_terminal(
             .get(&req.object_id)
             .expect("object exists (zone read above)");
         // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7).
-        if zones::token_is_outside_battlefield_and_stack(obj) {
+        // remains in place and ceases to exist at the next SBA (CR 111.7). An
+        // exact CR 601.2a pending spell plus its announcement placeholder makes
+        // the retained-origin representation stack-resident until this delivery.
+        if zones::token_is_outside_battlefield_and_stack(state, obj) {
             return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
@@ -776,18 +778,19 @@ pub(crate) fn move_object_with_terminal(
     // requested index and the tail's auto-shuffle is suppressed (CR 701.24a: a
     // placement is not a shuffle).
     //
-    // Phase E tranche 2: 11 raw library-position callers still bypass this consult
-    // by calling `zones::move_to_library_position` / `move_to_library_at_index`
-    // directly instead of routing through `move_object`'s placement arm. They are:
-    //   - engine_resolution_choices.rs (×5)
-    //   - reveal_until.rs:~400 (`shuffle_to_bottom`)
-    //   - drawn_this_turn_choice.rs:~114
-    //   - discover.rs:~103 (put-back of unhit cards)
-    //   - put_on_top.rs:~153 / ~158
-    //   - cascade.rs:~154 (bottom-in-random-order)
-    // Migrating each onto this arm is a guaranteed no-op today (zero pool
-    // `Moved` defs target the library) but pins the redirect consult for the
-    // future. Re-verify the census before lifting:
+    // Phase E tranche 2: six production raw library-position callers still bypass
+    // this consult by calling `zones::move_to_library_position` /
+    // `move_to_library_at_index` directly instead of routing through
+    // `move_object`'s placement arm. They are:
+    //   - engine_resolution_choices.rs: clash return (~2989)
+    //   - engine_resolution_choices.rs: EffectZoneChoice bottom placement (~7260)
+    //   - engine_resolution_choices.rs: EffectZoneChoice top/Nth placement (~7272)
+    //   - engine_resolution_choices.rs: EffectZoneChoice mixed-source reorder (~7333)
+    //   - zone_pipeline.rs: exempt library-placement delivery (~821)
+    //   - zone_pipeline.rs: replacement delivery placement (~2353)
+    // Migrating each onto this arm is a production no-op today (the only
+    // `Moved` definition targeting the library is test-only) but pins the
+    // redirect consult for the future. Re-verify the census before lifting:
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
@@ -1891,7 +1894,11 @@ fn legal_aura_attachment_targets(
         .collect();
 
     targets.extend(state.players.iter().filter_map(|player| {
-        if player.is_eliminated || player.is_phased_out() {
+        // Hygiene routing, behaviour-neutral by construction: `is_eliminated ||
+        // is_phased_out()` on an iterated member is the negation of what
+        // `players::player_exists_for_choice` spells for a member already known to be in
+        // `state.players`. Routed so an existence fix propagates here for free.
+        if !crate::game::players::player_exists_for_choice(state, player.id) {
             return None;
         }
         if crate::game::filter::player_matches_target_filter_in_state(
@@ -3074,6 +3081,62 @@ fn execute_zone_move_with_applied_terminal(
             replacement::park_waiting_for(state, player);
             ZoneMoveTerminalResult::NeedsChoice(player)
         }
+    }
+}
+
+#[cfg(test)]
+mod announced_spell_residency_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn casting_to_stack_rejects_same_id_activated_ability_entry() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Activated Source".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&object_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(state.stack.iter().any(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+        }));
+
+        // CR 109.1 / CR 602.2a: A same-id activated ability is a distinct
+        // noncard stack object, so it cannot satisfy the spell-residency gate.
+        let mut events = Vec::new();
+        let result = move_object_with_terminal(
+            &mut state,
+            ZoneMoveRequest::casting_to_stack(object_id, object_id),
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(events.is_empty());
     }
 }
 

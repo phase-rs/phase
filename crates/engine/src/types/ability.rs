@@ -2401,6 +2401,200 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
     }
 }
 
+/// CR 601.2c: "The player announces their choice of an appropriate object or
+/// player for each target the spell requires." A mana sentence can name up to
+/// two independent player targets with distinct roles, each announced as its
+/// own target (CR 115.1; CR 602.2b for activated abilities):
+/// - RECIPIENT — whose mana pool receives the mana (CR 106.4). Jetfire,
+///   Ingenious Scientist: "Target player adds that much {C}."
+/// - COUNT SOURCE — the player a production-count quantity reads
+///   (`TargetZoneCardCount`, `LifeTotal { player: Target }`). Jeska's Will:
+///   "Add {R} for each card in target opponent's hand." Carpet of Flowers:
+///   "…the number of Islands target opponent controls."
+///
+/// Modeling both roles in one `Option<TargetFilter>` forced the resolver to guess
+/// the role from the production's quantity shape, and collapsed both roles onto
+/// `ability.targets[0]` — wrong under CR 601.2c whenever both appear.
+/// Slots are surfaced recipient-first, in Oracle-text declaration order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role")]
+pub enum ManaTargetRole {
+    /// The named player's mana pool receives the mana (CR 106.4).
+    Recipient { recipient: TargetFilter },
+    /// The named player is read by the production's count quantity (CR 115.1).
+    CountSource { count_source: TargetFilter },
+    /// Both roles are declared, as two independent instances of the word
+    /// "target" (CR 601.2c). Zero printed cards today; the shape is legal Magic
+    /// and the enum makes the two roles independently representable.
+    Both {
+        recipient: TargetFilter,
+        count_source: TargetFilter,
+    },
+}
+
+/// Typed key for the two independent target slots a mana sentence can declare
+/// (CR 601.2c). Not a bool or a bare index — the slot identity is load-bearing
+/// in several separate consumers and must not be positional folklore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManaTargetSlot {
+    Recipient,
+    CountSource,
+}
+
+impl ManaTargetRole {
+    /// CR 106.4: the filter naming whose pool receives the mana, if declared.
+    pub fn recipient(&self) -> Option<&TargetFilter> {
+        match self {
+            ManaTargetRole::Recipient { recipient } | ManaTargetRole::Both { recipient, .. } => {
+                Some(recipient)
+            }
+            ManaTargetRole::CountSource { .. } => None,
+        }
+    }
+
+    /// CR 115.1: the filter naming the player the production count reads, if declared.
+    pub fn count_source(&self) -> Option<&TargetFilter> {
+        match self {
+            ManaTargetRole::CountSource { count_source }
+            | ManaTargetRole::Both { count_source, .. } => Some(count_source),
+            ManaTargetRole::Recipient { .. } => None,
+        }
+    }
+
+    /// The filter declared for `slot`, if any.
+    pub fn filter_for(&self, slot: ManaTargetSlot) -> Option<&TargetFilter> {
+        match slot {
+            ManaTargetSlot::Recipient => self.recipient(),
+            ManaTargetSlot::CountSource => self.count_source(),
+        }
+    }
+
+    /// CR 601.2c: Add (or replace) the RECIPIENT role, preserving any count
+    /// source already declared. This is the SINGLE AUTHORITY for the parser's
+    /// subject-stamping combine — both stamping sites
+    /// (`parser/oracle_effect/mana.rs` subject-led wrapper and
+    /// `parser/oracle_effect/mod.rs` subject-predicate classification) call it,
+    /// so neither may open-code the combine and silently clobber a count source.
+    #[must_use]
+    pub fn with_recipient(self, recipient: TargetFilter) -> Self {
+        match self {
+            ManaTargetRole::Recipient { .. } => ManaTargetRole::Recipient { recipient },
+            ManaTargetRole::CountSource { count_source }
+            | ManaTargetRole::Both { count_source, .. } => ManaTargetRole::Both {
+                recipient,
+                count_source,
+            },
+        }
+    }
+
+    /// CR 601.2c: mirror of [`Self::with_recipient`] for the count-source role.
+    #[must_use]
+    pub fn with_count_source(self, count_source: TargetFilter) -> Self {
+        match self {
+            ManaTargetRole::CountSource { .. } => ManaTargetRole::CountSource { count_source },
+            ManaTargetRole::Recipient { recipient } | ManaTargetRole::Both { recipient, .. } => {
+                ManaTargetRole::Both {
+                    recipient,
+                    count_source,
+                }
+            }
+        }
+    }
+
+    /// Every declared role filter in Oracle-text declaration order (recipient
+    /// first), CONTEXT-REFS INCLUDED. This is what `Effect::target_filter`, the
+    /// D5 frozen-tag scan, CR 605.1a mana-ability classification, the AI POISON
+    /// scan, and coverage rendering all read — none of them makes a slot
+    /// decision, and context-ref filters carry the frozen event tags.
+    pub fn declared_filters(&self) -> impl Iterator<Item = (ManaTargetSlot, &TargetFilter)> {
+        [
+            self.recipient().map(|f| (ManaTargetSlot::Recipient, f)),
+            self.count_source()
+                .map(|f| (ManaTargetSlot::CountSource, f)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// CR 115.1: the declared filters that surface a cast-time target slot —
+    /// i.e. the non-context-ref ones. This is the ONE iterator every slot site
+    /// consumes; no slot site may re-derive the skip predicate inline.
+    pub fn surfaced_filters(&self) -> impl Iterator<Item = (ManaTargetSlot, &TargetFilter)> {
+        self.declared_filters().filter(|(_, f)| !f.is_context_ref())
+    }
+
+    /// Index of `slot` among the SURFACED slots, or `None` when that slot
+    /// declares no filter or its filter is a context ref. Defined in terms of
+    /// `surfaced_filters` so it cannot drift from surfacing order.
+    pub fn slot_index(&self, slot: ManaTargetSlot) -> Option<usize> {
+        self.surfaced_filters().position(|(s, _)| s == slot)
+    }
+
+    /// CR 115.1: How many cast-time target slots the GENERIC single-slot
+    /// targeting path surfaces for this role — 0 or 1.
+    ///
+    /// The generic path reads `Effect::target_filter()` (the FIRST DECLARED role
+    /// filter) through `triggers::extract_target_filter_from_effect`, which ends
+    /// in `.filter(|t| !t.is_context_ref())`. So it surfaces one slot iff the
+    /// first declared filter exists and is not a context ref — exactly what this
+    /// returns.
+    ///
+    /// This is the SINGLE AUTHORITY for that quantity. `mana_multi_role` uses it
+    /// to decide whether the explicit role arms are needed at all, and
+    /// `minimum_targets_in_chain`'s excess term subtracts it from the surfaced
+    /// count so the two reservation terms sum to the true surfaced count. Those
+    /// two must never compute it independently: an inline `1` in the excess term
+    /// under-reserved by one for a context-ref-recipient `Both`, whose generic
+    /// term contributes 0.
+    pub fn generic_path_slots(&self) -> usize {
+        usize::from(
+            self.declared_filters()
+                .next()
+                .is_some_and(|(_, f)| !f.is_context_ref()),
+        )
+    }
+}
+
+/// CR 601.2c: A mana role whose surfaced target slots are NOT what the generic
+/// single-slot targeting path would surface, and which therefore needs the
+/// explicit role-slot arms in `ability_utils.rs`.
+///
+/// The generic path reads `Effect::target_filter()` — the FIRST DECLARED role
+/// filter — and surfaces one slot for it unless it is a context ref. That is
+/// correct for every printed card, all of which declare exactly one role. It is
+/// wrong in exactly two shapes:
+///
+///  1. **Two surfaced roles** (`Both` with two real filters). The generic path
+///     surfaces one slot and the second role would be unannounceable.
+///  2. **A CONTEXT-REF recipient plus a real count source.** The generic path
+///     reads the recipient (first declared), finds a context ref, and surfaces
+///     NOTHING — stranding the count source with no slot to resolve against.
+///     This shape is production-reachable through subject-predicate
+///     classification ("That player adds {R} for each card in target opponent's
+///     hand"): the subject is a `ScopedPlayer` recipient and the for-each clause
+///     is a real count source. Before roles were modeled it worked only by
+///     accident, because the `is_none()` clobber DISCARDED the recipient and
+///     left the count source as the sole field — the very data loss this change
+///     removes. Preserving the recipient is what makes case 2 reachable, so the
+///     gate must cover it.
+///
+/// Stated as "the surfaced set differs from the generic path's", so the two can
+/// never disagree by construction. Every one of the shipping single-role shapes
+/// — including all ten context-ref recipients and Carpet of Flowers — returns
+/// `None` here and keeps today's exact code path.
+pub fn mana_multi_role(effect: &Effect) -> Option<&ManaTargetRole> {
+    let Effect::Mana {
+        target: Some(role), ..
+    } = effect
+    else {
+        return None;
+    };
+    // How many slots the generic `Effect::target_filter()` path would surface.
+    // Single authority: `ManaTargetRole::generic_path_slots`, which
+    // `minimum_targets_in_chain`'s excess term also consumes.
+    (role.surfaced_filters().count() != role.generic_path_slots()).then_some(role)
+}
+
 /// Parse-time template for mana spend restrictions.
 ///
 /// Unlike [`ManaRestriction`](super::mana::ManaRestriction) which carries concrete values
@@ -3316,8 +3510,13 @@ pub enum ResolutionCastSuccessAction {
         remaining_mv_budget: Option<u32>,
         filter: TargetFilter,
         zones: Vec<Zone>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exile_instead_of_graveyard: bool,
+        #[serde(
+            default,
+            alias = "exile_instead_of_graveyard",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_graveyard_replacement_compat"
+        )]
+        graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
         /// CR 406.6: Source object of the granting ability, threaded so
         /// `ExiledBySource`-style filters (Plargg and Nassari) can rebuild the
         /// re-offer candidate set against the right exile links. Zero sentinel
@@ -3408,6 +3607,37 @@ impl TurnGate {
     }
 }
 
+/// CR 603.7b: The stated duration of a multi-fire `WheneverEvent` delayed
+/// triggered ability. "A delayed triggered ability will trigger only once … unless
+/// it has a stated duration, such as 'this turn.'" This axis records that stated
+/// duration so cleanup/purge can end the trigger at the right boundary.
+///
+/// WheneverEvent-specific (turn-gated expiry, not the `ThisTurn`/`Persistent`/
+/// `Reflexive` set that `DelayedTriggerLifetime` carries for `WhenNextEvent`), so
+/// it is a small dedicated enum rather than an overload of `DelayedTriggerLifetime`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WheneverEventExpiry {
+    /// DEFAULT — "this turn" / "this combat" / "until end of turn": the trigger
+    /// ends at the creating turn's cleanup step (CR 514.2). Every pre-existing
+    /// `WheneverEvent` card (Hunter's Insight, etc.) is this variant.
+    #[default]
+    EndOfTurn,
+    /// CR 603.7b: "until your next turn" — the trigger fires on intervening
+    /// (opponents') turns and ends at the START of the controller's next turn.
+    /// `after` is the symbolic `AfterCreationTurn` at parse time, stamped to
+    /// `After(creation_turn)` at delayed-trigger resolution (mirroring
+    /// `AtNextPhaseForPlayer.gate`).
+    UntilControllersNextTurn { after: TurnGate },
+}
+
+impl WheneverEventExpiry {
+    /// Serde skip-helper: `EndOfTurn` is the default and is omitted from JSON, so
+    /// all existing serialized card-data stays byte-identical.
+    pub fn is_end_of_turn(&self) -> bool {
+        matches!(self, WheneverEventExpiry::EndOfTurn)
+    }
+}
+
 /// When a delayed triggered ability fires (CR 603.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3446,7 +3676,16 @@ pub enum DelayedTriggerCondition {
     /// until end of turn. Reuses existing trigger matching infrastructure via embedded
     /// TriggerDefinition. The embedded trigger's `execute` field should be `None` —
     /// the actual effect lives in `DelayedTrigger.ability`.
-    WheneverEvent { trigger: Box<TriggerDefinition> },
+    WheneverEvent {
+        trigger: Box<TriggerDefinition>,
+        /// CR 603.7b: the trigger's stated duration. `EndOfTurn` (default) is
+        /// purged at the creating turn's cleanup; `UntilControllersNextTurn`
+        /// survives intervening turns and is purged at the controller's next turn
+        /// start (Kang Dynasty). Defaulted + skipped so existing card-data is
+        /// byte-identical.
+        #[serde(default, skip_serializing_if = "WheneverEventExpiry::is_end_of_turn")]
+        expiry: WheneverEventExpiry,
+    },
     /// CR 603.7: "When you next [event] this turn" — fires once on the next matching
     /// event, then is removed. One-shot variant of `WheneverEvent`.
     /// Uses existing trigger matching infrastructure to detect the event.
@@ -3673,7 +3912,7 @@ where
 /// → `None`), so an in-flight saved / reconnected permission serialized before
 /// the migration still reloads with its exile-on-resolution rider. Paired with
 /// `#[serde(alias = "exile_instead_of_graveyard_on_resolve")]` on the field.
-fn deserialize_graveyard_replacement_compat<'de, D>(
+pub(crate) fn deserialize_graveyard_replacement_compat<'de, D>(
     d: D,
 ) -> Result<Option<SpellStackToGraveyardReplacement>, D::Error>
 where
@@ -5549,6 +5788,11 @@ pub enum CastManaSpentMetric {
     Total,
     /// Number of distinct colors of mana spent.
     DistinctColors,
+    /// CR 106.3 + CR 601.2h: Amount of mana of one specific color spent to pay
+    /// the cost — the Adamant axis ("if at least three white mana was spent to
+    /// cast this spell"). A leaf parameterization of the same payment record
+    /// `Total` and `DistinctColors` aggregate differently.
+    OfColor { color: ManaColor },
     /// Amount of mana whose source matched the filter at payment time.
     FromSource { source_filter: TargetFilter },
 }
@@ -6504,6 +6748,26 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
+///
+/// A parameter, not a variant pair. The codebase already proliferates this axis
+/// as siblings (`PlayerFilter::ParentObjectTargetController` /
+/// `ParentObjectTargetOwner`, whose own doc calls it "completing the
+/// owner/controller pair"), and within one tracked-set snapshot the two
+/// readings differ only in which recorded field answers the same question.
+/// Both values have a shipped card: Faerie Slumber Party (`Controller`),
+/// Kefka, Dancing Mad (`Owner`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PossessionAxis {
+    /// CR 109.4 + CR 608.2h: controller. Only objects on the stack or the
+    /// battlefield have a controller, so a member that has left the
+    /// battlefield is read from last known information.
+    Controller,
+    /// CR 108.3: owner — the player who started the game with the card in
+    /// their deck. Stable across zone changes.
+    Owner,
+}
+
 /// CR 506.2 + CR 508.1b: Whose attacks the "opponents attacked" player set is
 /// measured over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -6771,6 +7035,49 @@ pub enum PlayerFilter {
     /// player facing the choice is the owner of the targeted permanent named in
     /// the prior clause, not the ability controller.
     ParentObjectTargetOwner,
+    /// CR 608.2c + CR 608.2h + CR 109.4 + CR 102.2: Each player matching
+    /// `relation` who possessed — per `possession` — at least one member of the
+    /// most recent tracked object set matching `filter`, restricted to members
+    /// whose recorded producer action equals `caused_by` when it is `Some`.
+    ///
+    /// Powers "for each opponent who controlled a creature returned this way"
+    /// (Faerie Slumber Party): the *set* of returned creatures is only the
+    /// membership test; the count is over the DISTINCT PLAYERS who possessed a
+    /// member. Counting the objects instead (bare `QuantityRef::TrackedSetSize`)
+    /// is a different quantity on a different axis.
+    ///
+    /// CR 109.4: a member no longer on the battlefield has NO controller, so
+    /// `Controller` falls back to `lki_cache[id].controller` (CR 608.2h last
+    /// known information) for exactly those members — and reads LIVE state for
+    /// members still on the battlefield, whose LKI entry may be a stale
+    /// snapshot from an earlier battlefield exit. `Owner` reads
+    /// `objects[id].owner` (CR 108.3, stable across zone changes).
+    ///
+    /// Reads the PUBLISHED tracked set (`tracked_object_sets`), which the
+    /// producing effect fills only when `next_sub_needs_tracked_set` is true.
+    /// `player_filter_references_tracked_set` (`game/effects/mod.rs`) MUST
+    /// report this variant as a consumer or the producer never publishes and
+    /// the count silently resolves to 0.
+    ///
+    /// USED IN THE COUNT POSITION ONLY (`repeat_for` / `QuantityRef::PlayerCount`).
+    /// Before using it as an `ability.player_scope`, see issue #6957:
+    /// `is_player_scope_local_continuation` ends on
+    /// `matches!(scope, PlayerFilter::All)`, so a scope-position variant it does
+    /// not list silently returns `false` and its continuation is detached as an
+    /// unscoped tail — the same silent-default mechanism as the publication
+    /// allowlist above, in a different predicate.
+    ///
+    /// Deliberately distinct from `ZoneChangedThisWay` (the unconditional,
+    /// unfiltered `last_zone_changed_ids` ledger) and `PerformedActionThisWay`
+    /// (the CR 701.x player-action ledger). The three share an English suffix,
+    /// not a ledger.
+    TrackedSetPossessor {
+        relation: PlayerRelation,
+        possession: PossessionAxis,
+        filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ThisWayCause>,
+    },
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -7097,6 +7404,31 @@ impl QuantityExpr {
     /// Returns true if this expression is an `UpTo` wrapper.
     pub fn is_up_to(&self) -> bool {
         matches!(self, QuantityExpr::UpTo { .. })
+    }
+
+    /// Walks every `QuantityRef` reachable through this expression's
+    /// composition forms and reports whether any satisfies `pred`. Single
+    /// traversal authority for the resolution-local back-reference
+    /// predicates, so a new `QuantityExpr` composition form is threaded in
+    /// exactly one place instead of once per predicate. Relocated from
+    /// `game/effects/mod.rs::quantity_expr_any_ref` (verbatim move) so the
+    /// parser layer can consult the same traversal without reaching into
+    /// game internals (`game/effects/mod.rs` now delegates here).
+    pub fn any_ref(&self, pred: &mut dyn FnMut(&QuantityRef) -> bool) -> bool {
+        match self {
+            QuantityExpr::Ref { qty } => pred(qty),
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. } => inner.any_ref(pred),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                exprs.iter().any(|expr| expr.any_ref(pred))
+            }
+            QuantityExpr::UpTo { max } => max.any_ref(pred),
+            QuantityExpr::Power { exponent, .. } => exponent.any_ref(pred),
+            QuantityExpr::Difference { left, right } => left.any_ref(pred) || right.any_ref(pred),
+            QuantityExpr::Fixed { .. } => false,
+        }
     }
 }
 
@@ -7456,7 +7788,13 @@ pub enum StaticCondition {
     Unrecognized {
         text: String,
     },
+    /// CR 102.1: The active player is the controller of this static ability.
     DuringYourTurn,
+    /// CR 102.3 + CR 805.4a: The active player is an opponent of this static
+    /// ability's controller. This is deliberately distinct from
+    /// `Not(DuringYourTurn)`: in team games, a teammate may be the active
+    /// player while the controller's team still has the turn.
+    DuringOpponentsTurn,
     /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with
     /// the most common color among all permanents on the battlefield (including
     /// any color tied for most common). Used by Heroic Defiance's "gets +3/+3
@@ -7861,6 +8199,34 @@ pub enum ParsedCondition {
     /// ability-resolution layer), the same way `ParsedCondition::And` mirrors
     /// `AbilityCondition::And`.
     IsYourTurn,
+    /// CR 102.3 + CR 805.4a: True when the active player belongs to a team the
+    /// scoped player is not on — "a player's opponents are all players not on
+    /// their team", so the turn genuinely belongs to an opponent.
+    ///
+    /// Deliberately NOT `Not(IsYourTurn)`. `IsYourTurn` compares the scoped
+    /// player against the single `active_player` SEAT, but under the shared
+    /// team turns option (CR 805.4: "Each team takes turns rather than each
+    /// player" — always on in Two-Headed Giant, CR 810.2) a turn belongs to a
+    /// TEAM. When a teammate holds `active_player` the active team is still the
+    /// scoped player's own team, yet `Not(IsYourTurn)` reports it as an
+    /// opponent's turn and wrongly opens an opponent-turn window.
+    ///
+    /// For the same reason this is not a `PlayerRelation` parameterization of
+    /// `IsYourTurn`: the two predicates are asked at different granularities
+    /// (seat vs team), so they are independent leaves rather than two values of
+    /// one scope axis.
+    ///
+    /// Team membership is never re-derived here — evaluation delegates to the
+    /// single authority `crate::game::players::is_opponent`.
+    IsOpponentsTurn,
+    /// CR 503.1: True when the game is currently in the upkeep step. A
+    /// turn-structure predicate with NO player scope — it asks only "is it an
+    /// upkeep step", not whose. Player scope composes at the restriction layer:
+    /// "during an opponent's upkeep" is `And([IsOpponentsTurn, IsDuringUpkeep])`
+    /// (CR 102.1 fixes the active player from the turn), reusing the
+    /// turn-scope leaf rather than adding a `DuringOpponents*` restriction
+    /// sibling per step.
+    IsDuringUpkeep,
     /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
     /// least one object that matches `filter`. Gates a target-dependent casting
     /// permission (Timely Ward — "you may cast this spell as though it had flash if
@@ -7875,6 +8241,17 @@ pub enum ParsedCondition {
     /// `ParsedCondition` does.
     SpellTargetsFilter {
         filter: TargetFilter,
+    },
+    /// CR 903.3 + CR 109.5: "you control your commander" — owner-scoped
+    /// (Lieutenant). CR 903.3d: "you control a commander" — controller-only, any
+    /// owner. The restriction-layer mirror of `StaticCondition::ControlsCommander`
+    /// / `TriggerCondition::ControlsCommander`; the `ownership` axis selects which
+    /// CR clause applies. Evaluated by `restrictions::evaluate_condition`, which
+    /// delegates to the single `crate::game::commander` authority — the same
+    /// helpers `layers.rs` uses for the static form, so both condition
+    /// vocabularies agree on the rule.
+    ControlsCommander {
+        ownership: CommanderOwnership,
     },
     // -- Combinators --
     /// CR 601.3 / CR 602.5: All inner conditions must be true. Used for compound
@@ -11494,16 +11871,16 @@ pub enum Effect {
         /// until the specified expiry condition is met (e.g., EndOfCombat for firebending).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expiry: Option<crate::types::mana::ManaExpiry>,
-        /// CR 115.1 + CR 115.7: Spell-level player target for mana abilities whose
-        /// produced amount references a player target (e.g., Jeska's Will mode 1
-        /// "Add {R} for each card in target opponent's hand"). When set, the
-        /// player target is surfaced as a target slot at cast time and
-        /// `TargetZoneCardCount` and `LifeTotal { player: Target }` quantities
-        /// resolve against it.
+        /// CR 601.2c + CR 115.1: Role-scoped player targets declared by this mana
+        /// sentence — the RECIPIENT whose pool receives the mana (CR 106.4,
+        /// Jetfire: "Target player adds that much {C}") and/or the COUNT SOURCE
+        /// the production's quantity reads (Jeska's Will mode 1: "Add {R} for
+        /// each card in target opponent's hand"). Each surfaced role is announced
+        /// as its own target slot at cast time and resolved from its own slot.
         /// `None` for the common case of mana abilities with no player target
         /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<TargetFilter>,
+        target: Option<ManaTargetRole>,
     },
     Discard {
         #[serde(default = "default_quantity_one")]
@@ -12112,10 +12489,9 @@ pub enum Effect {
     /// cross-selection budget that shrinks as each spell is cast. "Up to N"
     /// makes every cast optional (the controller may stop early or cast none).
     ///
-    /// When `exile_instead_of_graveyard` is true, each spell cast this way
-    /// carries the rider "if those spells would be put into your graveyard,
-    /// exile them instead" (CR 614.1a) for the rest of the cast — applied as a
-    /// duration-scoped replacement on the cast spell.
+    /// When `graveyard_replacement` is `Some`, each spell cast this way carries
+    /// its CR 614.1a stack-to-graveyard destination rider for the rest of the
+    /// cast — applied as a duration-scoped replacement on the cast spell.
     ///
     /// Distinct from `CastFromZone`, which grants a casting *permission* on a
     /// targeted object (lingering or a single self-cast). This effect owns the
@@ -12135,10 +12511,15 @@ pub enum Effect {
         /// CR 601.2a: Zones searched for candidates (the controller's own
         /// graveyard and/or hand).
         zones: Vec<Zone>,
-        /// CR 614.1a: When true, spells cast this way are exiled instead of
-        /// being put into their owner's graveyard ("exile them instead").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        exile_instead_of_graveyard: bool,
+        /// CR 614.1a: Optional destination for spells cast this way instead of
+        /// their owner's graveyard (for example, "exile them instead").
+        #[serde(
+            default,
+            alias = "exile_instead_of_graveyard",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_graveyard_replacement_compat"
+        )]
+        graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
     },
     /// CR 614.1a + CR 608.2n + CR 607.2b: "Exile it instead of putting it into a
     /// graveyard as it resolves" — the self-replacement rider applied by a
@@ -12153,7 +12534,8 @@ pub enum Effect {
     /// can later refer to the accumulating set.
     ///
     /// Distinct from `ChangeZone { destination: Exile }` (which moves a card that
-    /// is already in a zone) and from `FreeCastFromZones { exile_instead… }`
+    /// is already in a zone) and from `FreeCastFromZones {
+    /// graveyard_replacement: Some(..) }`
     /// (which stamps the same rider on a spell *cast during resolution*, with no
     /// linked-exile payoff). This effect is the trigger-driven, link-establishing
     /// form for the resolving spell itself.
@@ -12864,9 +13246,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
     },
-    /// Target's owner puts it on top or bottom of their library (owner chooses).
+    /// Put a target on top or bottom of its owner's library.
     PutOnTopOrBottom {
         target: TargetFilter,
+        /// CR 608.2d: the player directed by the Oracle text chooses top or bottom.
+        ///
+        /// CR 400.3: the object is delivered to its owner's library regardless
+        /// of who makes that choice.
+        #[serde(
+            default = "default_target_filter_parent_target_owner",
+            skip_serializing_if = "is_target_filter_parent_target_owner"
+        )]
+        chooser: TargetFilter,
     },
     /// Deliver a gift to an opponent: draw a card, create a token, etc.
     /// Resolves for the opponent of the ability's controller (2-player: the single opponent).
@@ -13717,6 +14108,16 @@ fn default_target_filter_parent() -> TargetFilter {
     TargetFilter::ParentTarget
 }
 
+/// CR 608.2d: the owner-framed top-or-bottom forms choose relative to the
+/// referenced object rather than the resolving ability's controller.
+fn default_target_filter_parent_target_owner() -> TargetFilter {
+    TargetFilter::ParentTargetOwner
+}
+
+fn is_target_filter_parent_target_owner(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::ParentTargetOwner)
+}
+
 fn target_filter_is_self_ref(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::SelfRef)
 }
@@ -14189,6 +14590,73 @@ impl TargetFilter {
                 .all(TargetFilter::references_exiled_by_source),
             TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_exiled_by_source(),
             _ => false,
+        }
+    }
+
+    /// CR 601.3: This filter with the exile-set anaphor
+    /// (`TargetFilter::ExiledBySource`) removed — i.e. the clause's OWN
+    /// restrictions, expressed against a set of objects whose membership in the
+    /// exile link has *already* been established by whoever produced the set.
+    ///
+    /// Returns `None` when nothing but the anaphor remains. A bare
+    /// `ExiledBySource` restricts a pre-established set not at all, so its
+    /// consumers must filter nothing rather than re-derive the link — re-reading
+    /// it is not merely redundant, it is wrong whenever the link is younger than
+    /// the reader's view of it (a trigger's `linked_exile_snapshot` is captured
+    /// when the trigger is put on the stack, before the ability's own exile step
+    /// has run, so the anaphor leg would be false for every forwarded id).
+    ///
+    /// Structure: `And` legs residualize independently and re-conjoin; an `Or`
+    /// with a branch that residualizes away imposes nothing on any member and so
+    /// drops whole. `TrackedSetFiltered` keeps its own set membership and
+    /// residualizes only the filter nested under it.
+    ///
+    /// INVARIANT — `Not`: this helper does not descend into `Not`, and neither
+    /// does [`TargetFilter::references_exiled_by_source`], the predicate that
+    /// gates every consumer of this residual. The two rest on the same premise
+    /// and must be changed in lockstep: no production cast filter puts the
+    /// anaphor under a negation ("cards NOT exiled this way" describes no
+    /// printed clause), so a `Not` is always a genuine restriction and is
+    /// preserved verbatim. If a card ever makes that shape real, both helpers
+    /// must be taught about it in the SAME change — a residual that still
+    /// contains `ExiledBySource` would re-evaluate the very link this helper
+    /// exists to discharge, and (per the paragraph above) that re-read is false
+    /// for every forwarded id, so the grant would silently become a no-op.
+    /// `not_over_the_exile_anaphor_is_unreachable_and_pinned_in_lockstep` pins
+    /// the current agreement between the two.
+    pub fn without_exile_anaphor(&self) -> Option<TargetFilter> {
+        match self {
+            TargetFilter::ExiledBySource => None,
+            TargetFilter::And { filters } => {
+                let mut residual: Vec<TargetFilter> = filters
+                    .iter()
+                    .filter_map(TargetFilter::without_exile_anaphor)
+                    .collect();
+                match residual.len() {
+                    0 => None,
+                    1 => residual.pop(),
+                    _ => Some(TargetFilter::And { filters: residual }),
+                }
+            }
+            TargetFilter::Or { filters } => {
+                let mut residual = Vec::with_capacity(filters.len());
+                for filter in filters {
+                    residual.push(filter.without_exile_anaphor()?);
+                }
+                Some(TargetFilter::Or { filters: residual })
+            }
+            // The tracked-set membership is its own restriction and survives; only
+            // the anaphor nested under it is discharged.
+            TargetFilter::TrackedSetFiltered {
+                id,
+                filter,
+                caused_by,
+            } => Some(TargetFilter::TrackedSetFiltered {
+                id: *id,
+                filter: Box::new(filter.without_exile_anaphor().unwrap_or(TargetFilter::Any)),
+                caused_by: *caused_by,
+            }),
+            other => Some(other.clone()),
         }
     }
 
@@ -14711,13 +15179,24 @@ impl Effect {
             | Effect::LoseTheGame { target, .. }
             | Effect::WinTheGame { target, .. } => target.as_ref(),
 
-            // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
-            // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
-            // each card in target opponent's hand") declare a player target so
-            // the `TargetZoneCardCount` quantity in `produced` can resolve
-            // against `ability.targets`. The optional `target` is `None` for
-            // every classic mana ability (Cabal Coffers, Reflecting Pool, etc.).
-            Effect::Mana { target, .. } => target.as_ref(),
+            // CR 601.2c + CR 115.1: A mana sentence declares its recipient and
+            // count-source player targets as independent role slots
+            // (`ManaTargetRole`). This accessor answers the generic targeting
+            // machinery's "primary filter for this node" question — it is NOT a
+            // role decision: it inspects no quantity and reinterprets nothing.
+            // It returns the FIRST DECLARED role filter, which for every printed
+            // card today (all single-role) is bit-for-bit the filter this arm
+            // returned before roles existed. Multi-role manas additionally
+            // surface their second slot through the explicit `mana_multi_role`
+            // arms in `ability_utils.rs`; role-aware consumers must go through
+            // `ManaTargetRole` accessors, never through this function.
+            // NOTE: `declared_filters()`, not `surfaced_filters()` — context-ref
+            // recipients (Belbe / High Tide / Utopia Sprawl / Spectral
+            // Searchlight) are returned by this accessor today and must
+            // continue to be.
+            Effect::Mana { target, .. } => target
+                .as_ref()
+                .and_then(|role| role.declared_filters().next().map(|(_, f)| f)),
 
             // CR 120.4b: Internal post-replacement damage continuations carry a
             // concrete target already chosen by an earlier effect; no new target
@@ -18415,8 +18894,18 @@ pub enum AbilityCondition {
     /// CR 601.3b + CR 702.8a: The source permanent came from a spell cast using
     /// a specific timing permission this turn.
     CastTimingPermission { permission: CastTimingPermission },
-    /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
-    /// resolution on the source object's recorded paid-mana colors.
+    /// CR 601.2h: "if {C} was spent to cast this spell" gates resolution on the
+    /// source object's recorded paid-mana colors.
+    ///
+    /// LEGACY SHAPE. The canonical generic form is
+    /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`,
+    /// which carries the CR 400.7d subject anaphora as an explicit
+    /// `CastManaObjectScope` that this variant cannot express. The leading-word
+    /// Adamant grammar already emits the generic form; this variant survives
+    /// only for the symbolic `{W}{W}` phrasing, which has no
+    /// `parse_inner_condition` grammar and fans into `And`/`Not` compositions.
+    /// Retiring it is a semantic migration (per-card scope decision), not a
+    /// rename — see `TriggerCondition::ManaColorSpent` for the sibling case.
     ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
     /// revealed card's type, or on the just-moved card when the parent effect
@@ -19527,6 +20016,14 @@ pub enum TriggerCondition {
     /// a specific timing permission this turn.
     CastTimingPermission { permission: CastTimingPermission },
     /// CR 207.2c: "if at least N mana of [color] was spent to cast this spell" — Adamant.
+    ///
+    /// LEGACY SHAPE, produced by the independent trigger-side grammar in
+    /// `parser::oracle_trigger`. The canonical generic form is
+    /// `QuantityCheck { lhs: ManaSpentToCast { scope, OfColor { color } }, GE, Fixed(minimum) }`
+    /// (see `AbilityCondition::ManaColorSpent`). Converging this one is a
+    /// SEMANTIC migration, not a rename: the producer accepts both "this spell"
+    /// and "that spell" and records neither, so lowering requires a per-card
+    /// CR 400.7d `CastManaObjectScope` decision.
     ManaColorSpent { color: ManaColor, minimum: u32 },
     /// CR 601.2b: "if no mana was spent to cast it" / "if mana from a [source] was spent"
     ManaSpentCondition { text: String },
@@ -22865,7 +23362,11 @@ pub struct ResolvedAbility {
     /// interactive continuation later proposes a follow-up event (for example a
     /// replacement's ChooseOneOf branch creates the substitute token), that event
     /// must inherit this set so the same replacement cannot apply to itself again.
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     /// CR 608.2c: How this ability links to its parent when present as a
     /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
@@ -23767,6 +24268,145 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 601.3: `without_exile_anaphor` is the residual of a cast
+    /// filter once the exile-set anaphor is discharged. The three shapes that
+    /// matter to the chain-forwarded grant path:
+    ///
+    /// * a BARE `ExiledBySource` (Hellcarver Demon, Improvisation Capstone, and
+    ///   the ~50 other bare rows) has no residual — its consumers must filter
+    ///   nothing, so those cards are a strict no-change path;
+    /// * a single-gate `And` residualizes to the gate alone;
+    /// * a nested `And[Or[..], ExiledBySource]` (Sanwell, Scarlet Witch) keeps
+    ///   the whole `Or` — collapsing it would drop one of its branches.
+    #[test]
+    fn without_exile_anaphor_discharges_only_the_anaphor_legs() {
+        let vehicle =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string())));
+        let artifact_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+            controller: None,
+            properties: Vec::new(),
+        });
+
+        assert_eq!(TargetFilter::ExiledBySource.without_exile_anaphor(), None);
+
+        let single_gate = TargetFilter::And {
+            filters: vec![vehicle.clone(), TargetFilter::ExiledBySource],
+        };
+        assert_eq!(
+            single_gate.without_exile_anaphor(),
+            Some(vehicle.clone()),
+            "a lone surviving leg unwraps out of the And"
+        );
+
+        let or_gate = TargetFilter::Or {
+            filters: vec![vehicle, artifact_creature],
+        };
+        let sanwell = TargetFilter::And {
+            filters: vec![or_gate.clone(), TargetFilter::ExiledBySource],
+        };
+        assert_eq!(
+            sanwell.without_exile_anaphor(),
+            Some(or_gate),
+            "both Or branches must survive the discharge"
+        );
+
+        // An Or with a bare-anaphor branch restricts a pre-established set not
+        // at all, so the whole disjunction drops rather than half of it.
+        assert_eq!(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::ExiledBySource,
+                ],
+            }
+            .without_exile_anaphor(),
+            None
+        );
+    }
+
+    /// CR 601.3: the `Not` invariant documented on
+    /// `without_exile_anaphor`. Neither that helper nor
+    /// `references_exiled_by_source` descends into `Not`; zero production cast
+    /// filters put the anaphor under a negation, so the two agree today. These
+    /// rows pin that agreement: teaching one helper about `Not` without the
+    /// other reddens this test instead of silently producing a residual that
+    /// re-reads the anaphor.
+    #[test]
+    fn not_over_the_exile_anaphor_is_unreachable_and_pinned_in_lockstep() {
+        let anaphor_under_not = TargetFilter::Not {
+            filter: Box::new(TargetFilter::ExiledBySource),
+        };
+        assert!(
+            !anaphor_under_not.references_exiled_by_source(),
+            "the gate predicate does not descend into Not, so this shape never \
+             reaches the chain-forwarded retain at all"
+        );
+        assert_eq!(
+            anaphor_under_not.clone().without_exile_anaphor(),
+            Some(anaphor_under_not),
+            "and the residualizer agrees: Not is preserved verbatim — if either \
+             side learns to descend, BOTH must, in the same change"
+        );
+
+        // An anaphor-free negation is a genuine restriction and survives the
+        // discharge unchanged, which is the shape this arm actually exists for.
+        let not_a_land = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+        };
+        assert_eq!(
+            TargetFilter::And {
+                filters: vec![not_a_land.clone(), TargetFilter::ExiledBySource],
+            }
+            .without_exile_anaphor(),
+            Some(not_a_land)
+        );
+    }
+
+    /// CR 608.2c: a tracked-set membership ("cards exiled this way")
+    /// is its own restriction on a chain-forwarded set, so it survives the
+    /// discharge; only the filter nested under it residualizes.
+    #[test]
+    fn without_exile_anaphor_keeps_tracked_set_membership() {
+        let instant = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let gated = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::And {
+                filters: vec![instant.clone(), TargetFilter::ExiledBySource],
+            }),
+            caused_by: Some(ThisWayCause::Exiled),
+        };
+        assert!(
+            gated.references_exiled_by_source(),
+            "the gate predicate descends into the tracked set, so the residual \
+             below is what the retain applies"
+        );
+        assert_eq!(
+            gated.without_exile_anaphor(),
+            Some(TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(instant),
+                caused_by: Some(ThisWayCause::Exiled),
+            })
+        );
+
+        // A tracked set whose only nested leg is the anaphor degrades that leg
+        // to `Any` — never to `None`, which would discard the membership too.
+        assert_eq!(
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(1),
+                filter: Box::new(TargetFilter::ExiledBySource),
+                caused_by: Some(ThisWayCause::Exiled),
+            }
+            .without_exile_anaphor(),
+            Some(TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(1),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Exiled),
+            })
+        );
+    }
 
     #[test]
     fn put_chosen_counter_quantity_visitor_includes_target_condition_rhs() {
@@ -26076,191 +26716,158 @@ mod tests {
     mod cost_category {
         use super::*;
 
+        /// Every `AbilityCost` variant maps to its `CostCategory` set. One row per
+        /// variant; the label names the row so a failure identifies which mapping
+        /// broke. `Unimplemented` is the sole empty-category row.
         #[test]
-        fn mana_only() {
-            let cost = AbilityCost::Mana {
-                cost: ManaCost::zero(),
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::ManaOnly]);
-        }
+        fn each_cost_variant_maps_to_its_categories() {
+            let cases: Vec<(&str, AbilityCost, Vec<CostCategory>)> = vec![
+                (
+                    "mana_only",
+                    AbilityCost::Mana {
+                        cost: ManaCost::zero(),
+                    },
+                    vec![CostCategory::ManaOnly],
+                ),
+                ("tap_self", AbilityCost::Tap, vec![CostCategory::TapsSelf]),
+                (
+                    "untap_self",
+                    AbilityCost::Untap,
+                    vec![CostCategory::UntapsSelf],
+                ),
+                (
+                    "loyalty",
+                    AbilityCost::Loyalty { amount: -2 },
+                    vec![CostCategory::PaysLoyalty],
+                ),
+                (
+                    "sacrifice_permanent",
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
+                    vec![CostCategory::SacrificesPermanent],
+                ),
+                (
+                    "pay_life",
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                    vec![CostCategory::PaysLife],
+                ),
+                (
+                    "discard",
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                    vec![CostCategory::Discards],
+                ),
+                (
+                    "exile_cards",
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: None,
+                    },
+                    vec![CostCategory::ExilesCards],
+                ),
+                (
+                    "collect_evidence",
+                    AbilityCost::CollectEvidence { amount: 4 },
+                    vec![CostCategory::ExilesCards],
+                ),
+                (
+                    "tap_other_creatures",
+                    AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::count(2),
+                        filter: TargetFilter::Any,
+                    },
+                    vec![CostCategory::TapsOtherCreatures],
+                ),
+                (
+                    "remove_counter",
+                    AbilityCost::RemoveCounter {
+                        count: 1,
+                        counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+                        target: None,
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                    vec![CostCategory::RemovesCounters],
+                ),
+                (
+                    "pay_energy",
+                    AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    },
+                    vec![CostCategory::PaysEnergy],
+                ),
+                (
+                    "pay_speed",
+                    AbilityCost::PaySpeed {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![CostCategory::PaysSpeed],
+                ),
+                (
+                    "return_to_hand",
+                    AbilityCost::ReturnToHand {
+                        count: 1,
+                        filter: None,
+                        from_zone: None,
+                    },
+                    vec![CostCategory::ReturnsToHand],
+                ),
+                (
+                    "unattach",
+                    AbilityCost::Unattach,
+                    vec![CostCategory::Unattaches],
+                ),
+                (
+                    "mill",
+                    AbilityCost::Mill { count: 3 },
+                    vec![CostCategory::Mills],
+                ),
+                ("exert", AbilityCost::Exert, vec![CostCategory::Exerts]),
+                (
+                    "blight_puts_counters",
+                    AbilityCost::Blight { count: 1 },
+                    vec![CostCategory::PutsCounters],
+                ),
+                (
+                    "reveal",
+                    AbilityCost::Reveal {
+                        count: 1,
+                        filter: None,
+                    },
+                    vec![CostCategory::Reveals],
+                ),
+                (
+                    "waterbend_keyword_cost",
+                    AbilityCost::Waterbend {
+                        cost: ManaCost::zero(),
+                    },
+                    vec![CostCategory::KeywordCost],
+                ),
+                (
+                    "ninjutsu_keyword_cost",
+                    AbilityCost::NinjutsuFamily {
+                        variant: NinjutsuVariant::Ninjutsu,
+                        mana_cost: ManaCost::zero(),
+                    },
+                    vec![CostCategory::KeywordCost],
+                ),
+                (
+                    "unimplemented_returns_empty",
+                    AbilityCost::Unimplemented {
+                        description: "foo".to_string(),
+                    },
+                    Vec::new(),
+                ),
+            ];
 
-        #[test]
-        fn tap_self() {
-            assert_eq!(AbilityCost::Tap.categories(), vec![CostCategory::TapsSelf]);
-        }
-
-        #[test]
-        fn untap_self() {
-            assert_eq!(
-                AbilityCost::Untap.categories(),
-                vec![CostCategory::UntapsSelf]
-            );
-        }
-
-        #[test]
-        fn loyalty() {
-            assert_eq!(
-                AbilityCost::Loyalty { amount: -2 }.categories(),
-                vec![CostCategory::PaysLoyalty]
-            );
-        }
-
-        #[test]
-        fn sacrifice_permanent() {
-            let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
-            assert_eq!(cost.categories(), vec![CostCategory::SacrificesPermanent]);
-        }
-
-        #[test]
-        fn pay_life() {
-            assert_eq!(
-                AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 2 },
-                }
-                .categories(),
-                vec![CostCategory::PaysLife]
-            );
-        }
-
-        #[test]
-        fn discard() {
-            let cost = AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: CardSelectionMode::Chosen,
-                self_scope: DiscardSelfScope::FromHand,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::Discards]);
-        }
-
-        #[test]
-        fn exile_cards() {
-            let cost = AbilityCost::Exile {
-                count: 1,
-                zone: None,
-                filter: None,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::ExilesCards]);
-        }
-
-        #[test]
-        fn collect_evidence() {
-            assert_eq!(
-                AbilityCost::CollectEvidence { amount: 4 }.categories(),
-                vec![CostCategory::ExilesCards]
-            );
-        }
-
-        #[test]
-        fn tap_other_creatures() {
-            let cost = AbilityCost::TapCreatures {
-                requirement: TapCreaturesRequirement::count(2),
-                filter: TargetFilter::Any,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::TapsOtherCreatures]);
-        }
-
-        #[test]
-        fn remove_counter() {
-            let cost = AbilityCost::RemoveCounter {
-                count: 1,
-                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
-                target: None,
-                selection: CounterCostSelection::SingleObject,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);
-        }
-
-        #[test]
-        fn pay_energy() {
-            assert_eq!(
-                AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Fixed { value: 3 }
-                }
-                .categories(),
-                vec![CostCategory::PaysEnergy]
-            );
-        }
-
-        #[test]
-        fn pay_speed() {
-            let cost = AbilityCost::PaySpeed {
-                amount: QuantityExpr::Fixed { value: 1 },
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::PaysSpeed]);
-        }
-
-        #[test]
-        fn return_to_hand() {
-            let cost = AbilityCost::ReturnToHand {
-                count: 1,
-                filter: None,
-                from_zone: None,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::ReturnsToHand]);
-        }
-
-        #[test]
-        fn unattach() {
-            assert_eq!(
-                AbilityCost::Unattach.categories(),
-                vec![CostCategory::Unattaches]
-            );
-        }
-
-        #[test]
-        fn mill() {
-            assert_eq!(
-                AbilityCost::Mill { count: 3 }.categories(),
-                vec![CostCategory::Mills]
-            );
-        }
-
-        #[test]
-        fn exert() {
-            assert_eq!(AbilityCost::Exert.categories(), vec![CostCategory::Exerts]);
-        }
-
-        #[test]
-        fn blight_puts_counters() {
-            assert_eq!(
-                AbilityCost::Blight { count: 1 }.categories(),
-                vec![CostCategory::PutsCounters]
-            );
-        }
-
-        #[test]
-        fn reveal() {
-            let cost = AbilityCost::Reveal {
-                count: 1,
-                filter: None,
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::Reveals]);
-        }
-
-        #[test]
-        fn waterbend_keyword_cost() {
-            let cost = AbilityCost::Waterbend {
-                cost: ManaCost::zero(),
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::KeywordCost]);
-        }
-
-        #[test]
-        fn ninjutsu_keyword_cost() {
-            let cost = AbilityCost::NinjutsuFamily {
-                variant: NinjutsuVariant::Ninjutsu,
-                mana_cost: ManaCost::zero(),
-            };
-            assert_eq!(cost.categories(), vec![CostCategory::KeywordCost]);
-        }
-
-        #[test]
-        fn unimplemented_returns_empty() {
-            let cost = AbilityCost::Unimplemented {
-                description: "foo".to_string(),
-            };
-            assert!(cost.categories().is_empty());
+            for (label, cost, expected) in cases {
+                assert_eq!(cost.categories(), expected, "{label}");
+            }
         }
 
         #[test]
@@ -27014,6 +27621,256 @@ mod modal_ability_tests {
                 .count(),
             1,
             "guesser must appear exactly once in sub_ability targets after promotion"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mana_target_role_tests {
+    use super::*;
+
+    /// Every distinct filter shape carried by an `Effect::Mana` target in the
+    /// shipping card set, paired with the role the parser stamps for it. The ten
+    /// context-ref recipients arrive by two parser routes (subject-led wrapper
+    /// and subject-predicate classification); Carpet of Flowers is the sole
+    /// count source.
+    fn fixture_roles() -> Vec<(&'static str, ManaTargetRole)> {
+        let recipient = |f: TargetFilter| ManaTargetRole::Recipient { recipient: f };
+        vec![
+            // ScopedPlayer — Belbe, Corrupted Observer / Blinkmoth Urn.
+            (
+                "Belbe / Blinkmoth Urn",
+                recipient(TargetFilter::ScopedPlayer),
+            ),
+            // TriggeringPlayer — Bubbling Muck / High Tide / Mana Flare.
+            (
+                "Bubbling Muck / High Tide / Mana Flare",
+                recipient(TargetFilter::TriggeringPlayer),
+            ),
+            // ParentTargetController — Fertile Ground / Utopia Sprawl / Wild
+            // Growth / Shimmerwilds Growth.
+            (
+                "Fertile Ground / Utopia Sprawl / Wild Growth / Shimmerwilds Growth",
+                recipient(TargetFilter::ParentTargetController),
+            ),
+            // Typed { controller: ChosenPlayer(0) } — Spectral Searchlight. A
+            // context ref via `chosen_player_index()`, NOT via the `matches!`
+            // arm in `is_context_ref`.
+            (
+                "Spectral Searchlight",
+                recipient(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                )),
+            ),
+            // Typed { controller: Opponent } — Carpet of Flowers, the sole
+            // COUNT SOURCE. Structurally indistinguishable from Spectral
+            // Searchlight as a bare filter; only the role tells them apart.
+            (
+                "Carpet of Flowers",
+                ManaTargetRole::CountSource {
+                    count_source: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
+                },
+            ),
+            // Jetfire, Ingenious Scientist — a genuinely surfaced recipient.
+            ("Jetfire", recipient(TargetFilter::Player)),
+            // Jeska's Will mode 1 — a genuinely surfaced count source.
+            (
+                "Jeska's Will",
+                ManaTargetRole::CountSource {
+                    count_source: TargetFilter::Player,
+                },
+            ),
+        ]
+    }
+
+    fn mana_with(role: Option<ManaTargetRole>) -> Effect {
+        Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: role,
+        }
+    }
+
+    /// Matrix row 15a — the keystone zero-delta property. `Effect::target_filter`
+    /// must keep returning EXACTLY the filter it returned before roles existed,
+    /// for every single-role shape any printed card carries. This is what makes a
+    /// per-site audit of the ~40 generic `target_filter()` consumers unnecessary.
+    ///
+    /// Fails if the accessor is written with `surfaced_filters()` — which would
+    /// return `None` for the ten context-ref recipients.
+    #[test]
+    fn target_filter_returns_the_sole_declared_role_filter_for_every_shipping_shape() {
+        for (name, role) in fixture_roles() {
+            let sole: Vec<&TargetFilter> = role.declared_filters().map(|(_, f)| f).collect();
+            assert_eq!(
+                sole.len(),
+                1,
+                "{name}: every shipping mana role is single-valued"
+            );
+            let effect = mana_with(Some(role.clone()));
+            assert_eq!(
+                effect.target_filter(),
+                Some(sole[0]),
+                "{name}: target_filter must return the sole declared role filter, \
+                 bit-for-bit as before roles existed"
+            );
+        }
+        assert_eq!(
+            mana_with(None).target_filter(),
+            None,
+            "an unqualified mana still reports no target filter"
+        );
+    }
+
+    /// `mana_multi_role` gates the explicit slot arms on SURFACED count > 1, not
+    /// on "is a Mana" and not on "is a `Both`". Every printed card must fall
+    /// through to the generic single-slot path. Over-application here is what
+    /// row 7b's paired negative catches at the slot layer.
+    #[test]
+    fn mana_multi_role_admits_only_shapes_the_generic_path_gets_wrong() {
+        for (name, role) in fixture_roles() {
+            assert!(
+                mana_multi_role(&mana_with(Some(role))).is_none(),
+                "{name}: a single-role mana must keep today's generic code path"
+            );
+        }
+        assert!(
+            mana_multi_role(&mana_with(None)).is_none(),
+            "an unqualified mana surfaces no role slots"
+        );
+
+        // A `Both` whose recipient is a CONTEXT REF surfaces only ONE slot —
+        // but the generic path would surface ZERO for it (it reads the FIRST
+        // DECLARED filter, finds the context ref, and skips), stranding the
+        // count source. So this shape DOES need the explicit arms. This is the
+        // subject-predicate route's shape ("That player adds {R} for each card
+        // in target opponent's hand") and it is production-reachable.
+        let ctx_both = ManaTargetRole::Both {
+            recipient: TargetFilter::ScopedPlayer,
+            count_source: TargetFilter::Player,
+        };
+        assert!(
+            mana_multi_role(&mana_with(Some(ctx_both.clone()))).is_some(),
+            "a context-ref recipient + real count source must take the explicit \
+             arms, or the count source surfaces no slot at all"
+        );
+        assert_eq!(
+            ctx_both.slot_index(ManaTargetSlot::CountSource),
+            Some(0),
+            "the count source lands at SURFACED index 0 when the recipient \
+             surfaces nothing — naive `Recipient == 0` index math breaks here"
+        );
+        assert_eq!(
+            ctx_both.slot_index(ManaTargetSlot::Recipient),
+            None,
+            "a context-ref recipient occupies no surfaced slot"
+        );
+
+        // Two real filters: the only shape that opens the explicit arms.
+        let both = ManaTargetRole::Both {
+            recipient: TargetFilter::Player,
+            count_source: TargetFilter::Player,
+        };
+        assert!(mana_multi_role(&mana_with(Some(both.clone()))).is_some());
+        assert_eq!(both.slot_index(ManaTargetSlot::Recipient), Some(0));
+        assert_eq!(both.slot_index(ManaTargetSlot::CountSource), Some(1));
+    }
+
+    /// CR 601.2c: `with_recipient` is the single authority both parser stamping
+    /// sites call. It must COMBINE with an existing count source rather than
+    /// clobber it (the shipped defect) or over-promote a bare stamp to `Both`
+    /// (which would surface a phantom slot). Both directions are asserted.
+    #[test]
+    fn with_recipient_combines_without_clobbering_or_over_promoting() {
+        let opp = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        // Combine: an inner clause already produced a count source.
+        let combined = ManaTargetRole::CountSource {
+            count_source: opp.clone(),
+        }
+        .with_recipient(TargetFilter::ScopedPlayer);
+        assert_eq!(
+            combined,
+            ManaTargetRole::Both {
+                recipient: TargetFilter::ScopedPlayer,
+                count_source: opp.clone(),
+            },
+            "stamping a recipient onto a count source must PRESERVE the count source"
+        );
+
+        // No over-promotion: replacing a recipient stays `Recipient`.
+        assert_eq!(
+            ManaTargetRole::Recipient {
+                recipient: TargetFilter::ScopedPlayer,
+            }
+            .with_recipient(TargetFilter::Player),
+            ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player,
+            },
+            "re-stamping a recipient must not invent a count source"
+        );
+
+        // Mirror: `with_count_source` behaves symmetrically.
+        assert_eq!(
+            ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player,
+            }
+            .with_count_source(opp.clone()),
+            ManaTargetRole::Both {
+                recipient: TargetFilter::Player,
+                count_source: opp,
+            },
+        );
+    }
+
+    /// Declaration order is recipient-first and is the ordering contract every
+    /// slot site consumes. A swap here would misalign `TargetInstanceId`s.
+    #[test]
+    fn declared_and_surfaced_filters_are_recipient_first() {
+        let both = ManaTargetRole::Both {
+            recipient: TargetFilter::Player,
+            count_source: TargetFilter::ScopedPlayer,
+        };
+        let declared: Vec<ManaTargetSlot> = both.declared_filters().map(|(s, _)| s).collect();
+        assert_eq!(
+            declared,
+            vec![ManaTargetSlot::Recipient, ManaTargetSlot::CountSource],
+            "declaration order is recipient, then count source"
+        );
+        // `declared_filters` includes context refs; `surfaced_filters` excludes them.
+        let surfaced: Vec<ManaTargetSlot> = both.surfaced_filters().map(|(s, _)| s).collect();
+        assert_eq!(
+            surfaced,
+            vec![ManaTargetSlot::Recipient],
+            "a ScopedPlayer count source surfaces no slot"
+        );
+    }
+
+    /// The legacy fixture encoding must round-trip through the role's
+    /// internally-tagged serde form, and `skip_serializing_if` must keep an
+    /// unqualified mana byte-identical (this is what leaves all tracked
+    /// snapshots untouched).
+    #[test]
+    fn role_serde_round_trips_and_none_is_skipped() {
+        for (name, role) in fixture_roles() {
+            let json = serde_json::to_string(&role).expect("role serializes");
+            let back: ManaTargetRole = serde_json::from_str(&json).expect("role deserializes");
+            assert_eq!(back, role, "{name}: role must round-trip");
+            assert!(
+                json.contains("\"role\":"),
+                "{name}: internally-tagged encoding expected, got {json}"
+            );
+        }
+        let json = serde_json::to_string(&mana_with(None)).expect("mana serializes");
+        assert!(
+            !json.contains("\"target\""),
+            "an unqualified mana must emit no `target` key, got {json}"
         );
     }
 }

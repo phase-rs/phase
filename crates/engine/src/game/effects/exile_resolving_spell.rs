@@ -104,7 +104,15 @@ pub fn apply_exile_rider(
         ExiledSpellRider::ReturnTo {
             destination,
             timing,
-        } => arm_return_to(state, exiled_id, controller, source_id, destination, timing),
+        } => arm_return_to(
+            state,
+            exiled_id,
+            controller,
+            source_id,
+            destination,
+            timing,
+            events,
+        ),
         // CR 702.170c: the card is now in exile, so it may become plotted. Route
         // through the single grant-permission authority so `turn_plotted` is
         // stamped and the `BecomesPlotted` event fires exactly as for the
@@ -160,6 +168,7 @@ fn arm_return_to(
     source_id: ObjectId,
     destination: Zone,
     timing: DelayedTriggerCondition,
+    events: &mut Vec<GameEvent>,
 ) {
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
@@ -212,6 +221,8 @@ fn arm_return_to(
             source_id,
             // CR 603.7b: one-shot — removed after it fires.
             one_shot: true,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         },
+        events,
     );
 }

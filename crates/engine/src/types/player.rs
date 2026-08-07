@@ -163,12 +163,19 @@ pub struct Player {
     pub is_eliminated: bool,
 
     /// Avatar crossover: which bending types this player has performed this turn.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub bending_types_this_turn: HashSet<BendingType>,
 
     /// CR 122.1: Player counters (experience, rad, ticket, etc.).
     /// Poison counters route to the dedicated `poison_counters` field via method accessors.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
     pub player_counters: HashMap<PlayerCounterKind, u32>,
 
     /// Phasing status. Default `Active`. While `PhasedOut`, the player is

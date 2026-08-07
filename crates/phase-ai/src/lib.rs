@@ -53,6 +53,6 @@ pub use eval::{
 };
 pub use search::{
     choose_action, choose_action_with_session, fallback_action, score_candidates,
-    score_candidates_with_session, softmax_select_pairs,
+    score_candidates_for_parallel_worker, select_safe_action_from_scores,
 };
 pub use session::{deck_pools_fingerprint, AiSession, SessionCache};

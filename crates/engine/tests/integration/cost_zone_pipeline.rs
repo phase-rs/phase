@@ -8591,6 +8591,7 @@ fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
     let mut ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(target)],
         source,
@@ -8774,6 +8775,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
     let mut top_ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(top_target)],
         top_source,
@@ -9717,6 +9719,97 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
             .count(),
         1,
         "the terminal effect fires exactly once after replacement delivery"
+    );
+}
+
+/// A resolver-created PutAtLibraryPosition choice must reject a repeated card
+/// before mutating its source zone, while preserving selection-order placement
+/// for a distinct follow-up choice.
+#[test]
+fn effect_zone_put_at_library_position_rejects_duplicate_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Put-On-Top Duplicate Selection Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate First", true)
+        .id();
+    let second = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate Second", true)
+        .id();
+    let marker = scenario
+        .add_spell_to_library_top(P0, "Put-On-Top Duplicate Marker", true)
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            count: QuantityExpr::Fixed { value: 2 },
+            position: engine::types::ability::LibraryPosition::Top,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![marker];
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("PutAtLibraryPosition reaches its real resolver-created choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("a repeated card is not a legal resolution-time choice");
+    assert!(
+        matches!(duplicate, engine::game::EngineError::InvalidAction(message) if message == "Selected cards must be distinct")
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![marker],
+        "rejected input must not mutate the library"
+    );
+
+    let completed = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("distinct eligible cards resolve the existing choice");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Library);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![first, second, marker],
+        "distinct selection retains the requested top order"
     );
 }
 

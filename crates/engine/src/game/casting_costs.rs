@@ -396,7 +396,14 @@ pub(crate) fn handle_decide_additional_cost(
             )
         })
     {
-        return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+        return handle_decide_repeatable_additional_cost(
+            state,
+            player,
+            pending,
+            additional_cost,
+            pay,
+            events,
+        );
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
@@ -410,7 +417,14 @@ pub(crate) fn handle_decide_additional_cost(
             }),
             _,
         ) => {
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         (None, AdditionalCost::Kicker { .. }) => {
             let mut pending = pending;
@@ -426,11 +440,19 @@ pub(crate) fn handle_decide_additional_cost(
         ) => {
             let mut pending = pending;
             pending.additional_cost_flow = Some(additional_cost.clone());
-            return handle_decide_repeatable_additional_cost(state, player, pending, pay, events);
+            return handle_decide_repeatable_additional_cost(
+                state,
+                player,
+                pending,
+                additional_cost,
+                pay,
+                events,
+            );
         }
         _ => {}
     }
 
+    let pending_before = pending.clone();
     let cost_source = pending.additional_cost_source;
     let current_instance = pending.additional_cost_queue.first().cloned();
     let mut ability = pending.ability;
@@ -619,6 +641,17 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     if let Some(cost) = cost_to_pay {
+        if matches!(cost, AbilityCost::PayLife { .. }) {
+            super::life_safety::begin_optional_additional_cost_attempt(
+                state,
+                player,
+                &pending_before,
+                additional_cost,
+                pay,
+                &cost,
+                &updated_pending,
+            );
+        }
         pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
@@ -635,7 +668,9 @@ fn continue_after_gift_promised(
     cost_source: SpellCostSource,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let opponents = crate::game::players::opponents(state, player);
+    // CR 702.174a: "you may choose an opponent" — a CHOICE, not a target (CR 115.10a),
+    // so the recipient list is the CHOOSABLE opponents, not the raw seat relation.
+    let opponents = crate::game::players::choosable_opponents(state, player);
     if opponents.is_empty() {
         return Err(EngineError::InvalidAction(
             "Cannot promise a gift with no opponents".to_string(),
@@ -965,9 +1000,11 @@ fn handle_decide_repeatable_additional_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
+    additional_cost: &AdditionalCost,
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let pending_before = pending.clone();
     let queued_instance = pending.additional_cost_queue.first().cloned();
     let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
     let queued_origin_ordinal = queued_instance
@@ -1001,6 +1038,17 @@ fn handle_decide_repeatable_additional_cost(
             .ability
             .context
             .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+    }
+    if matches!(cost, AbilityCost::PayLife { .. }) {
+        super::life_safety::begin_optional_additional_cost_attempt(
+            state,
+            player,
+            &pending_before,
+            additional_cost,
+            pay,
+            &cost,
+            &pending,
+        );
     }
     pay_additional_cost(state, player, cost, pending, events)
 }
@@ -1491,7 +1539,10 @@ pub(crate) fn begin_deferred_target_selection(
     // its announcing opponent chosen (and the controller has ≥2 opponents to pick
     // among), raise that decision before declaring targets. This loops once per
     // unassigned group, so each opponent-choice effect gets its own announcer.
-    let announcing_candidates = crate::game::players::opponents(state, player);
+    // CR 115.10a: the announcer is CHOSEN, not targeted — the SECOND mint of this
+    // variant, and it must narrow identically to the cast-time mint in `casting.rs`
+    // or the re-prompt would hand back a seat the first prompt excluded.
+    let announcing_candidates = crate::game::players::choosable_opponents(state, player);
     if announcing_candidates.len() >= 2 {
         if let Some(choice) = next_announcing_opponent_choice(&pending.ability) {
             return Ok(WaitingFor::ChooseAnnouncingOpponent {
@@ -6693,6 +6744,13 @@ pub(crate) fn handle_defiler_payment(
     let mut cost = pending.cost.clone();
 
     if pay {
+        super::life_safety::begin_defiler_payment_attempt(
+            state,
+            player,
+            &pending,
+            life_cost,
+            mana_reduction,
+        );
         // CR 118.3b + CR 119.4 + CR 119.8: Defiler's optional life payment is a
         // cost — route through the single-authority helper so the replacement
         // pipeline and CantLoseLife lock are honored. If the cost can't be paid
@@ -8603,8 +8661,8 @@ pub(super) fn pay_and_push_adventure(
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
-        && super::casting::has_manual_mana_ability_for_spell_payment(state, player, object_id)
-        && super::casting::can_feasibly_pay_mana_cost(state, player, Some(object_id), cost);
+        && super::casting::can_feasibly_pay_mana_cost(state, player, Some(object_id), cost)
+        && super::casting::has_manual_mana_payment_path_for_spell(state, player, object_id, cost);
     if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
@@ -10003,17 +10061,13 @@ fn handle_resolution_cast_success(
             remaining_mv_budget,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
             source,
             member_pool,
         } => {
-            if exile_instead_of_graveyard {
-                // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
-                apply_spell_graveyard_replacement_rider(
-                    state,
-                    cast_object,
-                    SpellStackToGraveyardReplacement::Exile,
-                );
+            if let Some(destination) = graveyard_replacement.clone() {
+                // CR 614.1a: Carry the exact printed replacement destination.
+                apply_spell_graveyard_replacement_rider(state, cast_object, destination);
             }
             let casts_left = remaining_casts.saturating_sub(1);
             // CR 202.3: shrink the shared budget by what was actually spent on
@@ -10048,7 +10102,7 @@ fn handle_resolution_cast_success(
                     remaining_mv_budget: budget_left,
                     filter,
                     zones,
-                    exile_instead_of_graveyard,
+                    graveyard_replacement,
                     source,
                     member_pool,
                 },
@@ -10171,8 +10225,12 @@ fn handle_resolution_cast_rejection(
     // finishes entering the stack because we abort before the Hand→Stack
     // zone move in `finalize_cast_with_phyrexian_choices`.
     if let Some(pos) = state.stack.iter().rposition(|entry| entry.id == object_id) {
-        super::stack::remove_stack_entry_at(state, pos)
-            .expect("rposition yielded a live stack index");
+        super::stack::remove_nonresolving_stack_entry_at(
+            state,
+            pos,
+            super::lifecycle::DelayedTerminalDisposition::Removed,
+        )
+        .expect("rposition yielded a live stack index");
     }
 
     let needs_choice = match reject_action {
@@ -11742,10 +11800,14 @@ fn assist_offer_params(
     {
         return None;
     }
+    // CR 702.132a: "you may choose another player" — a CHOICE, not a target
+    // (CR 115.10a), so the seat is judged by `player_exists_for_choice` and NOT by the
+    // targeting-only exclusions. `p.id != player` stays: that is "another player" SCOPE,
+    // not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != player && !p.is_eliminated)
+        .filter(|p| p.id != player && crate::game::players::player_exists_for_choice(state, p.id))
         .map(|p| p.id)
         .collect();
     if candidates.is_empty() {

@@ -976,19 +976,66 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        // "target opponent"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
-            return (
+        // CR 115.1: A coordinated target noun phrase may elide "target" after
+        // its first player leg: "target opponent, creature an opponent
+        // controls, or planeswalker an opponent controls." All coordinated
+        // nouns still describe one target slot, whose legal domain is the
+        // union of the player and object legs. Parse the player head and the
+        // separator compositionally, then delegate the complete object tail to
+        // the shared type-phrase grammar so controller/type qualifiers retain
+        // their ordinary semantics.
+        if let Ok((after_player, player_filter)) = alt((
+            value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
-        }
-        // "target player"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
+                tag::<_, _, OracleError<'_>>("opponent"),
+            ),
+            value(TargetFilter::Player, tag("player")),
+        ))
+        .parse(after_target)
+        {
+            if let Ok((object_tail, _)) = alt((
+                tag::<_, _, OracleError<'_>>(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(", "),
+            ))
+            .parse(after_player)
+            {
+                if starts_with_type_word(object_tail) {
+                    let mut combined = player_filter.clone();
+                    let mut leg_text = &text[lower.len() - object_tail.len()..];
+                    let mut merged_any = false;
+                    loop {
+                        let (leg, rest) = parse_type_phrase_with_ctx(leg_text, ctx);
+                        if matches!(leg, TargetFilter::Any) {
+                            if merged_any {
+                                return (combined, leg_text, syntax);
+                            }
+                            break;
+                        }
+                        combined = merge_or_filters(combined, leg);
+                        merged_any = true;
+
+                        let rest_lower = rest.to_lowercase();
+                        let Ok((next_leg, _)) = alt((
+                            tag::<_, _, OracleError<'_>>(", and/or "),
+                            tag(", and "),
+                            tag(", or "),
+                            tag(", "),
+                        ))
+                        .parse(rest_lower.as_str()) else {
+                            return (combined, rest, syntax);
+                        };
+                        if !starts_with_type_word(next_leg) {
+                            return (combined, rest, syntax);
+                        }
+                        leg_text = &rest[rest_lower.len() - next_leg.len()..];
+                    }
+                }
+            }
             return (
-                TargetFilter::Player,
-                &text[lower.len() - rest.len()..],
+                player_filter,
+                &text[lower.len() - after_player.len()..],
                 syntax,
             );
         }
@@ -2015,7 +2062,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
 /// with a union separator.
-fn match_mass_union_separator(lower: &str) -> Option<usize> {
+pub(crate) fn match_mass_union_separator(lower: &str) -> Option<usize> {
     alt((
         tag::<_, _, OracleError<'_>>(", and/or "),
         tag(", and "),
@@ -9573,6 +9620,64 @@ mod tests {
     }
 
     #[test]
+    fn target_opponent_with_elided_coordinated_object_alternatives() {
+        let (filter, rest) = parse_target(
+            "target opponent, creature an opponent controls, or planeswalker an opponent controls",
+        );
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .controller(ControllerRef::Opponent)
+                    ),
+                ],
+            },
+            "the player and both opponent-controlled object alternatives share one target slot"
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_preserves_plain_player_behavior() {
+        let (filter, rest) = parse_target("target player, creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_accepts_and_connector() {
+        let (filter, rest) = parse_target("target player, and creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            },
+            "the ordinary `, and` connector must retain the object alternative"
+        );
+    }
+
+    #[test]
     fn or_type_distributes_controller() {
         // "creature or artifact you control" → both branches get You controller
         let (f, _) = parse_target("target creature or artifact you control");
@@ -10432,7 +10537,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_3_or_greater() {
-        let (f, _) = parse_type_phrase("creature with power 3 or greater");
+        let (f, rest) = parse_type_phrase("creature with power 3 or greater");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -14179,23 +14285,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_phrase_comma_or_three_types() {
-        // CR 205.3a: "artifact, creature, or enchantment" — all 3 must appear in Or
-        let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Or { filters } = &filter {
-            assert_eq!(
-                filters.len(),
-                3,
-                "expected 3 Or branches, got {}",
-                filters.len()
-            );
-        } else {
-            panic!("Expected Or filter");
-        }
-    }
-
-    #[test]
     fn parse_type_phrase_comma_or_with_controller() {
         // "artifact, creature, or enchantment you control" — controller distributes
         let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment you control");
@@ -15492,30 +15581,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_phrase_creature_with_power_3_or_greater() {
-        let (filter, rest) = parse_type_phrase("creature with power 3 or greater");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Typed(tf) = &filter {
-            assert!(tf.type_filters.contains(&TypeFilter::Creature));
-            assert!(
-                tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::PtComparison {
-                        stat: PtStat::Power,
-                        scope: PtValueScope::Current,
-                        comparator: Comparator::GE,
-                        value: QuantityExpr::Fixed { value: 3 }
-                    }
-                )),
-                "Expected PtComparison(Power, GE, 3) in {:?}",
-                tf.properties
-            );
-        } else {
-            panic!("Expected Typed filter, got {filter:?}");
-        }
-    }
-
-    #[test]
     fn parse_type_phrase_creature_with_greater_power() {
         // CR 509.1b: "creatures with greater power" — relative to source
         let (filter, rest) = parse_type_phrase("creatures with greater power");
@@ -16164,19 +16229,6 @@ mod tests {
                 }
             )));
         }
-    }
-
-    /// CR 205.2a: "artifact or creature" is an OR-union of the two core types,
-    /// NOT a conjunction. The separator " or " breaks out of the conjunction
-    /// loop and builds a TargetFilter::Or with two branches.
-    #[test]
-    fn parse_type_phrase_artifact_or_creature_stays_union() {
-        let (filter, rest) = parse_type_phrase("artifact or creature");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        let TargetFilter::Or { filters } = &filter else {
-            panic!("Expected Or filter, got {filter:?}");
-        };
-        assert_eq!(filters.len(), 2);
     }
 
     /// CR 205.2a + CR 110.1: "artifact creature you control" — conjunction

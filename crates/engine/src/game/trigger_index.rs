@@ -31,6 +31,30 @@
 //! `collect_pending_triggers` flushes pending layers before reading the index.
 //! The `move_to_zone` incremental hooks are best-effort optimization between
 //! layer flushes — they are NOT the safety net.
+//!
+//! CR 113.6: because those hooks are best-effort and `rebuild_from_battlefield`
+//! trusts `state.battlefield` alone (it never reads `obj.zone`), the index can
+//! hold an entry for a permanent that has already left the battlefield.
+//! `candidates_for_event` therefore filters candidates by the LIVE `obj.zone`
+//! before returning them, so the consult honours its own battlefield-candidate
+//! contract regardless of how the stale entry arose. This is the same predicate
+//! `reindex_object_triggers` enforces on the maintenance side. In
+//! `debug_assertions` builds a stale entry panics with the object id, its live
+//! zone, and the event; in release builds — including the `server-release`
+//! profile the multiplayer server ships, which inherits
+//! `debug-assertions = false` — it is corrected silently and recorded only by a
+//! `tracing::warn!` on the drop path. That log line is the sole recurrence
+//! evidence on the SERVER; `engine-wasm` initialises no `tracing` subscriber, so
+//! the browser build records nothing at all.
+//!
+//! SCOPE: this contains the TRIGGER consequence of the desync, not the desync.
+//! The underlying maintenance defect is not found. If the disagreement is
+//! "still in `state.battlefield`, live zone elsewhere", then every other
+//! consumer of `state.battlefield` — the CR 704 SBA pass, combat declaration,
+//! `game/filter.rs` battlefield queries, and the rendered board — still treats
+//! the object as a permanent. Only the trigger path is guarded here.
+//! Reconciling at `battlefield_phased_in_ids` would contain all consumers at one
+//! seam; that is deliberately out of scope for this change.
 
 use smallvec::SmallVec;
 
@@ -1145,11 +1169,113 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
     if let Some(object_id) = phase_out_source {
         out.push(object_id);
     }
+    // CR 113.6: a candidate whose live zone is not the battlefield is a stale
+    // index entry. The `retain` below corrects it and logs; in debug builds we
+    // additionally panic with the diagnosis so the underlying maintenance defect
+    // is not masked indefinitely. `not(test)` mirrors the `ReplacementIndex`
+    // differential gate in `indexed_object_replacement_candidates` — without it,
+    // every hostile-state unit test in this module's own `#[cfg(test)] mod tests`
+    // would panic before reaching the code under test. Note that `cfg(test)` is
+    // NOT set for the engine lib when it is linked by the integration-test
+    // binaries under `crates/engine/tests/`, so this assertion IS live there —
+    // deliberately: it makes the whole integration suite a recurrence detector.
+    // O(candidates); the Vec is confined to this cfg so release and unit-test
+    // builds allocate nothing. `out` is not yet deduped, so the same
+    // (object_id, live_zone) pair can appear more than once in `stale`; that is
+    // duplication, not multiple defects.
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        let stale: Vec<(ObjectId, Zone)> = out
+            .iter()
+            .filter_map(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .and_then(|obj| (obj.zone != Zone::Battlefield).then_some((*id, obj.zone)))
+            })
+            .collect();
+        // `stale` and `event` are reported as SEPARATE fields. A consult reached
+        // via the batch-safety probe in `observers_are_batch_safe` carries a
+        // synthetic probe event that has nothing to do with the stale object;
+        // conflating them would misdirect the first person to hit this.
+        debug_assert!(
+            stale.is_empty(),
+            "TriggerIndex holds off-battlefield candidates (CR 113.6): \
+             stale=(object_id, live_zone){stale:?} consulted_for_event={event:?}",
+        );
+    }
     out.retain(|id| {
-        state
-            .objects
-            .get(id)
-            .is_none_or(|obj| !obj.is_phased_out() || phase_out_source == Some(*id))
+        let Some(obj) = state.objects.get(id) else {
+            // Absent objects are RETAINED, preserving the previous `is_none_or`
+            // semantics exactly: the production candidate loop already
+            // `continue`s on a missing object, `observers_are_batch_safe`'s
+            // inertness check does the same, and `DebugAction::RemoveObject`
+            // deletes an object without an index removal — so dropping here
+            // would change no behavior while breaking existing fixtures.
+            return true;
+        };
+        if obj.is_phased_out() && phase_out_source != Some(*id) {
+            return false;
+        }
+        if obj.zone != Zone::Battlefield {
+            // CR 113.6: "Abilities of all other objects usually function only
+            // while that object is on the battlefield." This consult returns
+            // BATTLEFIELD candidates — every caller scans them with
+            // `zone_filter = Some(Zone::Battlefield)`. CR 113.6b / CR 113.6k
+            // opt-ins (`trigger_zones`) are honoured by the dedicated off-zone
+            // scan in `triggers.rs`, which populates itself from the
+            // graveyard/exile/stack/command zone lists and never consults this
+            // index. So a candidate whose LIVE zone is no longer the battlefield
+            // is a stale entry and must not be handed back. This is the same
+            // predicate `reindex_object_triggers` already enforces on the
+            // maintenance side of this module.
+            //
+            // ONE DIRECTION, not an equivalence. `derived_views::is_live_battlefield_object`
+            // is the CONJUNCTION of `state.battlefield.contains(id)` and
+            // `obj.zone == Battlefield`; this checks only the second conjunct.
+            // Dropping the first is not merely an O(|battlefield|) saving — it
+            // is a weaker predicate, and the gap has a real producer:
+            // `zones::absorb_component` removes a merged/melded component from
+            // `state.battlefield` and then sets its zone BACK to `Battlefield`,
+            // so a component can be zone-battlefield while not a battlefield
+            // member. `reindex_object_triggers` admits on `obj.zone` alone, so
+            // that shape can enter the index and this retain passes it through.
+            // Uncontained here by choice: the reported bug is the opposite
+            // direction, and a `contains` on every candidate is a real hot-path
+            // cost for a shape with no current reindexing caller.
+            //
+            // CR 603.10a look-back sources are unaffected: a permanent observing
+            // its own departure, a self-exploiting creature, and co-departed
+            // observers are each produced by dedicated `collect_matching_triggers`
+            // blocks in `triggers.rs` fed from the event / `ZoneChangeRecord`,
+            // not from this index.
+            //
+            // `debug_assertions` builds have already panicked above with the full
+            // diagnosis; release builds (including `server-release`, which the
+            // multiplayer server ships and which inherits
+            // `debug-assertions = false`) silently correct it here. It is on the
+            // drop branch, so it costs nothing unless the defect actually occurs.
+            //
+            // This is the only recurrence evidence ON THE SERVER. It is NOT
+            // evidence in the browser: `engine-wasm` has no `tracing-subscriber`
+            // dependency and initialises no subscriber, so `tracing` events there
+            // go to the no-op dispatcher and this line emits nothing. A recurrence
+            // in a WASM release build is corrected silently and invisibly — and
+            // that is the surface most players are on, so absence of warnings in
+            // production is NOT evidence the desync stopped happening.
+            // NOTE: this runs BEFORE the `sort_unstable_by_key`/`dedup` below, so
+            // one stale id in several buckets logs more than once per consult, and
+            // every subsequent consult re-logs while the desync persists — count
+            // distinct object ids, not lines.
+            tracing::warn!(
+                object_id = ?id,
+                live_zone = ?obj.zone,
+                event = ?event,
+                "TriggerIndex held an off-battlefield candidate; dropped (CR 113.6)"
+            );
+            return false;
+        }
+        true
     });
     out.sort_unstable_by_key(|id| id.0);
     out.dedup();
@@ -1159,7 +1285,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::game_object::GameObject;
+    use crate::game::game_object::{GameObject, PhaseOutCause, PhaseStatus};
     use crate::types::ability::{TargetFilter, TypedFilter};
     use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::CardId;
@@ -1407,6 +1533,182 @@ mod tests {
             candidates.len(),
             2,
             "only TapsForMana candidates are visited"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 113.6 live-zone guard on the consult path.
+    //
+    // Every negative below induces the `state.battlefield` / `obj.zone` desync
+    // by writing `obj.zone` DIRECTLY, leaving `state.battlefield` and the index
+    // untouched. `zones::move_to_zone` cannot be used to induce it: its
+    // CR 603.6c hook drops the object from the index whenever it leaves the
+    // battlefield, so the stale entry these rows require would never exist.
+    // -----------------------------------------------------------------------
+
+    /// A phased-in battlefield permanent carrying one `TapsForMana` trigger,
+    /// registered through the production rebuild path.
+    fn indexed_mana_trigger_source(state: &mut GameState, object_id: ObjectId) {
+        let mut object = GameObject::new(
+            object_id,
+            CardId(object_id.0),
+            PlayerId(0),
+            format!("Indexed Source {}", object_id.0),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+        TriggerIndex::rebuild_from_battlefield(state);
+    }
+
+    fn tapped_for_mana_event() -> GameEvent {
+        GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: ObjectId(999),
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        }
+    }
+
+    /// Row 1 — the paired positive reach-guard for the zone rows below. Without
+    /// it, a guard that dropped every candidate would satisfy them vacuously.
+    #[test]
+    fn on_battlefield_source_is_still_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+
+        assert!(
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "an indexed source whose live zone IS the battlefield must remain a candidate"
+        );
+    }
+
+    /// Rows 2-6 — The Locust God (Hand), Lightning Rift (Graveyard), and the
+    /// sibling zones. CR 113.6: abilities of a permanent function only while it
+    /// is on the battlefield, so a stale index entry pointing off-battlefield
+    /// must not be handed back to the candidate loop. Command is included
+    /// because command-zone triggers are owned by the dedicated off-zone scan
+    /// in `triggers.rs`, never by this index.
+    #[test]
+    fn off_battlefield_sources_are_not_candidates() {
+        let leaked: Vec<Zone> = [
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Library,
+            Zone::Command,
+        ]
+        .into_iter()
+        .filter(|zone| {
+            let mut state = GameState::new_two_player(42);
+            let object_id = ObjectId(200);
+            indexed_mana_trigger_source(&mut state, object_id);
+            // Induce the desync: live zone moves, `state.battlefield` and the
+            // index are deliberately left stale.
+            state.objects.get_mut(&object_id).unwrap().zone = *zone;
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id)
+        })
+        .collect();
+
+        assert!(
+            leaked.is_empty(),
+            "CR 113.6: a stale index entry whose live zone is off the battlefield \
+             must not be returned as a candidate; leaked from {leaked:?}"
+        );
+    }
+
+    /// Row 7 — CR 702.26b: a phased-out permanent is treated as though it does
+    /// not exist, so it is not a candidate. Unchanged by the zone guard.
+    #[test]
+    fn phased_out_source_is_not_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        assert!(
+            !candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "CR 702.26b: a phased-out permanent must not be a candidate"
+        );
+    }
+
+    /// Row 8 — CR 702.26b carve-out: the permanent that just phased out is the
+    /// source of its own `PermanentPhasedOut` event and MUST survive. This row
+    /// is multi-authority on purpose (phased out AND the event source), and it
+    /// is the row that proves the zone guard is not collateral damage: phasing
+    /// changes status, not zone, so the carve-out object is still
+    /// `Zone::Battlefield` and passes the new check.
+    #[test]
+    fn phase_out_event_source_survives_the_carve_out() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+
+        let event = GameEvent::PermanentPhasedOut {
+            object_id,
+            indirect: false,
+        };
+        assert!(
+            candidates_for_event(&state, &event).contains(&object_id),
+            "CR 702.26b: the phase-out event's own source must still be a candidate"
+        );
+    }
+
+    /// Row 9 — fail-open is preserved. An id in the index with no `GameObject`
+    /// at all is RETAINED, pinning the `let ... else { return true }` rewrite
+    /// against the previous `is_none_or` semantics. Two production routes reach
+    /// this: the candidate loop's own missing-object `continue`, and
+    /// `DebugAction::RemoveObject`, which deletes an object without an index
+    /// removal.
+    #[test]
+    fn indexed_id_without_an_object_is_retained() {
+        let mut state = GameState::new_two_player(42);
+        let ghost = ObjectId(201);
+        state.trigger_index.add(
+            ghost,
+            &[TriggerDefinition::new(TriggerMode::TapsForMana)],
+            false,
+        );
+
+        assert!(
+            candidates_for_event(&state, &tapped_for_mana_event()).contains(&ghost),
+            "an indexed id with no GameObject must be retained (fail-open)"
+        );
+    }
+
+    /// Row 11 — the exact desync shape the env-gated differential is
+    /// structurally blind to: the id is off-battlefield by `obj.zone` while
+    /// still present in `state.battlefield`. The differential's shadow is drawn
+    /// from the live `obj.zone`, so this object is absent from the shadow and
+    /// present in production candidates — it lands only in `production - shadow`,
+    /// the direction that was removed for having a false-positive floor. So the
+    /// differential cannot see THIS shape at all, and this guard is the only
+    /// detector for it.
+    #[test]
+    fn off_battlefield_source_still_in_the_battlefield_vector_is_not_a_candidate() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = ObjectId(200);
+        indexed_mana_trigger_source(&mut state, object_id);
+        state.objects.get_mut(&object_id).unwrap().zone = Zone::Hand;
+
+        assert!(
+            state.battlefield.contains(&object_id),
+            "reach-guard: this row is only meaningful while the id is STILL in \
+             `state.battlefield` — that is the desync under test"
+        );
+        assert!(
+            !candidates_for_event(&state, &tapped_for_mana_event()).contains(&object_id),
+            "CR 113.6: `state.battlefield` membership is not the authority; the \
+             live `obj.zone` is"
         );
     }
 }

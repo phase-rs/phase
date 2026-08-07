@@ -99,6 +99,37 @@ pub(crate) fn find_legal_object_targets_for_ability_with_filter_controller(
     .collect()
 }
 
+/// CR 115.1: may this seat be chosen as a TARGET of this source?
+///
+/// Existence ([`crate::game::players::player_exists_for_choice`], which owns
+/// CR 800.4 + CR 102.1 plus the CR 702.26b phasing MIRROR) PLUS the targeting-only
+/// exclusions — CR 702.11c hexproof (opponent-scoped), CR 702.18a shroud
+/// (source-agnostic), CR 702.16b protection. Every player-target legal-set producer calls
+/// THIS, so the enumerating sides cannot drift.
+///
+/// NOT the predicate for a non-targeted choice. CR 115.10a draws that boundary — "unless
+/// that object or player is identified by the word 'target' ... it's not a target" — so a
+/// merely *chosen* seat is judged by [`crate::game::players::player_exists_for_choice`]
+/// alone, and its consumers must NOT call this function. Doing so would refuse legal
+/// choices.
+///
+/// Parameter order deliberately matches `static_abilities::player_cannot_be_targeted_by`
+/// so a silent transposition of `source_id` and `source_controller` is unrepresentable.
+pub fn player_is_legal_target(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
+    crate::game::players::player_exists_for_choice(state, player)
+        && !super::static_abilities::player_cannot_be_targeted_by(
+            state,
+            player,
+            source_id,
+            source_controller,
+        )
+}
+
 fn find_legal_targets_with_context(
     state: &GameState,
     filter: &TargetFilter,
@@ -193,22 +224,10 @@ fn find_legal_targets_with_context(
         if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
-                // Player-phasing exclusion (mirrors CR 702.26b for permanents).
-                if player.is_phased_out() {
-                    continue;
-                }
-                // CR 800.4a: Eliminated players are not legal targets.
-                if player.is_eliminated {
-                    continue;
-                }
-                // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof,
-                // shroud, and protection exclude illegal player targets.
-                if super::static_abilities::player_cannot_be_targeted_by(
-                    state,
-                    player.id,
-                    source_id,
-                    source_controller,
-                ) {
+                // CR 115.1: one authority for player-target legality — existence
+                // (CR 800.4 + CR 102.1, phasing per the CR 702.26b MIRROR) plus the
+                // targeting-only exclusions (CR 702.11c / CR 702.18a / CR 702.16b).
+                if !player_is_legal_target(state, player.id, source_id, source_controller) {
                     continue;
                 }
                 let include = match controller {
@@ -2132,28 +2151,14 @@ fn add_players(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) {
-    // Player-phasing exclusion: a phased-out player is treated as though they
-    // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
-    // applied to players via card Oracle text like "you phase out").
+    // CR 115.1: one authority for player-target legality — existence (CR 800.4:
+    // multiplayer games continue after players leave, + CR 102.1: a player is one of the
+    // people in the game; player phasing per the CR 702.26b MIRROR) plus the
+    // targeting-only exclusions (CR 702.11c hexproof / CR 702.18a shroud /
+    // CR 702.16b protection). CR 608.2b's illegal-target fizzle still applies on
+    // resolution; this is the announcement-time legal set.
     for player in &state.players {
-        if player.is_phased_out() {
-            continue;
-        }
-        // CR 800.4a: When a player leaves the game in a multiplayer game, all
-        // objects they own/control leave the game and the player ceases to be
-        // a valid target. Eliminated players cannot be targeted by any spell
-        // or ability (CR 608.2b illegal-target fizzle applies on resolution).
-        if player.is_eliminated {
-            continue;
-        }
-        // CR 702.11c + CR 702.18a + CR 702.16b: Player-scope hexproof, shroud,
-        // and protection exclude illegal player targets.
-        if super::static_abilities::player_cannot_be_targeted_by(
-            state,
-            player.id,
-            source_id,
-            source_controller,
-        ) {
+        if !player_is_legal_target(state, player.id, source_id, source_controller) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -2167,21 +2172,13 @@ fn add_specific_player(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) {
-    let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
-        return;
-    };
-    if player.is_phased_out() || player.is_eliminated {
-        return;
-    }
-    if super::static_abilities::player_cannot_be_targeted_by(
-        state,
-        player.id,
-        source_id,
-        source_controller,
-    ) {
+    // CR 115.1: same single authority as `add_players`. The former `find` membership
+    // guard is subsumed — `player_exists_for_choice` begins with `is_alive`, which is
+    // itself a membership test, so a nonexistent id is rejected identically.
+    if !player_is_legal_target(state, player_id, source_id, source_controller) {
         return;
     }
-    targets.push(TargetRef::Player(player.id));
+    targets.push(TargetRef::Player(player_id));
 }
 
 /// CR 702.16b: Protection prevents targeting from sources with the relevant quality.
@@ -3651,7 +3648,9 @@ mod tests {
         assert!(targets.is_empty());
     }
 
-    /// CR 800.4a: Eliminated players are not legal targets in multiplayer.
+    /// CR 800.4 + CR 102.1: a seat that has left the game is no longer one of the people
+    /// in the game, so nothing may choose it — which is why `find_legal_targets` omits it
+    /// in multiplayer.
     /// Regression: AI was targeting dead opponents in commander multiplayer.
     #[test]
     fn find_legal_targets_excludes_eliminated_player() {
@@ -3659,8 +3658,17 @@ mod tests {
         state.players[1].is_eliminated = true;
         state.eliminated_players.push(PlayerId(1));
 
+        // EVERY negative below is PAIRED with a positive reach-guard. Without them a
+        // `find_legal_targets` that returned nothing at all — because it bailed before it
+        // ever evaluated player legality — would satisfy all three "must not contain"
+        // assertions and the row would certify an unreached code path.
         let player_targets =
             find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), ObjectId(99));
+        assert!(
+            player_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "reach-guard: the LIVING player must still be a legal `Player` target, or the \
+             exclusion below proves nothing about elimination"
+        );
         assert!(
             !player_targets.contains(&TargetRef::Player(PlayerId(1))),
             "eliminated player must not appear in legal targets"
@@ -3668,13 +3676,31 @@ mod tests {
 
         let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(
+            any_targets.contains(&TargetRef::Player(PlayerId(0))),
+            "reach-guard: the LIVING player must still be reachable under `Any`"
+        );
+        assert!(
             !any_targets.contains(&TargetRef::Player(PlayerId(1))),
             "eliminated player must not appear under TargetFilter::Any either"
         );
 
+        // The opponent arm needs a THIRD seat. In the 2p fixture, eliminating P1 removes
+        // P0's only opponent, so "the eliminated opponent is absent" would hold for a
+        // filter that simply never yields players — the assertion would be vacuous by
+        // construction. A live opponent alongside the eliminated one is what makes the
+        // exclusion attributable to elimination.
+        use crate::types::format::FormatConfig;
+        let mut three = GameState::new(FormatConfig::standard(), 3, 42);
+        three.players[1].is_eliminated = true;
+        three.eliminated_players.push(PlayerId(1));
         let opponent_filter =
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
-        let opp_targets = find_legal_targets(&state, &opponent_filter, PlayerId(0), ObjectId(99));
+        let opp_targets = find_legal_targets(&three, &opponent_filter, PlayerId(0), ObjectId(99));
+        assert!(
+            opp_targets.contains(&TargetRef::Player(PlayerId(2))),
+            "reach-guard: the LIVING opponent must match 'target opponent', or the \
+             exclusion below is vacuous — got {opp_targets:?}"
+        );
         assert!(
             !opp_targets.contains(&TargetRef::Player(PlayerId(1))),
             "eliminated opponent must not match 'target opponent'"

@@ -96,7 +96,8 @@ pub fn resolve(
     // token (escalates to a full pass if it sources effects, carries
     // counters, etc.).
     crate::game::layers::mark_layers_entered(state, obj_id);
-    crate::game::restrictions::record_battlefield_entry(state, obj_id);
+    // CR 608.2i battlefield-entry bookkeeping is done by `record_zone_change` below —
+    // recording it here too would double-count `battlefield_entries_this_turn`.
     crate::game::restrictions::record_token_created(state, obj_id);
 
     // CR 603.6a: The Incubator token enters the battlefield as a zone change
@@ -109,20 +110,22 @@ pub fn resolve(
     // triggers (issue #4238). Mirrors
     // `token.rs::apply_create_token_after_replacement_with_created_ids` and
     // `conjure.rs`'s identical fix for the same bug class.
-    let zone_change_record = state
-        .objects
-        .get(&obj_id)
-        .expect("incubator token was just created")
-        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-    state
-        .zone_changes_this_turn
-        .push_back(zone_change_record.clone());
-    events.push(GameEvent::ZoneChanged {
-        object_id: obj_id,
-        from: None,
-        to: Zone::Battlefield,
-        record: Box::new(zone_change_record),
-    });
+    //
+    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the emit through
+    // `zones::record_and_emit_entry_from_no_zone` — the single `from: None → Battlefield`
+    // authority, which assigns this turn's zone-change index through
+    // `restrictions::record_zone_change` and writes it back onto the record it emits.
+    // That one call writes BOTH ledgers, which is why both rules are cited here: the CR 400.7
+    // zone-change row (whose length IS the index allocator) and — because `to_zone` is
+    // `Battlefield` — the CR 608.2i battlefield-entry row, via `record_battlefield_entry`. The
+    // latter is the look-back journal that a permanent which has since left still counts in, so
+    // re-recording either ledger at this call site would double-count it.
+    // `snapshot_for_zone_change` leaves that index at its `0` placeholder, and the batched
+    // zone-change replay guard (`triggers.rs`) dedups on `(definition_ref, turn_zone_change_index)`
+    // read off the EVENT, so an unrouted record aliases this Incubator onto occurrence `0` and a
+    // `batched: true` ETB trigger that already fired for another entry this turn is swallowed.
+    crate::game::zones::record_and_emit_entry_from_no_zone(state, obj_id, events)
+        .expect("incubator token was just created");
 
     super::token::inject_predefined_token_abilities(state, obj_id);
 

@@ -11,15 +11,19 @@ use crate::game::conditions::{
     eval_source_is_tapped_on_battlefield,
 };
 use crate::game::devotion::count_devotion;
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{
+    matches_target_filter, target_filter_characteristic_reads,
+    target_filter_characteristic_reads_at, CharacteristicKinds, FilterContext,
+    CHARACTERISTIC_READ_DEPTH,
+};
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
     is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
 };
 use crate::game::quantity::{
-    continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
-    QuantityContext,
+    continuous_modification_dynamic_quantity, filter_uses_recipient,
+    quantity_expr_characteristic_reads_at, quantity_expr_uses_recipient, QuantityContext,
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
@@ -1095,6 +1099,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -1126,6 +1131,148 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
+    }
+}
+
+/// CR 613.1: Which layer-writable characteristic kinds does this source-level
+/// enabling condition read?
+///
+/// Characteristic-dependence twin of `static_condition_uses_object_population`:
+/// that predicate answers "can board MEMBERSHIP flip this gate", this one
+/// answers "which layer-writable CHARACTERISTICS does the gate read".
+///
+/// Two deliberate differences from the boolean twin:
+/// - it RECURSES `SourceMatchesFilter` / `RecipientMatchesFilter` (both are
+///   `false` there because a battlefield entry cannot change whether the source
+///   or the recipient matches — but a layer write to that object very much can);
+/// - `Unrecognized` maps to ALL, not to a kind.
+///
+/// EXHAUSTIVE and wildcard-free. Conditions over zones, turn structure, player
+/// totals, statuses (CR 110.5a) and counters (CR 122.1) read NO layer-writable
+/// characteristic and MUST classify EMPTY — a blanket-ALL here would saturate
+/// the read union on ordinary boards and turn the entry-flush gate into an
+/// unconditional full re-evaluation.
+fn static_condition_characteristic_reads(condition: &StaticCondition) -> CharacteristicKinds {
+    static_condition_characteristic_reads_at(condition, CHARACTERISTIC_READ_DEPTH)
+}
+
+fn static_condition_characteristic_reads_at(
+    condition: &StaticCondition,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match condition {
+        // Threshold gates: both operands are magnitudes.
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_characteristic_reads_at(lhs, depth)
+                .union(quantity_expr_characteristic_reads_at(rhs, depth))
+        }
+        // CR 700.5: devotion sums mana symbols in the mana costs of the
+        // permanents the source's controller controls.
+        StaticCondition::DevotionGE { .. } => {
+            CharacteristicKinds::MANA_COST.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 105.1: color histogram over every battlefield permanent.
+        StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
+            CharacteristicKinds::COLOR
+        }
+        // CR 109.4: "you control [filter]" — controller-scoped membership over a
+        // live filter. A filterless `IsPresent` still reads the controller scope.
+        StaticCondition::IsPresent { filter } => {
+            filter
+                .as_ref()
+                .map_or(CharacteristicKinds::CONTROLLER, |f| {
+                    CharacteristicKinds::CONTROLLER
+                        .union(target_filter_characteristic_reads_at(f, depth))
+                })
+        }
+        // CR 509.1a + CR 109.4: per-player board census over a live filter.
+        StaticCondition::DefendingPlayerControls { filter } => CharacteristicKinds::CONTROLLER
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 903.3 + CR 613.1b: commander designation is fixed at deck
+        // construction; only the control scope is layer-writable.
+        StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceControllerEquals { .. } => CharacteristicKinds::CONTROLLER,
+        // Recurse combinators, early-exiting once saturated.
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .fold(CharacteristicKinds::EMPTY, |acc, c| {
+                if acc.is_all() {
+                    acc
+                } else {
+                    acc.union(static_condition_characteristic_reads_at(c, depth))
+                }
+            }),
+        StaticCondition::Not { condition } => {
+            static_condition_characteristic_reads_at(condition, depth)
+        }
+        // Parse fallback: text unknown, so every kind is conservatively assumed.
+        StaticCondition::Unrecognized { .. } => CharacteristicKinds::ALL,
+        // NET-NEW relative to the boolean twin: these match a live object
+        // against a filter, so every characteristic that filter reads is a live
+        // read of this condition.
+        StaticCondition::SourceMatchesFilter { filter }
+        | StaticCondition::RecipientMatchesFilter { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 301.5 + CR 303.4 + CR 306.1: attachment relationships are decided by
+        // the attachment's subtype (Equipment / Aura) and by the attached
+        // object's card type.
+        StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceAttachedToCreature => CharacteristicKinds::CARD_TYPES,
+        // Reads no layer-writable characteristic: zone contents, turn structure,
+        // combat state, player-scoped totals and designations, statuses
+        // (CR 110.5a), counters (CR 122.1), per-object chosen attributes, and
+        // cast history. Enumerated explicitly (no wildcard).
+        //
+        // CR 401.1: `TopOfLibraryMatches` reads the controller's LIBRARY top; no
+        // write to a battlefield object can change that card's characteristics.
+        StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => CharacteristicKinds::EMPTY,
     }
 }
 
@@ -1231,6 +1378,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -1439,6 +1587,16 @@ fn evaluate_condition_with_context(
                 .map(|obj| obj.controller)
                 .unwrap_or(controller);
             state.active_player == source_controller
+        }
+        // CR 102.3 + CR 805.4a: team-aware opponent relation. A teammate
+        // holding `active_player` does not make this an opponent's turn.
+        StaticCondition::DuringOpponentsTurn => {
+            let source_controller = state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(controller);
+            super::players::is_opponent(state, source_controller, state.active_player)
         }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
@@ -1822,8 +1980,9 @@ fn rebuild_static_index_at_top() -> bool {
 /// stops re-deriving them, and a naturally-menace creature keeps its printed
 /// menace when it stops being suspected.
 ///
-/// Called from the Step-1 reset of both the full (`evaluate_layers`) and
-/// incremental (`apply_layers_incremental`) passes, immediately after the live
+/// Called from `reset_recipient_to_base`, which both passes go through — the
+/// full one (`evaluate_layers`) board-wide, the incremental one
+/// (`prepare_incremental_flush`) over recipients — immediately after the live
 /// fields are reset to base, so the derived grant rides along with every reset.
 fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
     if !obj.is_suspected {
@@ -1850,11 +2009,12 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// CR 613.1 + CR 707.2 + CR 708.2: seed live characteristics from base_*; shared
 /// by Step-1 top-of-pass reset and the CR 613.2b Layer-1b face-down re-seed.
 ///
-/// Assigns the live copiable-characteristic fields from their `base_*` baseline,
-/// exactly mirroring the Step-1 reset block field-for-field. Does NOT call
-/// `sync_missing_base_characteristics`, and does NOT touch controller, the
-/// combat-assignment flags, or `derive_suspected_abilities` — those stay inline
-/// in Step 1 (they are not part of the face-down CR 708.2a re-seed).
+/// Assigns the live copiable-characteristic fields from their `base_*` baseline.
+/// Does NOT call `sync_missing_base_characteristics`, and does NOT touch
+/// controller, the combat-assignment flags, or `derive_suspected_abilities` —
+/// those live in `reset_recipient_to_base`, which calls this as its second step
+/// (they are not part of the face-down CR 708.2a re-seed, which is why this is
+/// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
     obj.name = obj.base_name.clone();
     obj.power = obj.base_power;
@@ -2027,23 +2187,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     let mut face_down_ids: Vec<ObjectId> = Vec::new();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            seed_live_characteristics_from_base(obj);
+            reset_recipient_to_base(obj);
+            // Reset does not touch `face_down`, so this reads the same value
+            // whichever side of the reset it sits on.
             if obj.face_down {
                 face_down_ids.push(id);
             }
-            // CR 613.1b: Reset controller to the object's base controller;
-            // Layer 2 re-applies continuous control-changing effects.
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
-            // re-applied after object-characteristic layers are complete.
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            // CR 701.60c: re-derive the suspected designation's menace +
-            // "can't block" onto the just-reset live fields (not base), so
-            // the grant lasts exactly as long as the designation.
-            derive_suspected_abilities(obj);
         }
     }
     // CR 702.94a + CR 400.3: Hand-zone continuous effects (Lorehold-style
@@ -2108,25 +2257,26 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
     let mut zone_cache = LayerZoneObjectCache::default();
     let mut started_effect_sets = StartedContinuousEffectSets::new();
-    let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
-    let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
-    for effect in &ordered_copy {
-        apply_continuous_effect(
-            state,
-            effect,
-            &mut abilities_suppressed,
-            &mut zone_cache,
-            &mut started_effect_sets,
-        );
-    }
-    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
-        // Sticker ability text is appended after the top-of-pass reset/copy
-        // application, so a sticker can turn a non-generator into a continuous
-        // static source mid-pass. Refresh the generator index before the main
-        // gather so those sticker-granted statics participate in this pass
-        // without broadening the non-sticker top-of-pass rebuild contract.
-        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
-    }
+    // Narrowed by payload rather than by "did layer 1a run": `CopyValues` carries
+    // the whole copiable static set in the modification, so the payload answers
+    // both questions 1a needs with no plumbing and no battlefield rescan. They are
+    // two different questions and are asked separately — `copy_grants_continuous_static`
+    // for the flag returned here (does the recipient become a generator layers 2-7
+    // must see?) and the narrower `copy_grants_copy_layer_static` for continuing
+    // 1a's own discovery loop. A clone of a vanilla creature — a permanent-duration
+    // TCE that outlives the clone — therefore pays nothing extra at all, and a
+    // clone of an ordinary lord pays one rebuild here rather than a second
+    // gather-and-rebuild generation inside 1a. Only a copy-granted COPY ability
+    // pays for a generation, which is the point of an index whose stated job is
+    // keeping per-flush work off `|battlefield|`.
+    let copy_added_generator = apply_copy_sublayer_to_fixed_point(
+        state,
+        &mut abilities_suppressed,
+        &mut zone_cache,
+        &mut started_effect_sets,
+    );
+    let stickers_applied =
+        crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids);
 
     // CR 613.2b + CR 708.2a + CR 708.10: Layer 1b. After Layer-1a copiable effects
     // (copy per CR 707, merge per CR 730) are applied, re-set each face-down
@@ -2138,6 +2288,39 @@ pub fn evaluate_layers(state: &mut GameState) {
         if let Some(obj) = state.objects.get_mut(&id) {
             seed_live_characteristics_from_base(obj);
         }
+    }
+
+    // Both producers say the same thing: layer 1 can turn a non-generator into a
+    // continuous static source mid-pass, and the top-of-pass index was built from
+    // the just-reset BASE definitions, which predate that. Refresh the generator
+    // index before the main gather so those statics participate in this pass,
+    // without broadening the top-of-pass rebuild contract for boards that have
+    // neither.
+    //
+    // CR 613.2a + CR 613.2c: a copy effect can hand a permanent a static ability
+    // its copiable base does not carry (an embalm token copying a Painter's
+    // Servant). After all of layer 1 has been applied the object's characteristics
+    // ARE its copiable values, so a static granted there must generate effects for
+    // layers 2-7 of THIS pass, not the next one.
+    //
+    // Sticker ability text is likewise appended after the top-of-pass reset/copy
+    // application.
+    //
+    // Placed below the 1b face-down reseed so the rebuild observes the whole of
+    // layer 1, which is the invariant CR 613.2c actually states. 1b only ever
+    // clears statics (`apply_face_down_creature_characteristics` clears live and
+    // base alike), so ordering the two the other way is inert today — but only via
+    // that non-local fact, not via the rule cited here.
+    //
+    // `apply_copy_sublayer_to_fixed_point` already rebuilt mid-1a whenever a
+    // generation of copies added a COPY-LAYER generator, but that rebuild is scoped
+    // to 1a's own discovery loop and predates 1b by construction. This one is the
+    // layer-1
+    // exit rebuild the CR 613.2c invariant asks for; on the rare board that pays
+    // both it is one extra O(battlefield) walk, the same order as the Step-1 reset
+    // that already runs unconditionally.
+    if copy_added_generator || stickers_applied {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
     }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
@@ -2894,7 +3077,9 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
             CastManaSpentMetric::FromSource { source_filter } => {
                 target_filter_reads_life_total(source_filter)
             }
-            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => false,
         },
 
         // CR 603.2c: the trigger-event player set filters candidates through a
@@ -2996,6 +3181,9 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             quantity_ref_reads_life(attr) || quantity_expr_reads_life(value)
         }
+        // CR 608.2c + CR 109.4: the tracked-set possession predicate applies its
+        // object `filter` to each member; route it like `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor { filter, .. } => target_filter_reads_life_total(filter),
         // Payload-free player sets — none read the life family. Enumerated
         // explicitly (no wildcard).
         PlayerFilter::Controller
@@ -3264,6 +3452,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
@@ -3414,6 +3603,27 @@ pub fn flush_layers(state: &mut GameState) {
     }
 }
 
+/// CR 613.1: Single authority for the per-object "back to base" reset. Both
+/// arms go through here — the full pass applies it board-wide over the
+/// phased-in battlefield, the incremental arm applies it to recipients only —
+/// so the two arms cannot drift in what "base" means.
+fn reset_recipient_to_base(obj: &mut crate::game::game_object::GameObject) {
+    obj.sync_missing_base_characteristics();
+    seed_live_characteristics_from_base(obj);
+    // CR 613.1b: layer 2 control-change effects are re-applied from the base
+    // controller, not accumulated on top of the previous pass's result.
+    obj.controller = obj.base_controller.unwrap_or(obj.owner);
+    // CR 613.11 + CR 510.1a: combat-assignment rule effects are re-derived every
+    // pass, so the previous pass's grants must not persist through the reset.
+    obj.assigns_damage_from_toughness = false;
+    obj.assigns_damage_as_though_unblocked = false;
+    obj.assigns_no_combat_damage = false;
+    // CR 701.60c: re-derive the suspected designation's menace + "can't block"
+    // onto the just-reset live fields (not base), so the grant lasts exactly as
+    // long as the designation.
+    derive_suspected_abilities(obj);
+}
+
 fn prepare_incremental_flush(
     state: &mut GameState,
     entered_ids: &BTreeSet<ObjectId>,
@@ -3433,13 +3643,7 @@ fn prepare_incremental_flush(
     // and collecting the prepared effect set so local CDAs are visible again.
     for &id in &recipient_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.sync_missing_base_characteristics();
-            seed_live_characteristics_from_base(obj);
-            obj.controller = obj.base_controller.unwrap_or(obj.owner);
-            obj.assigns_damage_from_toughness = false;
-            obj.assigns_damage_as_though_unblocked = false;
-            obj.assigns_no_combat_damage = false;
-            derive_suspected_abilities(obj);
+            reset_recipient_to_base(obj);
         }
     }
     crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
@@ -3452,8 +3656,54 @@ fn prepare_incremental_flush(
         return None;
     }
     if active_effects_force_incremental_escalation(state, entered_ids, &active_effects)
+        || population_probe_blinded_by_entrant_characteristic_change(
+            state,
+            entered_ids,
+            &active_effects,
+        )
         || any_active_static_condition_perturbed_by_entry(state, entered_ids)
     {
+        return None;
+    }
+    // CR 613.2a + CR 613.2c: a copy effect applied on this path can hand a
+    // recipient a continuous static ability its copiable base does not carry, and
+    // after layer 1 that static is part of the board layers 2-7 derive from.
+    //
+    // The incremental arm cannot absorb that. `entered_object_blocks_incremental`
+    // (1) escalates for an entrant that arrives sourcing a continuous effect,
+    // precisely because effects here are re-applied only to `recipient_ids` —
+    // pre-existing permanents are never reset, so a board-wide anthem a recipient
+    // acquires would never reach the objects it must apply to. A copy that grants
+    // a static reaches the same state one step later, so it takes the same exit.
+    // Escalating BEFORE any copy is applied also keeps the generator set of the
+    // index built above true for the whole of `apply_layers_incremental`.
+    //
+    // Reached by filter match, not only by name: the copy set below is applied
+    // with `apply_continuous_effect_to(state, effect, &recipient_ids, ..)`, which
+    // restricts an ordinary board-wide `affected_filter` to the recipients rather
+    // than requiring `TargetFilter::SpecificObject`. Neither
+    // `active_effects_force_incremental_escalation` (magnitude / affected-set
+    // population sensitivity) nor the source-side guard above sees that case: the
+    // copy's source is a pre-existing permanent and its filter counts nothing.
+    //
+    // That same `restrict_to` intersection is why the guard asks
+    // `effect_can_reach_incremental_recipients` rather than firing on the mere
+    // presence of a copy: a `SelfRef` / `SpecificObject` copy that names a
+    // PRE-EXISTING permanent — the ordinary shape, every resolved clone on the
+    // board carries one — applies to the empty set on this path, so it can hand no
+    // recipient anything, and escalating for it would put every board that has
+    // ever cast a clone back on the O(|battlefield|) full pass this module exists
+    // to avoid. A copy that does name a recipient still escalates; so does any
+    // copy whose affected set is a predicate, since that set is not decidable
+    // here.
+    //
+    // O(active-effect-count), and zero on the overwhelmingly common board with no
+    // copy effect at all.
+    if active_effects.iter().any(|effect| {
+        effect.layer == Layer::Copy
+            && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+            && copy_grants_continuous_static(&effect.modification)
+    }) {
         return None;
     }
 
@@ -3466,72 +3716,595 @@ fn prepare_incremental_flush(
 /// Decide whether an `EnteredObjects` flush must conservatively escalate to a
 /// full re-evaluation.
 ///
-/// Two axes, both required-clean for the fast path:
+/// SINGLE AUTHORITY: this delegates to `prepare_incremental_flush` — the exact
+/// gate `flush_layers` consults — rather than re-deriving the decision. It
+/// previously carried its own two-axis reimplementation, which had already
+/// drifted from production in two ways: it omitted the recipient-sourced-effect
+/// check, and it evaluated the active-effect axis against a board on which the
+/// recipient reset had NOT yet run (production resets first, so a stale layer-6
+/// removal could hide a recipient's live static from the test predicate but not
+/// from production). A test predicate that answers a different question than the
+/// production gate cannot certify the production gate.
 ///
-/// 1. Per-entered preconditions: the entered object must not itself be the
-///    source of a continuous effect, carry a CDA static, or carry a
-///    control-override / type-change / text-change / counter / attachment /
-///    transient effect (the entry enqueued none for a plain token).
+/// The escalation disjuncts are enumerated at the `prepare_incremental_flush`
+/// call site and documented on each disjunct's own function. This wrapper
+/// deliberately restates neither: a second enumeration here is exactly what
+/// drifted last time.
 ///
-/// 2. Board-wide escalation: no ACTIVE continuous effect may have a magnitude,
-///    affected set, or source-level enabling CONDITION that reads battlefield
-///    object population.
-///    CR 611.3a: a static-ability continuous effect isn't locked in; it applies
-///    at any moment to whatever its text indicates — so a board-population-
-///    dependent magnitude, affected set, or enabling condition re-evaluates when
-///    an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
-///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
-///    ordering operates on the live set. This scan is O(active-effect-count), NOT
-///    O(battlefield).
+/// CR 611.3a: a static-ability continuous effect isn't locked in; it applies
+/// at any moment to whatever its text indicates — so a board-population-
+/// dependent magnitude, affected set, or enabling condition re-evaluates when
+/// an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
+/// object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
+/// ordering operates on the live set.
+///
+/// Takes `&GameState` and works on a clone because `prepare_incremental_flush`
+/// mutates: after its per-entrant precondition scan it resets every recipient
+/// to base. The caller asks a question and must not have its board
+/// half-flushed by the asking.
 #[cfg(test)]
 pub(crate) fn incremental_flush_must_escalate(
     state: &GameState,
     entered_ids: &BTreeSet<ObjectId>,
 ) -> bool {
-    // Axis 1 — per-entered preconditions.
-    for &id in entered_ids {
-        let Some(obj) = state.objects.get(&id) else {
-            // The entered object already left (e.g. it was a token that died to
-            // an SBA before flush). A full pass is the safe handling.
-            return true;
-        };
-        if entered_object_blocks_incremental(state, obj) {
-            return true;
+    let mut scratch = state.clone();
+    prepare_incremental_flush(&mut scratch, entered_ids).is_none()
+}
+
+/// The two population-read channels of a single effect, computed once:
+/// `(dynamic-magnitude sensitivity, affected-set sensitivity)`. Axis 2a
+/// (`active_effects_force_incremental_escalation`) needs the split to pick which
+/// per-entrant narrowing applies without walking the affected filter twice.
+///
+/// MEMBERSHIP question, not a characteristic question — see
+/// [`CharacteristicKinds`] for the deliberate split.
+fn effect_population_reads(e: &ActiveContinuousEffect) -> (bool, bool) {
+    (
+        continuous_modification_dynamic_quantity(&e.modification)
+            .is_some_and(crate::game::quantity::quantity_expr_uses_object_count),
+        crate::game::filter::affected_filter_uses_object_population(&e.affected_filter),
+    )
+}
+
+/// The live read union, split by whether a contribution is attributable to one
+/// continuous effect.
+struct LiveCharacteristicReads {
+    /// Read kinds that belong to no single effect, so no writer is ever exempt
+    /// from them: dynamic magnitudes and Continuous statics' enabling
+    /// conditions.
+    global: CharacteristicKinds,
+    /// `global` plus every live affected filter's kinds — the full ReadKinds
+    /// union that drives the entrant-independent global exit.
+    total: CharacteristicKinds,
+}
+
+/// CR 613.1: the union of layer-writable characteristic kinds that the CURRENT
+/// board actually READS, per the live read channels.
+///
+/// Entrant-independent, so the entry-flush gate computes it once per flush:
+///
+/// ```text
+/// global    := ⋃ dynamic-magnitude kinds     // every live modification's magnitude
+///            ∪ ⋃ live condition kinds        // every live effect's retained condition
+///            ∪ ⋃ Continuous condition kinds  // every live Continuous static's condition
+///            ∪ ⋃ transient gate kinds        // every INSTALLED transient's duration + condition
+/// ReadKinds := global ∪ ⋃ affected-filter kinds  // every live modification's affected filter
+/// ```
+///
+/// All five channels are unioned UNCONDITIONALLY. An earlier design gated the
+/// affected-filter channel on the write set already intersecting, which is
+/// unsound: a board whose only name-sensitive read lives in another static's
+/// affected filter has an empty base union, so the gate would never notice a
+/// layer-3 name rewrite reaching the entrant.
+///
+/// The affected-filter channel is reported separately because it is the only
+/// one attributable to a single effect, and CR 613.6 puts an effect's own
+/// affected filter out of reach of its own writes — see
+/// [`AffectedFilterReadTally`]. The other four channels are board-level and
+/// admit no such exclusion.
+///
+/// WHAT CONVERGES WHERE. The `e.condition` channel below is NOT a single
+/// authority over every gate on the board, and must not be documented as one.
+/// The full producer census of `ActiveContinuousEffect::condition`, and which
+/// channel can see each one. One row per construction site — the eight
+/// `ActiveContinuousEffect { .. }` literals in the engine, six here and two in
+/// `stickers.rs`, all reached through
+/// [`collect_shared_active_continuous_effects`]:
+///
+/// | producer | `condition` it writes | seen by |
+/// |---|---|---|
+/// | The Ring emblem (CR 701.54c) | `None` | nothing to see |
+/// | [`active_continuous_effects_from_static_definitions`] (printed statics) | `def.condition` | `e.condition` AND the source walk |
+/// | [`expand_granted_static_effects`] | `inner.condition` | `e.condition` ONLY |
+/// | `expand_granted_activated_abilities` | `None` | nothing to see |
+/// | `expand_granted_triggered_abilities` | `None` | nothing to see |
+/// | [`gather_transient_continuous_effects`] | recipient-context `tce.condition` only | `e.condition`, plus the transient walk for what it drops |
+/// | `stickers.rs` (two P/T sites) | `None` | nothing to see |
+///
+/// One alternate ENTRY into row 2 is out of this census by scope:
+/// [`active_continuous_effects_from_base_static_source`] re-enters
+/// [`active_continuous_effects_from_static_definitions`] for off-zone keyword
+/// queries (sole caller `off_zone_characteristics.rs`) and never feeds
+/// [`evaluate_layers`], so no flush channel needs to see its conditions.
+///
+/// Two consequences a reader must not get backwards:
+///
+/// * a GRANTED-INNER static's condition lives in `inner.condition`, nested in
+///   `ContinuousModification::GrantStaticAbility`. The source walk below reads
+///   `obj.static_definitions.iter_all()`, i.e. OUTER definitions, so it sees
+///   that condition only once a previous pass has materialized the granted
+///   definition onto the recipient. On a never-yet-evaluated state — hand-built
+///   or freshly deserialized — `e.condition` is the ONLY channel that sees it.
+///   That is what the `e.condition` union is load-bearing for; it is not
+///   redundant with the source walk.
+/// * a TRANSIENT reaches `e.condition` only when its gate is currently ON *and*
+///   the condition is recipient-context, because
+///   [`gather_transient_continuous_effects`] skips a transient that is not live
+///   and strips a source-level condition from the effect it pushes. Both
+///   discarded shapes are exactly the ones an entry can flip, hence the
+///   separate walk over `state.transient_continuous_effects`.
+///
+/// `active_combat_assignment_rule_effects_from_static_definitions` /
+/// `collect_transient_combat_assignment_rule_effects` duplicate the same
+/// retain/strip logic for `ActiveCombatAssignmentRuleEffect`; those effects
+/// change CR 613.11 rules, not characteristics, so they are outside this union
+/// — but a future condition channel added here needs patching there too.
+///
+/// Walks early-exit the moment the union saturates to
+/// [`CharacteristicKinds::ALL`].
+fn live_characteristic_reads(
+    state: &GameState,
+    active_effects: &[ActiveContinuousEffect],
+) -> LiveCharacteristicReads {
+    let mut global = CharacteristicKinds::EMPTY;
+    let mut affected = CharacteristicKinds::EMPTY;
+    for e in active_effects {
+        if global.union(affected).is_all() {
+            break;
+        }
+        if let Some(q) = continuous_modification_dynamic_quantity(&e.modification) {
+            global = global.union(quantity_expr_characteristic_reads_at(
+                q,
+                CHARACTERISTIC_READ_DEPTH,
+            ));
+        }
+        affected = affected.union(target_filter_characteristic_reads(&e.affected_filter));
+        // CR 611.2c + CR 611.3a: CR 611.2c locks in the affected SET of a
+        // resolution-created continuous effect, but nothing locks in its
+        // enabling condition — a retained recipient-context condition is
+        // re-evaluated per recipient on every pass, exactly like the
+        // "isn't locked in" static-ability effect of CR 611.3a. The condition
+        // gates WHETHER the effect applies at all, so it is a board-level read
+        // and belongs in `global`, NOT in the per-effect `affected` channel
+        // that CR 613.6 lets an effect exclude from its own writes. Covers the
+        // gathered producers only — see the walks below for what this channel
+        // structurally cannot see.
+        if let Some(condition) = e.condition.as_ref() {
+            global = global.union(static_condition_characteristic_reads(condition));
         }
     }
-
-    // Axis 2a — magnitude + affected-set over the EXISTING active effect set,
-    // NARROWED to entries that actually perturb the population input.
+    // CR 611.2b + CR 611.2c: both gates of a resolution-created effect — its
+    // "for as long as" duration and its retained enabling condition — decide
+    // WHETHER the effect applies at all, so both are board-level reads.
     //
-    // Two-stage test per effect: the committed exhaustive classifier
-    // (`quantity_expr_uses_object_count` / `affected_filter_uses_object_population`)
-    // is the OUTER conjunct (compile-time tripwire — a future population-reading
-    // variant forces a classification). Then the entry-aware narrowing layer asks
-    // whether any ENTERED object can flip THIS effect's population input.
-    //
-    // CR 109.5: the filter's "you control" must resolve against the EFFECT
-    // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
-    // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
-    // any_entered_perturbs(e)`; both required.
-    let active_effects = collect_shared_active_continuous_effects(state);
-    if active_effects_force_incremental_escalation(state, entered_ids, &active_effects) {
-        return true;
+    // Walked straight off `state.transient_continuous_effects` rather than off
+    // `active_effects`, because neither shape that matters survives that
+    // projection: `gather_transient_continuous_effects` skips a transient whose
+    // gate is currently OFF (an OFF gate is exactly the one an entry can turn
+    // ON), and it strips a source-level condition from the effect it pushes,
+    // leaving `e.condition == None` above.
+    if !global.union(affected).is_all() {
+        for tce in &state.transient_continuous_effects {
+            if global.union(affected).is_all() {
+                break;
+            }
+            for condition in transient_gate_conditions(tce) {
+                global = global.union(static_condition_characteristic_reads(condition));
+            }
+        }
     }
+    if !global.union(affected).is_all() {
+        // CR 611.3a: a Continuous static's enabling condition re-evaluates as the
+        // board changes, so it is a live read channel in its own right.
+        let affected_so_far = affected;
+        for_each_static_effect_source(state, |_state, obj| {
+            if global.union(affected_so_far).is_all() {
+                return;
+            }
+            for def in obj.static_definitions.iter_all() {
+                if def.mode != StaticMode::Continuous {
+                    continue;
+                }
+                if let Some(condition) = def.condition.as_ref() {
+                    global = global.union(static_condition_characteristic_reads(condition));
+                }
+            }
+        });
+    }
+    LiveCharacteristicReads {
+        global,
+        total: global.union(affected),
+    }
+}
 
-    // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
-    // sources, NARROWED to entries that actually perturb the condition. Conditions
-    // remain attached to collected effects for application-time evaluation, while
-    // this source walk supplies the before/after truth comparison required for an
-    // incremental full-rebuild decision.
-    //
-    // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
-    // on board population, an object entering can flip the condition for the
-    // WHOLE recipient set, changing PRE-EXISTING recipients — so escalate to a
-    // full rebuild. The entry-aware narrowing (built per-source from the visited
-    // object, CR 109.5) skips escalation when no entered object can perturb the
-    // gate; the truth-delta refinement (below) skips escalation even when an
-    // entry perturbs the gate INPUT but does not flip its truth value.
-    any_active_static_condition_perturbed_by_entry(state, entered_ids)
+/// CR 613.6: a continuous effect whose modifications span several layers uses
+/// ONE affected-object set. It is determined the first time the effect applies
+/// and then retained for every other applicable layer — `started_effect_sets`
+/// in [`apply_continuous_effect_filtered`] is exactly that retention, keyed by
+/// [`ContinuousEffectGroupKey`]. The set is therefore fixed BEFORE any of that
+/// effect's own modifications run, in the full pass and in the incremental pass
+/// alike, so a modification can never move the affected set of the effect it
+/// belongs to — not for the entrant and not for a pre-existing object.
+///
+/// That makes the affected-filter read channel self-exclusive. When the gate
+/// asks whether writer `M` can invalidate a live read, `M`'s own effect's
+/// affected filter is not a read `M` can move; only OTHER effects' affected
+/// filters are. `name_rewrite_entry_escalates_through_affected_filter_reads`
+/// pins the cross-effect direction, where the rename is definition 0 and the
+/// name-sensitive buff is definition 1, so the buff's set is determined AFTER
+/// the rename applied. `incremental_entry_retains_multi_layer_effect_affected_set`
+/// pins the self direction: one definition whose layer-4 `AddType` write is
+/// read only by its own `Non(Creature)` affected filter, which CR 613.6 has
+/// already locked in.
+///
+/// Attribution is per retention group, never per modification: the sibling
+/// modifications of one definition each carry a clone of the same affected
+/// filter, so excluding one modification's copy would leave its siblings'
+/// identical copies contributing the same kinds.
+///
+/// `duplicated` keeps the exclusion O(effects) instead of O(effects²): a kind
+/// read by two or more distinct groups survives excluding any single group.
+struct AffectedFilterReadTally {
+    by_group: HashMap<ContinuousEffectGroupKey, CharacteristicKinds>,
+    /// Kinds read by at least one attributed group's affected filter.
+    attributed: CharacteristicKinds,
+    /// Kinds read by at least two DISTINCT attributed groups.
+    duplicated: CharacteristicKinds,
+    /// Affected-filter reads from effects with no retention identity. Fail
+    /// closed — these are never excluded.
+    unattributed: CharacteristicKinds,
+}
+
+impl AffectedFilterReadTally {
+    /// The affected-filter reads that survive excluding `effect`'s own CR 613.6
+    /// retention group.
+    fn excluding_own_group(
+        &self,
+        state: &GameState,
+        effect: &ActiveContinuousEffect,
+    ) -> CharacteristicKinds {
+        let own = continuous_effect_group_key(state, effect)
+            .and_then(|key| self.by_group.get(&key).copied())
+            .unwrap_or(CharacteristicKinds::EMPTY);
+        self.unattributed
+            .union(self.duplicated)
+            .union(self.attributed.without(own))
+    }
+}
+
+/// Attribute every live affected filter's characteristic reads to its CR 613.6
+/// retention group. Deliberately built only after the global disjointness exit
+/// has already failed, so the boards that leave the gate at that exit never pay
+/// for the grouping.
+fn tally_affected_filter_reads(
+    state: &GameState,
+    active_effects: &[ActiveContinuousEffect],
+) -> AffectedFilterReadTally {
+    let mut by_group: HashMap<ContinuousEffectGroupKey, CharacteristicKinds> = HashMap::new();
+    let mut unattributed = CharacteristicKinds::EMPTY;
+    for e in active_effects {
+        let reads = target_filter_characteristic_reads(&e.affected_filter);
+        if reads.is_empty() {
+            continue;
+        }
+        match continuous_effect_group_key(state, e) {
+            Some(key) => {
+                let slot = by_group.entry(key).or_insert(CharacteristicKinds::EMPTY);
+                *slot = slot.union(reads);
+            }
+            None => unattributed = unattributed.union(reads),
+        }
+    }
+    // Order-independent: `duplicated` ends up as the kinds present in two or
+    // more group entries however the map iterates.
+    let mut attributed = CharacteristicKinds::EMPTY;
+    let mut duplicated = CharacteristicKinds::EMPTY;
+    for reads in by_group.values() {
+        duplicated = duplicated.union(attributed.intersection(*reads));
+        attributed = attributed.union(*reads);
+    }
+    AffectedFilterReadTally {
+        by_group,
+        attributed,
+        duplicated,
+        unattributed,
+    }
+}
+
+/// CR 613.1 + CR 613.1d + CR 613.4a: escalate when the population probes below
+/// are asking about an object whose characteristics the pass is about to change.
+/// Layers apply in order (CR 613.1), so a layer-4 type rewrite (CR 613.1d) has
+/// already happened by the time any later layer's population read — including a
+/// layer-7a CDA's P/T definition (CR 613.4a) — is evaluated; the gate's probes
+/// run BEFORE any layer.
+///
+/// `active_effects_force_incremental_escalation` asks "does the ENTERING object
+/// join this counted population?" against the entrant's characteristics as they
+/// stand at gate time — which is BEFORE any layer has applied to it. If some
+/// other active effect will change those characteristics later in the same pass,
+/// the probe answered about the wrong object. The same blindness afflicts the
+/// per-entrant probe in `any_active_static_condition_perturbed_by_entry`: a
+/// static's enabling condition (CR 611.3a) that counts a population also reads
+/// the entrant pre-layer.
+///
+/// Found by differential verification against a full re-evaluation during
+/// development, on Ashaya, Soul of the Wild: its CDA counts "lands you control"
+/// (layer 7a) while its own second static makes nontoken creatures Forest LANDS
+/// (layer 4). An entering Grizzly Bears is not a land at gate time, so the probe
+/// reported no perturbation, the incremental arm ran, and Ashaya kept a stale
+/// 1/1 where a full pass derives 2/2. Condition-channel twin of the same
+/// blindness: Life and Limb (layer 4: all Saprolings are Forest lands) plus
+/// Sylvan Advocate ("as long as you control six or more lands...") — an
+/// entering Saproling flips the Advocate's condition only post-layer. The
+/// discriminating fixture for that channel is the synthetic
+/// `condition_gated_anthem_entry_escalates_when_entrant_types_rewritten`, which
+/// is constructed to take the incremental path; the printed Life and Limb pair
+/// is pinned end-to-end separately in
+/// `tests/integration/life_and_limb_sylvan_advocate.rs`.
+///
+/// Closed by a typed READ/WRITE-KIND RELATION rather than by a one-sided list
+/// of "population-keying" writers. Both sides are classified over the same
+/// lattice ([`CharacteristicKinds`], one bit per layer-writable characteristic
+/// kind), and the gate fires only when they INTERSECT:
+///
+/// ```text
+/// escalate ⇔ ∃ live M reaching an entrant with writes(M) ∩ reads_M_can_move ≠ ∅
+///
+/// reads_M_can_move := global reads (magnitudes, conditions)
+///                   ∪ affected-filter reads of every effect EXCEPT M's own
+/// ```
+///
+/// The exclusion is CR 613.6, not an optimisation: M's own effect's affected
+/// set is retained from the moment that effect first applies, so it is already
+/// fixed before M runs and M cannot move it. See [`AffectedFilterReadTally`].
+///
+/// `writes(M)` comes from [`modification_characteristic_writes`], `ReadKinds`
+/// from [`live_characteristic_reads`]. The predecessor of this gate recognized
+/// only three write kinds (card types, controller, color) and did not classify
+/// the read side at all, so it was simultaneously too narrow (a layer-3 name
+/// rewrite or a layer-6 keyword grant reaching the entrant was invisible to a
+/// name- or keyword-keyed population) and too wide (any recognized writer
+/// escalated even against a board that reads no kind it writes).
+///
+/// SOUNDNESS:
+///
+/// 1. If no live modification matches an entrant pre-layer, nothing applies to
+///    it, so post-layer characteristics equal pre-layer ones and the pre-layer
+///    population probe is exact. Chains cannot start without a pre-layer match.
+/// 2. If M reaches the entrant and writes kind K, staleness requires some live
+///    read to depend on K — through a counted magnitude, through a static's
+///    enabling condition, or through another modification's affected filter.
+///    `ReadKinds` unions all three unconditionally, so no live read of K can lie
+///    outside it; kinds disjoint from every live read cannot flip any verdict.
+///    The only read subtracted per modification is M's own effect's affected
+///    filter, and CR 613.6 proves that one is not a read M can move: the
+///    effect's affected set is determined when the effect first applies and
+///    retained for its later layers, so it is fixed strictly before any of that
+///    effect's own modifications run. Every other effect's affected filter stays
+///    in, which is what the layer-3 rename channel rides on.
+/// 3. Every uncertain form on either side maps to [`CharacteristicKinds::ALL`]
+///    (unparsed conditions, arbitrary player predicates, recursion overflow,
+///    `RemoveAllAbilities` stripping CDAs), so classification error can only
+///    OVER-escalate: a full re-evaluation is slower, never wrong.
+/// 4. STATED BOUNDARY, inherited unchanged. The reach probe below evaluates
+///    affected filters against the previous FINAL state, while full evaluation
+///    matches them at intermediate layer states; a count-thresholded affected
+///    filter can therefore diverge from the probe in either direction. This
+///    relation neither narrows nor widens that pre-existing limitation — it is a
+///    property of the probe, not of the kind typing. Points 1-3 are a soundness
+///    argument for the KIND RELATION, not a proof that the probe itself is
+///    exact.
+///
+/// Both classifiers are EXHAUSTIVE and wildcard-free, which is what actually
+/// holds the line: a future `ContinuousModification` or `FilterProp` cannot be
+/// added without deciding which kinds it writes and reads.
+///
+/// Evaluation order is cheapest-first, and each stage can return "no escalation"
+/// on its own:
+///
+/// 1. `all_writes` — pure enum matches over the live modifications, no filter
+///    work at all.
+/// 2. `ReadKinds` — entrant-independent, computed once per flush, early-exiting
+///    at ALL.
+/// 3. their intersection — if empty, ZERO `matches_target_filter` calls happen.
+///    This is the exit taken by the pinned fast paths, whose anthems write
+///    `{PowerToughness}` while their boards read `{CardTypes, Controller}` or
+///    `{ManaCost, Controller, CardTypes}`.
+/// 4. only then, the CR 613.6 group attribution and the per-entrant
+///    affected-filter reach probe, and only for the modifications that survived
+///    stage 3.
+fn population_probe_blinded_by_entrant_characteristic_change(
+    state: &GameState,
+    entered_ids: &BTreeSet<ObjectId>,
+    active_effects: &[ActiveContinuousEffect],
+) -> bool {
+    // Stage 1: pure enum matches.
+    let mut all_writes = CharacteristicKinds::EMPTY;
+    for e in active_effects {
+        all_writes = all_writes.union(modification_characteristic_writes(&e.modification));
+        if all_writes.is_all() {
+            break;
+        }
+    }
+    if all_writes.is_empty() {
+        return false;
+    }
+    // Stage 2: entrant-independent read union, computed once.
+    let read_kinds = live_characteristic_reads(state, active_effects);
+    // Stage 3: global disjointness — no per-entrant filter matching at all.
+    if !all_writes.intersects(read_kinds.total) {
+        return false;
+    }
+    // Stage 3.5: only boards that survive stage 3 pay for attributing the
+    // affected-filter reads to their CR 613.6 retention groups.
+    let affected_reads = tally_affected_filter_reads(state, active_effects);
+    // Stage 4: per-entrant reach probe, restricted to modifications whose own
+    // write set intersects a live read that modification could actually move.
+    active_effects.iter().any(|e| {
+        let reads_e_can_move = read_kinds
+            .global
+            .union(affected_reads.excluding_own_group(state, e));
+        if !modification_characteristic_writes(&e.modification).intersects(reads_e_can_move) {
+            return false;
+        }
+        let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+        entered_ids
+            .iter()
+            .any(|id| matches_target_filter(state, *id, &e.affected_filter, &ctx))
+    })
+}
+
+/// CR 613.1: which layer-writable characteristic kinds a modification WRITES.
+///
+/// EXHAUSTIVE and wildcard-free over `ContinuousModification`, the write half of
+/// the relation documented on
+/// [`population_probe_blinded_by_entrant_characteristic_change`]. A variant that
+/// writes several kinds returns their union; a variant whose effect cannot be
+/// bounded returns [`CharacteristicKinds::ALL`].
+fn modification_characteristic_writes(m: &ContinuousModification) -> CharacteristicKinds {
+    modification_characteristic_writes_at(m, GRANTED_STATIC_WRITE_DEPTH)
+}
+
+/// Depth bound for `GrantStaticAbility` recursion: a granted static may itself
+/// grant a static, and the granted `StaticDefinition` is owned data with no
+/// structural bound, so the walk is capped and falls back to
+/// [`CharacteristicKinds::ALL`] — conservative, per soundness point 3.
+const GRANTED_STATIC_WRITE_DEPTH: u32 = 4;
+
+fn modification_characteristic_writes_at(
+    m: &ContinuousModification,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match m {
+        // ---- CR 613.1d (layer 4): typeline. ----
+        ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => CharacteristicKinds::CARD_TYPES,
+        // CR 305.7: setting a basic land type replaces the land's subtypes AND
+        // removes its abilities (the Song of the Dryads / Blood Moon class), so
+        // it is a genuine two-kind writer.
+        ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+
+        // ---- CR 613.1c (layer 3) + CR 612.8: name. ----
+        ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SetChosenName => CharacteristicKinds::NAME_TEXT,
+
+        // ---- CR 613.1e (layer 5): color. ----
+        ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddChosenColor { .. } => CharacteristicKinds::COLOR,
+
+        // ---- CR 613.1b (layer 2): control. ----
+        // CR 109.3: control is not a characteristic, but it moves the object
+        // between controller-keyed populations, which is the read this gate
+        // protects.
+        ContinuousModification::ChangeController => CharacteristicKinds::CONTROLLER,
+
+        // ---- CR 613.1g + CR 613.4a-d (layer 7): power/toughness. ----
+        ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::SwitchPowerToughness => CharacteristicKinds::POWER_TOUGHNESS,
+
+        // ---- CR 613.1f (layer 6): abilities. ----
+        ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        // CR 707.9a: retaining a printed ability through a copy still only
+        // rewrites the ability set, despite sitting in the copy layer.
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        // Battlefield application is a no-op (the real write happens on off-zone
+        // characteristics), but the truthful kind is still Abilities.
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        // Manufactures a `StaticDefinition` with a mode but no inner
+        // modifications, so there is nothing to recurse into.
+        | ContinuousModification::AddStaticMode { .. } => CharacteristicKinds::ABILITIES,
+        // CR 613.1f: grants a whole static, so it writes Abilities PLUS whatever
+        // the granted static's own modifications write.
+        ContinuousModification::GrantStaticAbility { definition } => definition
+            .modifications
+            .iter()
+            .fold(CharacteristicKinds::ABILITIES, |acc, inner| {
+                if acc.is_all() {
+                    acc
+                } else {
+                    acc.union(modification_characteristic_writes_at(inner, depth))
+                }
+            }),
+        // CR 613.1f + CR 604.3: removing all abilities also strips
+        // characteristic-defining abilities, so it can second-order rewrite any
+        // kind the stripped CDA was defining.
+        ContinuousModification::RemoveAllAbilities => CharacteristicKinds::ALL,
+
+        // ---- CR 613.1a + CR 707.9b (layer 1): copy effects. ----
+        // A copy effect replaces the copiable values wholesale — name, mana
+        // cost, color, types, P/T and abilities — i.e. every kind except control
+        // (CR 109.3). `CopyChosen` applies as a no-op here because the real copy
+        // is installed as a latched `CopyValues`, but classifying it truthfully
+        // is free.
+        ContinuousModification::CopyValues { .. } | ContinuousModification::CopyChosen => {
+            CharacteristicKinds::ALL
+        }
+        // CR 202.1: the mana cost is only writable by copy effects; this variant
+        // is unreachable through the layer pipeline (its apply site asserts), but
+        // it is classified truthfully rather than as EMPTY.
+        ContinuousModification::RemoveManaCost => CharacteristicKinds::MANA_COST,
+
+        // ---- Writes no characteristic. ----
+        // CR 510.1a: combat damage ASSIGNMENT rules, not characteristics.
+        ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        // CR 121.1 + CR 613.1: consumed as an entry replacement at resolution and
+        // never reached through the layer pipeline (its apply site asserts);
+        // counters are not characteristics in any case.
+        | ContinuousModification::AddCounterOnEnter { .. }
+        // CR 306.5b: loyalty is read from the copiable values, not written as a
+        // layer effect; the apply site asserts unreachable.
+        | ContinuousModification::SetStartingLoyalty { .. } => CharacteristicKinds::EMPTY,
+    }
 }
 
 fn active_effects_force_incremental_escalation(
@@ -3540,14 +4313,11 @@ fn active_effects_force_incremental_escalation(
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
-        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
-        let magnitude_sensitive =
-            magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
-        let affected_sensitive =
-            crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+        let (magnitude_sensitive, affected_sensitive) = effect_population_reads(e);
         if !magnitude_sensitive && !affected_sensitive {
             return false;
         }
+        let magnitude = continuous_modification_dynamic_quantity(&e.modification);
         let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
         entered_ids.iter().any(|id| {
             let Some(entered) = state.objects.get(id) else {
@@ -3570,12 +4340,23 @@ fn active_effects_force_incremental_escalation(
     })
 }
 
-/// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
-/// whose enabling `condition` is board-population-dependent AND that one of the
-/// `entered_ids` actually perturbs. Walks the same source set as
-/// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
-/// and reads the source definition's `condition` field.
-/// O(active-source-count × entered-count); short-circuits on the first match.
+/// Scan every live continuous-effect generator for an enabling `condition` that
+/// is board-population-dependent AND that one of the `entered_ids` actually
+/// perturbs. Two generator channels are walked, matching the two kinds of
+/// generator that carry a condition:
+///
+///  * PRINTED (and granted-inner) CONTINUOUS `StaticDefinition`s, over the same
+///    source set as `collect_shared_active_continuous_effects`
+///    (`for_each_static_effect_source`), reading each definition's `condition`.
+///  * RESOLUTION-CREATED `TransientContinuousEffect`s, reading BOTH gates that
+///    [`transient_effect_is_live`] consults, via [`transient_gate_conditions`]:
+///    the "for as long as" duration (CR 611.2b) and the retained enabling
+///    condition. CR 611.2c locks in a resolved effect's affected SET, not
+///    either gate, so both flip on entry while the frozen set goes stale with
+///    them — see the transient walk below for why it has no truth-delta stage.
+///
+/// O((active-source-count + transient-count) × entered-count); short-circuits on
+/// the first match.
 ///
 /// Three-stage test:
 ///  1. The committed exhaustive classifier
@@ -3660,7 +4441,39 @@ fn any_active_static_condition_perturbed_by_entry(
             found = true;
         }
     });
-    found
+    if found {
+        return true;
+    }
+    // CR 611.2b + CR 611.2c: the walk above sees only PRINTED (and granted-inner)
+    // static definitions. A continuous effect created by the resolution of a
+    // spell or ability keeps BOTH of its gates live — CR 611.2c locks in the
+    // affected SET, and nothing else — so a population-dependent gate riding on
+    // a transient flips on entry while every recipient frozen into that effect's
+    // set goes stale with it. Both gates are walked through
+    // `transient_gate_conditions`: the "for as long as" duration is CR 611.2b
+    // (Master Thief), and the retained condition is the source definition's own
+    // CR 611.3a gate (`effects/counter.rs::apply_source_static`).
+    //
+    // No truth-delta stage here: `static_gate_truth` is keyed by
+    // `(source, def_index)` over printed definitions, and a transient has no
+    // `def_index` in that key space (several transients can share one
+    // `source_id`). Escalating on perturbation alone is the direction the whole
+    // gate is built on — over-escalation costs a full pass, under-escalation
+    // ships a wrong board — and it matches the recipient-context arm above,
+    // which also escalates on perturbation with no cache consult.
+    state.transient_continuous_effects.iter().any(|tce| {
+        // CR 109.5: a resolved spell or ability RETAINS its controller, so "you"
+        // in either retained gate names `tce.controller` — not whoever controls
+        // the source object now (that reading is only correct for static
+        // abilities).
+        let ctx = FilterContext::from_source_with_controller(tce.source_id, tce.controller);
+        transient_gate_conditions(tce).any(|condition| {
+            static_condition_uses_object_population(condition)
+                && entered_ids
+                    .iter()
+                    .any(|id| entered_object_perturbs_static_condition(state, *id, &ctx, condition))
+        })
+    })
 }
 
 /// CR 611.3a + CR 611.3b: rewrite the source-level enabling-condition truth
@@ -3784,14 +4597,369 @@ fn incremental_recipient_ids(
     recipients
 }
 
+/// The single object an effect's `affected_filter` provably names, when it names
+/// one by id at all. `None` means the filter is a PREDICATE over the board
+/// (`Typed`, `And`, `Or`, ...) whose membership can only be decided by evaluating
+/// it against every object — which neither caller below does, so each supplies
+/// its own conservative answer for that case.
+///
+/// An id-naming filter is exactly the case where the affected set is known
+/// without a board scan. (No CR annotation: this decides nothing about the rules,
+/// it only reports what a filter's shape already tells us.)
+fn effect_names_single_affected_object(effect: &ActiveContinuousEffect) -> Option<ObjectId> {
+    match &effect.affected_filter {
+        TargetFilter::SelfRef => Some(effect.source_id),
+        TargetFilter::SpecificObject { id } => Some(*id),
+        _ => None,
+    }
+}
+
+/// Is this effect provably CONFINED to the incremental recipients — i.e. can the
+/// restricted pass reproduce it in full? Unknown affected sets answer `false`
+/// (escalate on doubt): a board-wide filter also touches pre-existing objects
+/// that the incremental arm never resets.
 fn effect_is_restricted_to_incremental_recipients(
     effect: &ActiveContinuousEffect,
     recipient_ids: &BTreeSet<ObjectId>,
 ) -> bool {
-    match &effect.affected_filter {
-        TargetFilter::SelfRef => recipient_ids.contains(&effect.source_id),
-        TargetFilter::SpecificObject { id } => recipient_ids.contains(id),
+    effect_names_single_affected_object(effect).is_some_and(|id| recipient_ids.contains(&id))
+}
+
+/// Can this effect REACH at least one incremental recipient? The dual question to
+/// [`effect_is_restricted_to_incremental_recipients`], and deliberately not the
+/// same predicate: the two agree on an id-naming filter (a set of one is confined
+/// iff it is reached) but their conservative answers for an unknown affected set
+/// are OPPOSITE, because both must escalate on doubt and doubt sits on different
+/// sides of the two questions.
+fn effect_can_reach_incremental_recipients(
+    effect: &ActiveContinuousEffect,
+    recipient_ids: &BTreeSet<ObjectId>,
+) -> bool {
+    effect_names_single_affected_object(effect).is_none_or(|id| recipient_ids.contains(&id))
+}
+
+/// CR 613.2a + CR 613.2c: does applying this layer-1 copy modification hand its
+/// recipient a continuous static ability — i.e. can it turn a non-generator into a
+/// `StaticSourceIndex` generator mid-pass?
+///
+/// Shares the index's own classification predicate
+/// (`static_source_index::defs_source_continuous_effect`, the body of
+/// `object_sources_continuous_effect`): a generator is an object carrying a
+/// `StaticMode::Continuous` def. `CopyValues` carries its whole copiable static
+/// set in the modification payload and `apply_copiable_values` assigns that set
+/// wholesale, so the answer is exact — no id plumbing out of the apply path, and
+/// no battlefield rescan.
+///
+/// The six variants below are exactly `ContinuousModification::layer()`'s
+/// `Layer::Copy` set; every other variant belongs to layers 2-7 and is filtered
+/// out by both callers before they ask.
+fn copy_grants_continuous_static(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::CopyValues { values, .. } => {
+            crate::game::static_source_index::defs_source_continuous_effect(
+                &values.static_definitions,
+            )
+        }
+        // CR 707.9b: name-only override; never writes `static_definitions`.
+        ContinuousModification::SetName { .. } => false,
+        // CR 707.2c: parse-time marker whose apply arm is an explicit no-op. The
+        // real copy is the latched `CopyValues` TCE, which sits in this same
+        // bucket and is classified on its own payload.
+        ContinuousModification::CopyChosen => false,
+        // CR 707.9a: trigger-set retention only.
+        ContinuousModification::RetainPrintedTriggerFromSource { .. } => false,
+        // CR 707.9a: single-ability retention. Its apply arm pushes one
+        // `AbilityDefinition` read from the source's `base_abilities` onto
+        // `obj.abilities` and touches no other set — `static_definitions` is
+        // structurally out of its reach, so the Sakashima-class single-ability
+        // retain provably adds no generator.
+        ContinuousModification::RetainPrintedAbilityFromSource { .. } => false,
+        // CR 707.9a: the unbounded retain genuinely merges the source's
+        // `base_static_definitions` back onto the copy, so it can add a
+        // generator. Answered `true` without inspecting the retained set, which
+        // lives on the live source rather than in this payload.
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => true,
+        // Layers 2-7. `ContinuousModification` spans all eleven layers in one
+        // enum, so this arm is required for totality; it is EXACT rather than a
+        // fallback guess — no modification outside layer 1 writes copied
+        // `static_definitions`, and both callers filter to `Layer::Copy` first.
+        // Deliberately does not consult `other.layer()`: six of that method's
+        // arms are `unreachable!()` panics (`AddCounterOnEnter`,
+        // `SetStartingLoyalty`, `RemoveManaCost`, and the three
+        // combat-assignment variants), so the guard that was meant to make this
+        // arm safe could abort inside itself.
         _ => false,
+    }
+}
+
+/// CR 613.2a: can applying this copy modification produce ANOTHER generation of
+/// sublayer 1a — i.e. does its payload grant a continuous static that itself
+/// generates a LAYER-1 effect?
+///
+/// Strictly narrower than [`copy_grants_continuous_static`], and the two are not
+/// interchangeable. That one asks "does the recipient become a
+/// `StaticSourceIndex` generator?", which is the right question for the layer-1
+/// exit rebuild that feeds layers 2-7 and for the incremental-flush guard.
+/// Cloning an ordinary lord answers it yes — an anthem is a continuous static —
+/// but an anthem is a layer-7c effect and can never appear in a `Layer::Copy`
+/// gather however many times 1a re-runs. Continuing the loop on that answer buys
+/// a `StaticSourceIndex::rebuild_from_state` plus a board-wide
+/// `collect_shared_active_continuous_effects` for a generation that is
+/// guaranteed to find nothing, on the very common board that merely contains a
+/// cloned lord. Only a copy-LAYER static can extend the chain.
+///
+/// Asks [`ContinuousModification::is_copy_layer`] rather than `layer()`: these
+/// are payload modifications that have never been through the gather filter, and
+/// six of `layer()`'s arms are `unreachable!()` panics.
+fn copy_grants_copy_layer_static(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::CopyValues { values, .. } => values
+            .static_definitions
+            .iter()
+            // CR 604.2 + CR 613.1: a STATIC ability is what creates a continuous
+            // effect here, so only a `Continuous` def counts. (CR 611.2, which
+            // `defs_source_continuous_effect` cites for the same test, is the
+            // resolution-generated case; the answer is identical, the rule for a
+            // static is 604.2.)
+            .filter(|def| def.mode == StaticMode::Continuous)
+            .flat_map(|def| def.modifications.iter())
+            // `is_copy_layer` is total over `Layer::Copy`, so it answers `true` for
+            // a nested `CopyValues` too. That sub-case is unreachable, for the same
+            // reason `apply_continuous_effect`'s `"CopyValues must originate from a
+            // transient continuous effect"` expect is sound: every construction of
+            // `CopyValues` installs it through `add_transient_continuous_effect`
+            // (`become_copy::apply_precomputed_copy_values`,
+            // `merge::install_merge_layer_effect`) and card data never authors one,
+            // so no `StaticDefinition` — and hence no `CopiableValues` snapshot of
+            // one — can hold it. The two seams therefore disagree about whether the
+            // state is possible — this one buys a discovery generation for it, that
+            // one panics on it — and the disagreement is deliberate: the expect is
+            // where the invariant is enforced, so a future reachable case is a
+            // construction-site bug to fix there, not a case to quietly admit by
+            // special-casing it out of this totality.
+            .any(ContinuousModification::is_copy_layer),
+        // CR 707.9a: the unbounded retain merges the LIVE source's
+        // `base_static_definitions`, which are not in this payload to inspect, so
+        // it is answered conservatively — as in `copy_grants_continuous_static`.
+        // Over-answering costs at most one extra generation, which then gathers
+        // nothing fresh and exits.
+        ContinuousModification::RetainAllOtherAbilitiesFromSource => true,
+        // The remaining `Layer::Copy` variants write no `static_definitions` at
+        // all (`SetName` is name-only, `CopyChosen`'s apply arm is a no-op, and
+        // the two single-item retains push one ability / one trigger), and every
+        // layers-2-7 variant is out of both callers' `Layer::Copy` filter.
+        _ => false,
+    }
+}
+
+/// CR 613.2a + CR 613.2c: apply sublayer 1a to a fixed point.
+///
+/// A copy effect can hand a permanent a static ability its copiable base does not
+/// carry, and CR 613.2c says that after all of layer 1 has been applied the
+/// object's characteristics ARE its copiable values. When that granted static is
+/// itself a copy effect, it belongs to THIS sublayer — so gathering layer 1 once
+/// is not enough: the sublayer has to be iterated until no new copy effect
+/// appears.
+///
+/// Ordering is preserved ACROSS generations, not just within one: each generation
+/// re-orders and re-applies the whole started set (CR 613.2 timestamp order,
+/// CR 613.8a dependency order), never just the newly discovered tail. That
+/// matters because `depends_on` sorts every `CopyValues` ahead of the other
+/// layer-1 modifications, so a copy discovered late can legitimately need to
+/// apply before one already applied. Re-application is safe, and CR 707.2c is
+/// why: the copiable values a copy effect grants are fixed the first time it
+/// starts to apply, so re-applying a started effect re-applies that same locked
+/// snapshot. Mechanically, `CopyValues` / `SetName` assign wholesale from the
+/// payload, the retains dedupe per item, `CopyChosen` is a no-op, and
+/// `started_effect_sets` hands an already-started effect back its original
+/// affected set (CR 613.6). Nothing is ever pruned from the started set for the
+/// same reason: an effect whose provenance slot has since been overwritten still
+/// applies the values it locked in, so dropping it would be the CR 707.2c
+/// violation, not keeping it.
+///
+/// Termination. The loop's identity ([`CopySublayerEffectId`]) is provenance,
+/// never payload, so the space it draws from is finite and does not grow during
+/// the pass:
+///
+/// - The battlefield object set is fixed for the duration of layer 1 — nothing
+///   in sublayer 1a creates, destroys or moves an object — so the `Static` and
+///   `GrantedStatic` arms of `ContinuousEffectGroupKey` range over a fixed set of
+///   `ObjectIncarnationRef`s (`incarnation` changes only on a zone change), and
+///   the `Transient` arm over the fixed id set of
+///   `state.transient_continuous_effects`.
+/// - `definition_index` and `mod_index` are bounded by the largest static set any
+///   object can hold during the pass, and no arm can mint fresh ones without
+///   bound: `apply_copiable_values` ASSIGNS `obj.static_definitions` wholesale
+///   from the payload's snapshot rather than appending,
+///   `RetainAllOtherAbilitiesFromSource` merges the source's
+///   `base_static_definitions` behind a per-item `contains` dedupe, and every
+///   other `Layer::Copy` arm writes no static at all. Each payload is itself a
+///   snapshot taken before the pass began, so the reachable static sets are fixed
+///   too.
+///
+/// Each iteration therefore either inserts at least one identity into the
+/// monotonically growing `started_ids` — bounded above by that finite space — or
+/// gathers nothing fresh and returns. So the loop terminates, with no generation
+/// cap needed to force it.
+///
+/// Returns whether any applied copy added a `StaticSourceIndex` generator, which
+/// the caller needs for the layer-1 exit rebuild that feeds layers 2-7.
+fn apply_copy_sublayer_to_fixed_point(
+    state: &mut GameState,
+    abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
+) -> bool {
+    let mut started: Vec<ActiveContinuousEffect> = Vec::new();
+    let mut started_ids: HashSet<CopySublayerEffectId> = HashSet::new();
+    let mut copy_added_generator = false;
+
+    loop {
+        // `insert` returns `false` for an identity already started, so this both
+        // selects the fresh effects and records them in one O(1)-per-effect pass.
+        let fresh: Vec<ActiveContinuousEffect> =
+            gather_active_effects_for_layer(state, Layer::Copy)
+                .into_iter()
+                .filter(|effect| started_ids.insert(copy_sublayer_effect_id(state, effect)))
+                .collect();
+        if fresh.is_empty() {
+            // Fixed point: this generation's gather produced nothing the
+            // previous ones had not already started applying.
+            return copy_added_generator;
+        }
+
+        copy_added_generator |= fresh
+            .iter()
+            .any(|effect| copy_grants_continuous_static(&effect.modification));
+        // Loop continuation is the NARROW question: only a copy-layer static can
+        // show up in the next `Layer::Copy` gather. A cloned lord answers
+        // `copy_grants_continuous_static` yes and still cannot extend the chain.
+        let fresh_added_copy_generator = fresh
+            .iter()
+            .any(|effect| copy_grants_copy_layer_static(&effect.modification));
+
+        let reapplying = !started.is_empty();
+        started.extend(fresh);
+        let ordered = order_active_continuous_effects(Layer::Copy, &started, state);
+        if reapplying {
+            // 1a re-runs from the top, so its display attribution is re-derived
+            // from the top too — otherwise a re-applied effect would be listed
+            // twice, in stale order. Only the Copy bucket exists yet: Step 1
+            // cleared the table and no later layer has run.
+            for (_, attribution) in state.attribution.iter_mut() {
+                attribution.by_layer.remove(&Layer::Copy);
+            }
+        }
+        for effect in &ordered {
+            apply_continuous_effect(
+                state,
+                effect,
+                abilities_suppressed,
+                zone_cache,
+                started_effect_sets,
+            );
+        }
+
+        if !fresh_added_copy_generator {
+            // Nothing this generation can put a copy-layer static on the board,
+            // so the next gather would return the same set. Stop without paying
+            // the O(battlefield) rebuild. If a NON-copy generator was added, the
+            // returned flag makes the caller do the layer-1 exit rebuild instead.
+            return copy_added_generator;
+        }
+        // The index was built from definitions that predate these copies; refresh
+        // it so the next gather can see a copy-granted copy ability.
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+}
+
+/// CR 707.2c: identity of a layer-1 copy effect for the fixed-point loop.
+///
+/// PROVENANCE ONLY — never the payload. CR 707.2c: "If a static ability generates
+/// a continuous effect that's a copy effect, the copiable values that effect
+/// grants are determined only at the time that effect first starts to apply." So
+/// re-reading a provenance that has already started is the SAME effect granting
+/// the SAME locked values; a rewritten payload does not mint a new one. Keying on
+/// the payload instead both contradicts that rule and
+/// makes the loop non-convergent by construction — two permanents that rewrite
+/// each other's static sets would produce payload-distinct identities forever,
+/// which is exactly what a generation cap used to have to paper over.
+///
+/// Built on [`ContinuousEffectGroupKey`], this file's canonical "which effect is
+/// this" answer, rather than a hand-rolled tuple. Two reasons: it is what
+/// `started_effect_sets` already keys on, so the loop and `apply_continuous_effect`
+/// can no longer disagree about whether an effect has started (a disagreement is a
+/// CR 613.6 bug — the loop calls an effect new while the applier hands it back an
+/// already-locked affected set); and it distinguishes
+/// `GrantedStatic { grant_origin, recipient }` occurrences that a raw
+/// `(source_id, def_index, transient_id)` tuple collides on. That second reason is
+/// forward-looking here, not load-bearing: `GrantedStatic` is live in the layers
+/// that share this key, but reaching it from THIS loop needs a
+/// `GrantStaticAbility` whose inner definition is copy-layer, and no card prints
+/// one (see the pool argument below). Sharing the key is still the right call —
+/// the alternative is a second identity that can drift from the one
+/// `apply_continuous_effect` enforces.
+///
+/// The three provenances are not equally precise, and this identity claims no more
+/// than each one carries. `Transient { continuous_effect_id }` names an allocated
+/// id and `GrantedStatic { grant_origin, recipient }` names a grant origin —
+/// nothing in a layer pass can make either denote a different ability.
+/// `Static { source, definition_index }` names a POSITION in
+/// `obj.static_definitions`, and [`apply_copiable_values`] assigns that vector
+/// wholesale from the copy payload. So slot `i` could in principle denote a
+/// different static ability in generation N+1 than in generation N, and the
+/// newcomer would be filtered out as already-started while the effect it displaced
+/// kept re-applying.
+///
+/// That board is not constructible today, and the residual is accepted rather than
+/// closed: `ContinuousEffectGroupKey` is the shared key `started_effect_sets` uses
+/// in every layer, so de-positioning its `Static` arm is a change to all seven
+/// layers rather than to this loop. Reaching the hazard needs a `Layer::Copy`
+/// effect that is `Static`-keyed, and no producer makes one:
+///
+/// - Both engine construction sites of a `Layer::Copy` modification —
+///   `become_copy::apply_precomputed_copy_values` and
+///   `merge::install_merge_layer_effect` — install through
+///   `add_transient_continuous_effect`, so the effect is `Transient`-keyed.
+/// - `expand_granted_static_effects` sets `def_index: None`, so a granted
+///   copy-layer static is `GrantedStatic`-keyed.
+/// - Card data is the only other producer of `StaticDefinition`s, and in the
+///   generated pool every copy-layer modification that sits inside one at all sits
+///   inside a `GenericEffect` payload — Awakening of Vitu-Ghazi, Tenth District
+///   Hero, The Curse of Fenric, The Irencrag, all `SetName` — which
+///   `effects::effect` resolves through `register_transient_effect`. No card
+///   carries a copy-layer modification in its printed `static_abilities`, so no
+///   route into an object's `static_definitions` can carry one either: the copy
+///   payload ([`apply_copiable_values`]), the `GrantStaticAbility` graft, and the
+///   `RetainPrintedAbilityFromSource` graft all replay card-data statics.
+///
+/// The first card to print a copy-layer static ability directly — rather than
+/// creating its copy effect from a resolving spell or ability — is the trigger to
+/// revisit this.
+///
+/// `mod_index` rides alongside because the group key deliberately drops it — every
+/// modification of one definition shares one CR 613.6 affected set — while this
+/// loop must re-apply EACH modification of a multi-modification copy definition
+/// (`CopyValues` + its `SetName` exception, say), not just the first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CopySublayerEffectId {
+    /// `None` only for a synthetic effect carrying no static, transient or grant
+    /// provenance at all (the Ring emblem, stickers). No synthetic producer emits
+    /// a `Layer::Copy` modification today, so this is unreachable here; carrying
+    /// `source_id` keeps the identity total instead of resting on that fact.
+    group: Option<ContinuousEffectGroupKey>,
+    source_id: ObjectId,
+    mod_index: usize,
+}
+
+fn copy_sublayer_effect_id(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+) -> CopySublayerEffectId {
+    CopySublayerEffectId {
+        group: continuous_effect_group_key(state, effect),
+        source_id: effect.source_id,
+        mod_index: effect.mod_index,
     }
 }
 
@@ -3806,10 +4974,16 @@ fn effect_is_restricted_to_incremental_recipients(
 /// visibility). It does NOT clear attribution globally or touch the rest of the
 /// battlefield: pre-existing objects keep their already-derived characteristics.
 ///
-/// Caller (`flush_layers`) only reaches this path after
-/// `incremental_flush_must_escalate` returned false, which guarantees no active
-/// effect's magnitude or affected set reads board population — so re-deriving
-/// just the entered objects yields a board identical to a full pass (CR 613.1).
+/// Caller (`flush_layers`) only reaches this path when `prepare_incremental_flush`
+/// returned `Some`, i.e. none of its escalation disjuncts fired. The disjuncts are
+/// listed once, at that function; they are deliberately NOT restated here, because
+/// a second enumeration is exactly what drifted last time.
+///
+/// Within the limits those disjuncts detect, re-deriving just the entered objects
+/// yields a board identical to a full pass (CR 613.1). Note what that does and
+/// does not promise: the guarantee is "no DETECTED perturbation", not "no
+/// population read is live". The residual blind spots are enumerated on
+/// `population_probe_blinded_by_entrant_characteristic_change`.
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
     let PreparedIncrementalFlush {
         recipient_ids,
@@ -3822,9 +4996,18 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     // static-source index rebuild and shared active-effect collection.
 
     // Step 2: Copy effects first (Layer 1), restricted to recipient objects.
+    //
+    // `effect_can_reach_incremental_recipients` drops a copy that provably names a
+    // NON-recipient — the ordinary resolved-clone shape. `apply_continuous_effect_to`
+    // would skip every one of its objects at the `restrict_to` test anyway, so this
+    // changes no state; what it buys is an accurate `copy_effects.is_empty()` below,
+    // which is what decides whether this flush pays a second board-wide gather.
     let copy_effects: Vec<ActiveContinuousEffect> = active_effects
         .iter()
-        .filter(|effect| effect.layer == Layer::Copy)
+        .filter(|effect| {
+            effect.layer == Layer::Copy
+                && effect_can_reach_incremental_recipients(effect, &recipient_ids)
+        })
         .cloned()
         .collect();
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
@@ -3842,6 +5025,36 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
     let stickers_changed =
         crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
+    // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
+    // the full pass. A copy applied here could only add a generator by landing on
+    // a recipient, and it cannot: `recipient_ids` is `entered_ids` alone, because
+    // an attached entrant — the one way a pre-existing host joins the set — is
+    // rejected outright by `entered_object_blocks_incremental` guard (3); and a
+    // copy TCE naming a fresh entrant can only have been installed by that same
+    // entry, which called `layers_dirty.mark_full()` (`game_state.rs`,
+    // `apply_resolved_continuous_effect`) and so made this flush a full pass.
+    //
+    // That argument covers only a copy that NAMES a recipient. A pre-existing copy
+    // effect also reaches a recipient by plain filter match, because
+    // `apply_continuous_effect_to` restricts an ordinary board-wide
+    // `affected_filter` to `recipient_ids` rather than requiring
+    // `TargetFilter::SpecificObject`. What rules that case out is the escalation
+    // guard in `prepare_incremental_flush`: any active copy that can REACH a
+    // recipient and whose payload grants a continuous static sends the whole flush
+    // to `evaluate_layers`. The copies it lets through are exactly those confined
+    // to a named non-recipient, which the `copy_effects` filter above then drops —
+    // so either way no copy surviving to this line can turn a recipient into a
+    // `StaticSourceIndex` generator. The index built there still names exactly the
+    // right sources and a rebuild would find the identical set. (It would also be
+    // the wrong repair anyway: a guard that fans a copy-granted static over
+    // `recipient_ids` alone would not agree with the full pass, which derives it
+    // board-wide.)
+    //
+    // The re-collect below is not dead weight, though. A copy changes its
+    // recipients' characteristics, and a pre-existing generator's
+    // `GrantStaticAbility` fan-out is computed per matching recipient when that
+    // generator is visited — same generator set, different collected effects. So
+    // the effect set must be re-read after the copy even though the index need not.
     let active_effects = if stickers_changed {
         // Incremental resets clear the entered/attached recipients back to base,
         // so retained stickers must be re-applied before the restricted main
@@ -4892,8 +6105,90 @@ pub(crate) fn gather_transient_continuous_effects(
     }
 }
 
-fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+/// CR 611.2b: the enabling condition a `"for as long as …"` DURATION carries.
+///
+/// Single authority for "which condition does `tce.duration` gate on". The
+/// liveness evaluator ([`transient_duration_holds`]), the read union
+/// ([`live_characteristic_reads`]) and the entry-perturbation probe
+/// ([`any_active_static_condition_perturbed_by_entry`]) all ask through here,
+/// so a second condition-bearing `Duration` variant is wired into all three by
+/// editing one function.
+fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&StaticCondition> {
     let Duration::ForAsLongAs { ref condition } = tce.duration else {
+        return None;
+    };
+    Some(condition)
+}
+
+/// CR 611.2b + CR 611.2c: every condition that gates whether a
+/// resolution-created continuous effect is live on THIS pass.
+///
+/// CR 611.2c freezes such an effect's affected SET when it begins and nothing
+/// else, so both gates below stay live and can flip long after that set is
+/// fixed:
+///
+/// * the `"for as long as …"` DURATION (CR 611.2b — Master Thief's "gain
+///   control of target artifact for as long as you control this creature");
+/// * the retained enabling CONDITION, which is the source `StaticDefinition`'s
+///   own CR 611.3a gate riding along on the transient
+///   (`effects/counter.rs::apply_source_static`).
+///
+/// [`transient_effect_is_live`] consults this pair plus two gates that read no
+/// layer-writable characteristic at all — the CR 400.7 recipient-incarnation
+/// check and the `UntilHostLeavesPlay` source-zone check — which is why they
+/// are outside this iterator and outside [`live_characteristic_reads`]: a zone
+/// or identity change is not something layers 1-7 can write.
+///
+/// Every consumer that EVALUATES whether this effect is live walks the pair
+/// through here: [`transient_effect_is_live`] (via
+/// [`transient_duration_holds`] and its own `tce.condition` arm),
+/// [`live_characteristic_reads`] and
+/// [`any_active_static_condition_perturbed_by_entry`] in this module, six
+/// static-mode/protection queries in `static_abilities`, plus
+/// `casting::transient_granted_spell_keywords_for`,
+/// `turns::scan_step_end_mana_handlers` and
+/// `visibility::viewer_may_look_at_face_down`. All but the first evaluate with
+/// `evaluate_condition` rather than `source_condition_gate_passes` — the
+/// authority is over WHICH conditions gate the effect, not over how a given
+/// caller evaluates them.
+///
+/// Two classes sit deliberately outside that claim.
+///
+/// Walkers that CLASSIFY a duration without evaluating it are not consumers:
+/// `analysis::resource` (two hand-destructuring sibling-mutability scans),
+/// plus the `ability_rw` / `ability_scan` / `coverage` walkers. They ask what a
+/// duration reads, never whether it holds, and they stay variant-safe through
+/// `ability_scan`'s exhaustive matches rather than through this authority.
+///
+/// Gate-blind consumers are a tracked pre-existing gap, not an exemption:
+/// `casting::apply_static_activated_ability_cost_reduction` and
+/// `effects::attach::protection_blocks_attachment` apply a transient effect
+/// without consulting either gate, so a lapsed condition still reduces a cost
+/// or blocks an attachment. Routing them through here changes behavior and
+/// needs its own CR analysis and tests, so it is out of scope here.
+///
+/// The grep that surfaces a new offender is `for tce in
+/// &state.transient_continuous_effects` — the iteration site, not
+/// `Duration::ForAsLongAs`. The latter only matches sites that already
+/// destructure the duration, so it cannot see the gate-blind pair above. A new
+/// iteration site that decides liveness by hand instead of calling this is the
+/// regression to look for.
+///
+/// One deliberate non-consumer inside this file: the lapsed-attachment sweep in
+/// [`evaluate_layers`] destructures the exact `ForAsLongAs {
+/// RecipientMatchesFilter { AttachedTo } }` shape (CR 301.5) to decide
+/// permanent EXPIRY, not liveness. It needs the structural match, not the
+/// condition list, so routing it through here would lose the thing it matches on.
+pub(crate) fn transient_gate_conditions(
+    tce: &TransientContinuousEffect,
+) -> impl Iterator<Item = &StaticCondition> {
+    transient_duration_condition(tce)
+        .into_iter()
+        .chain(tce.condition.as_ref())
+}
+
+fn transient_duration_holds(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    let Some(condition) = transient_duration_condition(tce) else {
         return true;
     };
 
@@ -20333,6 +21628,544 @@ mod tests {
         );
     }
 
+    /// CR 613.2a + CR 613.2c: an entry-incremental flush must ESCALATE while a
+    /// copy effect whose payload carries a continuous static is active.
+    ///
+    /// The incremental arm applies every active effect through
+    /// `apply_continuous_effect_to(state, effect, &recipient_ids, ..)`, which
+    /// NARROWS an ordinary board-wide `affected_filter` down to the entrants — so
+    /// a PRE-EXISTING copy effect reaches a fresh entrant by FILTER MATCH, never
+    /// having to name it with `TargetFilter::SpecificObject`. The entrant would
+    /// then hold a continuous static (here an anthem) that the incremental arm
+    /// can never fan out over the pre-existing board, because pre-existing
+    /// objects are not reset — the same state `entered_object_blocks_incremental`
+    /// already escalates for, reached one step later. Neither existing guard sees
+    /// it: the entrant's own BASE carries no static, and the copy's source is a
+    /// pre-existing permanent whose filter counts nothing.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): delete the `Layer::Copy` guard at the
+    /// end of `prepare_incremental_flush` ⇒ `layers_incremental == 1` and
+    /// `layers_full_eval == 0`, and this test fails on the branch assertions.
+    #[test]
+    fn entry_incremental_escalates_when_a_live_copy_payload_carries_a_static() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let template = make_creature(&mut state, "Template", 2, 2, player);
+        let mut copied_values = intrinsic_copiable_values(&state.objects[&template]);
+        Arc::make_mut(&mut copied_values.static_definitions).push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        // Board-wide `affected`, NOT `SpecificObject`: this is the shape that
+        // reaches an object which did not exist when the effect was registered.
+        let caster = make_creature(&mut state, "Caster", 1, 1, player);
+        state.add_transient_continuous_effect(
+            caster,
+            player,
+            Duration::Permanent,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copied_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+
+        let entrant = make_creature(&mut state, "Entrant", 1, 1, player);
+        // Reach-guard asked of the guard ITSELF, not of a neighbouring field: this
+        // is the exact predicate `prepare_incremental_flush` consults first, and it
+        // reads the LIVE `static_definitions`. If it answered true the escalation
+        // below would be its doing and this test would stop probing the copy guard.
+        assert!(
+            !entered_object_blocks_incremental(&state, &state.objects[&entrant]),
+            "the entrant must be an ordinary entry, or the existing \
+             `entered_object_blocks_incremental` guard would escalate instead"
+        );
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            counters.layers_full_eval, 1,
+            "a live copy effect whose payload grants a continuous static must force \
+             a full pass"
+        );
+        assert_eq!(
+            counters.layers_incremental, 0,
+            "the incremental arm must not run for this entry"
+        );
+        // POSITIVE reach-guard: the copy really did reach the entrant by filter
+        // match, so the escalation above is not vacuous.
+        assert!(
+            !state.objects[&entrant].static_definitions.is_empty(),
+            "the board-wide copy must have handed the entrant the payload's static"
+        );
+    }
+
+    /// The other side of that guard: a copy effect that provably names a
+    /// PRE-EXISTING permanent must NOT escalate. This is the ordinary resolved
+    /// clone — every Clone / Vizier copy on a board carries a `SpecificObject`
+    /// (or `SelfRef`) filter naming one permanent — so escalating on the mere
+    /// PRESENCE of a copy would drop every board that has ever resolved one back
+    /// onto the O(|battlefield|) full pass this module exists to avoid.
+    ///
+    /// It is sound because the incremental arm applies copies through
+    /// `apply_continuous_effect_to(state, effect, &recipient_ids, ..)`: a filter
+    /// naming a non-recipient intersects `recipient_ids` to the empty set, so it
+    /// can hand the entrant nothing, and the clone's own copy-granted static —
+    /// already live on it from the earlier full pass, never reset here — is picked
+    /// up by the top-of-pass `StaticSourceIndex` rebuild like any other generator.
+    /// The differential assertion below is what pins that: the entrant must come
+    /// out of the incremental flush wearing the CLONE's anthem.
+    ///
+    /// REVERT-PROBE (discriminating, RUN): drop
+    /// `effect_can_reach_incremental_recipients` from the guard ⇒
+    /// `layers_full_eval == 1` / `layers_incremental == 0` and the two branch
+    /// assertions fail.
+    #[test]
+    fn entry_incremental_stays_incremental_for_a_copy_naming_a_pre_existing_object() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let template = make_creature(&mut state, "Template", 2, 2, player);
+        let mut copied_values = intrinsic_copiable_values(&state.objects[&template]);
+        Arc::make_mut(&mut copied_values.static_definitions).push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        // The clone exists BEFORE the flush under test, and the copy effect names
+        // it — the shape a resolved clone actually has on a live board.
+        let clone = make_creature(&mut state, "Clone", 1, 1, player);
+        let caster = make_creature(&mut state, "Caster", 1, 1, player);
+        state.add_transient_continuous_effect(
+            caster,
+            player,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: clone },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copied_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        evaluate_layers(&mut state);
+
+        // POSITIVE reach-guards, both on the live fields the guard consults: the
+        // copy really did land, so `copy_grants_continuous_static` answers TRUE for
+        // this effect and the only thing keeping the flush incremental is the reach
+        // test. Without this the assertions below would pass for the wrong reason.
+        assert!(
+            !state.objects[&clone].static_definitions.is_empty(),
+            "the clone must be carrying the payload's continuous static, or the \
+             guard's copy branch is never exercised"
+        );
+
+        let entrant = make_creature(&mut state, "Entrant", 1, 1, player);
+        // Same reach-guard as the escalating sibling, asked of the predicate itself
+        // (it reads the LIVE `static_definitions`, not the base).
+        assert!(
+            !entered_object_blocks_incremental(&state, &state.objects[&entrant]),
+            "the entrant must be an ordinary entry, or the incremental arm would be \
+             refused for a reason unrelated to the copy guard"
+        );
+
+        crate::game::perf_counters::reset();
+        state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
+        flush_layers(&mut state);
+        let counters = crate::game::perf_counters::snapshot();
+
+        assert_eq!(
+            counters.layers_incremental, 1,
+            "a copy confined to a pre-existing permanent cannot reach the entrant, \
+             so the flush must stay incremental"
+        );
+        assert_eq!(
+            counters.layers_full_eval, 0,
+            "no full pass may be forced by a copy the entrant is out of reach of"
+        );
+        // CR 613.2c: after layer 1 the clone's copied static is part of the board,
+        // so its anthem must reach the entrant on THIS path — 1/1 printed, +1/+0
+        // from the clone.
+        assert_eq!(
+            (
+                state.objects[&entrant].power,
+                state.objects[&entrant].toughness
+            ),
+            (Some(2), Some(1)),
+            "the entrant must still receive the clone's copy-granted anthem"
+        );
+    }
+
+    /// CR 613.2a: `copy_grants_continuous_static` answers over the COMPLETE
+    /// `Layer::Copy` modification set, and its `_ => false` arm is exact rather
+    /// than a fallback guess. Every variant here is also asserted to report
+    /// `Layer::Copy` (and the layers-2-7 sample NOT to), which pins the claim the
+    /// catch-all rests on. `layer()` itself is deliberately not consulted by the
+    /// function under test: six of its arms are `unreachable!()` panics, so the
+    /// `debug_assert_eq!(other.layer(), Layer::Copy)` guard this replaced could
+    /// abort inside itself — `AddCounterOnEnter` below is one such variant and is
+    /// answered without ever asking for its layer.
+    #[test]
+    fn copy_grants_continuous_static_covers_every_copy_layer_variant() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let donor = make_creature(&mut state, "Donor", 2, 2, player);
+        let plain_values = intrinsic_copiable_values(&state.objects[&donor]);
+        assert!(
+            plain_values.static_definitions.is_empty(),
+            "the vanilla donor must carry no static, or the negative case below \
+             would not be a negative case"
+        );
+        let mut anthem_values = plain_values.clone();
+        Arc::make_mut(&mut anthem_values.static_definitions).push(
+            StaticDefinition::continuous()
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+        // Same shape, but the payload's static is a LAYER-1 one — the only thing
+        // that can extend sublayer 1a's discovery chain.
+        let mut copy_static_values = plain_values.clone();
+        Arc::make_mut(&mut copy_static_values.static_definitions).push(
+            StaticDefinition::continuous().modifications(vec![ContinuousModification::SetName {
+                name: "Renamed".into(),
+            }]),
+        );
+        let copy_of = |values: CopiableValues| ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        };
+
+        // The whole `Layer::Copy` set: (modification, adds ANY generator, adds a
+        // COPY-LAYER generator). The two columns are the two different questions
+        // layer 1 asks, and the anthem row is where they must disagree.
+        let copy_layer_cases = [
+            // Payload-exact: the copiable static set travels inside the
+            // modification, so no live-source read and no battlefield rescan.
+            // An anthem makes its recipient a generator for layers 2-7 but can
+            // never appear in a `Layer::Copy` gather, so it must NOT buy a
+            // discovery generation.
+            (copy_of(anthem_values), true, false),
+            (copy_of(copy_static_values), true, true),
+            (copy_of(plain_values), false, false),
+            // CR 707.9a: merges the source's whole printed set, INCLUDING its
+            // `base_static_definitions`, onto the recipient (see the apply arm).
+            // The live source is not in the payload, so both answers are
+            // conservative.
+            (
+                ContinuousModification::RetainAllOtherAbilitiesFromSource,
+                true,
+                true,
+            ),
+            // CR 707.9a: pushes ONE `AbilityDefinition` onto `obj.abilities`;
+            // `static_definitions` is structurally out of reach.
+            (
+                ContinuousModification::RetainPrintedAbilityFromSource {
+                    source_ability_index: 0,
+                },
+                false,
+                false,
+            ),
+            // CR 707.9a: pushes one trigger; likewise never a static.
+            (
+                ContinuousModification::RetainPrintedTriggerFromSource {
+                    source_trigger_index: 0,
+                },
+                false,
+                false,
+            ),
+            // CR 707.9b: name-only override.
+            (
+                ContinuousModification::SetName {
+                    name: "Renamed".into(),
+                },
+                false,
+                false,
+            ),
+            // CR 707.2c: parse-time marker whose apply arm is an explicit no-op.
+            (ContinuousModification::CopyChosen, false, false),
+        ];
+        for (modification, expected_any, expected_copy_layer) in &copy_layer_cases {
+            assert_eq!(
+                modification.layer(),
+                Layer::Copy,
+                "{modification:?} must be a layer-1 modification for this table to be \
+                 the complete `Layer::Copy` set"
+            );
+            // Pins the panic-free companion to `layer()` over the same set — the
+            // invariant `is_copy_layer`'s doc claims.
+            assert!(
+                modification.is_copy_layer(),
+                "{modification:?} is in the `Layer::Copy` set, so `is_copy_layer` \
+                 must agree with `layer()`"
+            );
+            assert_eq!(
+                copy_grants_continuous_static(modification),
+                *expected_any,
+                "wrong generator answer for {modification:?}"
+            );
+            assert_eq!(
+                copy_grants_copy_layer_static(modification),
+                *expected_copy_layer,
+                "wrong copy-layer generator answer for {modification:?}"
+            );
+        }
+
+        // Layers 2-7 fall to the catch-all. `AddCounterOnEnter` is one of the six
+        // variants whose `layer()` is `unreachable!()`, so it is exactly the input
+        // that made the replaced `debug_assert_eq!(other.layer(), ..)` unsafe —
+        // and exactly why `is_copy_layer` exists to be asked instead.
+        for modification in [
+            ContinuousModification::AddCounterOnEnter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                if_type: None,
+            },
+            ContinuousModification::AddPower { value: 1 },
+        ] {
+            assert!(
+                !modification.is_copy_layer(),
+                "{modification:?} is not a layer-1 modification"
+            );
+            assert!(
+                !copy_grants_continuous_static(&modification),
+                "{modification:?} is not a layer-1 modification and must not claim to \
+                 add a generator"
+            );
+            assert!(
+                !copy_grants_copy_layer_static(&modification),
+                "{modification:?} is not a layer-1 modification and must not buy a \
+                 discovery generation"
+            );
+        }
+    }
+
+    /// CR 707.2c + CR 613.2c: sublayer 1a runs to a FIXED POINT on the exact
+    /// construction the deleted `MAX_COPY_SUBLAYER_GENERATIONS = 8` named — "two
+    /// permanents that rewrite each other's static sets". Reaching the assertions
+    /// at all IS the termination evidence; the assertions are the CR-correctness
+    /// evidence.
+    ///
+    /// Each half of the pair is copied from a donor whose copiable values carry a
+    /// copy-LAYER static (CR 707.2), so BOTH second-generation effects exist only
+    /// because the first generation applied, in both directions at once. The board
+    /// is synthetic in the sense that no printed pair does exactly this, but every
+    /// piece is a real mechanism: a latched `CopyValues` TCE (the only way a copy
+    /// effect can originate — `apply_continuous_effect` requires `transient_id` for
+    /// it) whose payload carries a `SetName` copy exception.
+    ///
+    /// The two copy-granted renames land on neutral watchers rather than on the
+    /// pair itself, ON PURPOSE. Two permanents copying each other is a CR 613.8b
+    /// dependency LOOP, so the engine correctly discards the dependency edges and
+    /// falls back to timestamp order, under which each half's older static applies
+    /// before the newer `CopyValues` overwrites its name. That is a separate rule
+    /// from the one under test, and asserting on the pair's own names would pin
+    /// 613.8b's tie-break instead of 1a's fixed point.
+    ///
+    /// REVERT-PROBE (discriminating, run): make the loop return after its first
+    /// generation ⇒ both watchers keep their printed names and both rename
+    /// assertions fail, while the copy assertions stay green.
+    #[test]
+    fn mutually_copying_permanents_reach_a_layer_one_fixed_point() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let left = make_creature(&mut state, "Left", 1, 1, player);
+        let right = make_creature(&mut state, "Right", 1, 1, player);
+        let watcher_l = make_creature(&mut state, "Watcher L", 1, 1, player);
+        let watcher_r = make_creature(&mut state, "Watcher R", 1, 1, player);
+        let donor_p = make_creature(&mut state, "Donor P", 4, 4, player);
+        let donor_q = make_creature(&mut state, "Donor Q", 5, 5, player);
+
+        // Donor payloads: each carries a copy-layer static that renames a watcher.
+        let renames = |state: &GameState, donor: ObjectId, target: ObjectId, name: &str| {
+            let mut values = intrinsic_copiable_values(&state.objects[&donor]);
+            Arc::make_mut(&mut values.static_definitions).push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target })
+                    .modifications(vec![ContinuousModification::SetName {
+                        name: name.to_string(),
+                    }]),
+            );
+            values
+        };
+        let p_values = renames(&state, donor_p, watcher_l, "Marked by right");
+        let q_values = renames(&state, donor_q, watcher_r, "Marked by left");
+
+        let mut copy_onto = |source: ObjectId, target: ObjectId, values: CopiableValues| {
+            state.add_transient_continuous_effect(
+                source,
+                player,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: target },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                }],
+                None,
+            );
+        };
+        // `left` copies donor P onto `right`; `right` copies donor Q onto `left`.
+        copy_onto(left, right, p_values);
+        copy_onto(right, left, q_values);
+
+        // POSITIVE reach-guards, on the live field the top-of-pass reset writes and
+        // `for_each_static_effect_source` gathers: neither permanent carries a
+        // PRINTED static, so every second-generation effect below can only exist
+        // because generation 1's copy put it there.
+        assert!(
+            state.objects[&left].base_static_definitions.is_empty()
+                && state.objects[&right].base_static_definitions.is_empty(),
+            "neither half of the pair may carry a printed static, or the renames \
+             would not depend on the copies at all"
+        );
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            !state.objects[&left].static_definitions.is_empty()
+                && !state.objects[&right].static_definitions.is_empty(),
+            "each copy must have handed its recipient the donor's copy-layer static, \
+             or there is no second generation to reach a fixed point over"
+        );
+        // CR 707.2: each half took its donor's copiable P/T.
+        assert_eq!(
+            (state.objects[&right].power, state.objects[&right].toughness),
+            (Some(4), Some(4)),
+            "the right half must be a copy of donor P"
+        );
+        assert_eq!(
+            (state.objects[&left].power, state.objects[&left].toughness),
+            (Some(5), Some(5)),
+            "the left half must be a copy of donor Q"
+        );
+        // Generation 2, both directions at once: each half's copy-granted static
+        // reached its watcher inside this same layer-1 pass.
+        assert_eq!(
+            state.objects[&watcher_l].name, "Marked by right",
+            "the copy-granted static on the RIGHT half must apply inside the same \
+             layer-1 pass that applied the copy"
+        );
+        assert_eq!(
+            state.objects[&watcher_r].name, "Marked by left",
+            "the copy-granted static on the LEFT half must apply inside the same \
+             layer-1 pass that applied the copy"
+        );
+    }
+
+    /// CR 613.2a: `copy_grants_continuous_static` is the WRONG question for
+    /// CONTINUING sublayer 1a's discovery loop. An anthem makes its recipient a
+    /// `StaticSourceIndex` generator, which layers 2-7 must see, but it can never
+    /// appear in a `Layer::Copy` gather — so answering the broad question at the
+    /// continuation site charged every board holding a cloned lord for an extra
+    /// index rebuild plus an extra board-wide
+    /// `collect_shared_active_continuous_effects`, inside the module whose stated
+    /// job is keeping per-flush work off `|battlefield|`.
+    ///
+    /// Three boards differing ONLY in the copy payload's static set, measured in
+    /// board-wide gathers.
+    ///
+    /// REVERT-PROBE (discriminating, run): put `copy_grants_continuous_static`
+    /// back at the loop-continuation site ⇒ the anthem board costs one gather more
+    /// than the vanilla board and the first assertion fails.
+    #[test]
+    fn only_a_copy_layer_payload_buys_a_layer_one_discovery_generation() {
+        /// Returns (board-wide gathers during the pass, statics landed on the
+        /// recipient).
+        fn probe(payload_static: Option<StaticDefinition>) -> (usize, usize) {
+            let mut state = setup();
+            let player = PlayerId(0);
+            let template = make_creature(&mut state, "Template", 2, 2, player);
+            let recipient = make_creature(&mut state, "Recipient", 1, 1, player);
+            let caster = make_creature(&mut state, "Caster", 1, 1, player);
+            let mut values = intrinsic_copiable_values(&state.objects[&template]);
+            assert!(
+                values.static_definitions.is_empty(),
+                "the template must be vanilla so the payload static is the only variable"
+            );
+            if let Some(def) = payload_static {
+                Arc::make_mut(&mut values.static_definitions).push(def);
+            }
+            state.add_transient_continuous_effect(
+                caster,
+                player,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: recipient },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                }],
+                None,
+            );
+            reset_active_effect_collection_count();
+            evaluate_layers(&mut state);
+            (
+                active_effect_collection_count(),
+                state.objects[&recipient].static_definitions.len(),
+            )
+        }
+
+        let board_wide =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let (vanilla_gathers, vanilla_statics) = probe(None);
+        let (anthem_gathers, anthem_statics) = probe(Some(
+            StaticDefinition::continuous()
+                .affected(board_wide())
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        ));
+        // Same shape, but a `Layer::Copy` modification — the only kind that can
+        // show up in the next gather.
+        let (copy_layer_gathers, copy_layer_statics) = probe(Some(
+            StaticDefinition::continuous()
+                .affected(board_wide())
+                .modifications(vec![ContinuousModification::SetName {
+                    name: "Renamed".into(),
+                }]),
+        ));
+
+        // POSITIVE reach-guards: the payload static really landed on the recipient
+        // in both static cases, so the gather counts below are not comparing two
+        // boards where the copy did nothing.
+        assert_eq!(
+            vanilla_statics, 0,
+            "the vanilla control must land no static"
+        );
+        assert_eq!(
+            anthem_statics, 1,
+            "the anthem payload must reach the recipient"
+        );
+        assert_eq!(
+            copy_layer_statics, 1,
+            "the copy-layer payload must reach the recipient"
+        );
+
+        assert_eq!(
+            anthem_gathers, vanilla_gathers,
+            "cloning an ordinary lord must buy no layer-1 discovery generation: an \
+             anthem is a layer-7c effect and cannot appear in a `Layer::Copy` gather"
+        );
+        assert_eq!(
+            copy_layer_gathers,
+            vanilla_gathers + 1,
+            "a copy-LAYER payload static must buy exactly one discovery generation"
+        );
+    }
+
     /// Shared reach-guard: run ONLY the guard from a Clean baseline and assert it
     /// forces a full escalation (the `mark_layers_full` the guarded site would
     /// otherwise call unconditionally).
@@ -20344,5 +22177,239 @@ mod tests {
             matches!(state.layers_dirty, LayersDirty::Full),
             "a live life-reading continuous static must force full escalation"
         );
+    }
+
+    /// CR 613.1: the characteristic a layer exists to rewrite, or `None` for
+    /// layer 1 (CR 613.1a — copy effects rewrite the whole copiable-value set,
+    /// so no single kind is implied) and for the counter sublayer (CR 613.4c —
+    /// counters are not continuous modifications).
+    fn layer_implied_kind(layer: Layer) -> Option<CharacteristicKinds> {
+        match layer {
+            // CR 613.1a: copy effects rewrite every copiable value at once.
+            Layer::Copy => None,
+            // CR 613.1b.
+            Layer::Control => Some(CharacteristicKinds::CONTROLLER),
+            // CR 613.1c.
+            Layer::Text => Some(CharacteristicKinds::NAME_TEXT),
+            // CR 613.1d.
+            Layer::Type => Some(CharacteristicKinds::CARD_TYPES),
+            // CR 613.1e.
+            Layer::Color => Some(CharacteristicKinds::COLOR),
+            // CR 613.1f.
+            Layer::Ability => Some(CharacteristicKinds::ABILITIES),
+            // CR 613.4a-d.
+            Layer::CharDef | Layer::SetPT | Layer::ModifyPT | Layer::SwitchPT => {
+                Some(CharacteristicKinds::POWER_TOUGHNESS)
+            }
+            // CR 613.4c: no `ContinuousModification` maps here.
+            Layer::CounterPT => None,
+        }
+    }
+
+    /// Every `ContinuousModification` variant that reaches the layer pipeline.
+    ///
+    /// The six omitted variants are exactly the ones whose `layer()` arm is
+    /// `unreachable!()` — `RemoveManaCost`, `AddCounterOnEnter`,
+    /// `SetStartingLoyalty` (all consumed at copy resolution) and the three
+    /// combat-damage assignment rules (applied after layer evaluation). They
+    /// have no layer to be consistent with, so the check below cannot include
+    /// them; their kinds are still pinned by the exhaustive `match` in
+    /// `modification_characteristic_writes_at`.
+    fn every_layered_modification() -> Vec<ContinuousModification> {
+        use crate::types::ability::{
+            ColorChangeMode, CopiableValues, CostDerivation, ReplacementDefinition,
+        };
+        use crate::types::card_type::{CardType, SubtypeSet};
+        use crate::types::keywords::{CostBearingKeywordKind, DynamicKeywordKind};
+        let dynamic = QuantityExpr::Fixed { value: 1 };
+        vec![
+            // ---- Layer 1 (CR 613.1a). ----
+            ContinuousModification::CopyValues {
+                values: Box::new(CopiableValues {
+                    name: "Copy".to_string(),
+                    mana_cost: ManaCost::default(),
+                    color: Vec::new(),
+                    card_types: CardType::default(),
+                    power: None,
+                    toughness: None,
+                    loyalty: None,
+                    printed_loyalty: None,
+                    keywords: Vec::new(),
+                    abilities: Arc::new(Vec::new()),
+                    trigger_definitions: Arc::new(Vec::new()),
+                    replacement_definitions: Arc::new(Vec::new()),
+                    static_definitions: Arc::new(Vec::new()),
+                }),
+                display_source: Default::default(),
+                printed_ref: None,
+                token_image_ref: None,
+            },
+            ContinuousModification::CopyChosen,
+            ContinuousModification::SetName {
+                name: "N".to_string(),
+            },
+            ContinuousModification::RetainPrintedTriggerFromSource {
+                source_trigger_index: 0,
+            },
+            ContinuousModification::RetainPrintedAbilityFromSource {
+                source_ability_index: 0,
+            },
+            ContinuousModification::RetainAllOtherAbilitiesFromSource,
+            // ---- Layer 2 (CR 613.1b). ----
+            ContinuousModification::ChangeController,
+            // ---- Layer 3 (CR 613.1c). ----
+            ContinuousModification::SetTextName {
+                name: "N".to_string(),
+            },
+            ContinuousModification::SetChosenName,
+            // ---- Layer 4 (CR 613.1d). ----
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+            ContinuousModification::RemoveType {
+                core_type: CoreType::Creature,
+            },
+            ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Creature],
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Bear".to_string(),
+            },
+            ContinuousModification::RemoveSubtype {
+                subtype: "Bear".to_string(),
+            },
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature,
+            },
+            ContinuousModification::AddAllCreatureTypes,
+            ContinuousModification::AddAllBasicLandTypes,
+            ContinuousModification::AddAllLandTypes,
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+            ContinuousModification::AddSupertype {
+                supertype: Supertype::Legendary,
+            },
+            ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            },
+            ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Forest,
+            },
+            ContinuousModification::SetChosenBasicLandType,
+            // ---- Layer 5 (CR 613.1e). ----
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Green],
+            },
+            ContinuousModification::AddColor {
+                color: ManaColor::Green,
+            },
+            ContinuousModification::AddChosenColor {
+                mode: ColorChangeMode::default(),
+            },
+            // ---- Layer 6 (CR 613.1f). ----
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Flying,
+            },
+            ContinuousModification::AddChosenKeyword,
+            ContinuousModification::RemoveChosenKeyword,
+            ContinuousModification::AddDynamicKeyword {
+                kind: DynamicKeywordKind::Annihilator,
+                value: dynamic.clone(),
+            },
+            ContinuousModification::AddKeywordWithDerivedCost {
+                kind: CostBearingKeywordKind::Foretell,
+                derivation: CostDerivation::ManaCostReducedBy(ManaCost::default()),
+            },
+            ContinuousModification::GrantAbility {
+                definition: Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            },
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::SelfRef,
+                cap: None,
+            },
+            ContinuousModification::GrantAllTriggeredAbilitiesOf {
+                source: TargetFilter::SelfRef,
+            },
+            ContinuousModification::GrantTrigger {
+                trigger: Box::new(TriggerDefinition::new(TriggerMode::ChangesZone)),
+            },
+            ContinuousModification::GrantReplacement {
+                replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::DamageDone)),
+            },
+            ContinuousModification::RemoveAllAbilities,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::Continuous,
+            },
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::Continuous)),
+            },
+            // ---- Layer 7 (CR 613.4a-d). ----
+            ContinuousModification::SetDynamicPower {
+                value: dynamic.clone(),
+            },
+            ContinuousModification::SetDynamicToughness {
+                value: dynamic.clone(),
+            },
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::SetPowerDynamic {
+                value: dynamic.clone(),
+            },
+            ContinuousModification::SetToughnessDynamic {
+                value: dynamic.clone(),
+            },
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddDynamicPower {
+                value: dynamic.clone(),
+            },
+            ContinuousModification::AddDynamicToughness { value: dynamic },
+            ContinuousModification::SwitchPowerToughness,
+        ]
+    }
+
+    /// CR 613.1: a modification's declared LAYER and its declared WRITE KIND
+    /// are two views of the same fact, so they must agree — an effect applied
+    /// in the type-changing layer must report that it writes card types, and so
+    /// on. This is the second tripwire on `modification_characteristic_writes`:
+    /// the exhaustive wildcard-free `match` catches a variant that was never
+    /// classified, and this catches one that was classified into the WRONG
+    /// kind (which the gate would silently under-escalate on).
+    ///
+    /// Both directions are only a containment, not an equality: a modification
+    /// may write MORE than its layer implies. CR 305.7's `SetBasicLandType`
+    /// sits in layer 4 but also strips abilities, and CR 613.1f's
+    /// `RemoveAllAbilities` sits in layer 6 but is classified `ALL` because it
+    /// turns off characteristic-defining abilities (CR 604.3).
+    #[test]
+    fn modification_write_kinds_agree_with_their_layer() {
+        for m in every_layered_modification() {
+            let writes = modification_characteristic_writes(&m);
+            let layer = m.layer();
+            let Some(implied) = layer_implied_kind(layer) else {
+                // Layer 1: no single implied kind, but a copy effect always
+                // rewrites SOMETHING.
+                assert!(
+                    !writes.is_empty(),
+                    "{m:?} is a layer-1 copy effect but was classified as writing nothing"
+                );
+                continue;
+            };
+            assert!(
+                writes.contains(implied),
+                "{m:?} is applied in {layer:?} but its write kinds {writes:?} do not \
+                 include the characteristic that layer exists to rewrite ({implied:?})"
+            );
+        }
     }
 }

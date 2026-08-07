@@ -1,8 +1,11 @@
+use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::player::PlayerId;
 
 use super::players;
+use super::precast_copy_shortcut;
+use super::turn_control;
 use super::turns;
 
 /// Handle a priority pass from the current priority player (CR 117.4).
@@ -87,7 +90,7 @@ pub fn handle_priority_pass_with_limit(
                 turns::auto_advance(state, events)
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
-                turns::advance_phase(state, events);
+                let _ = turns::advance_phase_once(state, events);
                 turns::auto_advance(state, events)
             }
         } else {
@@ -133,6 +136,90 @@ pub fn handle_priority_pass_with_limit(
 
         WaitingFor::Priority { player: next }
     }
+}
+
+/// CR 117.3d: "If a player has priority and chooses not to take any actions,
+/// that player passes." Passing is available to the holder of any live priority
+/// window; this is the single authority for the two conditions under which the
+/// engine nevertheless refuses one.
+///
+/// CR 723.5: under a turn-control effect the authorized submitter for the
+/// holder's seat is the controller, so the live `priority_player` must be
+/// compared against that mapped submitter, never against the seat itself.
+///
+/// CR 732.2a-c: a shortened pre-cast shortcut proposal (CR 732.2a-b) obliges the
+/// player who now has priority to "make a different game choice than what was
+/// originally proposed" (CR 732.2c). The runtime models that obligation as a
+/// divergence latch, and a bare pass can never discharge it.
+///
+/// Both the `(Priority, PassPriority)` reducer arm and
+/// `pass_priority_structurally_legal` below call this, so no fast path can drift
+/// from the reducer.
+pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(), EngineError> {
+    if state.priority_player != turn_control::authorized_submitter_for_player(state, player) {
+        return Err(EngineError::NotYourPriority);
+    }
+    if precast_copy_shortcut::blocks_pass(state, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `true` iff a bare `PassPriority` by `player` is legal **and** the pass
+/// boundary is decidable without simulating it.
+///
+/// This is the single predicate shared by every structural fast path for a pass
+/// — the AI legality hatch (`ai_support::filter`) and the `phase-ai` forward
+/// projection. Both must ask exactly this question; a caller that re-derives a
+/// weaker approximation reintroduces the drift `pass_priority_legality` exists to
+/// prevent.
+///
+/// CR 118.3b + CR 119.4 + CR 616.1: a parked deferred-life or cost-move payment
+/// root makes the pass boundary drain a continuation
+/// (`engine::resume_pending_continuation_if_priority`, whose own annotation on
+/// that seam cites these same three rules), and that drain's failure modes are
+/// not modelled here. Both fallible `?` sites in the drain are gated on exactly
+/// these two fields being `Some`, so refusing on either is a sound, O(1)
+/// over-approximation for roots that are already parked when this runs.
+///
+/// **Scope limit — read before "simplifying" this.** This test is evaluated
+/// BEFORE the pass boundary. The drain reads these fields AFTER
+/// `handle_priority_pass_with_limit` has resolved the top of the stack (CR
+/// 117.4), so a root parked BY that resolution is not visible here. The
+/// mitigating argument is that parking such a root coincides with installing a
+/// live non-`Priority` prompt, and each fallible drain site re-tests
+/// `WaitingFor::Priority` immediately before firing, so it is skipped at that
+/// boundary and caught here at the next window. The local half of that argument
+/// is visible in `handle_priority_pass_with_limit` above: after a CR 117.4
+/// resolution it returns `state.waiting_for.clone()` untouched and only resets
+/// to `Priority` when the resolved effect requested no interaction. Two links
+/// are read rather than proved, though — the `PaidWithDeferredSubstitution`
+/// variant's doc contract in `game::life_costs`, and that the installed prompt
+/// still stands at the drain instant (the drains are not the first thing after
+/// the resolution: `engine::sync_waiting_for` and the Priority-gated infallible
+/// `effects::drain_pending_continuation` / `effects::resume_resolution_frames`
+/// run before them). So the remainder is a known, booked residual rather than a
+/// closed window.
+///
+/// **Note the direction**: this is a test on the *fields*, not on
+/// `ai_support::classify_payment_continuation`'s verdict — that verdict can be
+/// `NotAffiliated` while a field is still `Some` (see
+/// `ai_support::payment_continuation::classify_parked_cost_move_root` and
+/// `classify_deferred_life_root`), so a verdict test would be strictly weaker
+/// and would let a fallible drain through.
+///
+/// Conservative by design, mirroring `ai_support::structurally_valid_search_selection`:
+/// `false` only costs a simulation, so any shape this does not fully model returns
+/// `false` rather than guessing.
+pub fn pass_priority_structurally_legal(state: &GameState, player: PlayerId) -> bool {
+    if state.pending_deferred_life_cost_resume.is_some() || state.pending_cost_move_resume.is_some()
+    {
+        return false;
+    }
+    pass_priority_legality(state, player).is_ok()
 }
 
 /// Determine the next player to receive priority, using APNAP order (CR 101.4).
@@ -495,6 +582,99 @@ mod tests {
         assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
+    // --- pass legality authority (CR 117.3d / CR 723.5 / CR 732.2c) ---
+
+    /// T1. `pass_priority_legality` is the single expression of the reducer's two
+    /// pass guards. Each arm is asserted separately so a delegation that drops
+    /// one of them cannot pass on the strength of the other.
+    #[test]
+    fn pass_priority_legality_expresses_both_reducer_guards() {
+        // (a) A fresh two-player state: P0 holds priority and is its own
+        // authorized submitter, no divergence latch — the pass is legal.
+        let state = setup();
+        assert!(pass_priority_legality(&state, PlayerId(0)).is_ok());
+
+        // (b) CR 723.5: `priority_player` no longer maps to the seat's
+        // authorized submitter.
+        let mut desynced = setup();
+        desynced.priority_player = PlayerId(1);
+        assert!(matches!(
+            pass_priority_legality(&desynced, PlayerId(0)),
+            Err(EngineError::NotYourPriority)
+        ));
+
+        // (c) CR 732.2c: a shortened pre-cast shortcut obliges its owner to make
+        // a different game choice; a bare pass can never discharge it.
+        let mut latched = setup();
+        latched.precast_shortcut_runtime.must_diverge = Some(PlayerId(0));
+        let Err(EngineError::ActionNotAllowed(message)) =
+            pass_priority_legality(&latched, PlayerId(0))
+        else {
+            panic!("a latched divergence obligation must reject a bare pass");
+        };
+        assert!(
+            message.contains("shortened pre-cast shortcut"),
+            "the reducer's exact message must be preserved by the extraction, got {message:?}"
+        );
+    }
+
+    /// T1b. `pass_priority_structurally_legal` is the authority PLUS the
+    /// parked-continuation field gate — not an alias for
+    /// `pass_priority_legality(..).is_ok()`.
+    ///
+    /// Each `false` case re-asserts that `pass_priority_legality` is still `Ok`
+    /// in the same state. That paired positive is the non-vacuity partner: it
+    /// proves the refusal came from the field gate and not from the authority,
+    /// so collapsing the two functions into one goes red here.
+    ///
+    /// The gate is `Option::is_some` on the two fields, so it is deliberately
+    /// variant-agnostic; the variants below are the cheapest constructible
+    /// representatives. `DeferredLifeCostResume::ManaRoot` is one of the two
+    /// fallible deferred-life roots that motivate the gate.
+    #[test]
+    fn pass_priority_structurally_legal_adds_the_parked_continuation_gate() {
+        use crate::types::game_state::{
+            DeferredLifeCostResume, ManaAbilityResume, PendingCostMoveResume,
+        };
+
+        let clean = setup();
+        assert!(pass_priority_structurally_legal(&clean, PlayerId(0)));
+
+        let mut deferred_life = setup();
+        deferred_life.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::ManaRoot {
+            player: PlayerId(0),
+            resume: Box::new(ManaAbilityResume::Priority),
+            remaining_life_payments: vec![],
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!pass_priority_structurally_legal(
+            &deferred_life,
+            PlayerId(0)
+        ));
+        assert!(
+            pass_priority_legality(&deferred_life, PlayerId(0)).is_ok(),
+            "the refusal must come from the field gate, not from the authority"
+        );
+
+        let mut cost_move = setup();
+        cost_move.pending_cost_move_resume = Some(PendingCostMoveResume::LoyaltyActivation {
+            player: PlayerId(0),
+            pw_id: crate::types::identifiers::ObjectId(1),
+            resolved: Box::new(ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                crate::types::identifiers::ObjectId(1),
+                PlayerId(0),
+            )),
+            ability_index: 0,
+        });
+        assert!(!pass_priority_structurally_legal(&cost_move, PlayerId(0)));
+        assert!(
+            pass_priority_legality(&cost_move, PlayerId(0)).is_ok(),
+            "the refusal must come from the field gate, not from the authority"
+        );
+    }
+
     #[test]
     fn resolve_preserves_interactive_waiting_for() {
         use crate::game::zones::create_object;
@@ -552,6 +732,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

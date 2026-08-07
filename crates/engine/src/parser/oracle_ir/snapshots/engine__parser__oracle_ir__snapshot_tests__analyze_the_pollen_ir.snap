@@ -79,7 +79,7 @@ expression: "&ir"
                       "SearchDestination": {
                         "destination": "Hand",
                         "enter_tapped": false,
-                        "enters_under": null,
+                        "enters_under": "Default",
                         "reveal": true,
                         "attach_host": null
                       }
@@ -152,7 +152,7 @@ expression: "&ir"
                       "SearchDestination": {
                         "destination": "Hand",
                         "enter_tapped": false,
-                        "enters_under": null,
+                        "enters_under": "Default",
                         "reveal": true,
                         "attach_host": null
                       }

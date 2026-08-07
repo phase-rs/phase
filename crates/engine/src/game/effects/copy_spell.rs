@@ -158,7 +158,8 @@ pub fn resolve(
 
     // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
     // copy-creation generation and emits `StackPushed`.
-    crate::game::stack::push_copy_to_stack(state, copy_entry, events);
+    let copied_trigger_firing = state.stack_trigger_firings.get(&top_entry.id).copied();
+    crate::game::stack::push_copy_to_stack(state, copy_entry, copied_trigger_firing, events);
 
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.
@@ -1813,6 +1814,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
     }
@@ -2814,6 +2816,7 @@ mod tests {
                 source_name: "Hope Estheim".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -2837,6 +2840,7 @@ mod tests {
                 source_name: "Opponent Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

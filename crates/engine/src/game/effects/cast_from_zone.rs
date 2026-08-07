@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::statics::CastFrequency;
 use crate::types::zones::{EtbTapState, Zone};
+use std::collections::HashSet;
 
 /// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
 /// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
@@ -45,6 +46,74 @@ pub(crate) fn looked_at_controller_library_cards(
                 .get(id)
                 .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
         })
+        .collect()
+}
+
+/// CR 608.2c + CR 115.1: Bind a tracked-set cast anaphor ("you may cast the
+/// exiled cards this turn") from the published set ITSELF, not from
+/// `ability.targets`.
+///
+/// A tracked-set filter is a LINKED reference, never a target (CR 115.1): its
+/// members were established by an earlier instruction in the same resolution,
+/// so nothing was declared on announcement. `ability.targets`, by contrast, can
+/// carry whatever the chain seam injected upstream (for Sanar, the whole
+/// reveal window), which is how "exile two of the revealed cards" turned into
+/// "exile and grant a cast permission to all 76 revealed cards".
+///
+/// The authority for turning the parser's `TrackedSetId(0)` sentinel into a
+/// concrete set is `targeting::resolve_tracked_set_sentinel` — the same call
+/// `change_zone::resolve` makes for the identical filter shape. Its ladder has
+/// four rungs, and all four are safe here:
+///   1. the active chain set (`chain_tracked_set_id`) — a tracked-set shape;
+///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
+///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
+///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
+///      The `let … else` below rejects every one of those, so a combat-damage
+///      anaphor casts nothing rather than something arbitrary;
+///   3. the latest non-empty published set — a tracked-set shape;
+///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
+///      passes the shape check but indexes a key that can never exist, because
+///      `GameState::next_tracked_set_id` initialises to `1`. Fail-closed.
+///
+/// Deduplication is required, not cosmetic: `publish_tracked_set` EXTENDS the
+/// set, so a chain that publishes the same object twice stores it twice (12
+/// entries observed for 6 objects). Granting the same card two permissions and
+/// queueing two zone moves for it is a real defect, so members are deduplicated
+/// on first appearance, preserving publication order.
+fn tracked_set_cast_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+    let (TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }) = bound
+    else {
+        return Vec::new();
+    };
+    let Some(members) = state.tracked_object_sets.get(&id) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let deduped: Vec<ObjectId> = members
+        .iter()
+        .copied()
+        .filter(|obj_id| seen.insert(*obj_id))
+        .collect();
+    // CR 607.2a + CR 608.2c: bind the filter's object-scope reads to exactly the
+    // published set, mirroring the two `ExiledBySource` sites below. Building the
+    // context from `ability` directly would carry `ability.targets` — for Sanar,
+    // the whole reveal window the chain seam injected — so a residual leg that
+    // reads object scope (a `ParentTarget`-relative comparison, a same-name or
+    // shares-a-type leg) would evaluate against the injected window rather than
+    // the members actually published. Latent today (all 51 cards bind
+    // `filter: Any`, which reads no object scope) and closed here so it stays that
+    // way.
+    let mut scoped_ability = ability.clone();
+    scoped_ability.targets = deduped.iter().copied().map(TargetRef::Object).collect();
+    let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    deduped
+        .into_iter()
+        .filter(|obj_id| crate::game::filter::matches_target_filter(state, *obj_id, &bound, &ctx))
         .collect()
 }
 
@@ -324,18 +393,27 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
 
-    // Collect target object IDs from the resolved ability's targets.
-    let mut target_ids: Vec<_> = ability
-        .targets
-        .iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
+    // reference whose members the chain published, so it binds INTRINSICALLY
+    // (`tracked_set_cast_candidates`) and must not read whatever the chain seam
+    // injected into `ability.targets`. Every other filter shape is a genuine
+    // target list and keeps the announcement-time targets.
+    let mut target_ids: Vec<_> = match target_filter {
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            tracked_set_cast_candidates(state, ability, target_filter)
+        }
+        _ => ability
+            .targets
+            .iter()
+            .filter_map(|t| {
+                if let TargetRef::Object(id) = t {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    };
 
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam
@@ -388,6 +466,59 @@ pub fn resolve(
             used_last_revealed_library_fallback = true;
             target_ids =
                 crate::game::filter::last_revealed_library_ids_matching(state, target_filter, &ctx);
+        }
+    }
+
+    // CR 601.3: The exile-set anaphor ("… from among them", "…
+    // from among the exiled cards") is a LINKED reference, never a targeted
+    // one — its object ids reach this effect implicitly, forwarded by the
+    // chain seam that resolved the exile step (`Effect::ExileTop`'s sub-ability
+    // hand-off in `effects::resolve_ability_chain`). That seam forwards EVERY
+    // exiled card, because it cannot know which of them this instruction
+    // describes. The permission granted below is what "a rule or effect allows
+    // that player to cast" (CR 601.3), so the clause's own filter — the card
+    // type gate on "cast instant and sorcery spells" / "up to two sorcery
+    // spells" / "a Vehicle or artifact creature spell" — must still be applied
+    // to the forwarded set. Without this, the type leg the parser composes onto
+    // the `ExiledBySource` anaphor is inert at runtime and every exiled card
+    // becomes castable (issue #6960; the mana-value axis already survives via
+    // the `CastPermissionConstraint`).
+    //
+    // Placed HERE, immediately after `target_ids` is final and ABOVE every
+    // downstream router (the private-library one-shot, the per-opponent fanout
+    // window, and the `driver_free_cast` / `immediate_graveyard_free_cast`
+    // single-target casts), so the gate is universal rather than partial: those
+    // routers return early, and `immediate_graveyard_free_cast` in particular
+    // carries no driver requirement, so a set filtered only below them would
+    // leave the type gate unapplied on whichever path fires first.
+    //
+    // Scoped to `references_exiled_by_source()` — the one filter class whose
+    // ids are chain-forwarded rather than chosen. Explicitly targeted grants
+    // (Emry, Bring to Light, Urza) were validated when their target was
+    // declared and must not be re-filtered here. The no-target fallback above
+    // populates `target_ids` from the live exile links and has already applied
+    // the whole filter to them, so re-testing the residual here is idempotent.
+    if !target_ids.is_empty() && target_filter.references_exiled_by_source() {
+        // Apply the clause's OWN legs only. `without_exile_anaphor`
+        // discharges the `ExiledBySource` leg the seam already satisfied and
+        // returns what is left of the tree, preserving its `And`/`Or` structure
+        // (Sanwell's `And[Or[Vehicle, artifact creature], ExiledBySource]`
+        // residualizes to the bare `Or`). Re-evaluating the anaphor here would be
+        // actively wrong: on a triggered ability `filter::ExiledBySource` reads
+        // the trigger's `linked_exile_snapshot`, captured before this ability's
+        // own exile step ran, so every forwarded id would be dropped and the
+        // grant would become a total no-op. `None` means the filter was nothing
+        // *but* the anaphor (Hellcarver Demon, Improvisation Capstone, and every
+        // other bare-`ExiledBySource` row) — those keep the full forwarded set.
+        if let Some(own_filter) = target_filter.without_exile_anaphor() {
+            // Bind the residual's object-scope reads to exactly the
+            // forwarded set, mirroring the no-target fallback's scoped context.
+            let mut scoped_ability = ability.clone();
+            scoped_ability.targets = target_ids.iter().copied().map(TargetRef::Object).collect();
+            let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+            target_ids.retain(|id| {
+                crate::game::filter::matches_target_filter(state, *id, &own_filter, &ctx)
+            });
         }
     }
 
@@ -599,6 +730,38 @@ pub fn resolve(
             },
         };
         return Ok(());
+    }
+
+    // CR 608.2g + CR 115.1a: A per-opponent fanout has already chosen its
+    // player/object pairs as the trigger went on the stack. After resolution
+    // revalidation only the surviving object ids remain, so hand them to the
+    // existing free-cast window as an exact pool: do not rescan graveyards and
+    // do not substitute another card from the same opponent. The window's
+    // re-offer pipeline casts selected spells one at a time without priority.
+    let is_per_opponent_fanout = crate::game::ability_utils::is_per_opponent_target_fanout(ability);
+    let graveyard_destination = cast_from_zone_graveyard_destination(ability);
+    if driver.is_during_resolution()
+        && without_paying
+        && alt_ability_cost.is_none()
+        && is_per_opponent_fanout
+        && !target_ids.is_empty()
+    {
+        let mut window = ability.clone();
+        window.effect = Effect::FreeCastFromZones {
+            count: target_ids.len().try_into().unwrap_or(u8::MAX),
+            max_total_mv: None,
+            filter: target_filter.clone(),
+            zones: vec![Zone::Graveyard],
+            // The CastFromZone rider is stored as a sequential ParentTarget
+            // sub-ability; FreeCastWindow carries its exact destination as
+            // per-cast metadata instead of installing a source-global effect.
+            graveyard_replacement: graveyard_destination,
+        };
+        // The rider has been translated into the window's per-cast metadata;
+        // retaining it would run a second destination move after the window.
+        window.sub_ability = None;
+        window.targets = target_ids.drain(..).map(TargetRef::Object).collect();
+        return super::free_cast_from_zones::resolve(state, &window, events);
     }
 
     if driver_free_cast || immediate_graveyard_free_cast {

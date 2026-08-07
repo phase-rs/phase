@@ -836,6 +836,7 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -988,6 +989,7 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -1108,6 +1110,7 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -1361,6 +1364,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         controller: PlayerId(0),
         source_id: delayed_source,
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     });
     state.exile_links.push(ExileLink {
         exiled_id: returned_id,

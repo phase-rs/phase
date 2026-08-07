@@ -14,7 +14,6 @@ import {
   ConditionBadge,
   CounterBadge,
   DungeonBadge,
-  familyOf,
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
@@ -220,8 +219,8 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
                 condition={condition}
               />
             ))}
-            {[...new Set(designations.unboundedResources.map((resource) => familyOf(resource.axis)))].map(
-              (family) => <UnboundedBadge key={family} family={family} />,
+            {designations.unboundedFamilies.map(
+              (u) => <UnboundedBadge key={u.family} family={u.family} state={u.state} />,
             )}
             {isPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
             {player.companion ? <StatusBadge label={t("badges.companion")} /> : null}

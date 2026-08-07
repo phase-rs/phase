@@ -2335,6 +2335,25 @@ fn edgewall_innkeeper() {
 }
 
 // ---------------------------------------------------------------------------
+// Valakut Exploration (existential exiled-with intervening-if + plural-pool
+// sweep + chained "that much" damage — CR 603.4 + CR 406.6 + CR 607.2a +
+// CR 608.2c/608.2k)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn valakut_exploration() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.\nAt the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+        "Valakut Exploration",
+        &["Landfall"],
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("valakut_exploration_ir", &ir);
+    insta::assert_json_snapshot!("valakut_exploration_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Bomat Courier (exile + activated with complex costs)
 // ---------------------------------------------------------------------------
 
@@ -2485,6 +2504,22 @@ fn liliana_the_repentant() {
     );
     insta::assert_json_snapshot!("liliana_the_repentant_ir", &ir);
     insta::assert_json_snapshot!("liliana_the_repentant_lowered", &lowered);
+}
+
+/// CR 508.1b-c + CR 508.1h + CR 602.2: Onakke's two printed lines exercise both the
+/// planeswalker-only combat-tax static and its graveyard activation. Snapshot
+/// both document IR and lowering so neither line can silently degrade while
+/// the other stays supported.
+#[test]
+fn onakke_oathkeeper() {
+    let (ir, lowered) = parse_two_layer(
+        "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control.\n{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
+        "Onakke Oathkeeper",
+        &["Creature"],
+        &["Ogre", "Spirit"],
+    );
+    insta::assert_json_snapshot!("onakke_oathkeeper_ir", &ir);
+    insta::assert_json_snapshot!("onakke_oathkeeper_lowered", &lowered);
 }
 
 /// CR 702.142a Boast: pins the order of the two IMPLICIT restrictions.

@@ -4,11 +4,15 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import {
+  collectObjectActions,
+  deriveActivationAffordances,
+  resolveObjectActivation,
+} from "../../viewmodel/cardActionChoice.ts";
 import { COUNTER_COLORS, formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { CardImage } from "../card/CardImage.tsx";
@@ -80,11 +84,25 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
   // triggered) but the engine surfaces them through the same per-object
   // legal-action map that PermanentCard consumes on the battlefield.
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const canActForWaitingState = useCanActForWaitingState();
   const objectActions = useMemo(
     () => (legalActionsByObject ? collectObjectActions(legalActionsByObject, objectId) : []),
     [legalActionsByObject, objectId],
   );
-  const isActivatable = objectActions.length > 0;
+  // THE single authority — the same affordance sets the battlefield ring reads,
+  // so this dialog can never offer an activation the board would refuse. It
+  // replaces an `objectActions.length > 0` test that had no WaitingFor gate and
+  // no seat gate.
+  const affordances = useMemo(
+    () =>
+      deriveActivationAffordances(waitingFor, canActForWaitingState, legalActionsByObject, objects),
+    [waitingFor, canActForWaitingState, legalActionsByObject, objects],
+  );
+  const isActivatable =
+    affordances.activatableObjectIds.has(objectId)
+    || affordances.manaTappableObjectIds.has(objectId);
 
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
 
@@ -118,19 +136,33 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
       return;
     }
     if (isActivatable) {
-      if (objectActions.length === 1) {
-        dispatchAction(objectActions[0]);
-        // Close so the board is reachable for whatever the activation asks
-        // next — e.g. Equip transitions to `EquipTarget`, whose creature
-        // target is picked on the battlefield, not in this dialog.
-        onDismiss?.();
-      } else {
-        // Multi-ability picker takes over. Hand off to it and close this
-        // dialog: the picker floats independently (DialogHost z-ordering)
-        // and its own dispatch will drive the next board prompt, so keeping
-        // the attachments dialog mounted behind it only obscures the board.
-        setPendingAbilityChoice({ objectId, actions: objectActions });
-        onDismiss?.();
+      // #506: the lone-action auto-dispatch decision belongs to the shared
+      // authority, never re-implemented here. `onDismiss` fires on both outcomes
+      // exactly as before — the board must be reachable for whatever the
+      // activation asks next (Equip → `EquipTarget`), and the multi-ability
+      // picker floats independently above this dialog.
+      const verdict = resolveObjectActivation(objectActions, obj, affordances, objectId);
+      switch (verdict.kind) {
+        case "dispatch":
+          dispatchAction(verdict.action);
+          onDismiss?.();
+          return;
+        case "choose":
+          setPendingAbilityChoice({ objectId, actions: verdict.actions });
+          onDismiss?.();
+          return;
+        case "none":
+          // Reachable only through the render→click staleness window: the cyan
+          // ring was painted from a bucket this click no longer sees. Doing
+          // nothing — and NOT dismissing — is correct, and is what the old
+          // if/else chain did.
+          return;
+        default: {
+          // CLAUDE.md "exhaustive match without wildcard fallbacks": a new
+          // ObjectActivation variant is a compile error here, never a silent drop.
+          const _exhaustive: never = verdict;
+          return _exhaustive;
+        }
       }
     }
   };

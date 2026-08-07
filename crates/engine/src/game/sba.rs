@@ -1917,8 +1917,17 @@ fn check_battle_protector(
         }
 
         // Compute legal choices.
+        // CR 310.11a: a Siege's controller "must choose its protector from among their
+        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
+        // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
+        // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
+        // PLACE: `is_alive` reads `Player::is_eliminated` while this reads
+        // `GameState::eliminated_players` — two different stores whose equivalence is not
+        // measured here, so deleting the redundant filter would smuggle an unmeasured
+        // behaviour change into a one-token routing.
         let legal_choices: Vec<PlayerId> = if is_siege {
-            crate::game::players::opponents(state, controller)
+            crate::game::players::choosable_opponents(state, controller)
                 .into_iter()
                 .filter(|p| !state.eliminated_players.contains(p))
                 .collect()
@@ -2115,8 +2124,8 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+            zones::token_is_outside_battlefield_and_stack(state, obj)
+                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -2297,6 +2306,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::replacements::ReplacementEvent;
 
@@ -4364,6 +4374,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -4898,6 +4909,66 @@ mod tests {
             state.objects.contains_key(&id),
             "Token on stack should survive SBA"
         );
+    }
+
+    #[test]
+    fn bare_same_id_spell_entry_does_not_prevent_off_zone_noncard_cleanup() {
+        fn add_off_zone_noncard(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            is_token: bool,
+            is_copy: bool,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.is_token = is_token;
+            object.is_copy = is_copy;
+            id
+        }
+
+        fn push_spell_placeholder(state: &mut GameState, id: ObjectId, card_id: u64) {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(card_id),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        let mut state = setup();
+        let token = add_off_zone_noncard(&mut state, 1, "Orphan Token", true, false);
+        let copy = add_off_zone_noncard(&mut state, 2, "Orphan Copy", false, true);
+        push_spell_placeholder(&mut state, token, 1);
+        push_spell_placeholder(&mut state, copy, 2);
+
+        for id in [token, copy] {
+            assert!(state.objects.contains_key(&id));
+            assert_eq!(state.objects[&id].zone, Zone::Exile);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5d + CR 704.5e: Bare same-id spell entries do not establish a
+        // live casting lifecycle, so both synthetic off-zone objects cease.
+        for id in [token, copy] {
+            assert!(
+                !state.objects.contains_key(&id),
+                "off-zone noncard object {id:?} must cease without its own PendingCast"
+            );
+        }
     }
 
     // --- CR 704.5e + CR 707.10a: Copy-of-a-card cease-to-exist tests ---

@@ -2,8 +2,11 @@ mod candidates;
 mod combat_withdrawal;
 mod context;
 mod copy;
+mod evoke;
 pub mod filter;
 mod payment_continuation;
+mod prospective_mana;
+mod swarm;
 mod targeted_exchange;
 
 use std::collections::{HashMap, HashSet};
@@ -47,6 +50,9 @@ pub use copy::{
     copy_effect_adds_flying, copy_target_filter, copy_target_mana_value_ceiling,
     project_copy_mana_spent_for_x,
 };
+pub use evoke::{
+    evoke_prompt_facts, EvokeImmediateOutcome, EvokePromptDescriptor, EvokePromptFacts,
+};
 pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
@@ -55,7 +61,21 @@ pub use payment_continuation::{
     PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationUnsupported,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
-pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
+pub use prospective_mana::{
+    certify_fetch_then_cast, certify_pact_plan, is_pact_payment_ability, is_pact_payment_cast,
+    CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan, PactPlanState,
+};
+pub use swarm::{
+    adversarial_swarm_witness, SwarmCombatWitness, SwarmWitnessIndeterminate, SwarmWitnessResult,
+    SWARM_WITNESS_MAX_DECLARATIONS,
+};
+#[cfg(feature = "test-support")]
+pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
+pub use targeted_exchange::{
+    root_may_yield_adverse_exchange, targeted_exchange_verdict, TargetedExchangeVerdict,
+};
+#[cfg(feature = "test-support")]
+pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///
@@ -96,6 +116,71 @@ pub fn validated_candidate_actions_with_probe(
     // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
     actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
     actions
+}
+
+/// CR 701.23a + CR 608.2c: A `SelectCards` answering a library search is legal
+/// exactly when it meets the three conditions the submission guard checks —
+/// cardinality, membership in the searched pool, and the printed-text selection
+/// constraint (`engine_resolution_choices.rs`, the `SearchChoice` arm). All
+/// three are decidable from the prompt without mutating the game, so
+/// `SimulationFilter` can skip its clone-and-apply probe. Mirrors
+/// [`structurally_valid_tap_for_convoke_payment`].
+///
+/// This is load-bearing for a single-card search, where the enumerator issues
+/// one candidate per card: against an 88-card library the simulated probe
+/// measured ~2.5 ms per candidate — ~217 ms to validate a list whose every
+/// entry is legal by construction.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_search_selection(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::SearchChoice {
+            cards,
+            count,
+            up_to,
+            allows_partial_find,
+            constraint,
+            ..
+        },
+        GameAction::SelectCards { cards: chosen },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // A scoped search (Wheel-of-Fate-class "each player searches") routes through
+    // `scoped_library_search::submit_selection`, which additionally requires the
+    // pick to be in that player's prepared exact-candidate set AND still live.
+    // Neither is modeled here, so defer to the simulation.
+    if state.pending_scoped_library_search.is_some() {
+        return false;
+    }
+
+    // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, and explicit
+    // stated-quality constraints accept a short or empty pick; a pure quantity
+    // search needs exactly `count`.
+    let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
+    let cardinality_ok = if lower_bounded {
+        chosen.len() <= *count
+    } else {
+        chosen.len() == *count
+    };
+    if !cardinality_ok {
+        return false;
+    }
+
+    // Membership plus distinctness: a repeated id would select one card twice,
+    // which pool membership alone would not catch.
+    let mut seen = std::collections::HashSet::with_capacity(chosen.len());
+    if !chosen
+        .iter()
+        .all(|id| cards.contains(id) && seen.insert(*id))
+    {
+        return false;
+    }
+
+    crate::game::effects::search_library::selection_satisfies_constraint(state, chosen, constraint)
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -5899,6 +5984,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:

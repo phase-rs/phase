@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
@@ -16,10 +17,10 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
-use crate::config::AiProfile;
+use crate::config::{AiConfig, AiProfile, ExecutionMode};
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
-use crate::projection::{project_to, Projection, ProjectionHorizon};
+use crate::projection::{project_to, projection_deadline, Projection, ProjectionHorizon};
 use crate::session::AiSession;
 
 /// Block-legality static slices collected once per combat decision and threaded
@@ -73,6 +74,45 @@ enum CombatObjective {
     Stabilize,
     PreserveAdvantage,
     Race,
+}
+
+/// Whether the attacker heuristic may spend an opponent-turn projection on
+/// crackback analysis, and the execution regime that projection runs under.
+///
+/// The regime travels with the permission so the two cannot drift: a caller
+/// cannot enable lookahead without stating a regime, and a caller that disables
+/// it never has to invent one (`search::deterministic_combat_choice` has no
+/// `AiConfig` at all). Replaces a `combat_lookahead: bool` that could express
+/// only half the decision.
+///
+/// Carries `ExecutionMode`, NOT a `Deadline`, deliberately: a `Deadline`
+/// snapshots an absolute instant at construction, and this value is built as an
+/// argument at `search::deterministic_choice` — before this function's opponent
+/// enumeration, must-attack sweep, `adversarial_swarm_witness` reducer replay,
+/// block-legality collection and per-candidate `defender_best_block` loop have
+/// run. Anchoring the 15 ms budget there would let that prologue consume it and
+/// silently disable CEDH crackback lookahead on a large board. The `Deadline` is
+/// therefore constructed at the point of use, below.
+#[derive(Debug, Clone, Copy)]
+pub enum CombatLookahead {
+    Disabled,
+    Enabled { execution_mode: ExecutionMode },
+}
+
+impl CombatLookahead {
+    /// `AiConfig::combat_lookahead` decides permission; `execution_mode` travels
+    /// with it so the measurement carve-out reaches the projection. Only CEDH
+    /// enables this today, but `cargo ai-gate --difficulty cedh` is a supported
+    /// invocation, so the carve-out must hold here too.
+    pub fn from_config(config: &AiConfig) -> Self {
+        if config.combat_lookahead {
+            Self::Enabled {
+                execution_mode: config.execution_mode,
+            }
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 fn emit_attack_trace(
@@ -141,7 +181,7 @@ pub fn choose_attackers_with_targets(
         state,
         player,
         &AiProfile::default(),
-        false,
+        CombatLookahead::Disabled,
         None,
         None,
         None,
@@ -152,7 +192,7 @@ pub fn choose_attackers_with_targets_with_profile(
     state: &GameState,
     player: PlayerId,
     profile: &AiProfile,
-    combat_lookahead: bool,
+    lookahead: CombatLookahead,
     valid_attacker_ids: Option<&[ObjectId]>,
     valid_attack_targets: Option<&[AttackTarget]>,
     session: Option<&AiSession>,
@@ -218,6 +258,46 @@ pub fn choose_attackers_with_targets_with_profile(
             }
         })
         .collect();
+
+    // CR 508.1 / CR 509.1 / CR 510.1: promote only an exact lethal
+    // declaration the engine has reducer-replayed against every bounded legal
+    // defense. This precedes all value, objective, crackback, and redirection
+    // policy gates: each would otherwise mutate the certified action.
+    // Preserve the non-mandatory commander heuristic, but include every
+    // must-attack creature before certification so the result cannot authorize
+    // a later union.
+    let alpha_candidates: Vec<ObjectId> = candidates
+        .iter()
+        .copied()
+        .filter(|&id| {
+            !state
+                .objects
+                .get(&id)
+                .map(|object| object.is_commander)
+                .unwrap_or(false)
+        })
+        .collect();
+    let mut certified_candidates = alpha_candidates;
+    for &id in &mandatory {
+        if !certified_candidates.contains(&id) {
+            certified_candidates.push(id);
+        }
+    }
+    if state.players.len() == 2 && opponents.len() == 1 {
+        let certified_attacks: Vec<_> = certified_candidates
+            .iter()
+            .map(|&id| (id, AttackTarget::Player(opponents[0])))
+            .collect();
+        if matches!(
+            adversarial_swarm_witness(state, player, &certified_attacks),
+            SwarmWitnessResult::Certified(witness)
+                if witness.is_lethal && witness.binds_declaration(state, &certified_attacks)
+        ) {
+            emit_attack_trace(player, &candidates, &certified_attacks);
+            return certified_attacks;
+        }
+    }
+
     let objective = determine_attack_objective(
         state,
         player,
@@ -283,58 +363,6 @@ pub fn choose_attackers_with_targets_with_profile(
         }
     }
 
-    // Alpha-strike: if no individual attack looks good but we outnumber blockers,
-    // attack with everyone — the excess creatures get through unblocked.
-    // Only do this if expected unblocked damage justifies the trade.
-    if attacking_ids.is_empty()
-        && !candidates.is_empty()
-        && candidates.len() > opponent_blockers.len()
-        && matches!(
-            objective,
-            CombatObjective::PreserveAdvantage | CombatObjective::Race
-        )
-    {
-        // CR 903.8: exclude the commander from the desperation alpha-strike for
-        // the same reason the per-creature gate does — don't trade it away.
-        // Alpha-strike only fires under PreserveAdvantage|Race when the per-loop
-        // gate rejected every candidate, so any commander here was a
-        // `!free_damage` rejection: `is_commander` is equivalent to the loop's
-        // `is_commander && !free_damage && objective != PushLethal`. Filter
-        // BEFORE the cost/benefit math so unblocked_power/worst_loss_value match
-        // the actual swing set. (A goaded commander is re-added by the
-        // must-attack union below, which runs after this block.)
-        let alpha_candidates: Vec<ObjectId> = candidates
-            .iter()
-            .copied()
-            .filter(|&id| {
-                !state
-                    .objects
-                    .get(&id)
-                    .map(|o| o.is_commander)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        if alpha_candidates.len() > opponent_blockers.len() {
-            let mut valued: Vec<(ObjectId, f64)> = alpha_candidates
-                .iter()
-                .map(|&id| (id, evaluate_creature(state, id)))
-                .collect();
-            valued.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let blocked_count = opponent_blockers.len();
-            let unblocked_power: i32 = valued[blocked_count..]
-                .iter()
-                .filter_map(|&(id, _)| state.objects.get(&id)?.power)
-                .sum();
-            let worst_loss_value: f64 = valued[..blocked_count].iter().map(|&(_, v)| v).sum();
-
-            if unblocked_power as f64 > worst_loss_value {
-                attacking_ids = alpha_candidates;
-            }
-        }
-    }
-
     // CR 508.1d / CR 701.15b: union the mandatory must-attack set. These
     // creatures are declared regardless of the value heuristic's verdict.
     for &id in &mandatory {
@@ -351,32 +379,43 @@ pub fn choose_attackers_with_targets_with_profile(
         // crackback_damage sees scaled creatures (Ouroboroid class) and
         // attack-trigger pumps (Battle Cry, Mentor). Failure to project
         // falls through to current state — matches pre-projection behavior.
-        let projection: Option<Arc<Projection>> = if combat_lookahead {
-            match session {
-                // Session present: route through the per-game projection cache
-                // (turn-scoped key; identical result to project_to on a miss,
-                // cached on subsequent identical combat decisions this turn).
-                Some(session) => session
-                    .get_or_project(
+        let projection: Option<Arc<Projection>> = match lookahead {
+            CombatLookahead::Disabled => None,
+            CombatLookahead::Enabled { execution_mode } => {
+                // Constructed HERE, not at the caller: `Deadline::after` snapshots
+                // an absolute instant, and everything above in this function
+                // (must-attack sweep, adversarial_swarm_witness reducer replay,
+                // block-legality slices, per-candidate defender_best_block) would
+                // otherwise run inside the 15 ms projection budget.
+                let deadline = projection_deadline(execution_mode);
+                match session {
+                    // Session present: route through the per-game projection cache
+                    // (turn-scoped key; identical result to project_to on a miss,
+                    // cached on subsequent identical combat decisions this turn).
+                    Some(session) => session
+                        .get_or_project(
+                            state,
+                            player,
+                            opponents[0],
+                            ProjectionHorizon::OpponentAttackersDeclared,
+                            deadline,
+                        )
+                        .ok(),
+                    // No session: the planner's production quiescence loop, the
+                    // public `choose_attackers_with_targets` wrapper, and tests.
+                    // Fall back to the free projection, wrapped in Arc to unify
+                    // the branch type.
+                    None => project_to(
                         state,
                         player,
                         opponents[0],
                         ProjectionHorizon::OpponentAttackersDeclared,
+                        deadline,
                     )
-                    .ok(),
-                // No session (public wrappers, tests): fall back to the free
-                // projection, wrapped in Arc to unify the branch type.
-                None => project_to(
-                    state,
-                    player,
-                    opponents[0],
-                    ProjectionHorizon::OpponentAttackersDeclared,
-                )
-                .ok()
-                .map(Arc::new),
+                    .ok()
+                    .map(Arc::new),
+                }
             }
-        } else {
-            None
         };
         let cb_damage = crackback_damage(
             state,
@@ -3441,6 +3480,9 @@ mod tests {
             bears.push(add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]));
         }
         add_creature(&mut state, PlayerId(1), "Wall", 0, 4, vec![]);
+        state.players[PlayerId(1).0 as usize].life = 10;
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
 
         let attacks = choose_attackers_with_targets(&state, PlayerId(0));
         assert!(
@@ -3450,6 +3492,410 @@ mod tests {
         assert!(
             bears.iter().any(|b| attacks.iter().any(|(id, _)| id == b)),
             "the bear swarm should still alpha-strike (the swing fires without the commander)"
+        );
+    }
+
+    /// Production-path guard: the policy must promote a reducer-certified lethal
+    /// alpha strike when the attacker count equals the defender's creature count,
+    /// but only one defender can block the flyers. The engine-built
+    /// `DeclareAttackers` payload is essential here: the witness replays this
+    /// actual declaration and the chosen action is then accepted by the same
+    /// reducer.
+    ///
+    /// CR 508.1 / CR 509.1 / CR 510.1b-c: three 1/1 flyers into one reach
+    /// creature and two ground creatures at two life leave two unblocked damage.
+    /// The equal raw counts must not reject this legal, lethal declaration before
+    /// the witness checks actual block legality.
+    #[test]
+    fn reducer_certified_equal_count_flying_swarm_promotes_alpha() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let flyers: Vec<_> = (0..3)
+            .map(|_| {
+                scenario
+                    .add_creature(PlayerId(0), "Flyer", 1, 1)
+                    .flying()
+                    .id()
+            })
+            .collect();
+        scenario.add_creature(PlayerId(1), "Reach", 0, 2).reach();
+        for _ in 0..2 {
+            scenario.add_creature(PlayerId(1), "Ground", 0, 2);
+        }
+        scenario.with_life(PlayerId(1), 2);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                (valid_attacker_ids.clone(), valid_attack_targets.clone())
+            }
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = flyers
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        let result = adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks);
+        let SwarmWitnessResult::Certified(witness) = result else {
+            panic!("equal-count flying alpha must certify: {result:?}");
+        };
+        assert!(witness.is_lethal);
+        assert_eq!(witness.resulting_life_loss, 2);
+        assert!(witness.binds_declaration(runner.state(), &alpha_attacks));
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            runner.state(),
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            Some(&valid_attacker_ids),
+            Some(&valid_attack_targets),
+            None,
+        );
+        assert_eq!(
+            attacks, alpha_attacks,
+            "only the engine Certified(lethal) witness may promote this hostile alpha strike"
+        );
+        runner
+            .declare_attackers(&attacks)
+            .expect("the policy's witness-backed DeclareAttackers action must be reducer-legal");
+    }
+
+    /// Phase 5 production-path guard: the policy must promote a reducer-certified
+    /// lethal alpha strike even when the legacy creature-value comparison would
+    /// reject it. The engine-built `DeclareAttackers` payload is essential here:
+    /// the witness replays this actual declaration and the chosen action is then
+    /// accepted by the same reducer.
+    ///
+    /// CR 508.1 / CR 509.1 / CR 510.1b-c: three 3/3s into one 5/5 at five
+    /// life leave six life loss after the defender's best legal block. Each
+    /// individual bear is a pure loss, and the old fallback's `6 > 7.5` gate
+    /// would incorrectly decline the lethal attack.
+    #[test]
+    fn reducer_certified_swarm_lethal_overrides_legacy_trade_value_veto() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                player,
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                (valid_attacker_ids.clone(), valid_attack_targets.clone())
+            }
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks),
+            SwarmWitnessResult::Certified(witness) if witness.is_lethal
+        ));
+        assert!(
+            6.0 <= evaluate_creature(runner.state(), bears[0]),
+            "fixture must defeat the retired unblocked-power-versus-sacrifice-value gate"
+        );
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            runner.state(),
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            Some(&valid_attacker_ids),
+            Some(&valid_attack_targets),
+            None,
+        );
+        assert_eq!(
+            attacks, alpha_attacks,
+            "only the engine Certified(lethal) witness may promote this hostile alpha strike"
+        );
+        runner
+            .declare_attackers(&attacks)
+            .expect("the policy's witness-backed DeclareAttackers action must be reducer-legal");
+    }
+
+    /// A mandatory commander must be part of the declaration before it is
+    /// certified. This hostile commander has trample, so the complete action is
+    /// indeterminate and the policy must not promote the optional bears.
+    #[test]
+    fn swarm_certificate_is_revoked_when_mandatory_union_changes_the_action() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let commander = scenario
+            .add_creature(PlayerId(0), "Goaded Commander", 3, 3)
+            .trample()
+            .id();
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .expect("fixture commander")
+            .is_commander = true;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .expect("fixture commander")
+            .goaded_by
+            .insert(PlayerId(1));
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let complete_action: Vec<_> =
+            std::iter::once((commander, AttackTarget::Player(PlayerId(1))))
+                .chain(
+                    bears
+                        .iter()
+                        .copied()
+                        .map(|id| (id, AttackTarget::Player(PlayerId(1)))),
+                )
+                .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &complete_action),
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
+        ));
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            vec![(commander, AttackTarget::Player(PlayerId(1)))],
+            "the mandatory attacker remains legal, but an indeterminate complete declaration must not promote optional bears"
+        );
+    }
+
+    /// A lethal certificate must bypass crackback pruning. Holding back one
+    /// bear would make the future swing survivable, but it would no longer be
+    /// the exact declaration that the engine replayed.
+    #[test]
+    fn swarm_certificate_is_not_pruned_for_crackback() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| scenario.add_creature(PlayerId(0), "Bear", 3, 3).id())
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(0), 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let certified_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &certified_attacks),
+            SwarmWitnessResult::Certified(witness) if witness.is_lethal
+        ));
+        assert!(
+            crackback_damage(runner.state(), PlayerId(0), &[PlayerId(1)], &bears, None) >= 5,
+            "fixture must activate the crackback-pruning branch"
+        );
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            certified_attacks,
+            "crackback must not remove an attacker from a certified declaration"
+        );
+    }
+
+    /// Player-target binding is part of the certificate. Double strike makes
+    /// this exact declaration reducer-lethal even though its raw power is below
+    /// the opponent's life, so the redirect helper would otherwise divert it to
+    /// a planeswalker. The certified player attack must be returned unchanged.
+    #[test]
+    fn swarm_certificate_keeps_its_player_targets_despite_planeswalker_redirect() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let bears: Vec<_> = (0..3)
+            .map(|_| {
+                scenario
+                    .add_creature(PlayerId(0), "Double-strike Bear", 3, 3)
+                    .double_strike()
+                    .id()
+            })
+            .collect();
+        scenario.add_creature(PlayerId(1), "Giant", 7, 7);
+        scenario.with_life(PlayerId(1), 10);
+        let mut runner = scenario.build();
+        let planeswalker = add_planeswalker(runner.state_mut(), PlayerId(1), 3);
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        assert!(valid_attack_targets.contains(&AttackTarget::Planeswalker(planeswalker)));
+        let certified_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &certified_attacks),
+            SwarmWitnessResult::Certified(witness)
+                if witness.is_lethal && witness.resulting_life_loss == 12
+        ));
+        assert!(
+            bears
+                .iter()
+                .filter_map(|id| runner.state().objects.get(id)?.power)
+                .sum::<i32>()
+                < runner.state().players[PlayerId(1).0 as usize].life,
+            "the redirect path must remain live for this exact certified declaration"
+        );
+        let redirected = redirect_attackers_to_planeswalker(
+            runner.state(),
+            &bears,
+            Some(&valid_attack_targets),
+            CombatObjective::PreserveAdvantage,
+            PlayerId(1),
+            runner.state().players[PlayerId(1).0 as usize].life,
+        );
+        assert!(
+            redirected
+                .iter()
+                .any(|(_, target)| *target == AttackTarget::Planeswalker(planeswalker)),
+            "the redirect transform must mutate this exact certified declaration"
+        );
+        assert_ne!(
+            redirected, certified_attacks,
+            "revert guard: post-certificate redirection would invalidate the certificate"
+        );
+
+        assert_eq!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            ),
+            certified_attacks,
+            "planeswalker redirection must not mutate the certified player-target declaration"
+        );
+    }
+
+    /// Companion fail-closed guard: the same hostile board must not attack when
+    /// a trample attacker makes the witness indeterminate due to damage-assignment
+    /// choice. This proves the policy consumes the typed engine fact rather than
+    /// independently treating raw excess power as forced lethal.
+    #[test]
+    fn swarm_alpha_abstains_when_engine_witness_is_indeterminate() {
+        let mut scenario = engine::game::scenario::GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let trampler = scenario
+            .add_creature(PlayerId(0), "Trampling Bear", 3, 3)
+            .trample()
+            .id();
+        let bears = [
+            trampler,
+            scenario.add_creature(PlayerId(0), "Bear", 3, 3).id(),
+            scenario.add_creature(PlayerId(0), "Bear", 3, 3).id(),
+        ];
+        scenario.add_creature(PlayerId(1), "Giant", 5, 5);
+        scenario.with_life(PlayerId(1), 5);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+
+        let (valid_attacker_ids, valid_attack_targets) = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids,
+                valid_attack_targets,
+                ..
+            } => (valid_attacker_ids.clone(), valid_attack_targets.clone()),
+            other => panic!("fixture must reach DeclareAttackers, got {other:?}"),
+        };
+        let alpha_attacks: Vec<_> = bears
+            .iter()
+            .copied()
+            .map(|id| (id, AttackTarget::Player(PlayerId(1))))
+            .collect();
+        assert!(matches!(
+            adversarial_swarm_witness(runner.state(), PlayerId(0), &alpha_attacks),
+            SwarmWitnessResult::Indeterminate(
+                engine::ai_support::SwarmWitnessIndeterminate::DamageChoice
+            )
+        ));
+
+        assert!(
+            choose_attackers_with_targets_with_profile(
+                runner.state(),
+                PlayerId(0),
+                &AiProfile::default(),
+                CombatLookahead::Disabled,
+                Some(&valid_attacker_ids),
+                Some(&valid_attack_targets),
+                None,
+            )
+            .is_empty(),
+            "without a Certified(lethal) engine witness, the hostile alpha strike must abstain"
         );
     }
 
@@ -3471,7 +3917,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3506,7 +3952,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3532,7 +3978,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3561,7 +4007,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3591,7 +4037,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3641,7 +4087,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&session),
@@ -3682,7 +4131,7 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ false,
+            /* lookahead = */ CombatLookahead::Disabled,
             None,
             None,
             Some(&session),
@@ -3707,7 +4156,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&AiSession::empty()),
@@ -3716,7 +4168,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             None,
@@ -3725,6 +4180,73 @@ mod tests {
         assert_eq!(
             with_session, without_session,
             "session-cached projection must yield the identical attacker decision as the free path"
+        );
+    }
+
+    /// T5a + T5b — `CombatLookahead::from_config` binds two authorities into one
+    /// value, and each must survive the binding.
+    ///
+    /// T5a (regime survives): the CEDH preset is the only one enabling combat
+    /// lookahead, so it is the only config that can carry a regime here. Its
+    /// measurement variant must arrive as `Enabled { execution_mode }` with the
+    /// measurement regime intact — `from_config` hardcoding
+    /// `ExecutionMode::Interactive` turns this red, and that is exactly the bug
+    /// that would leave the gate reading the wall clock at `--difficulty cedh`.
+    ///
+    /// T5b (permission dominates): with `combat_lookahead == false` the result
+    /// is `Disabled` in BOTH regimes, so measurement mode cannot smuggle a
+    /// projection into a tier that never takes one.
+    #[test]
+    fn combat_lookahead_from_config_carries_execution_mode() {
+        use crate::config::{create_config, AiDifficulty, Platform};
+
+        // T5a.
+        let cedh = create_config(AiDifficulty::CEDH, Platform::Native);
+        assert!(
+            cedh.combat_lookahead,
+            "T5a precondition: CEDH must be the tier that enables combat lookahead — if this \
+             preset changes, this test is measuring the wrong config"
+        );
+        let measured = CombatLookahead::from_config(&cedh.clone().into_measurement(1));
+        assert!(
+            matches!(
+                measured,
+                CombatLookahead::Enabled { execution_mode } if execution_mode.is_measurement()
+            ),
+            "a measurement CEDH config must produce Enabled carrying the measurement regime; \
+             got {measured:?}"
+        );
+        let interactive = CombatLookahead::from_config(&cedh);
+        assert!(
+            matches!(
+                interactive,
+                CombatLookahead::Enabled { execution_mode } if !execution_mode.is_measurement()
+            ),
+            "an interactive CEDH config must produce Enabled carrying the interactive regime; \
+             got {interactive:?}"
+        );
+
+        // T5b — the permission axis dominates in both regimes.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native);
+        assert!(
+            !medium.combat_lookahead,
+            "T5b precondition: Medium must NOT enable combat lookahead — a future preset flip \
+             must fail loudly here rather than pass silently"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in interactive mode"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium.into_measurement(1)),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in measurement mode too — \
+             measurement must not enable a projection the tier never takes"
         );
     }
 }

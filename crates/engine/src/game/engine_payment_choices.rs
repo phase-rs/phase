@@ -2120,16 +2120,20 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, ControllerRef, QuantityExpr, ResolvedAbility, SacrificeCost,
-        SubAbilityLink, TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, ManaContribution,
+        ManaProduction, QuantityExpr, ResolvedAbility, SacrificeCost, SubAbilityLink,
+        TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::TriggerMode;
 
     fn gain_life(value: i32) -> Effect {
         Effect::GainLife {
@@ -2418,6 +2422,95 @@ mod tests {
             .expect("unless-pay-life should resolve");
         // Player paid 3 life — life total drops by 3, gain-life effect skipped.
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 605.1b + CR 605.4a: A mana ability activated to pay an unless cost
+    /// resolves its TapsForMana triggered mana abilities immediately, without
+    /// replacing the unresolved unless-payment continuation.
+    #[test]
+    fn unless_payment_mana_activation_resolves_taps_for_mana_triggers_inline() {
+        let mut state = GameState::new_two_player(42);
+        let pending = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(3),
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let source = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Mana Dork".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![crate::types::mana::ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        let multiplier = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Mana Multiplier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&multiplier).unwrap();
+            let trigger = || {
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Any)
+                    .valid_target(TargetFilter::Controller)
+            };
+            obj.trigger_definitions.push(trigger());
+            obj.trigger_definitions.push(trigger());
+        }
+
+        let mut events = Vec::new();
+        let current_waiting = state.waiting_for.clone();
+        let waiting_for = handle_unless_payment_activate_ability(
+            &mut state,
+            current_waiting,
+            source,
+            0,
+            &mut events,
+        )
+        .expect("mana ability should activate during unless payment");
+
+        assert!(matches!(waiting_for, WaitingFor::UnlessPayment { .. }));
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            3,
+            "the base mana plus both triggered mana abilities must resolve inline"
+        );
     }
 
     /// CR 118.12a + CR 121.3a: "unless its controller has you draw a card"

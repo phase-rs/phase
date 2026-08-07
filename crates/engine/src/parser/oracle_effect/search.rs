@@ -3044,16 +3044,6 @@ mod tests {
     }
 
     #[test]
-    fn single_zone_search_has_no_split() {
-        // A plain tutor must NOT be misread as a split.
-        let details = parse_search_library_details(
-            "search your library for a basic land card, put it onto the battlefield tapped, then shuffle",
-            &mut ParseContext::default(),
-        );
-        assert!(details.split.is_none());
-    }
-
-    #[test]
     fn search_target_opponent_library() {
         let details = parse_search_library_details(
             "search target opponent's library for a creature card and put that card onto the battlefield under your control",

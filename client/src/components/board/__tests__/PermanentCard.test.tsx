@@ -124,6 +124,7 @@ function renderPermanent(
   boardChoiceObjectIds = new Set<number>(),
   activatableObjectIds = new Set<number>(),
   undoableTapObjectIds = new Set<number>(),
+  manaTappableObjectIds = new Set<number>(),
 ) {
   return render(
     <BoardInteractionContext.Provider
@@ -132,7 +133,7 @@ function renderPermanent(
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
-        manaTappableObjectIds: new Set(),
+        manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds,
@@ -509,6 +510,207 @@ describe("PermanentCard", () => {
       height: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
       fontSize: "clamp(12px, calc(var(--card-w) * 0.12), 15px)",
     });
+  });
+
+  /**
+   * Plan rows V10–V13 + V10c — hunk B: a host whose OWN click offers nothing,
+   * over an attachment the engine published affordances for, falls through to
+   * the full-card chooser instead of demanding a pixel-accurate click on a
+   * ~22px peek rendered BELOW the host (CR 301.5 / CR 303.4 — an attachment is
+   * its own object).
+   *
+   * EVIDENCE LABELS (plan §7.2): MEASURED = this PR ran that mutant arm and the
+   * quoted line is what flipped. QUOTED = verbatim from a named plan log.
+   * An untagged comment is prose and is evidence for nothing.
+   */
+  function clickHost(container: HTMLElement) {
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+  }
+
+  // V10 — the positive control for hunk B firing at all: an inert host over an
+  // actionable attachment opens the fan AND selects the host.
+  // QUOTED (plan §6.10, `.review3r4-v13.log`):
+  //   `PV13d[inert host + actionable attachment] dispatch=none fanHostId=1 selectedObjectId=1`
+  // MEASURED (drop side — hunk B deleted): `expected null to be 1`.
+  // MEASURED (always side — the `.some(...)` predicate forced constant-true):
+  //   V11's `expected 1 to be null` flips instead; on THIS fixture an
+  //   always-true predicate agrees, which is exactly why V11 exists.
+  it("opens the fan from an inert host when an attachment is actionable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+    expect(dispatchAction).not.toHaveBeenCalled();
+  });
+
+  // V10 (mana arm) — the predicate's SECOND disjunct. `activatableObjectIds` and
+  // `manaTappableObjectIds` are two independent affordance sets and hunk B reads
+  // both; without this arm the `|| manaTappableObjectIds.has(attachId)` half
+  // could be deleted and every other row here would stay green.
+  // MEASURED (drop side — the mana disjunct deleted): `expected null to be 1`.
+  it("opens the fan when the attachment is mana-tappable rather than activatable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(
+      new Set(), new Set(), new Set(), new Set(), new Set(), new Set([2]),
+    );
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+  });
+
+  // V10c — hunk B's selection is UNCONDITIONAL, deliberately unlike the plain
+  // click fallback which TOGGLES. Only a fixture whose host is ALREADY selected
+  // can see the difference; V10 above passes under both implementations.
+  // QUOTED (plan §6.10):
+  //   `PC1[before=null]  unconditional=401 toggle=401 DISCRIMINATES=false`
+  //   `PC1[before=401] unconditional=401 toggle=null  DISCRIMINATES=true`
+  // MEASURED (drop side — `selectObject(objectId)` replaced by the toggle form
+  //   `selectObject(isSelected ? null : objectId)`): `expected null to be 1`.
+  it("keeps the host selected when the fan is re-opened from an already-selected host", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: 1 });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+    clickHost(container);
+
+    // A toggle would strand the fan open over a host that just lost its ring,
+    // its attachment expansion and its exile-link expansion.
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+  });
+
+  // V11 — the negative side: no actionable attachment ⇒ the pre-existing
+  // fallback still owns the click. PAIR-ONLY (§7.1) — the row claims the change
+  // did NOTHING on this fixture, so no drop-the-fix mutant can be visible on it
+  // by construction; it is counted as always-side coverage only.
+  // QUOTED (plan §6.10): `PV13e[inert host + inert attachment] fanHostId=null selectedObjectId=1`
+  // MEASURED (always side — predicate forced constant-true): `expected 1 to be null`.
+  it("leaves the plain-click fallback alone when no attachment is actionable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent();
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+  });
+
+  // V12 — the predicate's SOURCE. Hunk B reads the shared affordance sets, never
+  // the raw `legalActionsByObject` bucket, so it can never offer what the board
+  // itself would not (the sets already carry the timing/seat gates). The bucket
+  // here is populated exactly as in V10; only the affordance set is empty.
+  // MEASURED (drop side — `activatableObjectIds.has(attachId)` swapped for a raw
+  //   `collectObjectActions(legalActionsByObject, attachId).length > 0` check):
+  //   `expected 1 to be null` — the fan opens at a state the board gates off.
+  it("ignores a populated action bucket that the affordance sets exclude", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+    useGameStore.setState({
+      legalActionsByObject: {
+        "2": [{ type: "ActivateAbility", data: { source_id: 2, ability_index: 0 } }],
+      },
+    });
+
+    const { container } = renderPermanent();
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    // REACH GUARD, paired with the negative above: a bare "no fan" assertion
+    // would also pass if the click never landed at all. Selection proves the
+    // handler ran and fell through to the plain-click fallback.
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+  });
+
+  // V13 (mobile arm) — hunk B sits ABOVE the `isMobile` branch, so on a narrow
+  // viewport a host whose attachment is actionable opens the fan instead of the
+  // sticky preview. That is a deliberate trade (long-press still inspects, and
+  // the fan renders large legible cards), and it is pinned here so a future
+  // reorder cannot revert it silently.
+  // MEASURED (drop side — hunk B deleted): `expected null to be 1`, and the
+  //   preview arm takes the click instead.
+  it("prefers the fan over the mobile sticky preview when an attachment is actionable", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    act(() => {
+      useUiStore.setState({
+        attachmentFanHostId: null,
+        selectedObjectId: null,
+        inspectedObjectId: null,
+      });
+    });
+
+    try {
+      const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+      clickHost(container);
+
+      expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+      // The arm hunk B pre-empts, asserted as the pair: no sticky preview.
+      expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    }
+  });
+
+  // V13 — hunk B is placed LAST, so it can never pre-empt the host's own
+  // target / activation / undo intent. Every arm below holds the actionable
+  // attachment FIXED and varies only the host's own affordance, so a passing
+  // arm is a statement about branch ORDER and nothing else.
+  // QUOTED (plan §6.10, `.review3r4-v13.log`):
+  //   `PV13a[valid target + actionable attachment]      dispatch=ChooseTarget      fanHostId=null`
+  //   `PV13b[activatable host + actionable attachment]  dispatch=ActivateAbility   fanHostId=null`
+  //   `PV13c[undoable tap + actionable attachment]      dispatch=UntapLandForMana  fanHostId=null`
+  // MEASURED (drop side — hunk B moved ABOVE `isValidTarget`): the PV13a arm
+  //   flips to `expected "spy" to be called with ... ChooseTarget`, and
+  //   `fanHostId` reads 1 instead of null.
+  // V10 is the positive control proving these arms are not uniformly inert.
+  it("never pre-empts the host's own target, activation or undo intent", () => {
+    const actionableAttachment = new Set([2]);
+
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+    const targetArm = renderPermanent(new Set([1]), new Set(), new Set(), actionableAttachment);
+    clickHost(targetArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 1 } },
+    });
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    cleanup();
+    vi.mocked(dispatchAction).mockClear();
+
+    const hostAbility = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } } as const;
+    useGameStore.setState({ legalActionsByObject: { "1": [hostAbility] } });
+    const activateArm = renderPermanent(
+      new Set(), new Set(), new Set(), new Set([1, 2]),
+    );
+    clickHost(activateArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith(hostAbility);
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    cleanup();
+    vi.mocked(dispatchAction).mockClear();
+    useGameStore.setState({ legalActionsByObject: {} });
+
+    const undoArm = renderPermanent(
+      new Set(), new Set(), new Set(), actionableAttachment, new Set([1]),
+    );
+    clickHost(undoArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "UntapLandForMana",
+      data: { object_id: 1 },
+    });
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
   });
 
   it("refreshes the attachment fan when the engine clears host attachments", () => {
@@ -1026,6 +1228,24 @@ describe("PermanentCard", () => {
     });
   });
 
+  it("submits an authorized untap decision from the board", () => {
+    const gameState: GameState = {
+      ...makeState(),
+      turn_decision_controller: 0,
+      active_player: 1,
+      waiting_for: { type: "UntapChoice", data: { player: 1, candidates: [1] } },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    const { container } = renderPermanent(new Set(), new Set(), new Set([1]));
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 1, untap: true },
+    });
+  });
+
   it("counts only active board-choice selections when enforcing count limits", () => {
     const gameState: GameState = {
       ...makeState(),
@@ -1234,9 +1454,16 @@ describe("PermanentCard", () => {
       mana_cost: { type: "NoCost" },
       color: [],
       base_color: [],
+      // `is_mana_ability` is the engine-derived key (CR 605.1a) that BOTH
+      // `deriveActivationAffordances` and `resolveObjectActivation` classify
+      // with, so in production the affordance sets and the resolver's partition
+      // can never disagree. This fixture asserts the mana-only affordance pair
+      // below, so the abilities must carry the flag that produces it; without it
+      // the fixture describes a state the engine cannot emit.
       abilities: [
         {
           kind: "Activated",
+          is_mana_ability: true,
           cost: { type: "Tap" },
           description: "{T}: Add {C}.",
           effect: {
@@ -1246,6 +1473,7 @@ describe("PermanentCard", () => {
         },
         {
           kind: "Activated",
+          is_mana_ability: true,
           cost: {
             type: "Composite",
             costs: [

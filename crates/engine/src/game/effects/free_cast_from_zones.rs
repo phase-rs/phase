@@ -22,27 +22,26 @@ use crate::types::zones::Zone;
 /// matching the Cascade/Discover/Ripple pattern. The "Exile ~" sub-ability is
 /// stashed as a `pending_continuation` and runs after the window finishes.
 ///
-/// Invoke Calamity is the type specimen. The `exile_instead_of_graveyard` rider
-/// (CR 614.1a — "if those spells would be put into your graveyard, exile them
-/// instead") is carried on the offer so each cast spell is stamped with it.
+/// Invoke Calamity is the type specimen. The optional CR 614.1a destination
+/// rider is carried on the offer so each cast spell is stamped with it.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count, max_total_mv, filter, zones, exile_instead_of_graveyard) = match &ability.effect {
+    let (count, max_total_mv, filter, zones, graveyard_replacement) = match &ability.effect {
         Effect::FreeCastFromZones {
             count,
             max_total_mv,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
         } => (
             *count,
             *max_total_mv,
             filter.clone(),
             zones.clone(),
-            *exile_instead_of_graveyard,
+            graveyard_replacement.clone(),
         ),
         _ => return Err(EffectError::MissingParam("FreeCastFromZones".to_string())),
     };
@@ -105,7 +104,7 @@ pub fn resolve(
             remaining_mv_budget: max_total_mv,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
             source: ability.source_id,
             member_pool,
         },
@@ -124,12 +123,14 @@ pub fn resolve(
 /// resolve their exile links against it, so the real id must be threaded
 /// rather than a sentinel.
 ///
-/// `member_pool`, when non-empty, is THIS resolution's concrete "exiled this
-/// way" batch (the pool the preceding `ChooseFromZone` offered): candidates
-/// must belong to it, applied BEFORE the filter's `Not(InTrackedSet)`
-/// chosen-card exclusion so a stale linked card from a previous resolution is
-/// never offered (CR 607.2a — "the other cards exiled this way" is scoped to
-/// this resolution's exile batch). Empty means no batch restriction.
+/// `member_pool`, when non-empty, is THIS resolution's concrete approved pool:
+/// candidates are enumerated from those exact ids, rather than from a zone scan.
+/// It originally served "exiled this way" batches, and also carries paired
+/// opponent-graveyard targets into the same window. In the latter case the
+/// player target has intentionally been consumed before this resolver runs, so
+/// `TargetPlayer`/`Owned(TargetPlayer)` are not evaluated again; zone, type,
+/// cast legality, and every unrelated filter property remain authoritative.
+/// Empty retains Invoke Calamity's existing controller-zone enumeration.
 pub(crate) fn eligible_candidates(
     state: &GameState,
     controller: PlayerId,
@@ -144,77 +145,127 @@ pub(crate) fn eligible_candidates(
     };
 
     let ctx = FilterContext::from_source_with_controller(source, controller);
+    let member_pool_filter = member_pool_filter(filter);
     let mut candidates = Vec::new();
-    for &zone in zones {
-        let zone_ids = match zone {
-            Zone::Graveyard => &player.graveyard,
-            Zone::Hand => &player.hand,
-            // CR 400.10a + CR 608.2g: Exile is a shared zone — the whole pile
-            // is scanned and the `filter` (e.g. `ExiledBySource` +
-            // `Not(InTrackedSet)`) narrows it to this resolution's linked set
-            // regardless of who owns the exiled cards (Plargg and Nassari
-            // exiles from EVERY player's library).
-            Zone::Exile => &state.exile,
-            // CR 601.2a: Other zones would need a parser/effect change, so an
-            // unexpected zone contributes no candidates rather than silently
-            // scanning the wrong pile.
-            _ => continue,
-        };
-        for &id in zone_ids {
-            // CR 607.2a: Confine the offer to THIS resolution's exile batch
-            // before any other narrowing — a card linked by a previous
-            // resolution is not among "the cards exiled this way" now.
-            if !member_pool.is_empty() && !member_pool.contains(&id) {
-                continue;
-            }
-            // CR 305.1: a land card can never be cast — this window is a cast
-            // grant, so lands are excluded from the offer outright (mirrors
-            // `cast_from_zone`'s cast-mode land guard).
-            if state.objects.get(&id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-            }) {
-                continue;
-            }
-            if !matches_target_filter_in_owner_zone(state, id, filter, &ctx) {
-                continue;
-            }
-            // CR 601.2c + CR 608.2g: A spell cast during resolution still
-            // needs every required target to be legal before it can be offered.
-            let Some(obj) = state.objects.get(&id) else {
-                continue;
+    let candidate_ids: Vec<ObjectId> = if member_pool.is_empty() {
+        let mut ids = Vec::new();
+        for &zone in zones {
+            let zone_ids = match zone {
+                Zone::Graveyard => &player.graveyard,
+                Zone::Hand => &player.hand,
+                // CR 400.10a + CR 608.2g: Exile is a shared zone — the whole pile
+                // is scanned and the `filter` (e.g. `ExiledBySource` +
+                // `Not(InTrackedSet)`) narrows it to this resolution's linked set
+                // regardless of who owns the exiled cards (Plargg and Nassari
+                // exiles from EVERY player's library).
+                Zone::Exile => &state.exile,
+                // CR 601.2a: Other zones would need a parser/effect change, so an
+                // unexpected zone contributes no candidates rather than silently
+                // scanning the wrong pile.
+                _ => continue,
             };
-            if !crate::game::casting::spell_has_legal_targets(state, obj, controller) {
+            ids.extend(zone_ids.iter().copied());
+        }
+        ids
+    } else {
+        member_pool.to_vec()
+    };
+
+    for id in candidate_ids {
+        if !state
+            .objects
+            .get(&id)
+            .is_some_and(|object| zones.contains(&object.zone))
+        {
+            continue;
+        }
+        // CR 305.1: a land card can never be cast — this window is a cast
+        // grant, so lands are excluded from the offer outright (mirrors
+        // `cast_from_zone`'s cast-mode land guard).
+        if state.objects.get(&id).is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+        }) {
+            continue;
+        }
+        let candidate_filter = if member_pool.is_empty() {
+            filter
+        } else {
+            &member_pool_filter
+        };
+        if !matches_target_filter_in_owner_zone(state, id, candidate_filter, &ctx) {
+            continue;
+        }
+        // CR 601.2c + CR 608.2g: A spell cast during resolution still
+        // needs every required target to be legal before it can be offered.
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if !crate::game::casting::spell_has_legal_targets(state, obj, controller) {
+            continue;
+        }
+        // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.
+        // Because this window casts without paying a mana cost, X can only
+        // be announced as 0, so the card's printed mana_value() is the same
+        // value used when the choice is submitted.
+        if let Some(budget) = max_total_mv {
+            let mv = state
+                .objects
+                .get(&id)
+                // CR 202.3d + CR 709.4b: candidate cards are in a non-stack
+                // zone, so a split card's MV budget is its combined halves.
+                .map(|obj| obj.effective_mana_value())
+                .unwrap_or(0);
+            if mv > budget {
                 continue;
             }
-            // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.
-            // Because this window casts without paying a mana cost, X can only
-            // be announced as 0, so the card's printed mana_value() is the same
-            // value used when the choice is submitted.
-            if let Some(budget) = max_total_mv {
-                let mv = state
-                    .objects
-                    .get(&id)
-                    // CR 202.3d + CR 709.4b: candidate cards are in a non-stack
-                    // zone, so a split card's MV budget is its combined halves.
-                    .map(|obj| obj.effective_mana_value())
-                    .unwrap_or(0);
-                if mv > budget {
-                    continue;
-                }
-            }
-            candidates.push(id);
         }
+        candidates.push(id);
     }
     candidates
+}
+
+/// CR 608.2g + CR 115.1a: A fixed member pool already proves which paired
+/// player selected each object. Strip only that consumed player binding before
+/// re-offering the exact ids; every type, zone, and cast-legality check remains.
+fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
+    use crate::types::ability::{ControllerRef, FilterProp};
+
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let mut tf = tf.clone();
+            if tf.controller == Some(ControllerRef::TargetPlayer) {
+                tf.controller = None;
+            }
+            tf.properties.retain(|prop| {
+                !matches!(
+                    prop,
+                    FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer
+                    }
+                )
+            });
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.iter().map(member_pool_filter).collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.iter().map(member_pool_filter).collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(member_pool_filter(filter)),
+        },
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::ability::{SpellStackToGraveyardReplacement, TypeFilter, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -343,6 +394,127 @@ mod tests {
         assert_eq!(candidates, vec![mine]);
     }
 
+    /// CR 608.2g + CR 115.1a: A nonempty member pool is the enumeration
+    /// authority. It preserves exactly the paired opponent-graveyard targets,
+    /// skips their consumed TargetPlayer/Owned binding, and never substitutes
+    /// another matching card from either graveyard on the initial offer or a
+    /// re-offer after one pool member becomes illegal.
+    #[test]
+    fn member_pool_keeps_exact_opponent_graveyard_targets_without_substitutes() {
+        use crate::types::ability::{ControllerRef, FilterProp};
+        use crate::types::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 1);
+        let selected_p1 = add_card(
+            &mut state,
+            PlayerId(1),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+        let selected_p2 = add_card(
+            &mut state,
+            PlayerId(2),
+            Zone::Graveyard,
+            CoreType::Sorcery,
+            1,
+        );
+        let _p1_extra = add_card(
+            &mut state,
+            PlayerId(1),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+        let _p2_extra = add_card(
+            &mut state,
+            PlayerId(2),
+            Zone::Graveyard,
+            CoreType::Sorcery,
+            1,
+        );
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::AnyOf(vec![
+                TypeFilter::Instant,
+                TypeFilter::Sorcery,
+            ]))
+            .controller(ControllerRef::TargetPlayer)
+            .properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ]),
+        );
+
+        let pool = [selected_p1, selected_p2];
+        let candidates = eligible_candidates(
+            &state,
+            PlayerId(0),
+            ObjectId(900),
+            &filter,
+            &[Zone::Graveyard],
+            None,
+            &pool,
+        );
+        assert_eq!(
+            candidates,
+            vec![selected_p1, selected_p2],
+            "the type filter still applies, but only the approved paired targets may be offered"
+        );
+
+        state.objects.get_mut(&selected_p1).unwrap().zone = Zone::Exile;
+        let reoffered = eligible_candidates(
+            &state,
+            PlayerId(0),
+            ObjectId(900),
+            &filter,
+            &[Zone::Graveyard],
+            None,
+            &pool,
+        );
+        assert!(
+            reoffered == vec![selected_p2],
+            "an illegal selected target must disappear rather than be replaced by a graveyard extra"
+        );
+    }
+
+    /// Invoke Calamity has no fixed pool, so its established own-zone scan must
+    /// remain the authority rather than attempting paired-target semantics.
+    #[test]
+    fn empty_member_pool_retains_invoke_calamity_controller_zone_scan() {
+        let mut state = GameState::new_two_player(1);
+        let mine = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+        let _opponent = add_card(
+            &mut state,
+            PlayerId(1),
+            Zone::Graveyard,
+            CoreType::Instant,
+            1,
+        );
+        assert_eq!(
+            eligible_candidates(
+                &state,
+                PlayerId(0),
+                ObjectId(900),
+                &instant_sorcery_filter(),
+                &[Zone::Graveyard],
+                None,
+                &[],
+            ),
+            vec![mine],
+            "empty pool preserves Invoke Calamity's controller-graveyard scan"
+        );
+    }
+
     /// CR 608.2g: An empty candidate set sets no pause and emits EffectResolved,
     /// so the continuation (Exile ~) runs immediately.
     #[test]
@@ -361,7 +533,7 @@ mod tests {
                 max_total_mv: Some(6),
                 filter: instant_sorcery_filter(),
                 zones: vec![Zone::Graveyard, Zone::Hand],
-                exile_instead_of_graveyard: true,
+                graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
             },
             vec![],
             source,
@@ -407,7 +579,7 @@ mod tests {
                 max_total_mv: Some(6),
                 filter: instant_sorcery_filter(),
                 zones: vec![Zone::Graveyard, Zone::Hand],
-                exile_instead_of_graveyard: true,
+                graveyard_replacement: Some(SpellStackToGraveyardReplacement::Exile),
             },
             vec![],
             source,
@@ -423,7 +595,7 @@ mod tests {
                         candidates,
                         remaining_casts,
                         remaining_mv_budget,
-                        exile_instead_of_graveyard,
+                        graveyard_replacement,
                         ..
                     },
             } => {
@@ -431,7 +603,10 @@ mod tests {
                 assert_eq!(candidates, &vec![instant]);
                 assert_eq!(*remaining_casts, 2);
                 assert_eq!(*remaining_mv_budget, Some(6));
-                assert!(*exile_instead_of_graveyard);
+                assert_eq!(
+                    graveyard_replacement.as_ref(),
+                    Some(&SpellStackToGraveyardReplacement::Exile)
+                );
             }
             other => panic!("expected FreeCastWindow, got {other:?}"),
         }

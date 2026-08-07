@@ -4,13 +4,15 @@
 use super::dash::install_dash_riders;
 use crate::game::keywords::has_haste;
 use crate::game::layers::evaluate_layers;
+use crate::game::scenario::GameRunner;
 use crate::game::stack::resolve_top;
 use crate::game::triggers::check_delayed_triggers;
 use crate::game::zones::{create_object, move_to_zone};
 use crate::types::ability::{DelayedTriggerCondition, Effect, TargetFilter};
+use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -35,7 +37,8 @@ fn dash_creature_on_battlefield(state: &mut GameState) -> ObjectId {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
     }
-    install_dash_riders(state, id, PlayerId(0));
+    let mut events = Vec::new();
+    install_dash_riders(state, id, PlayerId(0), &mut events);
     id
 }
 
@@ -97,6 +100,10 @@ fn end_step_return_resolves() {
 
     assert_eq!(state.objects[&id].zone, Zone::Hand);
     assert!(
+        state.delayed_triggers.is_empty(),
+        "the resolved Dash return must clean up only its one-shot delayed record"
+    );
+    assert!(
         state.players[0].hand.contains(&id),
         "returned to owner's hand"
     );
@@ -139,4 +146,53 @@ fn dead_creature_is_not_returned_from_graveyard() {
         "a dead dash creature must stay in the graveyard, not be returned to hand"
     );
     assert!(!state.players[0].hand.contains(&id));
+}
+
+/// CR 603.7 + CR 702.109a: two Dash-derived installs from the same source are
+/// distinct occurrences. A source id is not an installation identity.
+#[test]
+fn repeated_dash_installs_from_one_source_have_distinct_provenance() {
+    let mut state = GameState::new_two_player(42);
+    let id = dash_creature_on_battlefield(&mut state);
+    let mut events = Vec::new();
+    install_dash_riders(&mut state, id, PlayerId(0), &mut events);
+
+    let provenance: Vec<_> = state
+        .delayed_triggers
+        .iter()
+        .map(|trigger| {
+            trigger
+                .provenance
+                .origin()
+                .expect("live Dash trigger is installed")
+        })
+        .collect();
+    assert_eq!(provenance.len(), 2);
+    assert_eq!(provenance[0].source_id, id);
+    assert_eq!(provenance[1].source_id, id);
+    assert_ne!(provenance[0].token, provenance[1].token);
+    assert_ne!(provenance[0].instance, provenance[1].instance);
+
+    // CR 603.3b: indistinguishable no-input trigger siblings auto-order through
+    // the production dispatcher. If a future change makes their ordering
+    // observable, the ordinary ordering reducer remains the only alternate
+    // route; either path must preserve both distinct delayed firings.
+    state.phase = Phase::End;
+    state.active_player = PlayerId(0);
+    check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+    let mut runner = GameRunner::from_state(state);
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::OrderTriggers { player: PlayerId(0), ref triggers } if triggers.len() == 2
+    ) {
+        runner
+            .act(GameAction::OrderTriggers { order: vec![0, 1] })
+            .expect("the production CR 603.3b order action accepts both Dash triggers");
+    }
+    assert!(runner.state().delayed_triggers.is_empty());
+    assert_eq!(runner.state().stack.len(), 2);
+
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
+    assert!(runner.state().stack.is_empty());
 }
