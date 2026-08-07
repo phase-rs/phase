@@ -1794,16 +1794,16 @@ impl Keyword {
     /// the parser must not emit a duplicate `CastWithKeyword` grant the merge would
     /// silently drop.
     ///
-    /// - Cascade (CR 702.85c) and Ripple (CR 702.60b): each granted instance
+    /// - Cascade (CR 702.85c), Storm (CR 702.40b), and Ripple (CR 702.60b): each granted instance
     ///   triggers separately, counted via `cast_spell_keywords` in
     ///   `game/triggers.rs`.
     /// - Casualty (CR 702.153b) / Squad (CR 702.157b): each instance is paid and
     ///   triggers separately.
     ///
-    /// Deliberately NARROWER than [`Self::instances_function_separately`]: Storm
-    /// (CR 702.40b), Myriad, Increment, Provoke, Exalted, and DoubleTeam function
-    /// separately by their own rules, but their cast-GRANT consumption still reads
-    /// the kind-deduped keyword list, so preserving duplicate grants would be inert.
+    /// Deliberately NARROWER than [`Self::instances_function_separately`]: Myriad,
+    /// Increment, Provoke, Exalted, and DoubleTeam function separately by their
+    /// own rules, but their cast-GRANT consumption still reads the kind-deduped
+    /// keyword list, so preserving duplicate grants would be inert.
     /// When such a keyword IS admitted by the quoted-list grammar (of these, only
     /// Exalted is in `parse_keyword_name`'s KEYWORDS today), the parser declines a
     /// duplicate of it rather than lower it to a single silently-deduped grant.
@@ -1815,7 +1815,11 @@ impl Keyword {
             // CR 113.2c + CR 702.60b: multiple instances of Ripple function
             // independently, so a spell's cast-time snapshot must retain each
             // static grant for trigger synthesis.
-            Keyword::Cascade | Keyword::Ripple(_) | Keyword::Casualty(_) | Keyword::Squad(_)
+            Keyword::Cascade
+                | Keyword::Storm
+                | Keyword::Ripple(_)
+                | Keyword::Casualty(_)
+                | Keyword::Squad(_)
         )
     }
 }

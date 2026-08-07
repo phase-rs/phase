@@ -738,8 +738,10 @@ pub(crate) fn move_object_with_terminal(
             .get(&req.object_id)
             .expect("object exists (zone read above)");
         // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7).
-        if zones::token_is_outside_battlefield_and_stack(obj) {
+        // remains in place and ceases to exist at the next SBA (CR 111.7). An
+        // exact CR 601.2a pending spell plus its announcement placeholder makes
+        // the retained-origin representation stack-resident until this delivery.
+        if zones::token_is_outside_battlefield_and_stack(state, obj) {
             return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
@@ -3078,6 +3080,62 @@ fn execute_zone_move_with_applied_terminal(
             replacement::park_waiting_for(state, player);
             ZoneMoveTerminalResult::NeedsChoice(player)
         }
+    }
+}
+
+#[cfg(test)]
+mod announced_spell_residency_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn casting_to_stack_rejects_same_id_activated_ability_entry() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Activated Source".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&object_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(state.stack.iter().any(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+        }));
+
+        // CR 109.1 / CR 602.2a: A same-id activated ability is a distinct
+        // noncard stack object, so it cannot satisfy the spell-residency gate.
+        let mut events = Vec::new();
+        let result = move_object_with_terminal(
+            &mut state,
+            ZoneMoveRequest::casting_to_stack(object_id, object_id),
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(events.is_empty());
     }
 }
 

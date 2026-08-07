@@ -2961,6 +2961,7 @@ fn self_counter_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        provenance: None,
     } = &entry.kind
     else {
         return None;
@@ -3167,6 +3168,7 @@ fn fixed_controller_gain_life_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        provenance: None,
     } = &entry.kind
     else {
         return None;
@@ -3354,6 +3356,7 @@ fn fixed_opponent_lose_life_run_key<'a>(
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        provenance: None,
     } = &entry.kind
     else {
         return None;
@@ -4226,6 +4229,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         source_name: _,
         subject_match_count: _,
         die_result: _,
+        provenance: None,
     } = &entry.kind
     else {
         return None;
@@ -4407,6 +4411,7 @@ struct StackGroupKey {
     targets: Vec<TargetRef>,
     paid: Option<StackPaidSnapshot>,
     is_pending: bool,
+    provenance: Option<crate::types::game_state::SyntheticTriggerProvenance>,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -4438,6 +4443,12 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         .map(|ability| ability.selected_mode_labels.clone())
         .unwrap_or_default();
     let paid = state.stack_paid_facts.get(&entry.id).cloned();
+    let provenance = match &entry.kind {
+        StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::KeywordAction { .. } => None,
+    };
     StackGroupKey {
         source_name,
         tag,
@@ -4446,6 +4457,7 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
         targets,
         paid,
         is_pending: effective_ability.is_pending,
+        provenance,
     }
 }
 
@@ -4556,8 +4568,9 @@ mod tests {
     use crate::game::triggers::{check_delayed_triggers, PendingTrigger};
     use crate::game::zones::{self, create_object, move_to_zone};
     use crate::types::ability::{
-        CastingPermission, ControllerRef, CostPaidObjectSnapshot, Effect, ModalChoice,
-        QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        CastingPermission, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, Effect,
+        ModalChoice, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -4899,6 +4912,7 @@ mod tests {
                 source_name: "Trygon Predator".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.pending_trigger_entry = Some(entry_id);
@@ -4922,6 +4936,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -5320,6 +5335,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -6418,6 +6434,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -6430,6 +6447,53 @@ mod tests {
         );
         assert_eq!(groups[0].count, 100);
         assert_eq!(groups[0].member_ids.len(), 100);
+    }
+
+    #[test]
+    fn stack_display_groups_keep_different_storm_copy_counts_separate() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::game_state::SyntheticTriggerProvenance;
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grapeshot".to_string(),
+            Zone::Stack,
+        );
+        for (id, copy_count) in [(ObjectId(10_001), 1), (ObjectId(10_002), 2)] {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::CopySpell {
+                            target: TargetFilter::SelfRef,
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
+                            additional_modifications: Vec::new(),
+                            starting_loyalty_from_casualty_sacrifice: false,
+                        },
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: None,
+                    description: Some("Storm".to_string()),
+                    source_name: "Grapeshot".to_string(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: Some(SyntheticTriggerProvenance::Storm { copy_count }),
+                },
+            });
+        }
+
+        assert_eq!(stack_display_groups(&state).len(), 2);
     }
 
     #[test]
@@ -6482,6 +6546,7 @@ mod tests {
                     source_name: "Honored Dreyleader".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -6532,6 +6597,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         };
         state.stack.push_back(mk_entry(s1));
@@ -6585,6 +6651,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         };
         state
@@ -6775,6 +6842,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             }
         };
@@ -7494,6 +7562,7 @@ mod tests {
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
                         die_result: None,
+                        provenance: None,
                     },
                 });
             }
@@ -7571,6 +7640,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -7610,6 +7680,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -7655,6 +7726,7 @@ mod tests {
                     source_name: state.objects[&source].name.clone(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -8401,6 +8473,7 @@ mod tests {
                         source_name: String::new(),
                         subject_match_count: None,
                         die_result: None,
+                        provenance: None,
                     },
                 });
             }
@@ -8699,6 +8772,7 @@ mod tests {
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
                         die_result: None,
+                        provenance: None,
                     },
                 });
             }
@@ -9145,6 +9219,111 @@ mod tests {
             assert!(
                 !observers_are_batch_safe(&mut state, &plan),
                 "meaningful broad permanent-ETB observer must force Layer C refusal"
+            );
+        }
+
+        // CR 113.6 + CR 603.3 — the third production consumer of the
+        // `candidates_for_event` seam. `observers_are_batch_safe` is the
+        // batch-safety gate, so the live-zone guard changes a BATCHING decision
+        // here, not only trigger firing: a stale off-battlefield observer used
+        // to make `candidates` non-empty and force the conservative sequential
+        // path. Dropping it cannot turn a safe batch unsafe, because an
+        // observer that cannot legally trigger under CR 113.6 cannot make a
+        // batch order-sensitive.
+        #[test]
+        fn stale_off_battlefield_observer_does_not_force_batch_refusal() {
+            // Same broad permanent-ETB observer shape as
+            // `kodama_broad_permanent_etb_observer_forces_refusal`.
+            let build = || -> (GameState, ObjectId, effects::BatchPlan) {
+                let mut state = setup();
+                add_lands(&mut state, 3);
+                let src = add_scute_source(&mut state);
+
+                let observer_id = create_object(
+                    &mut state,
+                    CardId(908),
+                    PlayerId(0),
+                    "Kodama of the East Tree".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let obj = state.objects.get_mut(&observer_id).unwrap();
+                    obj.card_types.core_types.push(CoreType::Creature);
+                    let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .destination(Zone::Battlefield)
+                        .valid_card(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Permanent],
+                            ..Default::default()
+                        }))
+                        .execute(AbilityDefinition::new(
+                            crate::types::ability::AbilityKind::Database,
+                            Effect::Draw {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Controller,
+                            },
+                        ));
+                    Arc::make_mut(&mut obj.base_trigger_definitions).push(trig.clone());
+                    obj.trigger_definitions.push(trig);
+                }
+                // Register while the observer is legitimately on the
+                // battlefield. No rebuild can intervene later:
+                // `observers_are_batch_safe` consults `candidates_for_event`
+                // directly and never calls `ensure_ready`.
+                crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+                push_token_triggers(&mut state, src, insect_token_effect(), None, 5);
+
+                let run_len = batch_run_len(&state).unwrap();
+                let ability = state.stack.back().unwrap().ability().unwrap().clone();
+                let plan = try_batch(&state, &ability, run_len).unwrap();
+                (state, observer_id, plan)
+            };
+
+            // 1. Positive reach-guard: this observer really is a shape the gate
+            //    reacts to. Without it the negative below could be satisfied
+            //    vacuously by an observer that never registered under any key.
+            {
+                let (mut state, _observer_id, plan) = build();
+                assert!(
+                    !observers_are_batch_safe(&mut state, &plan),
+                    "reach-guard: an on-battlefield broad permanent-ETB observer \
+                     must force refusal"
+                );
+            }
+
+            // 2. The delta. Induce the desync AFTER the rebuild, leaving
+            //    `state.battlefield` and the index stale.
+            let stale = {
+                let (mut state, observer_id, plan) = build();
+                state.objects.get_mut(&observer_id).unwrap().zone = Zone::Hand;
+                let mut probe = state.clone();
+                assert!(
+                    observers_are_batch_safe(&mut probe, &plan),
+                    "CR 113.6: a stale off-battlefield observer must not force \
+                     batch refusal"
+                );
+                state
+            };
+
+            // 3. Outcome identity: the batch the guard newly permits resolves
+            //    exactly as the sequential path would. This is what pins "the
+            //    batching delta is observationally inert" instead of asserting
+            //    it. Deliberately NOT asserting the step shape — that would flip
+            //    red without the guard and silently promote this into a
+            //    falsification vehicle, which it is not.
+            let mut batched = stale.clone();
+            let mut sequential = stale;
+            resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+            assert_eq!(
+                token_ids(&batched).len(),
+                token_ids(&sequential).len(),
+                "batched token count must equal sequential"
+            );
+            assert_eq!(
+                batched.battlefield.len(),
+                sequential.battlefield.len(),
+                "batched battlefield must equal sequential"
             );
         }
 
@@ -12928,6 +13107,7 @@ mod tests {
                 source_name: "Ancient Bronze Dragon".to_string(),
                 subject_match_count: None,
                 die_result: Some(11),
+                provenance: None,
             },
         });
 
@@ -13184,6 +13364,7 @@ mod tests {
                     source_name: "Conditional Trigger".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
             let depth = state.stack.len();

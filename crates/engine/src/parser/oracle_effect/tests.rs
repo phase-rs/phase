@@ -16575,19 +16575,25 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
         .sub_ability
         .as_ref()
         .expect("the free-cast grant must chain after the exile");
+    // CR 608.2c + CR 607.2a: the prior `ExileTop` stamps `ThisWayCause::Exiled`,
+    // so the cast anaphor narrows to the exiled members of the chain set rather
+    // than binding bare (which would also pick up any other publisher's
+    // objects that were merged into the same set).
     assert!(
         matches!(
             &*cast.effect,
             Effect::CastFromZone {
-                target: TargetFilter::TrackedSet {
+                target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
+                    caused_by: Some(ThisWayCause::Exiled),
+                    ..
                 },
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Play,
                 ..
             }
         ),
-        "expected CastFromZone bound to the tracked exiled card (free, Play), got {:?}",
+        "expected CastFromZone bound to the exiled members of the tracked set (free, Play), got {:?}",
         cast.effect
     );
 }
@@ -22378,12 +22384,17 @@ fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
             mode,
             ..
         } => {
+            // CR 608.2c + CR 607.2a: the prior "exiles the top two cards"
+            // stamps `ThisWayCause::Exiled`, so "those cards" binds to the
+            // exiled members of the chain set, not to every member.
             assert_eq!(
                 *target,
-                TargetFilter::TrackedSet {
-                    id: TrackedSetId(0)
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::Exiled),
                 },
-                "expected sub-ability to bind to the tracked exile set"
+                "expected sub-ability to bind to the exiled members of the tracked set"
             );
             assert!(
                 *without_paying_mana_cost,
@@ -22395,6 +22406,202 @@ fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
             );
         }
         other => panic!("expected CastFromZone sub-ability, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 607.2a invariant: every effect shape that
+/// `publishes_exiled_cause_at_resolution` accepts must actually stamp
+/// `ThisWayCause::Exiled` on the members it publishes at runtime.
+///
+/// The predicate exists to gate a `TrackedSetFiltered { caused_by:
+/// Some(Exiled) }` binding on 51 cards' cast anaphors. If a later contributor
+/// widens `is_exile_effect` with a producer whose runtime cause is `None` (as
+/// `Dig{Exile}`, `HeistExile`, `ExileHaunting`,
+/// `ExileResolvingSpellInsteadOfGraveyard` and `RevealUntil{kept: Exile}` all
+/// are — they are accepted by the *sibling* `chain_clause_is_exile_producer`
+/// and deliberately not by this one), those cards' anaphors would silently
+/// match nothing and every one of them would go quietly inert. The compiler
+/// cannot see that coupling.
+///
+/// **Scope of the guarantee.** This test checks a hand-listed set of shapes; it
+/// does NOT enumerate everything `is_exile_effect` accepts, so a newly added
+/// arm would pass unnoticed until it is listed here. Widening
+/// `is_exile_effect` therefore means adding the shape below by hand.
+///
+/// Two arms of the predicate are pinned differently:
+/// * The `is_exile_effect` shapes are checked directly against the runtime
+///   registry `game::effects::this_way_cause_for_effect`.
+/// * `ForEachCategory { action: ExileFromPool }` does not go through that
+///   registry — its resolver
+///   (`game::effects::choose_from_zone::complete_per_category_exile`) calls
+///   `publish_tracked_set_with_causes` with an explicit
+///   `ThisWayCause::Exiled`. Its runtime pin is
+///   `tests/integration/issue_4253_sanar_vivid.rs`.
+#[test]
+fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
+    use crate::game::effects::this_way_cause_for_effect;
+    use crate::types::counter::CounterType;
+    use crate::types::zones::EtbTapState;
+
+    let direct_publishers = [
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            random_order: false,
+        },
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+    ];
+    for effect in &direct_publishers {
+        assert!(
+            publishes_exiled_cause_at_resolution(effect),
+            "expected {effect:?} to be an Exiled-cause publisher"
+        );
+        assert_eq!(
+            this_way_cause_for_effect(effect),
+            Some(ThisWayCause::Exiled),
+            "{effect:?} is accepted by publishes_exiled_cause_at_resolution but does NOT stamp \
+             ThisWayCause::Exiled at runtime — a cause-filtered cast anaphor bound after it \
+             would match nothing"
+        );
+    }
+
+    // CR 603.7a: the delayed-trigger wrapper defers its exile to a LATER
+    // resolution, so it answers the two questions differently — yes to "did
+    // this chain publish a tracked set?", no to "does this clause stamp
+    // Exiled when it resolves?". Both directions are pinned here: the first
+    // guards the six scopes whose sole producer is a delayed wrapper
+    // (conqueror's galleon, end-blaze epiphany, fire giant's fury, priority
+    // boarding, storm herald, waltz of rage) against losing their binding;
+    // the second is why the narrow predicate spells its shapes out instead of
+    // delegating to `is_exile_effect`.
+    let delayed = Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            direct_publishers[0].clone(),
+        )),
+        uses_tracked_set: true,
+    };
+    assert!(
+        publishes_tracked_set_from_resolution(&delayed),
+        "the delayed wrapper stands in for a real exile in an earlier clause, so the \
+         chain DID publish a set — dropping this sends six cards back to the \
+         unrewritten ParentTarget binding"
+    );
+    assert!(
+        !publishes_exiled_cause_at_resolution(&delayed),
+        "the delayed wrapper stamps nothing when it resolves, so a cause-filtered \
+         cast anaphor bound after it would match nothing"
+    );
+    assert_eq!(
+        this_way_cause_for_effect(&delayed),
+        None,
+        "the runtime registry agrees: no cause is stamped. If this ever returns \
+         Some(Exiled), the narrow predicate can accept the wrapper again."
+    );
+
+    // The per-category exile arm: accepted here, stamped explicitly by its own
+    // resolver rather than by the shared registry.
+    let per_category = Effect::ForEachCategory {
+        category: IterationCategory::Color,
+        chooser: Chooser::Controller,
+        action: ForEachCategoryAction::ExileFromPool {
+            zone: Zone::Library,
+            up_to: true,
+        },
+    };
+    assert!(
+        publishes_exiled_cause_at_resolution(&per_category),
+        "Sanar's per-category exile must count as an Exiled-cause publisher"
+    );
+
+    // Negative sibling: the OTHER ForEachCategory action is not an exile at
+    // all, and must not drag a cast anaphor onto the exiled-members binding.
+    let per_category_counters = Effect::ForEachCategory {
+        category: IterationCategory::Color,
+        chooser: Chooser::Controller,
+        action: ForEachCategoryAction::PutCounter {
+            target: TargetFilter::Any,
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+    };
+    assert!(
+        !publishes_exiled_cause_at_resolution(&per_category_counters),
+        "ForEachCategory{{PutCounter}} exiles nothing and must not be an exile publisher"
+    );
+
+    // Negative: shapes that DO exile but whose members carry no cause. Each is
+    // accepted by `chain_clause_is_exile_producer` and must stay rejected here.
+    let uncaused_exilers = [
+        Effect::HeistExile,
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: Some(Zone::Exile),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+            source: crate::types::ability::DigSource::default(),
+        },
+        Effect::ExileHaunting {
+            target: TargetFilter::Any,
+        },
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: None },
+        Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            kept_destination: Zone::Exile,
+            rest_destination: Zone::Library,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+        },
+    ];
+    for effect in &uncaused_exilers {
+        assert!(
+            chain_clause_is_exile_producer(effect),
+            "{effect:?} is expected to remain a same-chain exile producer"
+        );
+        assert!(
+            !publishes_exiled_cause_at_resolution(effect),
+            "{effect:?} publishes no cause stamp, so a cause-filtered cast anaphor must NOT be \
+             bound after it"
+        );
+        assert_eq!(this_way_cause_for_effect(effect), None);
     }
 }
 
@@ -47674,12 +47881,20 @@ fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
         .iter()
         .filter_map(|trigger| trigger.execute.as_deref())
         .find_map(find_cast_from_zone_target);
+    // CR 608.2c + CR 607.2a: still the same-chain sentinel (id 0), never durable
+    // `ExiledBySource` — but narrowed to the members the same-chain exile
+    // stamped `Exiled`.
     assert!(
         matches!(
             target,
-            Some(TargetFilter::TrackedSet { id }) if id.0 == 0
+            Some(TargetFilter::TrackedSetFiltered {
+                id,
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            }) if id.0 == 0
         ),
-        "Keldon Flamesage's same-chain exile must keep CastFromZone{{TrackedSet(0)}}, got {target:?}"
+        "Keldon Flamesage's same-chain exile must keep the CastFromZone anaphor on the \
+         chain-local tracked-set sentinel (exiled members), got {target:?}"
     );
 }
 

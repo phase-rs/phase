@@ -7367,6 +7367,15 @@ mod tests {
 
         // Non-sick, eligible creature (create_creature leaves summoning_sick false).
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // CR 508.1a: a SECOND eligible attacker keeps the refreshed snapshot
+        // non-empty after `id` goes sick. Without it the declaration becomes
+        // forced, and `run_auto_pass_loop` auto-submits the only legal (empty)
+        // declaration — the prompt is gone and this row can no longer observe
+        // the refresh at all. Keeping the set non-empty also makes the
+        // assertion strictly sharper: it proves the refresh dropped THAT
+        // creature while retaining the other, which an emptied set cannot
+        // distinguish from a snapshot that simply cleared everything.
+        let companion = create_creature(&mut state, PlayerId(0), "Ox", 3, 3);
 
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
@@ -7378,10 +7387,17 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                valid_attacker_ids.contains(&id),
-                "precondition: eligible creature must be a valid attacker"
-            ),
+            } => {
+                assert!(
+                    valid_attacker_ids.contains(&id),
+                    "precondition: eligible creature must be a valid attacker"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "precondition: the companion must also be a valid attacker, \
+                     or the post-refresh set would be empty for the wrong reason"
+                );
+            }
             other => panic!("expected DeclareAttackers, got {other:?}"),
         }
 
@@ -7398,10 +7414,17 @@ mod tests {
         match &result.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                !valid_attacker_ids.contains(&id),
-                "refreshed snapshot must drop the now-sick creature"
-            ),
+            } => {
+                assert!(
+                    !valid_attacker_ids.contains(&id),
+                    "refreshed snapshot must drop the now-sick creature"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "the refresh must be selective, not a wholesale clear: the \
+                     untouched companion is still an eligible attacker"
+                );
+            }
             other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
         }
     }

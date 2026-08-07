@@ -28,6 +28,7 @@ use engine::game::{
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
+use engine::types::card_type::Supertype;
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -1109,9 +1110,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         zone,
         attach_to,
         run_etb,
+        nonlegendary,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb);
+        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb, nonlegendary);
     }
 
     // Cloned before `apply` consumes `action` — recorded into REPLAY_LOG only
@@ -1198,8 +1200,9 @@ fn handle_debug_create_card(
     zone: engine::types::zones::Zone,
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
+    nonlegendary: bool,
 ) -> JsValue {
-    match handle_debug_create_card_inner(card_name, owner, zone, attach_to, run_etb) {
+    match handle_debug_create_card_inner(card_name, owner, zone, attach_to, run_etb, nonlegendary) {
         Ok(result) => to_js(&result),
         Err(msg) => JsValue::from_str(msg),
     }
@@ -1216,6 +1219,7 @@ fn handle_debug_create_card_inner(
     zone: engine::types::zones::Zone,
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
+    nonlegendary: bool,
 ) -> Result<engine::types::game_state::ActionResult, &'static str> {
     let face = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -1258,6 +1262,17 @@ fn handle_debug_create_card_inner(
             engine::game::create_object(state, card_id, owner, face.name.clone(), staging_zone);
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
+        // CR 205.4a-b: Legendary is an independent supertype. The sandbox
+        // override removes only that supertype from both the base (copiable)
+        // and current characteristics, preserving every other type detail.
+        if nonlegendary {
+            obj.base_card_types
+                .supertypes
+                .retain(|supertype| *supertype != Supertype::Legendary);
+            obj.card_types
+                .supertypes
+                .retain(|supertype| *supertype != Supertype::Legendary);
+        }
         state.layers_dirty.mark_full();
 
         // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
@@ -3715,7 +3730,7 @@ mod replay_bridge_tests {
                 "test card": {
                     "name": "Test Card",
                     "mana_cost": { "type": "NoCost" },
-                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
                     "power": "1",
                     "toughness": "1",
                     "loyalty": null,
@@ -3753,11 +3768,28 @@ mod replay_bridge_tests {
             engine::types::zones::Zone::Hand,
             None,
             true,
+            true,
         );
         assert!(
             result.is_ok(),
             "debug create-card should succeed in this fixture: {result:?}"
         );
+        with_state(|state| {
+            let card = state
+                .objects
+                .values()
+                .find(|object| object.name == "Test Card")
+                .expect("debug-created card should exist");
+            assert!(!card
+                .card_types
+                .supertypes
+                .contains(&engine::types::card_type::Supertype::Legendary));
+            assert!(!card
+                .base_card_types
+                .supertypes
+                .contains(&engine::types::card_type::Supertype::Legendary));
+        })
+        .expect("game state should remain initialized");
 
         assert!(
             !has_replay_recording(),

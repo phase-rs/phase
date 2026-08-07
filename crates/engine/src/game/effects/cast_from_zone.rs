@@ -10,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::statics::CastFrequency;
 use crate::types::zones::{EtbTapState, Zone};
+use std::collections::HashSet;
 
 /// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
 /// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
@@ -45,6 +46,74 @@ pub(crate) fn looked_at_controller_library_cards(
                 .get(id)
                 .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
         })
+        .collect()
+}
+
+/// CR 608.2c + CR 115.1: Bind a tracked-set cast anaphor ("you may cast the
+/// exiled cards this turn") from the published set ITSELF, not from
+/// `ability.targets`.
+///
+/// A tracked-set filter is a LINKED reference, never a target (CR 115.1): its
+/// members were established by an earlier instruction in the same resolution,
+/// so nothing was declared on announcement. `ability.targets`, by contrast, can
+/// carry whatever the chain seam injected upstream (for Sanar, the whole
+/// reveal window), which is how "exile two of the revealed cards" turned into
+/// "exile and grant a cast permission to all 76 revealed cards".
+///
+/// The authority for turning the parser's `TrackedSetId(0)` sentinel into a
+/// concrete set is `targeting::resolve_tracked_set_sentinel` — the same call
+/// `change_zone::resolve` makes for the identical filter shape. Its ladder has
+/// four rungs, and all four are safe here:
+///   1. the active chain set (`chain_tracked_set_id`) — a tracked-set shape;
+///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
+///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
+///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
+///      The `let … else` below rejects every one of those, so a combat-damage
+///      anaphor casts nothing rather than something arbitrary;
+///   3. the latest non-empty published set — a tracked-set shape;
+///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
+///      passes the shape check but indexes a key that can never exist, because
+///      `GameState::next_tracked_set_id` initialises to `1`. Fail-closed.
+///
+/// Deduplication is required, not cosmetic: `publish_tracked_set` EXTENDS the
+/// set, so a chain that publishes the same object twice stores it twice (12
+/// entries observed for 6 objects). Granting the same card two permissions and
+/// queueing two zone moves for it is a real defect, so members are deduplicated
+/// on first appearance, preserving publication order.
+fn tracked_set_cast_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+    let (TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }) = bound
+    else {
+        return Vec::new();
+    };
+    let Some(members) = state.tracked_object_sets.get(&id) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let deduped: Vec<ObjectId> = members
+        .iter()
+        .copied()
+        .filter(|obj_id| seen.insert(*obj_id))
+        .collect();
+    // CR 607.2a + CR 608.2c: bind the filter's object-scope reads to exactly the
+    // published set, mirroring the two `ExiledBySource` sites below. Building the
+    // context from `ability` directly would carry `ability.targets` — for Sanar,
+    // the whole reveal window the chain seam injected — so a residual leg that
+    // reads object scope (a `ParentTarget`-relative comparison, a same-name or
+    // shares-a-type leg) would evaluate against the injected window rather than
+    // the members actually published. Latent today (all 51 cards bind
+    // `filter: Any`, which reads no object scope) and closed here so it stays that
+    // way.
+    let mut scoped_ability = ability.clone();
+    scoped_ability.targets = deduped.iter().copied().map(TargetRef::Object).collect();
+    let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    deduped
+        .into_iter()
+        .filter(|obj_id| crate::game::filter::matches_target_filter(state, *obj_id, &bound, &ctx))
         .collect()
 }
 
@@ -324,18 +393,27 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
 
-    // Collect target object IDs from the resolved ability's targets.
-    let mut target_ids: Vec<_> = ability
-        .targets
-        .iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
+    // reference whose members the chain published, so it binds INTRINSICALLY
+    // (`tracked_set_cast_candidates`) and must not read whatever the chain seam
+    // injected into `ability.targets`. Every other filter shape is a genuine
+    // target list and keeps the announcement-time targets.
+    let mut target_ids: Vec<_> = match target_filter {
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            tracked_set_cast_candidates(state, ability, target_filter)
+        }
+        _ => ability
+            .targets
+            .iter()
+            .filter_map(|t| {
+                if let TargetRef::Object(id) = t {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    };
 
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam

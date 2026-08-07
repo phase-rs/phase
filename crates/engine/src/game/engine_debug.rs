@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::{DebugAction, DebugTokenRequest};
+use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -574,7 +576,11 @@ pub fn apply_debug_action(
             }
         }
 
-        DebugAction::CreateTokenCopy { source_id, owner } => {
+        DebugAction::CreateTokenCopy {
+            source_id,
+            owner,
+            nonlegendary,
+        } => {
             validate_object(state, source_id)?;
             validate_player(state, owner)?;
             let ability = ResolvedAbility::new(
@@ -586,7 +592,12 @@ pub fn apply_debug_action(
                     tapped: false,
                     count: QuantityExpr::Fixed { value: 1 },
                     extra_keywords: vec![],
-                    additional_modifications: vec![],
+                    additional_modifications: nonlegendary
+                        .then_some(ContinuousModification::RemoveSupertype {
+                            supertype: Supertype::Legendary,
+                        })
+                        .into_iter()
+                        .collect(),
                 },
                 vec![TargetRef::Object(source_id)],
                 source_id,
@@ -1167,6 +1178,7 @@ mod tests {
             GameAction::Debug(DebugAction::CreateTokenCopy {
                 source_id,
                 owner: PlayerId(1),
+                nonlegendary: false,
             }),
         )
         .expect("debug CreateTokenCopy should succeed");
@@ -1189,6 +1201,48 @@ mod tests {
         assert_eq!(token.name, "Copy Source");
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(3));
+    }
+
+    #[test]
+    fn debug_create_token_copy_can_strip_legendary() {
+        let mut state = sandbox_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legendary Copy Source".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.base_card_types.supertypes.push(Supertype::Legendary);
+        source.card_types.supertypes.push(Supertype::Legendary);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::CreateTokenCopy {
+                source_id,
+                owner: PlayerId(0),
+                nonlegendary: true,
+            }),
+        )
+        .expect("debug CreateTokenCopy should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+        let token = &state.objects[&token_id];
+
+        assert!(!token.card_types.supertypes.contains(&Supertype::Legendary));
+        assert!(!token
+            .base_card_types
+            .supertypes
+            .contains(&Supertype::Legendary));
     }
 
     #[test]

@@ -15,6 +15,7 @@ import type {
   ObjectId,
   PlayerId,
   PersistedGameState,
+  RewindOption,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
@@ -119,20 +120,21 @@ export function isAuthorityRemote(mode: GameMode | null): boolean {
  * are safe when false — there is nobody else's game to disturb and no hidden
  * info to leak across a wire.
  *
- * **This predicate has no production caller today, deliberately.** Every gate
- * that reads `gameMode` asks the authority question above; the company
- * question is what the merged predicate silently got *wrong* for `native-ai`,
- * and naming it is the fix. It is exported rather than left implicit so that
- * the next gate needing "are other humans watching?" has an answer to call
- * instead of an `||` to append — and so the classification is observable, which
- * is what lets a test prove the two axes actually disagree for `native-ai`.
- * Without it a test could still tabulate `isAuthorityRemote` across all eight
- * modes and go red on any classification change; that test would not be
- * vacuous, it would just be a no-op restatement of the behaviour before the
- * split, unable to say anything about the axis this change exists to name.
- * No lint flags unused exports here (`client/eslint.config.js` configures only
- * `@typescript-eslint/no-unused-vars`, and there is no knip), so this comment,
- * not a suppression, is the honest handling.
+ * **First and only production consumer: `GamePage`'s `takebackAudience`.**
+ * `GamePage` passes `hasRemoteHumans(storeGameMode) ? "table" : "solo"` to
+ * `GameMenu`, which is what makes the desktop solo-vs-AI menu entry read "Undo
+ * Last Action" rather than "Request Takeback". That gate is the company
+ * question, not the authority one: `native-ai` is `authority: "wire"` (the
+ * sidecar owns the state) but has no other human at the table, and asking
+ * `isAuthorityRemote` there would label a solo undo as a request to somebody.
+ * That mislabelling is exactly what the merged predicate got wrong, and
+ * splitting the two axes is the fix.
+ *
+ * Every *other* gate that reads `gameMode` still asks the authority question
+ * above; keep it that way. Reach for this one only when the question really is
+ * "are other humans watching?", and prefer calling it over appending an `||` to
+ * a mode list — the string union is frozen taxonomy, and a hand-rolled list
+ * silently misses the next mode added.
  *
  * Do not repurpose it for transport questions: `canRestoreCheckpoints`
  * (`DebugPanel.tsx`) looks like a company gate but is really "does this
@@ -186,6 +188,13 @@ interface GameStoreState {
   viewerInteraction: ViewerInteraction | null;
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
+  /**
+   * Server-published turn boundaries offered as rollback targets. Mirrors the
+   * server exactly — never appended to client-side, never derived. Empty on
+   * every transport that does not publish them (which is all of them except a
+   * `SingleUser` phase-server sidecar).
+   */
+  rewindTargets: RewindOption[];
   /**
    * Pre-game P2P lobby fill state, populated by the `lobbyProgress` adapter
    * event and cleared when `game_setup` arrives (game starts). `null` when
@@ -291,6 +300,12 @@ interface GameStoreActions {
   resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
+  /**
+   * Replace the server-published rollback targets. Only `dispatch.ts` calls
+   * this, and only from inside its generation gate — a superseded remote update
+   * must not clobber the list with a stale one.
+   */
+  setRewindTargets: (targets: RewindOption[]) => void;
   reset: () => void;
   setAdapter: (adapter: EngineAdapter) => void;
   /**
@@ -389,6 +404,7 @@ async function seedResumedServerGame(
       nextLogSeq: 0,
       stateHistory: [],
       turnCheckpoints: [],
+      rewindTargets: [],
     },
   });
 }
@@ -416,6 +432,7 @@ const initialState: GameStoreState = {
   viewerInteraction: null,
   stateHistory: [],
   turnCheckpoints: [],
+  rewindTargets: [],
   lobbyProgress: null,
   resolutionProgress: null,
   isResolvingAll: false,
@@ -540,6 +557,7 @@ export const useGameStore = create<GameStore>()(
           nextLogSeq: initLogEntries.length,
           stateHistory: [],
           turnCheckpoints: [],
+          rewindTargets: [],
           startingContest,
         },
       });
@@ -566,6 +584,7 @@ export const useGameStore = create<GameStore>()(
           nextLogSeq: 0,
           stateHistory: [],
           turnCheckpoints: savedCheckpoints,
+          rewindTargets: [],
         },
       });
     },
@@ -649,6 +668,10 @@ export const useGameStore = create<GameStore>()(
           stateHistory: stateHistory.slice(0, -1),
         },
       });
+    },
+
+    setRewindTargets: (targets) => {
+      set({ rewindTargets: targets });
     },
 
     reset: () => {

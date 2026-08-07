@@ -125,6 +125,7 @@ fn vivien_invocation_reflexive_trigger_deals_entering_creatures_power() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };

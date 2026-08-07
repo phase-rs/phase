@@ -25765,8 +25765,81 @@ fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<Control
     }
 }
 
+/// CR 608.2c + CR 607.2a: Does this clause, at resolution, publish tracked-set
+/// members stamped with [`ThisWayCause::Exiled`]?
+///
+/// CR 607.2a is the linked-ability rule this implements: an activated or
+/// triggered ability that *instructs a player to exile* is linked to an ability
+/// referring to "the exiled cards", and the second refers ONLY to cards put in
+/// exile as a result of that instruction. Cause-filtering by
+/// [`ThisWayCause::Exiled`] is how that restriction is enforced. (CR 607.2b is
+/// the replacement-effect variant and does not apply — these cards exile on
+/// resolution, not by replacing an event.)
+///
+/// This is the predicate a CAST anaphor ("you may cast the exiled cards this
+/// turn") must be bound against, because the binding it produces is
+/// `TrackedSetFiltered { caused_by: Some(Exiled) }` — a cause-filtered read
+/// (`game/filter.rs`, `TrackedSetFiltered` arm) that matches only members whose
+/// recorded producer ACTION was an exile.
+///
+/// DELIBERATELY NARROWER than the sibling [`chain_clause_is_exile_producer`],
+/// which additionally counts `Dig { destination: Some(Exile) }`, `HeistExile`,
+/// `ExileHaunting`, `ExileResolvingSpellInsteadOfGraveyard` and
+/// `RevealUntil { kept_destination: Exile }`. Those genuinely exile, but
+/// `game/effects/mod.rs::this_way_cause_for_effect` resolves each of them to
+/// `None` — they publish members with NO cause stamp — so an anaphor bound to
+/// `caused_by: Exiled` after one of them would match nothing. Two predicates
+/// because there are two questions: "did an exile happen in this chain?"
+/// (`chain_clause_is_exile_producer`, which gates same-chain vs. durable
+/// `ExiledBySource` binding) versus "will a cause-filtered `Exiled` read find
+/// anything?" (this one).
+///
+/// `ForEachCategoryAction::ExileFromPool` is added HERE rather than to
+/// `is_exile_effect`: its resolver
+/// (`game/effects/choose_from_zone.rs::complete_per_category_exile`) publishes
+/// its picks through `publish_tracked_set_with_causes(.., ThisWayCause::Exiled)`
+/// explicitly, and `is_exile_effect`'s other caller
+/// (`chain_clause_is_exile_producer`) already enumerates this producer on its
+/// own arm.
+///
+/// CR 603.7a: this spells the shapes out rather than delegating to
+/// [`is_exile_effect`], which recurses into `Effect::CreateDelayedTrigger`.
+/// That recursion is right for the WIDE question below — `strip_temporal_suffix`
+/// wraps a previous clause's real exile into the delayed node, so the chain did
+/// publish a set — but wrong here: a delayed trigger's exile happens in a LATER
+/// resolution, so nothing is stamped when THIS clause resolves and a
+/// `caused_by: Exiled` anaphor bound after it would match nothing.
+///
+/// The `publishes_exiled_cause_at_resolution` ⟶ `this_way_cause_for_effect`
+/// correspondence is pinned by
+/// `exiled_cause_publishers_all_stamp_exiled_at_runtime` in this module's tests.
+pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        } | Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        } | Effect::ExileTop { .. }
+            | Effect::ForEachCategory {
+                action: crate::types::ability::ForEachCategoryAction::ExileFromPool { .. },
+                ..
+            }
+    )
+}
+
+/// `is_exile_effect` is listed separately from
+/// [`publishes_exiled_cause_at_resolution`] rather than being subsumed by it:
+/// only the former recurses into `CreateDelayedTrigger`, and dropping that
+/// recursion here would take six scopes whose sole producer is a delayed
+/// wrapper (`conqueror's galleon`, `end-blaze epiphany`, `fire giant's fury`,
+/// `priority boarding`, `storm herald`, `waltz of rage`) back to the
+/// unrewritten `ParentTarget` binding.
 fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
+        || publishes_exiled_cause_at_resolution(effect)
         || is_battlefield_return_effect(effect)
         || is_token_creating_effect(effect)
         || is_mass_coerce_static(effect)
@@ -26291,7 +26364,51 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     }
 }
 
-fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
+/// CR 608.2c + CR 607.2a: the cause-filtered sibling of
+/// [`rewrite_filter_parent_to_tracked_set`], used for the CAST anaphor only.
+///
+/// `publish_tracked_set` EXTENDS the chain set rather than replacing it
+/// (`game/effects/mod.rs`), so any intervening publisher in the same chain
+/// merges its own objects into the set the anaphor will read. A BARE
+/// `TrackedSet{0}` binding hands all of them to
+/// `cast_from_zone::grant_lingering_permissions`, whose exile-delivery batch
+/// moves every non-exile-zone member into exile — i.e. an
+/// "exile the top two cards; put a +1/+1 counter on each creature you control;
+/// you may cast the exiled cards" chain would rip the countered battlefield
+/// creature into exile and grant it a cast permission. Binding
+/// `caused_by: Some(Exiled)` reads only the members whose producer action was
+/// an exile (`game/filter.rs`, `TrackedSetFiltered` arm), which is exactly what
+/// "the exiled cards" names. Portent of Calamity already ships this filter
+/// shape from the "this way" anaphor path.
+///
+/// Recurses through `Not`/`Or`/`And` so a composed cast filter is rewritten at
+/// every leaf, mirroring its bare sibling.
+fn rewrite_filter_parent_to_exiled_tracked_set(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::ParentTarget => {
+            *filter = TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Exiled),
+            }
+        }
+        TargetFilter::Not { filter } => rewrite_filter_parent_to_exiled_tracked_set(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for filter in filters {
+                rewrite_filter_parent_to_exiled_tracked_set(filter);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `cast_anaphor_is_exiled` says whether the prior clauses of this chain
+/// publish `ThisWayCause::Exiled` members (see
+/// [`publishes_exiled_cause_at_resolution`]). It is consulted by exactly one
+/// arm — `Effect::CastFromZone` — because that is the only rewritten effect
+/// whose resolver has an exile-DELIVERY side effect on the objects it binds;
+/// every other arm keeps the bare [`tracked_set_filter`].
+fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect, cast_anaphor_is_exiled: bool) {
     match effect {
         // CR 701.26a/b: only single-target tap/untap carries a rewritable target.
         Effect::SetTapState {
@@ -26321,7 +26438,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::PutCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::ChangeZone { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         // CR 603.7 + CR 608.2c: A cross-clause "cast/play that card / those
         // cards" anaphor following an exile resolves to the *tracked set*
         // (the cards exiled by the prior clause), not the trigger source.
@@ -26330,7 +26447,18 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         // and similar cross-clause cast forms reach `try_parse_cast_effect`
         // with `target: ParentTarget`; this rewrite binds them to the
         // tracked exile set during chain stitching.
-        | Effect::CastFromZone { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        //
+        // CR 607.2a: when the chain's publishers stamp `Exiled`, narrow the
+        // binding to those members — see
+        // `rewrite_filter_parent_to_exiled_tracked_set` for why a bare binding
+        // is destructive here and nowhere else.
+        Effect::CastFromZone { target, .. } => {
+            if cast_anaphor_is_exiled {
+                rewrite_filter_parent_to_exiled_tracked_set(target)
+            } else {
+                rewrite_filter_parent_to_tracked_set(target)
+            }
+        }
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
@@ -32457,6 +32585,13 @@ pub(crate) fn parse_effect_chain_ir(
         let needs_tracked_set = any_prior_publishes
             && (contains_explicit_tracked_set_pronoun(&lower_check)
                 || contains_implicit_tracked_set_pronoun(&lower_check));
+        // CR 608.2c + CR 607.2a: same walk, narrower predicate — does any prior
+        // clause publish members stamped `Exiled`? Only then may a cast anaphor
+        // narrow to `caused_by: Exiled`.
+        let cast_anaphor_is_exiled = builder.clauses().iter().any(|c| {
+            !matches!(c.disposition, ClauseDisposition::Continue { .. })
+                && publishes_exiled_cause_at_resolution(&c.parsed.effect)
+        });
 
         // Continuation recognition — store on ClauseIr, application moves to lowering.
         //
@@ -32728,7 +32863,10 @@ pub(crate) fn parse_effect_chain_ir(
                 check_def.player_scope = lifted_player_scope;
             }
             if needs_tracked_set {
-                rewrite_parent_targets_to_tracked_set(&mut check_def.effect);
+                rewrite_parent_targets_to_tracked_set(
+                    &mut check_def.effect,
+                    cast_anaphor_is_exiled,
+                );
             }
             let mut check_defs = vec![check_def];
             let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });

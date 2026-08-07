@@ -2252,6 +2252,7 @@ fn try_begin_reflexive_target_selection_inner(
             // into the later fresh-`apply()` target-assign.
             subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
             die_result: state.die_result_this_resolution,
+            provenance: None,
         };
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -2345,6 +2346,7 @@ fn try_begin_reflexive_target_selection_inner(
         // creating ability so the reflexive entry can re-stamp it when it
         // resolves as its own stack object.
         die_result: state.die_result_this_resolution,
+        provenance: None,
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
     let pending_for_state = pending.clone();
@@ -4992,7 +4994,7 @@ fn affected_objects_with_causes(
 /// stamped onto the tracked-set members it publishes. Derived purely from the
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
-fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
+pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
     use crate::types::zones::Zone;
     // CR 400.7: a generic zone change names a "this way" verb only for the
     // destinations a consumer references — Exile (exiled), Battlefield

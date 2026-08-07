@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 use std::collections::HashMap;
 
 use crate::types::ability::{
@@ -567,6 +568,13 @@ fn batch_or_drain_observer_triggers(
     events: &mut Vec<GameEvent>,
     event_slice_start: usize,
     event_slice_end: usize,
+    // CR 603.2c: `true` declares that `events[event_slice_start..event_slice_end]`
+    // is exactly one completed logical zone-change owner's completion slice.
+    // `LogicalZoneChangeGroup::append_delivery_events` retains EVERY `ZoneChanged`
+    // in the slice it is handed, so within such a slice a blanket drop is
+    // equivalent to per-occurrence suppression. A collector whose slice is not
+    // owner-bounded must use
+    // `triggers::filter_already_collected_trigger_events_from` instead.
     zone_changes_are_logically_owned: bool,
 ) -> Option<ResolutionChoiceOutcome> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -611,15 +619,30 @@ fn batch_or_drain_observer_triggers(
 /// continuation drains, park ETB/dies/discards observers for the next priority
 /// checkpoint instead of dispatching them while the test harness (or UI) may
 /// still be inside the same `SelectCards` action (issue #5336).
+///
+/// CR 603.2c: this slice spans the whole continuation drain, so it holds both
+/// the delivery's logical zone-change owner's occurrences (already collected by
+/// `change_zone::resolve` / `zone_pipeline::move_objects_simultaneously_then`)
+/// AND zone changes no owner allocated a group for. It is therefore NOT
+/// owner-bounded and cannot blanket-drop `ZoneChanged` the way
+/// `batch_or_drain_observer_triggers` does; it consults the shared ownership
+/// authority instead. That authority's ledger half applies to every event kind,
+/// matching the generic priority scan. Without it a fetched land's landfall/ETB
+/// observers fire twice.
 fn park_search_observer_triggers(
     state: &mut GameState,
     events: &[GameEvent],
     events_before_drain: usize,
 ) -> ResolutionChoiceOutcome {
-    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-        .iter()
+    let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        events,
+        events_before_drain,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let trigger_events: Vec<GameEvent> = uncollected_events
+        .into_iter()
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-        .cloned()
         .collect();
     if !trigger_events.is_empty() {
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
@@ -1196,6 +1219,282 @@ fn append_vote_ballot_and_advance(
             events,
         );
         ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
+    }
+}
+
+/// CR 732.1a + CR 732.1b — THE BOUNDARY RE-CHECK IS THE SHORTCUT SYSTEM DOING ITS JOB.
+///
+/// CR 732.1a: "The rules for taking shortcuts are largely informal. As long as each player in the
+/// game understands the intent of each other player, any shortcut system they use is acceptable."
+/// This engine IS the table's shortcut system, and CR 732.1b states the job that system performs:
+/// the shortcut rules determine "how many times those actions are repeated without having to
+/// actually perform them, and HOW THE LOOP IS BROKEN". Defining and enforcing where an elided
+/// infinite loop closes is that second clause, not a departure from it.
+///
+/// THE INVARIANT THIS GATE PROTECTS (full statement, with lemmas, at `types::game_state`'s
+/// `scheduled_collapse_axes` doc): ELISION ≡ PERFORMANCE — the engine never advances to a state
+/// that performing the proposal's choices would not produce, which is exactly what CR 732.2c means
+/// by reaching the ending point "with all game choices contained in the shortcut proposal having
+/// been taken". Once an observer appears mid-window, a batched advance would reach a state those
+/// choices would NOT produce, and replaying an observer-laden sequence would execute a proposal
+/// nobody accepted. Declining to manual play is the only CR 732-faithful option left, so THIS GATE
+/// ENFORCES CR 732.2c — the deviation would be either alternative it forecloses.
+///
+/// So this re-check is not the engine second-guessing an accepted proposal. It is the system
+/// establishing, at the point where the elided loop closes, what the table agreed would happen.
+/// When the growth is no longer observed the elision no longer describes the board, the shortcut
+/// does not close there, and the axis stays `∞` for manual play — every player keeps priority and
+/// every choice they would have had. Nobody loses an entitlement they accepted; what they lose is
+/// a shortcut that had stopped matching the game.
+///
+/// Earlier revisions of this doc called the re-check unlicensed. That conceded a rule the code
+/// satisfies. The subsystem's single authority for the full four-position reading is
+/// `types/game_state.rs`'s `scheduled_collapse_axes` doc; see also `game/derived_views.rs`'s
+/// `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block. `derived_views::FamilyCollapseState` still
+/// separates `Committed` from the weaker variants, because being right about WHEN the loop closes
+/// is not the same as knowing WHAT NUMBER lands, and `∞→N` is a promise about the number.
+///
+/// CR 732.2a supplies the CONTENT of the re-check, and its antecedent is worth stating exactly so
+/// nobody over-reads it: "at any point in the game, THE PLAYER WITH PRIORITY MAY SUGGEST a shortcut
+/// … that may be legally taken based on the current game state and THE PREDICTABLE RESULTS of the
+/// sequence of choices" — subject = the proposing player, moment = suggestion. It is a legality
+/// condition on a PROPOSAL, so it is not self-executing at the boundary; what re-applies it there is
+/// the shortcut system's CR 732.1a mandate to close the loop the way the table understood it. The
+/// rule says what "predictable results" means; CR 732.1a/1b say who checks and when. The two
+/// firewalls this boundary re-calls are `analysis::resource::counter_growth_is_observed` and
+/// `analysis::resource::life_growth_is_observed` — named by symbol, never by line.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ObservedGrowth {
+    pub(crate) counter: bool,
+    pub(crate) life: bool,
+}
+
+impl ObservedGrowth {
+    /// Evaluated ONCE before the boundary's apply loop, at the same hoist point as the two calls it
+    /// replaces. The firewalls scan the board/stack, not the stash, so they need no sequence.
+    pub(crate) fn at_boundary(state: &GameState) -> Self {
+        Self {
+            counter: crate::analysis::resource::counter_growth_is_observed(state),
+            life: crate::analysis::resource::life_growth_is_observed(state),
+        }
+    }
+}
+
+/// A way the boundary finishes a stashed item WITHOUT applying it — leaving the axis ∞ with no
+/// finite amount reaching it. NO CR GOVERNS THIS ENUM: it is a census of THIS engine loop's own
+/// control flow at the boundary described on [`ObservedGrowth`], not a rules behavior
+/// (cf. `game/filter.rs`'s `context_free_prop_matches_face` Kleene `AnyOf` arm).
+///
+/// MEASURED CENSUS of the loop below, not a guess. THE COUNTING UNIT IS THE CONTROL-FLOW STATEMENT
+/// (`continue` / `return` / the single `collapsed.push`), because that is the unit an edit adds one
+/// of; counting "kinds of exit" instead is what made the earlier version of this paragraph fail to
+/// sum. The loop body has exactly FOUR, and they decompose 1 + 2 + 1 = 4:
+///   • 1 PUSH — `collapsed.push(item.clone())`, the single apply-succeeded exit.
+///   • 2 ITEM-LEVEL NON-PUSH — the `boundary_declines` `continue` ([`BoundaryHold::ObservedGrowth`])
+///     and the `active_copy_token()` `return` ([`BoundaryHold::CopyTokenPause`]). These two, and
+///     only these two, are what [`possible_hold`] enumerates: 2 statements, 2 variants.
+///   • 1 INNER PER-GROWTH SKIP — `!state.battlefield.contains(&g.object)` (CR 400.7: an object that
+///     changes zones becomes a new object, so the stale id is skipped). It is a `continue` on the
+///     INNER `for g in growths` loop, so its ITEM still reaches the push. It is NOT a hold, and
+///     mistaking it for one is the reading error this doc exists to prevent.
+/// So: 3 of the 4 statements are non-push, and 2 of those 3 are holds.
+/// `boundary_hold_census_matches_the_apply_loop` re-derives all three numbers from this file's own
+/// source text, so an added or removed exit reds it instead of silently invalidating this paragraph.
+/// Today's loop happens to use only `continue` and `return`, but the census counts `break` and `?`
+/// as well — the earlier detector did not, and a `break` skips the push for its item AND every
+/// later one, which is the failure this whole enum exists to make impossible.
+///
+/// This is the badge's question. [`boundary_declines`] answers a strictly narrower one, and a
+/// promise derived from it alone is FALSE for `Tokens`, whose only hold is a pause.
+///
+/// # The citation gate for this subsystem
+///
+/// STEP (0) IS NOT ONE OF FOUR — IT RUNS FIRST AND CAN END THE SEARCH. Before citing any rule for
+/// code in this subsystem, read `types/game_state.rs`'s `scheduled_collapse_axes` doc: it is the
+/// SINGLE AUTHORITY for how this subsystem stands under CR 732, and if your question is answered
+/// there, cite it rather than re-deriving a reading beside it.
+///
+/// A WARNING WITH A WORKED EXAMPLE, because this step used to say the opposite. It previously told
+/// you that finding an existing "no CR licenses" admission ENDED the search — that looking for a
+/// rule was itself the category error. That instruction was wrong, and it was self-sealing: the
+/// admissions were written before the reading existed, and the gate then prevented anyone from
+/// checking whether they were true. Five citations were tried and rejected on this branch before
+/// the reading was found, which is what made the admissions look load-bearing. **An admission in
+/// the code is evidence about what a previous author concluded, never evidence about what the
+/// rules say.** Re-verify it against the text like any other claim.
+///
+/// THE CONSTRUCTIVE FORM OF STEP (0): A LICENSE CLAIM MUST NAME ITS INVARIANT. Do not assert that a
+/// rule licenses a site; state the property the site preserves and show the rule is about that
+/// property. Here the invariant is ELISION ≡ PERFORMANCE (`types::game_state`'s
+/// `scheduled_collapse_axes` doc), and CR 732.1a is what covers differences in the SYSTEM'S FORM so
+/// long as that invariant holds. A claim with no named invariant is the same error as an admission
+/// with no verification — both skip the step where someone could check.
+///
+/// The remaining steps always
+/// apply: (1) EXISTENCE — grep the rule number in `docs/MagicCompRules.txt`;
+/// (2) CONTENT, ON BOTH ANTECEDENT AXES — *subject* (who or what the antecedent is about; does it
+/// describe this code's actual matched text or predicate?) and *time* (an antecedent fixes a moment;
+/// a permission granted at proposal time does not travel past acceptance, and a legality condition
+/// on a proposal does not become a continuing-validity condition); (3) NORMATIVE DIRECTION — is this
+/// rule the one the code *applies*, or the one the code *deviates from*? Citing the deviated-from
+/// rule as a license inverts the annotation's meaning.
+///
+/// "NO CR GOVERNS THIS" IS STILL A SAFE, CORRECT, FINAL VERDICT WHERE IT IS TRUE — reaching for the
+/// next closest-sounding rule remains the error. In-tree precedent that survives: `game/filter.rs`'s
+/// `context_free_prop_matches_face` Kleene `AnyOf` arm, which answers an `Option<bool>` question
+/// that is not a rules behavior at all.
+///
+/// THE TWO FAILURE MODES ARE SYMMETRIC, AND THIS SUBSYSTEM HAS NOW COMMITTED BOTH. Citing a
+/// closest-sounding rule as a license inverts an annotation's meaning; conceding a deviation the
+/// code does not actually commit gives away a rule the implementation satisfies, and it is the
+/// harder error to detect because it reads as rigor. Prefer the reading you can defend clause by
+/// clause, and where a clause genuinely does not reach the code, say so — but only after checking.
+///
+/// DO NOT COPY A CITATION SET FROM ONE SITE TO ANOTHER. The parser
+/// (`parse_optional_token_substitution_choice` in `oracle_replacement.rs`)
+/// answers "what does this card's text create?"; this boundary answers "why does this mint pause?"
+/// Same card, different questions, different rules.
+///
+/// CR 614.1 / CR 614.1a TRAVEL TO THE BOUNDARY WHERE CR 608.2d CANNOT, because 614.1 is
+/// EVENT-SCOPED IN THE PERMISSIVE DIRECTION — "replacement effects apply continuously as events
+/// happen—they aren't locked in ahead of time" — and 614.1a is DEFINITIONAL, classifying what a
+/// replacement effect *is*, so it holds wherever such an effect exists. CR 608.2d is SOURCE-SCOPED
+/// — "if an effect OF A SPELL OR ABILITY offers any choices" — and at a source-less mint its
+/// antecedent is false by construction. Definitional and continuously-applying rules are
+/// site-portable; source-scoped rules are site-local.
+///
+/// CITE BY SYMBOL OR BY HEADING TEXT, NEVER BY LINE. No survivor list, no exemption for a cited
+/// file the change happens not to touch.
+///
+/// The rule has now failed twice, each time through its own carve-out. The first form exempted
+/// files the edit itself re-derives; this change then moved `derived_views.rs`'s CR 732 doctrine block
+/// ~120 lines and shipped five citations pointing at unrelated code, which read as "the no-CR
+/// precedent does not exist". The second form exempted a cited file *untouched by the change* and
+/// named three survivors — but that makes staleness depend on WHO edits rather than on whether the
+/// anchor can drift, and every survivor sat in a high-churn file (`replacement.rs` is 9000+ lines)
+/// where the next unrelated edit above it reloads the same gun. A carve-out that keeps needing to
+/// be renegotiated is the class, not an exception to it.
+///
+/// So there are none. Every citation in the enrolled files names a symbol or a greppable heading,
+/// both of which move WITH the code they point at. Every target converted cleanly — no cited
+/// location needed a heading added to it — so no carve-out language was needed either.
+///
+/// ENFORCED, NOT REQUESTED: `subsystem_citations_are_symbol_anchored` discovers its population by
+/// an opt-in marker comment and reds on any surviving line anchor. The rule used to be prose that
+/// only a reviewer could apply, which is how it shipped false twice. Read that test's doc for the
+/// residual hole it deliberately does not claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum BoundaryHold {
+    /// An observer of the growing class appeared accept→boundary, so the batched single-application
+    /// would no longer match the sequence's own result, and the engine declines it: `continue`, no
+    /// push, ∞ left for manual play. Runtime gate: [`boundary_declines`].
+    ///
+    /// THIS ARM ENFORCES CR 732.2c. The sentence above states the invariant without naming it: the
+    /// batched single-application "would no longer match the sequence's own result" — that is
+    /// ELISION ≢ PERFORMANCE, detected. CR 732.2c defines the advance as reaching the ending point
+    /// "with all game choices contained in the shortcut proposal having been taken", so the end
+    /// state must be the state those choices produce. Applying the batch anyway would land a state
+    /// they would NOT produce; replaying an observer-laden sequence would execute a proposal nobody
+    /// accepted. Declining to manual play is the only remaining CR 732-faithful option, and it
+    /// costs no player a decision — everyone keeps priority and performs the actions. The full
+    /// three-route statement with lemmas is at `types::game_state`'s `scheduled_collapse_axes` doc.
+    ///
+    /// An earlier revision of this doc said "NOT LICENSED BY ANY CR" and listed CR 732.1a/1b/2a/2b
+    /// as rules that "look close and are not". That list was built on the assumption that CR 732.2
+    /// is the exclusive procedure; CR 732.1a's plain text ("any shortcut system they use is
+    /// acceptable") is what refutes it, and CR 732.1b names this exact job — the shortcut rules
+    /// determine "how many times those actions are repeated … and how the loop is broken".
+    /// Declining an elision is not a deviation from a rule that licenses elision: the ELISION is
+    /// what needs a license, and its absence never does.
+    ObservedGrowth,
+    /// CR 614.1 + CR 614.1a: the fodder mint parked on a replacement choice, so the arm returns
+    /// through its pause transaction before the push — zero tokens minted, no finite amount chosen,
+    /// axis stays ∞. CR 614.1 is why an "instead" replacement still applies here: replacement effects
+    /// "apply continuously as events happen—they aren't locked in ahead of time" and "watch for a
+    /// particular event", and "you would create one or more tokens" is exactly the event this mint is.
+    /// CR 614.1a supplies only the CLASSIFICATION — that an "instead" effect is a replacement effect.
+    ///
+    /// WHY THE MINT IS SOURCE-LESS (the `ObjectId(0)` sentinel below): because it happens inside the
+    /// engine's deferral window, not during any spell or ability resolution. Under CR 732.2c the
+    /// growth would already have been applied at accept and there would be no boundary mint at all —
+    /// so 732.2c is the rule this DEVIATES FROM, not the rule that authorizes the sentinel. See
+    /// [`ObservedGrowth`] and `types/game_state.rs`'s `scheduled_collapse_axes` doc.
+    ///
+    /// TWO ingresses, both parking on the one `active_copy_token()` guard. Each names the arm of
+    /// `token_copy.rs`'s `replace_event` match that produces it:
+    ///   • the `ReplacementResult::NeedsChoice` arm — from ONE optional candidate
+    ///     (`replacement.rs`'s `replacement_is_optional` single-candidate branch; CR 614.1a
+    ///     "instead", e.g. Jinnie Fay, Jetmir's Second) or from ≥2 materially-ordered candidates
+    ///     (`replacement.rs`'s `replacement_ordering_is_material` branch; CR 616.1, whose text
+    ///     is scoped to "two or more" and so covers ONLY that ingress);
+    ///   • the `Execute` arm's `apply_create_token_after_replacement == false` early return.
+    /// NOT a hold: the `ReplacementResult::Prevented` arm mints zero tokens but does not
+    /// park, so the arm reaches its push — see [`materialization_certainty`].
+    ///
+    /// TWO RULES THAT DO NOT APPLY HERE:
+    ///   • CR 608.2d — "if an effect OF A SPELL OR ABILITY offers any choices"; at a source-less mint
+    ///     that antecedent is false by construction. It is correct at the PARSER
+    ///     (`parse_optional_token_substitution_choice` in `oracle_replacement.rs`) and is
+    ///     deliberately not imported.
+    ///   • CR 614.16 — "if an EFFECT would create one or more tokens"; the parsed tag is
+    ///     "if YOU would create" — that parser's literal
+    ///     `tag("if you would create one or more tokens, ")`.
+    CopyTokenPause,
+}
+
+impl BoundaryHold {
+    /// The full variant set. Production code never enumerates holds — it branches on
+    /// [`boundary_declines`] and on the one `active_copy_token()` guard — so this exists purely
+    /// for the completeness half of `boundary_hold_census_matches_the_apply_loop`, which is what
+    /// keeps a variant no kind can reach from being added.
+    #[cfg(test)]
+    pub(crate) const ALL: [BoundaryHold; 2] = [Self::ObservedGrowth, Self::CopyTokenPause];
+}
+
+/// The hold this item's KIND can take, independent of live state. `None` => the arm reaches the
+/// single `collapsed.push` unconditionally. No CR governs this — it is the control-flow census
+/// described on [`BoundaryHold`].
+pub(crate) fn possible_hold(item: &PersistentAxisMaterialization) -> Option<BoundaryHold> {
+    match item {
+        PersistentAxisMaterialization::Tokens(_) => Some(BoundaryHold::CopyTokenPause),
+        PersistentAxisMaterialization::Counters(_) | PersistentAxisMaterialization::Life { .. } => {
+            Some(BoundaryHold::ObservedGrowth)
+        }
+        // No non-push exit: `drive_persistent_axis_collapse` holds a `SimulationProbeGuard` so it
+        // cannot park, and `break`s to commit the successful prefix on a failed cycle — the arm
+        // always reaches the push.
+        PersistentAxisMaterialization::DriveSequence { .. } => None,
+    }
+}
+
+/// What the HUD may promise. `Conditional` iff the kind has a hold. No CR governs this — it is a
+/// display promise derived from the census above, not a rules behavior.
+///
+/// APPLIED-BUT-NULLIFIED is deliberately `Committed`: a `Counters` item whose bearers all left
+/// (CR 400.7, the inner stale-id skip), a `Prevented` mint, and a `DriveSequence` committing k<N all
+/// PUSH, so the ∞ genuinely ends. The shipped copy promises "a finite amount will be chosen", not a
+/// quantity.
+pub(crate) fn materialization_certainty(
+    item: &PersistentAxisMaterialization,
+) -> crate::game::derived_views::CollapseCertainty {
+    match possible_hold(item) {
+        Some(_) => crate::game::derived_views::CollapseCertainty::Conditional,
+        None => crate::game::derived_views::CollapseCertainty::Committed,
+    }
+}
+
+/// THE boundary's decline gate — the runtime half of [`BoundaryHold::ObservedGrowth`], whose rules
+/// frame (CR 732.1a/1b: the shortcut system decides how the loop is broken) is stated there. SINGLE AUTHORITY: the loop branches on this instead of
+/// per-arm `if *_observed_now`.
+pub(crate) fn boundary_declines(
+    item: &PersistentAxisMaterialization,
+    observed: ObservedGrowth,
+) -> bool {
+    match item {
+        PersistentAxisMaterialization::Tokens(_)
+        | PersistentAxisMaterialization::DriveSequence { .. } => false,
+        PersistentAxisMaterialization::Counters(_) => observed.counter,
+        PersistentAxisMaterialization::Life { .. } => observed.life,
     }
 }
 
@@ -2251,19 +2550,25 @@ pub(super) fn handle_resolution_choice(
                     // doubler pipeline. Re-check NOW (the firewall scans the board/stack, not
                     // the stash, so it needs no sequence): if an observer appeared, DECLINE
                     // the batched `Counters`/`Life` apply and leave those ∞ axes marked for
-                    // manual play (CR 732.2a / CR 732.2b never force a shortcut) —
-                    // unambiguously sound (never a wrong count). `Tokens` (N real ETB events)
-                    // and `DriveSequence` (N-cycle real replay) honor observers regardless
-                    // and always proceed. Only the ACTUALLY-applied items are cleared, so a
-                    // declined axis stays ∞.
+                    // manual play — unambiguously sound (never a wrong count). `Tokens` (N real
+                    // ETB events) and `DriveSequence` (N-cycle real replay) honor observers
+                    // regardless and always proceed. Only the ACTUALLY-applied items are
+                    // cleared, so a declined axis stays ∞.
                     // AXIS-SPECIFIC re-check: an observer of the counter class must not veto a
-                    // batched LIFE gain and vice-versa. Each axis re-runs its own firewall.
-                    let counter_observed_now =
-                        crate::analysis::resource::counter_growth_is_observed(state);
-                    let life_observed_now =
-                        crate::analysis::resource::life_growth_is_observed(state);
+                    // batched LIFE gain and vice-versa. Each axis re-runs its own firewall —
+                    // which is why `ObservedGrowth` carries both answers separately.
+                    // CR 732.1a/1b: this re-check is the shortcut system closing the elided loop
+                    // where the table understood it would close. The rules frame lives on
+                    // `ObservedGrowth::at_boundary` and `BoundaryHold::ObservedGrowth`; do not
+                    // re-derive one here.
+                    let observed = ObservedGrowth::at_boundary(state);
                     let mut collapsed: Vec<PersistentAxisMaterialization> = Vec::new();
                     for item in &items {
+                        // The ONE decline decision — `BoundaryHold::ObservedGrowth` (see its doc
+                        // for the CR 732.1a/1b frame).
+                        if boundary_declines(item, observed) {
+                            continue;
+                        }
                         match item {
                             PersistentAxisMaterialization::Tokens(profile) => {
                                 // CR 707.2 (+ CR 111.10): mint N tapped copy-tokens of the
@@ -2275,7 +2580,7 @@ pub(super) fn handle_resolution_choice(
                                 // stash is only registered under `if let Some(profile)` in
                                 // `materialize_object_growth_shortcut` (engine.rs), whose
                                 // `current_period_fodder` derives the profile from
-                                // `derived_fodder_class` (engine.rs:1991-2005), which returns `None`
+                                // `derived_fodder_class` (`game/engine.rs`), which returns `None`
                                 // unless EXACTLY one new battlefield object appeared per period
                                 // (`let id = new_ids.next()?; if new_ids.next().is_some() { None }`).
                                 // A k>1 period (two+ new objects/cycle) fails that gate ⇒ no `Tokens`
@@ -2307,38 +2612,52 @@ pub(super) fn handle_resolution_choice(
                                     ObjectId(0),
                                     events,
                                 );
-                                // CR 732.2a defense-in-depth: the offer firewall (the exhaustive
-                                // fail-closed `_ => Err(RecastAbort)` in `drive_loop_action_iteration`,
-                                // engine.rs:1871-1873, has no replacement-/target-choice arm)
-                                // guarantees a certified shortcut's per-cycle fodder mint cannot
-                                // pause, so this mint is unreachable-paused today. The boundary copies
-                                // the SAME fodder class (CR 707.2), so a mint that would pause implies
-                                // a certification that would have aborted. If that invariant ever
-                                // weakens, DO NOT advance the phase / mark the axis collapsed /
+                                // DEFENSE-IN-DEPTH AT ACCEPT ONLY. The offer firewall — the
+                                // exhaustive fail-closed `_ => Err(RecastAbort)` in
+                                // `drive_loop_action_iteration` (cited by symbol; it has no
+                                // replacement-/target-choice arm) — runs at CERTIFICATION. It
+                                // cannot bind this mint, which happens later: a replacement
+                                // effect installed AFTER the accept reaches this pause, and
+                                // `med_tokens_boundary_mint_pause_preserves_replacement_choice`
+                                // drives exactly that. Both ingresses come out of `token_copy.rs`'s
+                                // `replace_event` match: its `NeedsChoice` arm, and its `Execute`
+                                // arm's `apply_create_token_after_replacement == false` return.
+                                //
+                                // CR 614.1 + CR 614.1a: an "instead" replacement is a replacement
+                                // effect, and replacement effects "apply continuously as events
+                                // happen—they aren't locked in ahead of time", so one installed
+                                // after accept still watches this mint event. CR 616.1 covers only
+                                // the ≥2-candidate ordering ingress ("if two or more replacement
+                                // and/or prevention effects are attempting to modify …").
+                                //
+                                // CR 732.2c is named here ONLY as the rule this window DEVIATES
+                                // FROM: under it the growth would already have been applied at
+                                // accept and there would be no boundary mint to pause. See
+                                // `BoundaryHold::CopyTokenPause`.
+                                //
+                                // So: DO NOT advance the phase / mark the axis collapsed /
                                 // overwrite the replacement `waiting_for`: preserve the paused
-                                // copy-resolution and hand the replacement choice back (CR 732.2b
-                                // leaves the ∞ axes for manual play; game totals stay correct because
-                                // the ∞ marks are not cleared). No `debug_assert!` — the defensive
-                                // test deliberately drives this pause, which a debug_assert would panic.
+                                // copy-resolution and hand the replacement choice back (game totals
+                                // stay correct because the ∞ marks are not cleared). No
+                                // `debug_assert!` — the defensive test deliberately drives this
+                                // pause, which a debug_assert would panic.
+                                // BoundaryHold::CopyTokenPause
                                 if state.active_copy_token().is_some() {
                                     // CR 732.2a pause-safe transaction: cash out the axes already
                                     // applied THIS pass (a mixed stash, Edit 1 puts Tokens last) so
                                     // no finite-applied Counters/Life axis is left with a stale ∞
                                     // mark. The still-paused Tokens axis is NOT in `collapsed`, so
-                                    // its ∞ axis/pile is preserved for manual play (CR 732.2b never
-                                    // forces a shortcut). Do NOT drain the phase — the mint is
-                                    // mid-flight.
+                                    // its ∞ axis/pile is preserved for manual play (the loop has
+                                    // not closed yet, so the capability still stands; see
+                                    // `BoundaryHold::CopyTokenPause`). Do NOT drain the phase — the
+                                    // mint is mid-flight.
                                     state.clear_collapsed_materializations(player, &collapsed);
                                     return Ok(ResolutionChoiceOutcome::WaitingFor(
                                         state.waiting_for.clone(),
                                     ));
                                 }
-                                collapsed.push(item.clone());
                             }
                             PersistentAxisMaterialization::Counters(growths) => {
-                                if counter_observed_now {
-                                    continue; // decline (finding #4): leave the ∞ axis for manual play
-                                }
                                 for g in growths {
                                     // CR 400.7: a permanent that left the battlefield
                                     // accept→boundary is skipped (its object id is stale).
@@ -2357,15 +2676,11 @@ pub(super) fn handle_resolution_choice(
                                         events,
                                     );
                                 }
-                                collapsed.push(item.clone());
                             }
                             PersistentAxisMaterialization::Life {
                                 player: p,
                                 per_cycle_delta,
                             } => {
-                                if life_observed_now {
-                                    continue; // decline (finding #4): leave the ∞ axis for manual play
-                                }
                                 // CR 119.3 single life authority; SOUND only because the
                                 // firewall rejected any life-gain replacement/observer
                                 // (`apply_life_gain` re-runs the replacement pipeline, so a
@@ -2376,7 +2691,6 @@ pub(super) fn handle_resolution_choice(
                                     per_cycle_delta.saturating_mul(amount),
                                     events,
                                 );
-                                collapsed.push(item.clone());
                             }
                             PersistentAxisMaterialization::DriveSequence {
                                 sequence,
@@ -2387,16 +2701,22 @@ pub(super) fn handle_resolution_choice(
                                 crate::game::engine::drive_persistent_axis_collapse(
                                     state, sequence, amount,
                                 );
-                                collapsed.push(item.clone());
                             }
                         }
+                        // The SINGLE push. Reaching here means the growth applied; every other
+                        // outcome is a labelled `BoundaryHold` above. `possible_hold` is exactly
+                        // the set of arms that can skip this line. "Single" is asserted, not just
+                        // asked for: `boundary_apply_loop_region` panics on a second push, because
+                        // the exit census reads the text between the sort and the FIRST push.
+                        collapsed.push(item.clone());
                     }
                     // CR 732.2a: cash out ONLY the axes actually collapsed (axis-scoped) —
                     // end their ∞ status + stash + pile, PRESERVING any coexisting axis (a
                     // debug infinite-mana capability, or a finding-#4-declined axis). The ∞
                     // display collapses to an ordinary ×N for the collapsed axes (§9).
                     //
-                    // FINDING #4 DECLINED-AXIS ∞ LIFECYCLE (CR 732.2b): a declined `Counters`/`Life`
+                    // FINDING #4 DECLINED-AXIS ∞ LIFECYCLE (CR 732.1b — the shortcut system
+                    // determines how the loop is broken; see BoundaryHold::ObservedGrowth): a declined `Counters`/`Life`
                     // axis (`continue`d above without `collapsed.push`) is absent from `collapsed`,
                     // so `clear_collapsed_materializations` — which iterates ONLY `collapsed`
                     // (game_state.rs) — never removes its `unbounded_resources` /
@@ -2405,17 +2725,22 @@ pub(super) fn handle_resolution_choice(
                     // real), with game totals correct (the declined axis was not applied — no double
                     // count). It is retired by exactly TWO LIVE paths:
                     //   (a) a later GENUINE re-detection re-collapsing it — the empty-stack offer
-                    //       hook `try_offer_object_growth_shortcut` (engine.rs:472), which is NOT
-                    //       ∞-gated, so a fresh manual re-loop re-offers and re-registers a stash; and
-                    //   (b) debug toggle-off — `clear_unbounded_loop` via `engine_debug.rs:417`.
+                    //       hook `try_offer_object_growth_shortcut` (in `game/engine.rs`), which is
+                    //       NOT ∞-gated, so a fresh manual re-loop re-offers and re-registers a
+                    //       stash; and
+                    //   (b) debug toggle-off — `engine_debug.rs`'s `clear_unbounded_loop` call.
                     // NOTE: the enabler-departure clear (`clear_unbounded_loop` from
-                    // `zones.rs:544-554`) is INERT for this object-growth ∞-mark class, because
-                    // `materialize_object_growth_shortcut` (engine.rs) never calls
-                    // `register_unbounded_loop_enablers` (only the Interactive Path-C arm at
-                    // engine.rs:682 does), so `zones.rs`'s `unbounded_loop_enablers.contains(id)`
-                    // gate never matches an object-growth mark. Registering enablers for the
-                    // object-growth path is a PRE-EXISTING, broader gap (deferred follow-up F2), not
-                    // introduced by this declined-axis handling.
+                    // `zones::apply_zone_exit_cleanup`) is INERT for this object-growth ∞-mark
+                    // class, because `materialize_object_growth_shortcut` (engine.rs) never calls
+                    // `register_unbounded_loop_enablers` (only the Interactive Path-C arm does), so
+                    // `zones.rs`'s `unbounded_loop_enablers.contains(id)` gate never matches an
+                    // object-growth mark. It STAYS inert deliberately: `clear_unbounded_loop` drops
+                    // SIX maps including `pending_unbounded_materialization`, so registering
+                    // enablers here would let one departing token cancel the collapse the table
+                    // unanimously accepted (CR 732.2c: the shortcut is taken at the last accept).
+                    // The DISPLAY half of follow-up F2 is instead covered live at the projection by
+                    // `derived_views::object_growth_backing`, which drops an ∞ row whose entire
+                    // registered display set has left the battlefield without touching the stash.
                     state.clear_collapsed_materializations(player, &collapsed);
                     // Continue the boundary fixpoint (§7): re-draining either prompts the
                     // next APNAP player with a stash or restores Priority now.
@@ -2996,9 +3321,9 @@ pub(super) fn handle_resolution_choice(
                 // `validate_dig_selection` below requires every kept id to be in
                 // `selectable_cards` while this gate demands more ids than it
                 // holds — softlocking every controller. Matches the clamp the
-                // candidate enumerator (`ai_support/candidates.rs:1185`) and
-                // `cheap_reject_candidate` (`ai_support/mod.rs:702`) already
-                // apply.
+                // candidate enumerator (`ai_support/candidates.rs`'s
+                // `WaitingFor::DigChoice` arm) and `cheap_reject_candidate`'s own
+                // `WaitingFor::DigChoice` arm already apply.
                 let required = keep_count.min(selectable_cards.len());
                 if kept.len() != required {
                     return Err(EngineError::InvalidAction(format!(
@@ -9754,6 +10079,343 @@ mod tests {
             state.objects.get(&eligible).map(|obj| obj.zone),
             Some(Zone::Graveyard),
             "zero-choice must leave eligible cards unmoved"
+        );
+    }
+
+    /// Minimal 1/1 `CopiableValues` for the `Tokens` stash kind — only the VARIANT is under
+    /// test here, never the profile contents.
+    fn boundary_census_token_profile() -> Box<crate::types::ability::CopiableValues> {
+        Box::new(crate::types::ability::CopiableValues {
+            name: "Saproling".to_string(),
+            mana_cost: crate::types::mana::ManaCost::default(),
+            color: vec![],
+            card_types: crate::types::card_type::CardType::default(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            printed_loyalty: None,
+            keywords: vec![],
+            abilities: std::sync::Arc::default(),
+            trigger_definitions: std::sync::Arc::default(),
+            replacement_definitions: std::sync::Arc::default(),
+            static_definitions: std::sync::Arc::default(),
+        })
+    }
+
+    /// The boundary apply loop's own source region, sliced out of this file at compile time.
+    ///
+    /// WHY SOURCE TEXT. `possible_hold`'s wildcard-free `match` is compiler-enforced on the
+    /// `PersistentAxisMaterialization` VARIANT axis, but nothing in the type system binds it to the
+    /// loop's EXIT axis. Without this slice the census below compares `possible_hold` against a
+    /// hand-transcribed `vec![..]` — i.e. against itself — so adding an item-level non-push exit
+    /// reachable by `DriveSequence` would leave `possible_hold` still reporting
+    /// `DriveSequence => None ⇒ Committed` and the badge would silently resume promising `∞→N` for
+    /// a collapse that never lands. That is MED-2 recurring, invisibly. Reading engine source with
+    /// `include_str!` is the in-house technique for exactly this
+    /// (`tests/integration/cr_annotations.rs`); it does not recurse, so a file may read itself.
+    ///
+    /// THE REGION STARTS AT THE SORT, NOT AT THE `for`. The Tokens-last ordering is the reason the
+    /// `CopyTokenPause` `return` cannot strand a still-unapplied non-`Tokens` item — which is the
+    /// other way `DriveSequence => Committed` becomes a lie — so dropping it must red this test too.
+    ///
+    /// Panics rather than degrading into a file-wide scan if any anchor moves.
+    fn boundary_apply_loop_region() -> &'static str {
+        const SRC: &str = include_str!("engine_resolution_choices.rs");
+        const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
+        const SORT: &str =
+            "items.sort_by_key(|i| matches!(i, PersistentAxisMaterialization::Tokens(_)))";
+        const OPEN: &str = "for item in &items {";
+        const CLOSE: &str = "collapsed.push(item.clone());";
+
+        // PRODUCTION ONLY. The three anchors below are also `const` string literals in THIS module,
+        // so an un-truncated search silently falls through to the test's own source when an anchor
+        // is deleted from the loop: the `Tokens`-last drop probe reported `(0, 0)` — red, but for
+        // the wrong reason, with a `possible_hold` message pointing at a mutation that was really a
+        // missing sort. Truncating first makes a deleted anchor a named panic instead.
+        let production = SRC
+            .find(TEST_MOD)
+            .map(|at| &SRC[..at])
+            .expect("this file's inline test module header");
+
+        let sort = production
+            .find(SORT)
+            .expect("the Tokens-last stash ordering that keeps the pause from stranding items");
+        let open = production[sort..]
+            .find(OPEN)
+            .map(|at| at + sort)
+            .expect("the boundary apply loop opener");
+        // SINGLE-PUSH INVARIANT, IN CODE. `close` takes the FIRST push after the opener, so a push
+        // inserted higher in the body silently truncates the region and drops every exit below it
+        // from the census below — defeating it without failing it. The invariant used to be stated
+        // only in prose on the push itself.
+        assert_eq!(
+            production.matches(CLOSE).count(),
+            1,
+            "the boundary apply loop must contain exactly one `collapsed.push(item.clone());`; a \
+             second one silently narrows the census region instead of failing it"
+        );
+        let close = production[open..]
+            .find(CLOSE)
+            .map(|at| at + open)
+            .expect("the single collapsed.push");
+        &production[sort..close]
+    }
+
+    /// The citation rule on [`BoundaryHold`] shipped false twice as prose, each time through a
+    /// carve-out only a reviewer could apply. This is the executable form.
+    ///
+    /// MEASURED, not feared: at `BASE_SHA` this file already carried five line anchors, and four of
+    /// them pointed at unrelated code — `derived_fodder_class` was cited ~2500 lines from where it
+    /// lives, `try_offer_object_growth_shortcut` ~4200. Each was accurate when it was written.
+    /// That is the whole argument for symbol anchors, and it is why the rule needed a gate rather
+    /// than a stricter sentence.
+    ///
+    /// POPULATION IS DISCOVERED, NOT LISTED. The guard walks the crate and enforces on every file
+    /// carrying the opt-in marker comment, so a seventh file joining the class is covered the
+    /// moment it opts in, and a hardcoded list cannot drift out of sync with the class it names.
+    /// A whole-crate sweep was measured and rejected as out of scope, not as unnecessary:
+    /// `crates/engine/src` carries 216 such anchors across 61 files (`game/engine.rs` alone 29),
+    /// ~20x this change. Regenerate that census with:
+    ///
+    /// ```text
+    /// grep -rnoP '[A-Za-z0-9_./-]*[A-Za-z0-9_-]\.rs:[0-9]' crates/engine/src | wc -l
+    /// ```
+    ///
+    /// THE RESIDUAL HOLE, NAMED: a file that adds line-anchored citations WITHOUT the marker is not
+    /// covered — opting in is voluntary. This gate keeps the enrolled class honest; it does not
+    /// claim the 61 files that never enrolled. Closing that hole means enrolling them, not widening
+    /// this assertion.
+    ///
+    /// Two anchor forms are caught, because both shipped here: the named `<file>.rs:<line>` and the
+    /// bare `:<line>` back-reference used once the file has been named earlier in the same block.
+    /// A symbol-keyed sweep cannot see the bare form, which is exactly how the first pass
+    /// undercounted; sweep by pattern, never from a previous census.
+    ///
+    /// Production text only, where a file has an inline test module: a test module necessarily
+    /// writes such anchors into its own prose and messages.
+    #[test]
+    fn subsystem_citations_are_symbol_anchored() {
+        const MARKER: &str = "engine-citation-gate: symbol anchors only";
+        const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
+        // Enrolment floor. Not a list — a non-vacuity guard, so a broken walk or a renamed marker
+        // reds instead of passing on an empty population. Raise it when a file joins.
+        const ENROLLED_FLOOR: usize = 6;
+
+        // `CR 732.2a` has no colon; `std::vec` no digit; `field:1` and `{"Life":1}` have a name or
+        // a quote before the colon. A bare back-reference is recognized only after whitespace, a
+        // backtick or `(`, which is how every one of them was actually written.
+        fn line_anchored(line: &str) -> bool {
+            line.match_indices(':')
+                .filter(|(at, _)| line[at + 1..].starts_with(|c: char| c.is_ascii_digit()))
+                .any(|(at, _)| match line[..at].chars().next_back() {
+                    Some(c) if c.is_alphanumeric() || c == '_' => line[..at]
+                        .rsplit(|c: char| !(c.is_alphanumeric() || "._-/".contains(c)))
+                        .next()
+                        .is_some_and(|word| word.contains('.')),
+                    Some(' ' | '\t' | '`' | '(') => true,
+                    _ => false,
+                })
+        }
+
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        rs_files(&root.join("src"), &mut files);
+        rs_files(&root.join("tests"), &mut files);
+        files.sort();
+
+        let mut enrolled = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        for path in &files {
+            let Ok(src) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if !src.contains(MARKER) {
+                continue;
+            }
+            enrolled += 1;
+            let production = src.find(TEST_MOD).map_or(src.as_str(), |at| &src[..at]);
+            for (n, line) in production.lines().enumerate() {
+                if line_anchored(line) {
+                    offenders.push(format!(
+                        "{} line {} — {}",
+                        path.display(),
+                        n + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            enrolled >= ENROLLED_FLOOR,
+            "the citation gate found only {enrolled} enrolled files; it must find at least \
+             {ENROLLED_FLOOR}. A gate that discovers nothing passes vacuously — check the marker \
+             comment and the crate walk before lowering this floor"
+        );
+        assert!(
+            offenders.is_empty(),
+            "an enrolled file cites by line, which the rule on `BoundaryHold` forbids: an unrelated \
+             edit above the target silently repoints the citation, and four such citations were \
+             already stale when this gate was written. Name the symbol or a greppable heading \
+             instead.\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Whole-word occurrences of `keyword` in already-comment-stripped code. Bare `str::matches`
+    /// counts `should_continue;` and `breakfast`, so a census built on it moves under a rename —
+    /// and a census a rename can move is one people learn to silence.
+    fn count_exit_keyword(code: &str, keyword: &str) -> usize {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        code.match_indices(keyword)
+            .filter(|(at, _)| {
+                code[..*at].chars().next_back().is_none_or(|c| !is_ident(c))
+                    && code[at + keyword.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !is_ident(c))
+            })
+            .count()
+    }
+
+    /// B-1: `possible_hold` is the boundary apply loop's own non-push-exit census, so it must
+    /// agree with that loop kind-for-kind, and every `BoundaryHold` variant must be claimed by
+    /// at least one kind.
+    ///
+    /// REVERT-PROBE (matched positive AND negative in this one test):
+    ///   (a) `Tokens => None` ⇒ the `Tokens` hold/certainty assertions flip ⇒ RED.
+    ///   (b) `DriveSequence => Some(BoundaryHold::ObservedGrowth)` ⇒ the only `Committed` kind
+    ///       flips ⇒ RED.
+    ///   (c) a third `BoundaryHold` variant claimed by no kind ⇒ the completeness assertion reds.
+    ///   (d) ADD any item-level non-push exit to the loop ⇒ the exit-axis assertion reds. All four
+    ///       exit forms are counted — `continue`, `return`, `break`, `?`. The first two alone were
+    ///       not enough: a `break` skips the push for its item AND every later one, which is the
+    ///       MED-2 shape this census exists to catch, and it went uncounted.
+    ///   (e) REMOVE one (e.g. delete the `boundary_declines` guard) ⇒ it reds the other way.
+    ///   (f) drop the `items.sort_by_key(..)` ⇒ `boundary_apply_loop_region` panics ⇒ RED.
+    ///   (g) ADD a second `collapsed.push(item.clone());` ⇒ the single-push assertion in
+    ///       `boundary_apply_loop_region` panics ⇒ RED. Without it a push inserted higher in the
+    ///       body truncates the census region and drops the exits below it, silently.
+    #[test]
+    fn boundary_hold_census_matches_the_apply_loop() {
+        use crate::game::derived_views::CollapseCertainty;
+
+        let kinds = [
+            PersistentAxisMaterialization::Tokens(boundary_census_token_profile()),
+            PersistentAxisMaterialization::Counters(vec![]),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 2,
+            },
+            PersistentAxisMaterialization::DriveSequence {
+                sequence: vec![],
+                collapsed_axes: vec![],
+            },
+        ];
+
+        let holds: Vec<Option<BoundaryHold>> = kinds.iter().map(possible_hold).collect();
+        assert_eq!(
+            holds,
+            vec![
+                Some(BoundaryHold::CopyTokenPause),
+                Some(BoundaryHold::ObservedGrowth),
+                Some(BoundaryHold::ObservedGrowth),
+                None,
+            ],
+            "possible_hold must mirror the boundary loop's three non-push exits: the Tokens \
+             pause, and the Counters/Life observer declines. DriveSequence has none."
+        );
+
+        let certainties: Vec<CollapseCertainty> =
+            kinds.iter().map(materialization_certainty).collect();
+        assert_eq!(
+            certainties,
+            vec![
+                CollapseCertainty::Conditional,
+                CollapseCertainty::Conditional,
+                CollapseCertainty::Conditional,
+                CollapseCertainty::Committed,
+            ],
+            "certainty is Conditional iff the kind has a hold — DriveSequence is the only \
+             Committed kind, which is why ∞→N is reserved for it"
+        );
+
+        // COMPLETENESS: no BoundaryHold variant may exist that no kind can reach.
+        let mut claimed: Vec<BoundaryHold> = holds.into_iter().flatten().collect();
+        claimed.sort();
+        claimed.dedup();
+        assert_eq!(
+            claimed,
+            BoundaryHold::ALL.to_vec(),
+            "every BoundaryHold variant must be claimed by at least one materialization kind"
+        );
+
+        // EXIT-AXIS BINDING — the half the two assertions above cannot supply, because they compare
+        // `possible_hold` against a transcription of itself. Counting unit and decomposition are the
+        // ones stated on `BoundaryHold`: 4 control-flow statements = 1 push + 2 item-level non-push
+        // + 1 inner per-growth skip. Comment lines are stripped so prose ABOUT `continue`/`return`
+        // cannot inflate the count.
+        let code: String = boundary_apply_loop_region()
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The counters read raw text, and a string literal is not a comment, so one carrying the
+        // word `break` (or a `?`) would be counted as control flow — a red no reader could act on.
+        // There are none in the loop today; keep it that way, or teach the counters to skip them.
+        assert!(
+            !code.contains('"'),
+            "the boundary apply loop must carry no string literal — the exit census counts raw text"
+        );
+        // Whole-word so an identifier ending in a keyword cannot inflate the count.
+        let continues = count_exit_keyword(&code, "continue");
+        let returns = count_exit_keyword(&code, "return");
+        // `break` and `?` are exits the earlier `matches("continue;")` / `matches("return ")` pair
+        // could not see, which made claim (d) above false: a `break` skips the push for THIS item
+        // and every later one — the exact MED-2 shape — and `foo()?` leaves the function outright.
+        // Not hypothetical vocabulary: `possible_hold`'s own doc describes
+        // `drive_persistent_axis_collapse` as one that `break`s to commit a successful prefix.
+        let breaks = count_exit_keyword(&code, "break");
+        // Deliberately crude: `?Sized` or `'?'` would OVER-count, and over-counting reds (a human
+        // re-derives the census) while under-counting ships MED-2. The two directions are not
+        // symmetric, so the cheap matcher is the safe one.
+        let tries = code.matches('?').count();
+        assert_eq!(
+            (continues, returns, breaks, tries),
+            (2, 1, 0, 0),
+            "the boundary apply loop's control-flow census moved. Re-derive it, then update \
+             `possible_hold`, `BoundaryHold`, and this test together — an item-level exit that \
+             `possible_hold` does not know about makes the badge promise a collapse that never \
+             lands (MED-2)"
+        );
+
+        // The inner `for g in growths` stale-id skip (CR 400.7) is the ONE non-push statement whose
+        // ITEM still reaches the push, so it is subtracted rather than mapped to a variant. What is
+        // left must be exactly the hold set. Adding an item-level exit raises the left side without
+        // raising the right; removing one lowers it. Deliberately blind to WHICH kind of statement
+        // was added — a new inner skip reds this too, which forces a human to re-derive the census
+        // rather than letting the safe case train anyone to ignore it.
+        const INNER_PER_GROWTH_SKIPS: usize = 1;
+        assert_eq!(
+            continues + returns + breaks + tries - INNER_PER_GROWTH_SKIPS,
+            BoundaryHold::ALL.len(),
+            "every item-level non-push exit in the loop must be a labelled BoundaryHold, and every \
+             BoundaryHold must be one of those exits"
         );
     }
 }

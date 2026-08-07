@@ -963,6 +963,7 @@ fn ctx(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result,
+        provenance: None,
     })
 }
 
@@ -1425,6 +1426,7 @@ fn ctx_c(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     })
 }
 

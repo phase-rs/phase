@@ -365,6 +365,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 }
             } else {
                 StackEntryKind::ActivatedAbility {
@@ -460,6 +461,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             },
             &mut events,
@@ -532,6 +534,7 @@ mod tests {
                     source_name: "Front Face".to_string(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             },
             &mut events,

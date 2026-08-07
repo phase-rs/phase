@@ -12267,6 +12267,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         (state, ability_id)
@@ -13211,6 +13212,7 @@ mod tests {
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
                 die_result: None,
+                provenance: None,
             },
         });
 

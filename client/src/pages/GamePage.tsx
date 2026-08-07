@@ -150,7 +150,7 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
-import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import type { MultiplayerBoardLayout } from "../stores/preferencesStore.ts";
@@ -954,6 +954,10 @@ function GamePageContent({
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
+  // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
+  // it cannot answer "is anyone else at this table?".
+  const storeGameMode = useGameStore((s) => s.gameMode);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
     return getOpponentIds(gameState, perspectivePlayerId);
@@ -1617,6 +1621,7 @@ function GamePageContent({
             ? handleRequestTakeback
             : undefined
         }
+        takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
         debugClickModeButtonVisible={debugClickModeButtonVisible}

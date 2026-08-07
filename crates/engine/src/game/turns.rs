@@ -550,10 +550,19 @@ pub(super) fn drain_pending_phase_transition_progress(
                 state.waiting_for = WaitingFor::PayAmountChoice {
                     player: controller,
                     resource: PayableResource::LoopCollapse { axis },
-                    // ENGINE TOLERANCE, NOT A RULES ENTITLEMENT — no CR licenses this, and
-                    // none is cited: CR 732.2c says the shortcut "is taken" at the accepted
-                    // count and the game simply advances to that ending point, so there is no
-                    // re-choice and strictly `min` and `max` would both be the accepted N.
+                    // CR 732.2a: a proposal may be "a loop that repeats a specified number of
+                    // times", and the proposer is who specifies it — this prompt IS that
+                    // specification, taken at the ending point and bounded above by what the
+                    // table accepted. Naming fewer repetitions is CR 732.2b/2c shortening
+                    // realized, not a re-choice the rules withhold: a player may name a place
+                    // for a different game choice without specifying it at that time
+                    // (CR 732.2b), and at the new ending point a different choice is made
+                    // (CR 732.2c). Prefix consent (L3 at `types::game_state`'s
+                    // `scheduled_collapse_axes` doc): accepting a bound of N is declining to
+                    // shorten at every place up to N, so every value in [0, N] is a prefix the
+                    // table already consented to and that manual play reaches by simply
+                    // performing the actions — the offer gate admits only voluntarily-repeatable
+                    // periods (L1), so stopping early is always available unelided.
                     // `min: 0` is unchanged from BASE and kept as a deliberate NEVER-OVER-
                     // DELIVER fail-safe, not as wedge-avoidance — `min == max == N` is already
                     // a single legal answer, so a narrow range could not wedge the boundary.
