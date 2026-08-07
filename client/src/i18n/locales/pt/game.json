@@ -441,6 +441,8 @@
     "initiativeTooltip": "Tem a Iniciativa — aventura-se na Subcidade no início da manutenção",
     "cityBlessing": "Bênção da Cidade",
     "cityBlessingTooltip": "Bênção da Cidade — controla dez ou mais permanentes (Ascender)",
+    "enduringStory": "História duradoura",
+    "enduringStoryTooltip": "História duradoura — obtida por um permanente Storied e três permanentes históricos",
     "dungeonAriaLabel": "Aventurando-se em {{name}}, sala {{room}}",
     "dungeonTooltip": "Aventurando-se em {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",

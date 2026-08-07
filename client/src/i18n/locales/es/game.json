@@ -441,6 +441,8 @@
     "initiativeTooltip": "Tiene la Iniciativa — se aventura en la Ciudad Baja al inicio del mantenimiento",
     "cityBlessing": "Bendición de la ciudad",
     "cityBlessingTooltip": "Bendición de la ciudad — controla diez o más permanentes (Ascender)",
+    "enduringStory": "Historia perdurable",
+    "enduringStoryTooltip": "Historia perdurable — obtenida al controlar un permanente Storied y tres permanentes históricos",
     "dungeonAriaLabel": "Aventurándose en {{name}}, sala {{room}}",
     "dungeonTooltip": "Aventurándose en {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",

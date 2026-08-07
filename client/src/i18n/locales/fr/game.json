@@ -441,6 +441,8 @@
     "initiativeTooltip": "Détient l'Initiative — s'aventure dans la Ville souterraine au début de l'entretien",
     "cityBlessing": "Bénédiction de la cité",
     "cityBlessingTooltip": "Bénédiction de la cité — contrôle dix permanents ou plus (Ascension)",
+    "enduringStory": "Histoire durable",
+    "enduringStoryTooltip": "Histoire durable — obtenue grâce à un permanent Storied et trois permanents historiques",
     "dungeonAriaLabel": "Aventure dans {{name}}, salle {{room}}",
     "dungeonTooltip": "Aventure dans {{name}} — salle {{room}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",

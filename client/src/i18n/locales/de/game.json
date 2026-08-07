@@ -441,6 +441,8 @@
     "initiativeTooltip": "Hat die Initiative — wagt sich zu Beginn der Versorgung in die Unterstadt vor",
     "cityBlessing": "Segen der Stadt",
     "cityBlessingTooltip": "Segen der Stadt — kontrolliert zehn oder mehr bleibende Karten (Aufstieg)",
+    "enduringStory": "Bleibende Geschichte",
+    "enduringStoryTooltip": "Bleibende Geschichte — erhalten durch eine Storied bleibende Karte und drei historische bleibende Karten",
     "dungeonAriaLabel": "Wagt sich in {{name}} vor, Raum {{room}}",
     "dungeonTooltip": "Wagt sich in {{name}} vor — Raum {{room}}",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
