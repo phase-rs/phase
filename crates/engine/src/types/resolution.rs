@@ -1963,7 +1963,7 @@ impl ResolutionStack {
     /// terminal zone delivery cannot require the discard to be the stack top.
     pub fn discard_mut(&mut self, id: DiscardFrameId) -> Option<&mut DiscardFrame> {
         self.frames.iter_mut().rev().find_map(|frame| match frame {
-            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame),
+            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame.as_mut()),
             _ => None,
         })
     }
@@ -1972,7 +1972,7 @@ impl ResolutionStack {
     /// backing stack.
     pub fn discard(&self, id: DiscardFrameId) -> Option<&DiscardFrame> {
         self.frames.iter().rev().find_map(|frame| match frame {
-            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame),
+            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame.as_ref()),
             _ => None,
         })
     }
@@ -3638,7 +3638,7 @@ fn project_frames_into_legacy_state(
                 projected.resolution_stack.push_multi_draw(frame.clone())
             }
             ResolutionFrame::Discard(frame) => {
-                projected.resolution_stack.push_discard(frame.clone())
+                projected.resolution_stack.push_discard((**frame).clone())
             }
             ResolutionFrame::ConniveReentry(pending) => projected
                 .resolution_stack
