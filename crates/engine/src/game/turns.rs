@@ -3026,7 +3026,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply;
     use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -7460,15 +7462,30 @@ mod tests {
     }
 
     #[test]
-    fn auto_advance_skips_combat_phases() {
+    fn empty_combat_reaches_post_combat_main_after_priority_and_declaration() {
         let mut state = setup();
         state.phase = Phase::BeginCombat;
 
         let mut events = Vec::new();
         let waiting = auto_advance(&mut state, &mut events);
 
-        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.phase, Phase::BeginCombat);
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
+
+        state.waiting_for = waiting;
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
     }
 
     #[test]
