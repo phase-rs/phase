@@ -9,6 +9,12 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * Build the bounded card corpus for parallel AI scoring workers. The live
+ * main engine remains the only authority that owns the full card database.
+ */
+export function build_ai_card_subset(): string;
+
+/**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
  * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
  * classification — the frontend must not compute this from card lists itself.
@@ -95,17 +101,32 @@ export function export_replay_log(): string;
  */
 export function getFormatRegistry(): any;
 
-/** Return an opaque action proposal bound to the live engine decision domain. */
+/**
+ * Mint an opaque, authority-bound proposal for the AI's next action.
+ *
+ * Callers must submit it through [`submit_ai_action_proposal`]. The registry
+ * is local to this live WASM instance and is cleared
+ * on every successful state mutation, restore, resume, reset, and new game.
+ */
 export function get_ai_action_proposal(difficulty: string, player_id: number): any;
-/** Filter score-only worker output through the live contract and mint a proposal. */
-export function get_ai_action_proposal_from_scores(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
-/** Score candidates in an isolated worker. The result is not dispatchable. */
-export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
-/** Build the game-scoped card database used by parallel AI workers. */
-export function build_ai_card_subset(): string;
 
-/** Apply an opaque AI proposal, yielding an applied/stale/rejected tagged result. */
-export function submit_ai_action_proposal(token: string, actor: number, action: any): any;
+/**
+ * Convert score-only worker output into an authority-bound proposal.
+ *
+ * The worker state may be old, from another game, or maliciously altered.
+ * Consequently this endpoint always derives a new decision contract from the
+ * main WASM state, discards every score whose action is not an exact member,
+ * and only then mints an opaque proposal. There is intentionally no public
+ * score-to-`GameAction` endpoint.
+ */
+export function get_ai_action_proposal_from_scores(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
+
+/**
+ * Score candidates inside an isolated AI worker. These are plain,
+ * serializable hints rather than capabilities: they cannot cross the action
+ * boundary until the live main engine reissues an exact proposal.
+ */
+export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
 
 /**
  * Look up a card face by name from the loaded card database.
@@ -423,6 +444,15 @@ export function signatureSpellSelectionPolicy(request: any): any;
 export function submit_action(actor: number, action: any): any;
 
 /**
+ * Submit an action selected from an engine-issued AI proposal.
+ *
+ * A stale or foreign proposal is a normal race outcome and is returned as a
+ * tagged value. Rejected actions leave the proposal live for diagnostics or a
+ * retry; only a successful apply invalidates the authority generation.
+ */
+export function submit_ai_action_proposal(token: string, actor: number, action: any): any;
+
+/**
  * Submit one opaque, engine-authored interaction response. The browser never
  * materializes a `GameAction`; only a successful engine reducer result exposes
  * the exact action to the replay recorder.
@@ -443,6 +473,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
@@ -455,8 +486,7 @@ export interface InitOutput {
     readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
-    readonly get_ai_scored_candidates: (a: number, b: number, c: bigint) => [number, number, number];
-    readonly build_ai_card_subset: () => [number, number, number];
+    readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
@@ -486,7 +516,7 @@ export interface InitOutput {
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
-    readonly submit_ai_action_proposal: (a: number, b: number, c: any) => any;
+    readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
