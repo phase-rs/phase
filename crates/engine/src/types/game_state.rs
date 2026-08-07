@@ -7753,9 +7753,11 @@ fn reindex_persisted_batched_zone_change_trigger_keys(
             let old_index = json_usize(index).ok_or_else(|| {
                 "batched_zone_change_trigger_fired occurrence index must be an integer".to_string()
             })?;
-            if let Some(new_index) = old_to_current_index.get(&old_index) {
-                *index = serde_json::Value::from(*new_index);
-            }
+            let new_index = old_to_current_index.get(&old_index).ok_or_else(|| {
+                "batched_zone_change_trigger_fired current-turn key points to a pruned ledger row"
+                    .to_string()
+            })?;
+            *index = serde_json::Value::from(*new_index);
         }
     }
     Ok(())
@@ -22841,6 +22843,29 @@ mod tests {
             19,
             0
         )));
+    }
+
+    #[test]
+    fn persisted_zone_change_rejects_replay_key_for_pruned_stale_ledger_row() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        state
+            .zone_changes_this_turn
+            .push_back(persisted_zone_change_record(ObjectId(9_128), 18, 0));
+        state
+            .zone_changes_this_turn
+            .push_back(persisted_zone_change_record(ObjectId(9_129), 19, 1));
+        state.batched_zone_change_trigger_fired.insert((
+            printed_trigger_ref(2),
+            state.turn_number,
+            0,
+        ));
+
+        let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        let error = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect_err("a replay key for a pruned stale row cannot alias the compacted ledger");
+        assert!(error.to_string().contains("pruned ledger row"));
     }
 
     #[test]
