@@ -8481,7 +8481,7 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     (`tests/integration/search_delivery_observer_dedup.rs`) pins the
 ///     allocator->event fidelity link in production on ONE emit path only
 ///     (`zone_pipeline` -> `move_to_zone` ordinary arm -> `zones.rs:1362`). It
-///     is a sentinel, not a census over the three emit sites.
+///     is a sentinel, not a census over the four emit sites.
 ///
 /// KNOWN UNCLOSED GUARD GAP, deliberately out of scope here:
 /// `apply_resolved_zone_change` compares the recorder's return value against
