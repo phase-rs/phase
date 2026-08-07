@@ -23425,7 +23425,7 @@ mod tests {
                 .clone(),
             &state,
         );
-        state.resolution_stack = ResolutionStack::default();
+        state.resolution_stack = Box::default();
         let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
         v1["resolution_state_version"] = serde_json::Value::from(1);
         v1["pending_continuation"] =
