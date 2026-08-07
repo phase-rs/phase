@@ -7665,26 +7665,37 @@ fn reconcile_persisted_zone_change_occurrences(
         .as_array_mut()
         .ok_or_else(|| "zone_changes_this_turn must be an array".to_string())?;
 
+    // CR 514.2 + CR 400.7: this is a strictly current-turn ledger. A canonical
+    // restore can expose stale fixture/cache rows only after the wire projects
+    // into GameState; discard them before assigning the current occurrence
+    // namespace. Live deferred events keep their own recorded turn separately.
+    ledger.retain(|record| {
+        record
+            .get("recorded_turn_number")
+            .and_then(json_u32)
+            .is_none_or(|recorded_turn| recorded_turn == 0 || recorded_turn >= turn_number)
+    });
+
     let mut occurrences = Vec::with_capacity(ledger.len());
     for (index, record) in ledger.iter_mut().enumerate() {
         let record = record
             .as_object_mut()
             .ok_or_else(|| "zone_changes_this_turn entries must be objects".to_string())?;
         match record.get("recorded_turn_number") {
-            Some(recorded_turn)
-                if json_u32(recorded_turn).is_some_and(|turn| turn == turn_number) => {}
+            Some(recorded_turn) if json_u32(recorded_turn) == Some(turn_number) => {}
+            Some(recorded_turn) if json_u32(recorded_turn) == Some(0) => {}
+            Some(recorded_turn) if json_u32(recorded_turn).is_none() => {
+                return Err("zone_changes_this_turn has an invalid recorded turn".to_string());
+            }
             Some(_) => {
-                return Err(
-                    "zone_changes_this_turn contains a record from another turn".to_string()
-                );
+                return Err("zone_changes_this_turn contains a future-turn record".to_string());
             }
-            None => {
-                record.insert(
-                    "recorded_turn_number".to_string(),
-                    serde_json::Value::from(turn_number),
-                );
-            }
+            None => {}
         }
+        record.insert(
+            "recorded_turn_number".to_string(),
+            serde_json::Value::from(turn_number),
+        );
         record.insert(
             "turn_zone_change_index".to_string(),
             serde_json::Value::from(index),
@@ -7755,6 +7766,12 @@ fn reconcile_persisted_zone_changed_record(
     let index = record.get("turn_zone_change_index").and_then(json_usize);
 
     let (recorded_turn, index) = match recorded_turn {
+        Some(0) if current_turn != 0 => reconcile_current_turn_zone_changed_record(
+            record,
+            current_turn,
+            &fingerprint,
+            occurrences,
+        )?,
         Some(turn) if turn < current_turn => {
             let index = index.ok_or_else(|| {
                 "prior-turn ZoneChanged record is missing its occurrence index".to_string()
@@ -22738,6 +22755,35 @@ mod tests {
             .expect("stamped prior-turn event remains valid")
             .into_game_state();
         assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(18, 0)]);
+    }
+
+    #[test]
+    fn persisted_zone_change_prunes_stale_ledger_rows_before_rebinding_live_events() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
+        let current = persisted_zone_change_record(ObjectId(9_127), 19, 9);
+        state.zone_changes_this_turn.push_back(stale);
+        state.zone_changes_this_turn.push_back(current.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("stale ledger history is pruned before live event reconciliation")
+            .into_game_state();
+
+        assert_eq!(restored.zone_changes_this_turn.len(), 1);
+        assert_eq!(
+            (
+                restored.zone_changes_this_turn[0].recorded_turn_number,
+                restored.zone_changes_this_turn[0].turn_zone_change_index,
+            ),
+            (19, 0),
+            "the retained current-turn ledger row receives the current namespace"
+        );
+        assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(19, 0)]);
     }
 
     #[test]
