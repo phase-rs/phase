@@ -1958,39 +1958,6 @@ impl ResolutionStack {
         }
     }
 
-    /// Looks up the exact operation-owned discard frame by its unforgeable
-    /// frame id. A replacement child may temporarily sit above the frame, so a
-    /// terminal zone delivery cannot require the discard to be the stack top.
-    pub fn discard_mut(&mut self, id: DiscardFrameId) -> Option<&mut DiscardFrame> {
-        self.frames.iter_mut().rev().find_map(|frame| match frame {
-            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame.as_mut()),
-            _ => None,
-        })
-    }
-
-    /// Reads the exact operation-owned discard frame by id without exposing the
-    /// backing stack.
-    pub fn discard(&self, id: DiscardFrameId) -> Option<&DiscardFrame> {
-        self.frames.iter().rev().find_map(|frame| match frame {
-            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame.as_ref()),
-            _ => None,
-        })
-    }
-
-    /// Consumes one completed discard frame by its provenance id. The only
-    /// caller is the direct-child hand-off after its result was copied into
-    /// `SpellContext`; a frame may sit below a continuation while that hand-off
-    /// is prepared.
-    pub fn take_discard(&mut self, id: DiscardFrameId) -> Option<DiscardFrame> {
-        self.frames
-            .iter()
-            .rposition(|frame| matches!(frame, ResolutionFrame::Discard(frame) if frame.id == id))
-            .map(|index| match self.frames.remove(index) {
-                ResolutionFrame::Discard(frame) => *frame,
-                _ => unreachable!("discard frame index must contain a discard frame"),
-            })
-    }
-
     /// Consumes exactly the active discard frame.
     pub fn take_active_discard(&mut self) -> Result<Option<DiscardFrame>, ResolutionStackError> {
         match self.last() {
@@ -5447,10 +5414,12 @@ mod tests {
             restored.resolution_stack.next_discard_frame_id() > captured.0,
             "a restored discard allocator must remain above every live frame id"
         );
-        restored
+        let retired = restored
             .resolution_stack
-            .take_discard(captured)
+            .take_active_discard()
+            .expect("restored discard frame must be active")
             .expect("restored discard frame remains addressable");
+        assert_eq!(retired.id, captured);
         assert!(
             restored.resolution_stack.begin_discard(None) > captured,
             "the recovered allocator must not reuse an abandoned discard frame id"
@@ -5460,7 +5429,7 @@ mod tests {
         let duplicate_id = duplicate_state.resolution_stack.begin_discard(None);
         let duplicate = duplicate_state
             .resolution_stack
-            .discard(duplicate_id)
+            .active_discard()
             .expect("new discard frame exists")
             .clone();
         duplicate_state.resolution_stack.push_discard(duplicate);

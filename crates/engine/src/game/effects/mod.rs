@@ -772,20 +772,28 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
-        if let Some(discard_frame) = state
+        let discard_frame = state
             .resolution_stack
-            .active_ability_continuation_discard_parent_id()
-        {
-            let handed_off = discard::hand_off_recruit_discard_result(state, discard_frame);
-            debug_assert!(
-                handed_off,
-                "checked direct discard parent must hand off to its child"
-            );
-        }
-        let frame = state
+            .active_ability_continuation_discard_parent_id();
+        let mut frame = state
             .take_active_ability_continuation()
             .expect("checked active continuation must be consumable")
             .expect("checked active continuation must exist");
+        if let Some(discard_id) = discard_frame {
+            let discard = state
+                .resolution_stack
+                .take_active_discard()
+                .expect("direct Recruit parent must be active after its child is popped")
+                .expect("direct Recruit parent must exist");
+            assert_eq!(
+                discard.id, discard_id,
+                "direct Recruit parent id must remain adjacent"
+            );
+            frame
+                .pending
+                .chain
+                .set_direct_discard_result_for_immediate_node(discard.results.into_iter().next());
+        }
         let cont = frame.pending;
         let PendingContinuation {
             chain,
@@ -10160,8 +10168,12 @@ fn resolve_chain_body(
         if let Some((frame_id, result)) = result {
             discard_context = ability.clone();
             discard_context.context.direct_discard_result = Some(result);
-            state.resolution_stack.take_discard(frame_id).expect(
+            let retired = state.resolution_stack.take_active_discard().expect(
                 "completed Recruit discard frame must remain live until direct-child hand-off",
+            );
+            assert_eq!(
+                retired.expect("active Recruit frame must exist").id,
+                frame_id
             );
             &discard_context
         } else {
@@ -10174,8 +10186,12 @@ fn resolve_chain_body(
                     .active_discard()
                     .map(|frame| frame.id)
                 {
-                    state.resolution_stack.take_discard(frame_id).expect(
+                    let retired = state.resolution_stack.take_active_discard().expect(
                         "settled Recruit discard frame must remain live until its gate is checked",
+                    );
+                    assert_eq!(
+                        retired.expect("active Recruit frame must exist").id,
+                        frame_id
                     );
                 }
             }

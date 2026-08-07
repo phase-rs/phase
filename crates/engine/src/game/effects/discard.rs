@@ -87,10 +87,12 @@ pub(crate) fn complete_discard_to_graveyard(
             // (CR 701.9c: a card put elsewhere instead is still discarded —
             // the Execute arm above and the madness path both record + emit).
             if let Some(frame_id) = discard_frame {
-                state
+                let retired = state
                     .resolution_stack
-                    .take_discard(frame_id)
-                    .expect("prevented Recruit discard frame must remain live until completion");
+                    .take_active_discard()
+                    .expect("prevented Recruit discard frame must be active")
+                    .expect("prevented Recruit discard frame must exist");
+                assert_eq!(retired.id, frame_id);
             }
             return DiscardOutcome::Complete;
         }
@@ -124,34 +126,6 @@ pub(crate) fn complete_discard_to_graveyard(
 /// Hands the terminal result of a Recruit discard to its directly contingent
 /// continuation. This is called only after terminal zone delivery: a
 /// replacement choice may keep the operation parked until that point.
-pub(crate) fn hand_off_recruit_discard_result(
-    state: &mut GameState,
-    frame_id: crate::types::identifiers::DiscardFrameId,
-) -> bool {
-    let result = state
-        .resolution_stack
-        .discard(frame_id)
-        .and_then(|frame| frame.results.first())
-        .cloned();
-    let Some(frame) = state
-        .resolution_stack
-        .active_ability_continuation_with_discard_parent_mut(frame_id)
-    else {
-        return false;
-    };
-    if let Some(result) = result {
-        frame
-            .pending
-            .chain
-            .set_direct_discard_result_for_immediate_node(result);
-    }
-    state
-        .resolution_stack
-        .take_discard(frame_id)
-        .expect("completed Recruit discard frame must remain live until direct-child hand-off");
-    true
-}
-
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(
@@ -368,9 +342,12 @@ pub fn resolve(
                 }
                 ReplacementResult::Prevented => {
                     if let Some(frame_id) = discard_frame {
-                        state.resolution_stack.take_discard(frame_id).expect(
-                            "prevented Recruit discard frame must remain live until completion",
-                        );
+                        let retired = state
+                            .resolution_stack
+                            .take_active_discard()
+                            .expect("prevented Recruit discard frame must be active")
+                            .expect("prevented Recruit discard frame must exist");
+                        assert_eq!(retired.id, frame_id);
                     }
                 }
                 ReplacementResult::NeedsChoice(player) => {
@@ -658,7 +635,7 @@ mod tests {
         let discard_frame = state.resolution_stack.begin_discard(Some(ObjectId(99)));
         state
             .resolution_stack
-            .discard_mut(discard_frame)
+            .active_discard_mut()
             .expect("new Recruit frame exists")
             .results
             .push(result.clone());
@@ -702,7 +679,10 @@ mod tests {
             "a buried continuation must not consume the operation-owned result"
         );
         assert!(
-            state.resolution_stack.discard(discard_frame).is_some(),
+            state
+                .resolution_stack
+                .active_discard()
+                .is_some_and(|frame| frame.id == discard_frame),
             "nested replacement work must retain Recruit's exact frame"
         );
 
