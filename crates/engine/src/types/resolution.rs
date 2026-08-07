@@ -5444,7 +5444,7 @@ mod tests {
         );
 
         let mut duplicate_state = GameState::new_two_player(141);
-        let duplicate_id = duplicate_state.resolution_stack.begin_discard(None);
+        let _duplicate_id = duplicate_state.resolution_stack.begin_discard(None);
         let duplicate = duplicate_state
             .resolution_stack
             .active_discard()
