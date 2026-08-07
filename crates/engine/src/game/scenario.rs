@@ -1310,6 +1310,18 @@ impl GameRunner {
 
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        // Test scenarios historically modelled the transition out of precombat
+        // main as directly reaching DeclareAttackers. CR 507.2 now exposes the
+        // intervening priority window, so preserve that test-driver shorthand
+        // by passing the window only when a scenario submits its declaration.
+        // Live callers use `engine::apply` and must act during that window.
+        if matches!(&action, GameAction::DeclareAttackers { .. })
+            && self.state.phase == Phase::BeginCombat
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+        {
+            apply_as_current(&mut self.state, GameAction::PassPriority)?;
+            apply_as_current(&mut self.state, GameAction::PassPriority)?;
+        }
         apply_as_current(&mut self.state, action)
     }
 

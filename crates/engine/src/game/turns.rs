@@ -7473,8 +7473,17 @@ mod tests {
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
 
         state.waiting_for = waiting;
-        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
-        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+        for _ in 0..4 {
+            if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
+                break;
+            }
+            let actor = state.priority_player;
+            apply(&mut state, actor, GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
         apply(
             &mut state,
             PlayerId(0),

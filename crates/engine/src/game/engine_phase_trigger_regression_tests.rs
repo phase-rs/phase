@@ -331,6 +331,13 @@ fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
             .objects
             .get_mut(&source_id)
             .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
             .trigger_definitions
             .push(
                 TriggerDefinition::new(TriggerMode::Phase)
