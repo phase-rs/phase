@@ -68,10 +68,13 @@ upload_to_r2() {
         brotli -q 9 -c "client/$file" > "$BRDIR/$key.br"
         (cd client && pnpm wrangler r2 object put "$R2_BUCKET/$key" \
           --file "$BRDIR/$key.br" --content-type application/json --content-encoding br --remote)
-        # Update cache atomically
-        grep -v "^$key:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
-        echo "$key:$local_tag" >> "$DEPLOY_CACHE.tmp"
-        mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
+        # Record the tag in a private per-key file instead of editing
+        # $DEPLOY_CACHE here. Every entry in this loop runs in its own
+        # background subshell, so a read-modify-write through one shared
+        # "$DEPLOY_CACHE.tmp" path drops entries whenever two workers interleave:
+        # both read the old cache, both write the same temp name, and the last
+        # `mv` wins. The merge after the wait loop is the single writer.
+        echo "$key:$local_tag" > "$BRDIR/$key.cachetag"
       fi
     ) &
     json_pids+=($!)
@@ -99,6 +102,17 @@ upload_to_r2() {
     wait "$pid"
   done
   echo "R2 uploads complete."
+
+  # Fold the workers' recorded tags into $DEPLOY_CACHE. Every worker has exited
+  # by now, so this is the only process touching the file — the read-modify-write
+  # below is safe here in a way it was not inside the loop.
+  for tagfile in "$BRDIR"/*.cachetag; do
+    [ -e "$tagfile" ] || continue          # no glob match => nothing was uploaded
+    tag_entry=$(cat "$tagfile")
+    grep -v "^${tag_entry%%:*}:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
+    echo "$tag_entry" >> "$DEPLOY_CACHE.tmp"
+    mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
+  done
 
   # Verify uploads actually reached remote R2 (not local emulator)
   echo "Verifying R2 uploads are accessible..."

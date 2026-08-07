@@ -139,6 +139,50 @@ function loadLocaleArtInBackground(lang: string): void {
     });
 }
 
+/**
+ * Cache-key component for a resolved image URL. It encodes the *art vocabulary*
+ * the URL was produced with, not merely the language: before the locale map
+ * arrives every card legitimately resolves to English art, and caching that
+ * under a bare `"de"` key would pin it there forever — the background load
+ * dispatches an invalidation, but the request key would be unchanged, so the
+ * resolution effect would never re-run. Distinguishing pending from ready makes
+ * the map's arrival a genuine key change.
+ */
+function localeArtCacheKey(lang: string): string {
+  return isLocaleArtReady(lang) ? lang : `${lang}:pending`;
+}
+
+/**
+ * Load the active language's card-art map and re-render the caller when it
+ * lands, returning the art-locale key its URLs were resolved with.
+ *
+ * For components that resolve art through `resolvePrintingImageUrl` directly
+ * instead of through `useCardImage` — they otherwise render whatever vocabulary
+ * happened to be installed at mount and never hear about the map arriving.
+ *
+ * `useCardImage` deliberately does NOT call this: it already owns an
+ * `artCacheEvents` subscription filtered by oracleId, and an unfiltered second
+ * one per tile would resurrect the unscoped re-render storm that filter exists
+ * to prevent (see the subscription comment in the hook body). Callers of this
+ * hook subscribe once per component, not once per rendered card.
+ */
+export function useLocaleArt(): string {
+  const language = usePreferencesStore((s) => s.language);
+  const [, setLocaleArtTick] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setLocaleArtTick((t) => t + 1);
+    artCacheEvents.addEventListener("update", handler);
+    return () => artCacheEvents.removeEventListener("update", handler);
+  }, []);
+
+  useEffect(() => {
+    loadLocaleArtInBackground(language);
+  }, [language]);
+
+  return localeArtCacheKey(language);
+}
+
 function applyChainEntry(
   entry: ArtChainEntry,
   printings: PrintingEntry[],
@@ -414,17 +458,7 @@ export function useCardImage(
   // only its image is swapped for the same printing in their language. Cards
   // with no localized sibling keep their English art.
   const language = usePreferencesStore((s) => s.language);
-  loadLocaleArtInBackground(language);
-  /**
-   * Cache-key component for the resolved image URL. It encodes the *art
-   * vocabulary* a URL was produced with, not merely the language: before the
-   * locale map arrives every card legitimately resolves to English art, and
-   * caching that under a bare `"de"` key would pin it there forever — the
-   * background load dispatches an invalidation, but `requestKey` would be
-   * unchanged, so the resolution effect would never re-run. Distinguishing
-   * pending from ready makes the map's arrival a genuine key change.
-   */
-  const artLocaleKey = isLocaleArtReady(language) ? language : `${language}:pending`;
+  const artLocaleKey = localeArtCacheKey(language);
 
   const [src, setSrc] = useState<string | null>(null);
   const [isRotated, setIsRotated] = useState(false);
@@ -459,6 +493,20 @@ export function useCardImage(
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
   }, []);
+
+  // Kick the locale-art load from an effect, not from render. It writes
+  // module-global state (`desiredArtLang`, which decides whose fetch may
+  // install itself), and under concurrent rendering React may start a render
+  // and discard it — so a render-phase call can let a language that was never
+  // committed win that race. Running after commit means only the committed
+  // language is ever requested.
+  //
+  // Deliberately placed after the subscription effect above: effects run in
+  // source order, so the `update` listener is registered before any dispatch
+  // this load can trigger, even when `loadLocaleArt` resolves from cache.
+  useEffect(() => {
+    loadLocaleArtInBackground(language);
+  }, [language]);
 
   // The printings/art-strategy path indexes faces numerically, but for a
   // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its

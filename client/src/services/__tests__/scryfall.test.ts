@@ -1466,4 +1466,39 @@ describe("localized card art", () => {
     expect(mod.isLocaleArtReady("de")).toBe(true);
     expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
   });
+
+  it("dedupes concurrent loads of one locale into a single fetch", async () => {
+    const mod = await loadScryfallModule();
+    let settle: ((r: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof global.fetch;
+
+    // Both callers start while the request is still in flight. Several tiles
+    // mounting at once is the normal case, so the second must join the pending
+    // promise rather than opening its own request.
+    const first = mod.loadLocaleArt("de");
+    const second = mod.loadLocaleArt("de");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    settle!(
+      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const [mapA, mapB] = await Promise.all([first, second]);
+
+    // Same Map instance, so the body was parsed once and both callers observe
+    // one shared map rather than two equal copies.
+    expect(mapA).toBe(mapB);
+    expect(mapA.get(EN_ID)).toBe(DE_ID);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Reach guard: the deduped map is the one that actually got installed, so
+    // the identity assertions above are not describing a map nobody uses.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+  });
 });

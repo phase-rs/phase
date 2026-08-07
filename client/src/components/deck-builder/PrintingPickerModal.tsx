@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useLocaleArt } from "../../hooks/useCardImage.ts";
 import { getCardPrintings, resolvePrintingImageUrl } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -27,6 +28,15 @@ export function PrintingPickerModal({
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
   const [query, setQuery] = useState("");
+
+  // Tile URLs come from `resolvePrintingImageUrl` during render, which reads the
+  // installed locale-art map. Without this the picker would render whatever
+  // vocabulary happened to be loaded when it mounted: open it while the map is
+  // still in flight and every tile shows English art with no re-render when the
+  // map lands. The hook loads the active language's map and ticks this
+  // component when it arrives; the tile URLs are recomputed inline, so a
+  // re-render is all that is needed to pick up the swap.
+  useLocaleArt();
 
   const currentOverride = usePreferencesStore((s) => s.artOverrides[oracleId]);
   const setArtOverride = usePreferencesStore((s) => s.setArtOverride);
