@@ -7647,13 +7647,15 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
 /// current turn and the ledger position together, but historical payloads may
 /// omit either field and deserialize them as zero.
 ///
-/// This runs against canonical serialized `GameState` after `ResolutionStateWire`
-/// has projected legacy and v2 frame payloads into their typed live carriers.
+/// This runs against serialized `ResolutionStateWire` input before either v1
+/// legacy fields or v2 frames materialize into runtime state. The caller passes
+/// any v1-only live roots; v2 frames are part of the canonical root set below.
 /// Raw and Trusted persistence are both fallible at that boundary, and rebinding
-/// after the direct-current decoder returns would be too late: callers could
-/// already observe an ambiguous trigger event.
-fn reconcile_persisted_zone_change_occurrences(
+/// after deserialization would be too late: callers could already observe an
+/// ambiguous trigger event.
+pub(crate) fn reconcile_persisted_zone_change_occurrences(
     value: &mut serde_json::Value,
+    additional_live_event_roots: &[&str],
 ) -> Result<(), String> {
     let state = value
         .as_object_mut()
@@ -7719,7 +7721,7 @@ fn reconcile_persisted_zone_change_occurrences(
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
 
     let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
-    visit_persisted_live_zone_changed_records(state, &mut |record| {
+    visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
         reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
     })?;
 
@@ -7912,6 +7914,7 @@ fn reconcile_current_turn_zone_changed_record(
 /// to the current turn's ledger.
 fn visit_persisted_live_zone_changed_records(
     state: &mut serde_json::Map<String, serde_json::Value>,
+    additional_live_event_roots: &[&str],
     visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
     // The resolution stack contains paused delivery and continuation event
@@ -7937,10 +7940,17 @@ fn visit_persisted_live_zone_changed_records(
         "pending_cost_move_resume",
         "pending_deferred_life_cost_resume",
         "pending_discard_for_cost",
+        // ResolutionStateWire's current representation holds active frames
+        // here, never in legacy top-level continuation fields.
+        "resolution_frames",
     ];
 
-    for field in LIVE_EVENT_CARRIER_FIELDS {
-        if let Some(value) = state.get_mut(*field) {
+    for field in LIVE_EVENT_CARRIER_FIELDS
+        .iter()
+        .copied()
+        .chain(additional_live_event_roots.iter().copied())
+    {
+        if let Some(value) = state.get_mut(field) {
             visit_persisted_zone_changed_records_in_value(value, visit)?;
         }
     }
@@ -15640,12 +15650,9 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
-        let state = serde_json::from_value::<ResolutionStateWire>(value)
+        let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
-        let mut canonical = serde_json::to_value(state).map_err(|error| error.to_string())?;
-        reconcile_persisted_zone_change_occurrences(&mut canonical)?;
-        let mut state = Self::decode(canonical, GameStateDecodeMode::DirectCurrentRaw)?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -22697,7 +22704,7 @@ mod tests {
         let state = value
             .as_object_mut()
             .expect("persisted fixture has a state object");
-        visit_persisted_live_zone_changed_records(state, &mut |record| {
+        visit_persisted_live_zone_changed_records(state, &[], &mut |record| {
             let record = record
                 .as_object_mut()
                 .expect("serialized ZoneChanged record is an object");
@@ -22903,7 +22910,7 @@ mod tests {
         let future_state = future_state
             .as_object_mut()
             .expect("persisted fixture has a state object");
-        visit_persisted_live_zone_changed_records(future_state, &mut |record| {
+        visit_persisted_live_zone_changed_records(future_state, &[], &mut |record| {
             record
                 .as_object_mut()
                 .expect("event record is an object")
@@ -23000,7 +23007,7 @@ mod tests {
         let restored_state = persisted_state_payload_mut(&mut restored_wire)
             .as_object_mut()
             .expect("persisted fixture has a state object");
-        visit_persisted_live_zone_changed_records(restored_state, &mut |record| {
+        visit_persisted_live_zone_changed_records(restored_state, &[], &mut |record| {
             let record = record
                 .as_object()
                 .expect("serialized event record is an object");
@@ -23317,6 +23324,52 @@ mod tests {
             (record.recorded_turn_number, record.turn_zone_change_index),
             (19, 0),
             "projected continuation event is reconciled to its current ledger occurrence"
+        );
+    }
+
+    #[test]
+    fn v2_continuation_zone_change_event_reconciles_in_serialized_frame() {
+        let mut state = trigger_continuation_fixture();
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_172), state.turn_number, 0);
+        let event = persisted_zone_change_event(record.clone());
+        state.zone_changes_this_turn.push_back(record);
+        state.current_trigger_event = Some(event.clone());
+        state.current_trigger_events = vec![event];
+        state.resolution_stack = ResolutionStack::default();
+        let continuation = PendingContinuation::new(
+            state
+                .pending_trigger
+                .as_ref()
+                .expect("fixture has an active trigger")
+                .ability
+                .clone(),
+            &state,
+        );
+        state.park_ability_continuation(continuation);
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("v2 frame fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("v2 frame event reconciles before materialization")
+            .into_game_state();
+        let GameEvent::ZoneChanged { record, .. } = &restored
+            .active_ability_continuation()
+            .expect("v2 frame restores as an active continuation")
+            .trigger_context
+            .as_ref()
+            .expect("continuation retains its trigger context")
+            .event
+            .as_ref()
+            .expect("continuation retains the triggering event")
+        else {
+            panic!("continuation trigger context retains a ZoneChanged event");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "serialized v2 frame event is reconciled to its current ledger occurrence"
         );
     }
 

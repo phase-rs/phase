@@ -2676,14 +2676,22 @@ impl ResolutionStateWire {
         // both belong to `GameStateDecode`; no wire branch gets a private
         // `GameState` serde shortcut.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
-        let object = value
-            .as_object()
-            .expect("the checked resolution state wire remains an object");
 
         match version {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             LEGACY_RESOLUTION_STATE_WIRE_VERSION => {
+                crate::types::game_state::reconcile_persisted_zone_change_occurrences(
+                    &mut value,
+                    &[
+                        "pending_continuation",
+                        "pending_choose_zone_trigger_context",
+                        "pending_optional_trigger_event",
+                    ],
+                )?;
+                let object = value
+                    .as_object()
+                    .expect("the checked resolution state wire remains an object");
                 if object.contains_key("resolution_frames") {
                     return Err("v1 resolution state must not contain resolution_frames".to_string());
                 }
@@ -2847,6 +2855,13 @@ impl ResolutionStateWire {
                 Ok(Self { state: legacy })
             }
             RESOLUTION_STATE_WIRE_VERSION => {
+                crate::types::game_state::reconcile_persisted_zone_change_occurrences(
+                    &mut value,
+                    &[],
+                )?;
+                let object = value
+                    .as_object()
+                    .expect("the checked resolution state wire remains an object");
                 if legacy_resolution_wire_field(object).is_some() {
                     return Err("v2 resolution state must not contain a legacy resolution field".to_string());
                 }
