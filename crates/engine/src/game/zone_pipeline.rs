@@ -787,9 +787,9 @@ pub(crate) fn move_object_with_terminal(
     //   - discover.rs:~103 (put-back of unhit cards)
     //   - put_on_top.rs:~153 / ~158
     //   - cascade.rs:~154 (bottom-in-random-order)
-    // Migrating each onto this arm is a guaranteed no-op today (zero pool
-    // `Moved` defs target the library) but pins the redirect consult for the
-    // future. Re-verify the census before lifting:
+    // Migrating each onto this arm is a production no-op today (the only
+    // `Moved` definition targeting the library is test-only) but pins the
+    // redirect consult for the future. Re-verify the census before lifting:
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
