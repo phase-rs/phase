@@ -72,7 +72,8 @@ pub use swarm::{
 #[cfg(feature = "test-support")]
 pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
 pub use targeted_exchange::{
-    root_may_yield_adverse_exchange, targeted_exchange_verdict, TargetedExchangeVerdict,
+    is_targeted_exchange_root, root_may_yield_adverse_exchange, targeted_exchange_verdict,
+    TargetedExchangeVerdict,
 };
 #[cfg(feature = "test-support")]
 pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};

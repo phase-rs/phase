@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use engine::ai_support::{
-    targeted_exchange_verdict, AiDecisionContext, CandidateAction, TargetedExchangeVerdict,
+    is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
+    TargetedExchangeVerdict,
 };
 use engine::game::combat::AttackTarget;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
@@ -213,13 +214,12 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     // CR 601.2c + CR 608.2c: Target-sourced self-damage and fight exchanges are
     // evaluated from reducer-issued, fully-bound target paths before scoring.
     // `Indeterminate` stays fail-open: this is a proof-backed veto only.
-    if matches!(
-        ctx.candidate.action,
-        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
-    ) && matches!(
-        targeted_exchange_verdict(ctx.state, ctx.candidate),
-        TargetedExchangeVerdict::Reject
-    ) {
+    if is_targeted_exchange_root(&ctx.candidate.action)
+        && matches!(
+            targeted_exchange_verdict(ctx.state, ctx.candidate),
+            TargetedExchangeVerdict::Reject
+        )
+    {
         return GateDecision::Reject;
     }
 

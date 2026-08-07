@@ -6,9 +6,9 @@ use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, root_may_yield_adverse_exchange,
-    targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner, AiDecisionContract,
-    TargetedExchangeVerdict,
+    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root,
+    root_may_yield_adverse_exchange, targeted_exchange_verdict,
+    validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
 use engine::types::ability::{
     AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility, StaticDefinition,
@@ -545,10 +545,7 @@ fn fast_priority_action(
 /// `targeted_exchange_verdict`, the old path returned `true` on every root this
 /// one short-circuits.
 fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
-    if !matches!(
-        action,
-        GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
-    ) {
+    if !is_targeted_exchange_root(action) {
         return true;
     }
     if !root_may_yield_adverse_exchange(state, action) {

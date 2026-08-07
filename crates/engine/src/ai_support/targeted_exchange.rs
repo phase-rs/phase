@@ -46,8 +46,18 @@ enum RootBinding {
 impl RootBinding {
     fn from_action(action: &GameAction) -> Option<Self> {
         match action {
-            GameAction::CastSpell { object_id, .. } => Some(Self::Cast {
+            // These announcements all enter the normal casting pipeline with
+            // this card object as `PendingCast::object_id`, so their bound
+            // spell ability is authenticated exactly like a normal cast.
+            GameAction::CastSpell { object_id, .. }
+            | GameAction::CastSpellForFree { object_id, .. }
+            | GameAction::CastSpellAsMiracle { object_id, .. }
+            | GameAction::CastSpellAsMadness { object_id, .. } => Some(Self::Cast {
                 object_id: *object_id,
+            }),
+            GameAction::CastSpellAsSneak { hand_object, .. }
+            | GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(Self::Cast {
+                object_id: *hand_object,
             }),
             GameAction::ActivateAbility {
                 source_id,
@@ -99,6 +109,17 @@ impl RootBinding {
             }
         }
     }
+}
+
+/// Whether `action` has a stable spell or activation object that the bounded
+/// targeted-exchange preview can authenticate after announcement.
+///
+/// `CastPreparedCopy` and `CastParadigmCopy` intentionally remain outside this
+/// class: each action names its source, while its reducer synthesizes a distinct
+/// copy object before binding targets. Treating that source as the cast object
+/// would inspect the wrong ability tree.
+pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
+    RootBinding::from_action(action).is_some()
 }
 
 /// Clone-free precondition for [`targeted_exchange_verdict`]. `false` PROVES the
@@ -1358,7 +1379,7 @@ mod tests {
         );
     }
 
-    /// H6 — hostile branch precedence: a non-cast/non-activate action is answered
+    /// H6 — hostile branch precedence: a non-root action is answered
     /// by `RootBinding::from_action`, before the guard reads anything. The fixture
     /// deliberately holds a Fight spell so the `false` is about the action kind.
     #[test]
@@ -1381,6 +1402,56 @@ mod tests {
             TargetedExchangeVerdict::Indeterminate,
             "the verdict's own `RootBinding::from_action` early-out keeps its current precedence"
         );
+    }
+
+    #[test]
+    fn direct_card_cast_variants_are_targeted_exchange_roots() {
+        let object_id = ObjectId(1);
+        let card_id = CardId(1);
+        let actions = [
+            GameAction::CastSpell {
+                object_id,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsSneak {
+                hand_object: object_id,
+                card_id,
+                creature_to_return: ObjectId(2),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsWebSlinging {
+                hand_object: object_id,
+                card_id,
+                creature_to_return: ObjectId(2),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellForFree {
+                object_id,
+                card_id,
+                source_id: ObjectId(2),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsMiracle {
+                object_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            GameAction::CastSpellAsMadness {
+                object_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+        ];
+
+        assert!(actions.iter().all(is_targeted_exchange_root));
+        assert!(!is_targeted_exchange_root(&GameAction::CastPreparedCopy {
+            source: object_id,
+        }));
+        assert!(!is_targeted_exchange_root(&GameAction::CastParadigmCopy {
+            source: object_id,
+        }));
     }
 
     /// H7 — carrier completeness. Mirrors
