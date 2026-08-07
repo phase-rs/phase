@@ -1022,6 +1022,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ClassLevelGained { .. }
         | GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }

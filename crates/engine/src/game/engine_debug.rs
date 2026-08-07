@@ -772,6 +772,7 @@ pub fn route_debug_create_to_battlefield(
         enter_transformed: false,
         face_down_profile: None,
         enter_as_copy: None,
+        discard_frame: None,
         applied: HashSet::new(),
     };
 

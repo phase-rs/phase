@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::types::ability::{AbilityDefinition, ResolvedAbility, TargetRef};
+use crate::types::ability::{AbilityDefinition, DiscardedCardResult, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
@@ -21,7 +21,7 @@ use crate::types::game_state::{
     PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainStack,
     ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
 
 /// The complete shipped draw authority carried by one `MultiDraw` frame.
@@ -39,6 +39,18 @@ pub struct MultiDrawFrame {
     /// predecessor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connive_reentry: Option<PendingConniveReentry>,
+}
+
+/// CR 701.9a + CR 614.1: One discard operation's serializable authority.
+/// Replacement choices may suspend the operation, but only terminal delivery
+/// may append the captured hand-time result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscardFrame {
+    pub id: DiscardFrameId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<DiscardedCardResult>,
 }
 
 /// CR 603.12a + CR 608.2c: A repeated optional-cost process parked at one
@@ -189,6 +201,7 @@ pub enum ResolutionFrame {
     CoinFlip(PendingCoinFlip),
     Proliferate(PendingProliferateActions),
     MultiDraw(MultiDrawFrame),
+    Discard(DiscardFrame),
     ConniveReentry(PendingConniveReentry),
     LifeTotalAssignment(PendingLifeTotalAssignment),
     SpellResolution(PendingSpellResolution),
@@ -219,6 +232,7 @@ pub enum FrameKind {
     CoinFlip,
     Proliferate,
     MultiDraw,
+    Discard,
     ConniveReentry,
     LifeTotalAssignment,
     SpellResolution,
@@ -248,6 +262,7 @@ impl ResolutionFrame {
             Self::CoinFlip(_) => FrameKind::CoinFlip,
             Self::Proliferate(_) => FrameKind::Proliferate,
             Self::MultiDraw(_) => FrameKind::MultiDraw,
+            Self::Discard(_) => FrameKind::Discard,
             Self::ConniveReentry(_) => FrameKind::ConniveReentry,
             Self::LifeTotalAssignment(_) => FrameKind::LifeTotalAssignment,
             Self::SpellResolution(_) => FrameKind::SpellResolution,
@@ -283,6 +298,7 @@ impl ResolutionFrame {
             | Self::Proliferate(_)
             | Self::MutateMerge(_)
             | Self::MultiDraw(_)
+            | Self::Discard(_)
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
@@ -321,6 +337,7 @@ impl ResolutionFrame {
             | Self::PerPlayerZoneChoice(_)
             | Self::PerCategoryZoneChoice(_)
             | Self::MultiDraw(_)
+            | Self::Discard(_)
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
@@ -415,6 +432,10 @@ pub struct ResolutionStack {
     /// frame, so a stale captured ID cannot alias a later instruction.
     #[serde(default)]
     next_draw_sequence_frame_id: u64,
+    /// Monotonic allocator for operation-owned discard frames. It never
+    /// rewinds, so a stale replacement event cannot bind to a later discard.
+    #[serde(default)]
+    next_discard_frame_id: u64,
 }
 
 impl ResolutionStack {
@@ -445,8 +466,32 @@ impl ResolutionStack {
         self.next_draw_sequence_frame_id = next_frame_id;
     }
 
+    pub(crate) fn next_discard_frame_id(&self) -> u64 {
+        self.next_discard_frame_id
+    }
+
+    pub(crate) fn restore_next_discard_frame_id(&mut self, next_frame_id: u64) {
+        self.next_discard_frame_id = next_frame_id;
+    }
+
+    /// Starts one discard operation and returns its unique provenance id.
+    pub fn begin_discard(&mut self, source_id: Option<ObjectId>) -> DiscardFrameId {
+        let id = DiscardFrameId(self.next_discard_frame_id);
+        self.next_discard_frame_id = self.next_discard_frame_id.saturating_add(1);
+        self.push_discard(DiscardFrame {
+            id,
+            source_id,
+            results: Vec::new(),
+        });
+        id
+    }
+
     pub(crate) fn observe_draw_sequence_frame_id(&mut self, next_frame_id: u64) {
         self.next_draw_sequence_frame_id = self.next_draw_sequence_frame_id.max(next_frame_id);
+    }
+
+    fn observe_discard_frame_id(&mut self, id: DiscardFrameId) {
+        self.next_discard_frame_id = self.next_discard_frame_id.max(id.0.saturating_add(1));
     }
 
     /// Restores a v2 payload written before the outer allocator was serialized.
@@ -462,6 +507,22 @@ impl ResolutionStack {
             .max();
         if let Some(next_frame_id) = next_frame_id {
             self.observe_draw_sequence_frame_id(next_frame_id);
+        }
+    }
+
+    /// Restores the monotonic discard allocator from persisted in-flight
+    /// operations when an older wire payload omits its outer allocator.
+    fn recover_discard_allocator(&mut self) {
+        let next_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::Discard(frame) => Some(frame.id.0.saturating_add(1)),
+                _ => None,
+            })
+            .max();
+        if let Some(next_frame_id) = next_frame_id {
+            self.next_discard_frame_id = self.next_discard_frame_id.max(next_frame_id);
         }
     }
 
@@ -526,6 +587,51 @@ impl ResolutionStack {
         match self.frames.last_mut() {
             Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
             Some(_) | None => None,
+        }
+    }
+
+    /// Returns the active continuation only when the exact discard operation
+    /// is its immediate parent. This fixed adjacency is the authority that
+    /// permits a Recruit result to cross a replacement pause; arbitrary stack
+    /// searches would risk binding a sibling discard to the wrong child.
+    pub fn active_ability_continuation_with_discard_parent_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if discard.id == discard_id => {}
+            _ => return None,
+        }
+        match self.frames.get_mut(continuation_index) {
+            Some(ResolutionFrame::AbilityContinuation(continuation)) => Some(continuation),
+            Some(_) | None => {
+                unreachable!("checked direct continuation must retain its frame kind")
+            }
+        }
+    }
+
+    /// Identifies the exact discard parent of the active continuation without
+    /// exposing any non-adjacent frame.
+    pub fn active_ability_continuation_discard_parent_id(&self) -> Option<DiscardFrameId> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) => Some(discard.id),
+            _ => None,
         }
     }
 
@@ -1834,6 +1940,80 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::ConniveReentry(pending));
     }
 
+    /// Returns the active discard operation only when it owns the stack top.
+    /// Callers cannot recover a buried operation through a nested replacement
+    /// choice, preserving LIFO provenance.
+    pub fn active_discard(&self) -> Option<&DiscardFrame> {
+        match self.last() {
+            Some(ResolutionFrame::Discard(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active discard operation's terminal results.
+    pub fn active_discard_mut(&mut self) -> Option<&mut DiscardFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::Discard(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Looks up the exact operation-owned discard frame by its unforgeable
+    /// frame id. A replacement child may temporarily sit above the frame, so a
+    /// terminal zone delivery cannot require the discard to be the stack top.
+    pub fn discard_mut(&mut self, id: DiscardFrameId) -> Option<&mut DiscardFrame> {
+        self.frames.iter_mut().rev().find_map(|frame| match frame {
+            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame),
+            _ => None,
+        })
+    }
+
+    /// Reads the exact operation-owned discard frame by id without exposing the
+    /// backing stack.
+    pub fn discard(&self, id: DiscardFrameId) -> Option<&DiscardFrame> {
+        self.frames.iter().rev().find_map(|frame| match frame {
+            ResolutionFrame::Discard(frame) if frame.id == id => Some(frame),
+            _ => None,
+        })
+    }
+
+    /// Consumes one completed discard frame by its provenance id. The only
+    /// caller is the direct-child hand-off after its result was copied into
+    /// `SpellContext`; a frame may sit below a continuation while that hand-off
+    /// is prepared.
+    pub fn take_discard(&mut self, id: DiscardFrameId) -> Option<DiscardFrame> {
+        self.frames
+            .iter()
+            .rposition(|frame| matches!(frame, ResolutionFrame::Discard(frame) if frame.id == id))
+            .and_then(|index| match self.frames.remove(index) {
+                ResolutionFrame::Discard(frame) => Some(frame),
+                _ => unreachable!("discard frame index must contain a discard frame"),
+            })
+    }
+
+    /// Consumes exactly the active discard frame.
+    pub fn take_active_discard(&mut self) -> Result<Option<DiscardFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::Discard(_)) => {
+                let ResolutionFrame::Discard(frame) = self.pop_expected(FrameKind::Discard)? else {
+                    unreachable!("checked discard frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::Discard,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a discard operation before it enters replacement processing.
+    pub fn push_discard(&mut self, frame: DiscardFrame) {
+        self.observe_discard_frame_id(frame.id);
+        self.push_inner(ResolutionFrame::Discard(frame));
+    }
+
     /// Returns a life-total assignment tail only when it owns the active stack
     /// top.
     pub fn active_life_total_assignment(&self) -> Option<&PendingLifeTotalAssignment> {
@@ -2328,6 +2508,7 @@ impl ResolutionStack {
             });
         }
         let has_multi_draw = multi_draw_count == 1;
+        let mut discard_ids = HashSet::new();
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
@@ -2349,6 +2530,22 @@ impl ResolutionStack {
                         frame: FrameKind::MultiDraw,
                         message: "the resolution-stack draw allocator is behind its active frame"
                             .to_string(),
+                    });
+                }
+            }
+            if let ResolutionFrame::Discard(discard) = frame {
+                if !discard_ids.insert(discard.id) {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::Discard,
+                        message: "duplicate discard frame id".to_string(),
+                    });
+                }
+                if discard.id.0 >= self.next_discard_frame_id {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::Discard,
+                        message:
+                            "the resolution-stack discard allocator is behind its active frame"
+                                .to_string(),
                     });
                 }
             }
@@ -2680,6 +2877,7 @@ impl ResolutionStateWire {
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
                 frames.recover_draw_sequence_allocator();
+                frames.recover_discard_allocator();
 
                 let mut state_value = value;
                 let state_object = state_value.as_object_mut().expect("checked JSON object");
@@ -3349,6 +3547,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     let mut frames = ResolutionStack::default();
     frames
         .restore_next_draw_sequence_frame_id(state.resolution_stack.next_draw_sequence_frame_id());
+    frames.restore_next_discard_frame_id(state.resolution_stack.next_discard_frame_id());
 
     for frame in state.resolution_stack.iter() {
         if !frame.is_runtime_stack_resident() {
@@ -3371,6 +3570,9 @@ fn project_frames_into_legacy_state(
     projected
         .resolution_stack
         .restore_next_draw_sequence_frame_id(frames.next_draw_sequence_frame_id());
+    projected
+        .resolution_stack
+        .restore_next_discard_frame_id(frames.next_discard_frame_id());
     for frame in frames.iter() {
         match frame {
             ResolutionFrame::AbilityContinuation(frame) => {
@@ -3434,6 +3636,9 @@ fn project_frames_into_legacy_state(
             }
             ResolutionFrame::MultiDraw(frame) => {
                 projected.resolution_stack.push_multi_draw(frame.clone())
+            }
+            ResolutionFrame::Discard(frame) => {
+                projected.resolution_stack.push_discard(frame.clone())
             }
             ResolutionFrame::ConniveReentry(pending) => projected
                 .resolution_stack
@@ -5223,6 +5428,48 @@ mod tests {
         assert!(
             later > captured,
             "the recovered allocator must not reuse an ID captured by the abandoned draw frame"
+        );
+    }
+
+    #[test]
+    fn v2_reader_recovers_discard_allocator_and_rejects_duplicate_frame_ids() {
+        let mut state = GameState::new_two_player(140);
+        let captured = state.resolution_stack.begin_discard(None);
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("v2 active discard fixture serializes");
+
+        let mut stale_outer_allocator = v2.clone();
+        stale_outer_allocator["resolution_frames"]["next_discard_frame_id"] = Value::from(0);
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(stale_outer_allocator)
+            .expect("stale discard allocator is repaired from the active frame")
+            .into_game_state();
+        assert!(
+            restored.resolution_stack.next_discard_frame_id() > captured.0,
+            "a restored discard allocator must remain above every live frame id"
+        );
+        restored
+            .resolution_stack
+            .take_discard(captured)
+            .expect("restored discard frame remains addressable");
+        assert!(
+            restored.resolution_stack.begin_discard(None) > captured,
+            "the recovered allocator must not reuse an abandoned discard frame id"
+        );
+
+        let mut duplicate_state = GameState::new_two_player(141);
+        let duplicate_id = duplicate_state.resolution_stack.begin_discard(None);
+        let duplicate = duplicate_state
+            .resolution_stack
+            .discard(duplicate_id)
+            .expect("new discard frame exists")
+            .clone();
+        duplicate_state.resolution_stack.push_discard(duplicate);
+        let duplicate_wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(duplicate_state))
+                .expect("malformed duplicate fixture serializes for reader validation");
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(duplicate_wire).is_err(),
+            "a wire payload with duplicate discard frame ids must be rejected"
         );
     }
 

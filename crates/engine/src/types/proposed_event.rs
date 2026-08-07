@@ -418,6 +418,11 @@ pub enum ProposedEvent {
         /// delivered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enter_as_copy: Option<Box<CopyTokenSpec>>,
+        /// CR 701.9a + CR 614.1: Preserves an operation-owned discard frame
+        /// through the inner hand-to-destination move and any replacement
+        /// choices. Unrelated zone changes omit it from the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -601,6 +606,11 @@ pub enum ProposedEvent {
         /// actions (cleanup hand-size discard).
         #[serde(default)]
         caused_by_effect: bool,
+        /// CR 701.9a + CR 614.1: Operation-owned provenance for an in-flight
+        /// discard. `None` preserves ordinary discard/cost behavior; Recruit
+        /// installs an id before the event enters replacement processing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -754,6 +764,7 @@ impl ProposedEvent {
             enter_transformed: false,
             face_down_profile: None,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
         }
     }

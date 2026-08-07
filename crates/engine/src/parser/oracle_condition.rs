@@ -298,6 +298,7 @@ fn static_condition_to_restriction_condition(
         }),
         // Player-state leaves with an exact restriction evaluator.
         StaticCondition::HasCityBlessing => Some(ParsedCondition::HasCityBlessing),
+        StaticCondition::HasEnduringStory => Some(ParsedCondition::HasEnduringStory),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }

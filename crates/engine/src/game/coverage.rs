@@ -3924,6 +3924,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
+        AbilityCondition::HasEnduringStory => "has an enduring story".into(),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => {
+            format!("discarded card matches {}", fmt_target(filter))
+        }
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
@@ -4070,6 +4074,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             "a spell was cast with this variant this turn".into()
         }
         TC::HasCityBlessing => "has the city's blessing".into(),
+        TC::HasEnduringStory => "has an enduring story".into(),
         TC::CompletedDungeon { .. } => "completed a dungeon".into(),
         TC::SourceIsTapped => "source is tapped".into(),
         TC::SourceIsTransformed => "source is transformed".into(),
@@ -4226,6 +4231,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
+        SC::HasEnduringStory => "has an enduring story".into(),
         SC::CompletedADungeon => "completed a dungeon".into(),
         SC::WasStartingPlayer { .. } => "was the starting player".into(),
         SC::SpellCastWithVariantThisTurn { .. } => {
@@ -7425,6 +7431,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        AbilityCondition::HasEnduringStory => ("HasEnduringStory", Handled),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => {
+            ("DiscardedCardMatchesFilter", Handled)
+        }
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
@@ -7828,6 +7838,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        StaticCondition::HasEnduringStory => ("HasEnduringStory", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),

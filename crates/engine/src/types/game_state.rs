@@ -9647,6 +9647,10 @@ pub enum WaitingFor {
         /// the player may discard 1 card matching this filter instead of `count`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unless_filter: Option<crate::types::ability::TargetFilter>,
+        /// CR 701.9a + CR 614.1: Optional operation-owned provenance for a
+        /// resolving discard (not discard costs or Ward).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
     },
     /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
     /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
@@ -14807,6 +14811,11 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub city_blessing: HashSet<PlayerId>,
 
+    /// Players with an enduring story. Once gained, it persists for the game.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub enduring_story: HashSet<PlayerId>,
+
     /// CR 702.50a-b: Active Epic effects — one per resolved Epic spell. Each
     /// entry is a rest-of-game record: its controller can't cast spells
     /// (CR 702.50b, derived via `epic::is_epic_locked`) and, at the beginning of
@@ -18864,6 +18873,7 @@ impl GameState {
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
+            enduring_story: HashSet::new(),
             epic_effects: Vec::new(),
             restrictions: Vec::new(),
             pending_damage_replacements: Vec::new(),
@@ -20557,6 +20567,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         exiled_from_hand_this_resolution: _,
         monarch: _,
         city_blessing: _,
+        enduring_story: _,
         epic_effects: _,
         restrictions: _,
         pending_damage_replacements: _,
@@ -20856,6 +20867,7 @@ impl PartialEq for GameState {
             && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.city_blessing == other.city_blessing
+            && self.enduring_story == other.enduring_story
             && self.planar_deck == other.planar_deck
             && self.planar_controller == other.planar_controller
             && self.planar_die_actions_this_turn == other.planar_die_actions_this_turn
@@ -25297,6 +25309,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::Discard,
             up_to: false,
             unless_filter: None,
+            discard_frame: None,
         }));
         variants.push(Box::new(WaitingFor::EffectZoneChoice {
             player: PlayerId(0),

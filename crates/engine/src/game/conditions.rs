@@ -176,6 +176,10 @@ pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) ->
     state.city_blessing.contains(&controller)
 }
 
+pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
+    state.enduring_story.contains(&controller)
+}
+
 /// CR 400.7: True when the source permanent entered the battlefield this turn.
 pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: ObjectId) -> bool {
     state

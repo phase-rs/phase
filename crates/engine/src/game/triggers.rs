@@ -44,8 +44,8 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
-    counter_condition_matches_lki, eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
-    eval_no_monarch, eval_source_is_attacking,
+    counter_condition_matches_lki, eval_has_city_blessing, eval_has_enduring_story,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_is_attacking,
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
@@ -10361,6 +10361,7 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
+        TriggerCondition::HasEnduringStory => eval_has_enduring_story(state, controller),
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
         // wraps via `Not { Box::new(SourceIsTapped) }`. No battlefield zone guard
         // (trigger conditions; zone already constrained by functioning-abilities path).
@@ -31267,6 +31268,7 @@ pub mod tests {
             | Keyword::Exploit
             | Keyword::Explore
             | Keyword::Ascend
+            | Keyword::Storied
             | Keyword::StartYourEngines
             | Keyword::Dredge(_)
             | Keyword::Modular(_)

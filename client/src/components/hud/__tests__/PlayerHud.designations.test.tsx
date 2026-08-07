@@ -87,6 +87,16 @@ describe("PlayerHud designations", () => {
     });
   });
 
+  describe("Enduring Story", () => {
+    it("renders only for the designated local player", () => {
+      act(() => {
+        useGameStore.setState({ gameState: buildGameState({ enduring_story: [0] }) });
+      });
+      render(<PlayerHud />);
+      expect(screen.getByLabelText("Enduring Story")).toBeInTheDocument();
+    });
+  });
+
   describe("Ring level", () => {
     it("renders the ring counter at level 3 for the local player", () => {
       act(() => {

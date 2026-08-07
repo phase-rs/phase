@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
     eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
@@ -772,6 +772,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
+        if let Some(discard_frame) = state
+            .resolution_stack
+            .active_ability_continuation_discard_parent_id()
+        {
+            let handed_off = discard::hand_off_recruit_discard_result(state, discard_frame);
+            debug_assert!(
+                handed_off,
+                "checked direct discard parent must hand off to its child"
+            );
+        }
         let frame = state
             .take_active_ability_continuation()
             .expect("checked active continuation must be consumable")
@@ -2440,6 +2450,15 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
+    // contingent child. Every ordinary hand-off clears it, preventing a later
+    // grandchild (or an unrelated chain branch) from reading stale provenance.
+    if !matches!(
+        parent.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        child.context.direct_discard_result = None;
+    }
     // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
     // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
     // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice
@@ -2883,7 +2902,8 @@ fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
 
 fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::ZoneChangedThisWay { .. } => true,
+        AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. } => true,
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_depends_on_zone_change_this_way(lhs)
                 || quantity_expr_depends_on_zone_change_this_way(rhs)
@@ -2942,13 +2962,13 @@ fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> boo
     }
 }
 
-fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
+fn condition_contains_designation(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::HasCityBlessing => true,
-        AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
-        AbilityCondition::ConditionInstead { inner } => condition_contains_city_blessing(inner),
+        AbilityCondition::HasCityBlessing | AbilityCondition::HasEnduringStory => true,
+        AbilityCondition::Not { condition } => condition_contains_designation(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_contains_designation(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_contains_city_blessing)
+            conditions.iter().any(condition_contains_designation)
         }
         _ => false,
     }
@@ -10119,6 +10139,48 @@ fn resolve_chain_body(
             _ => None,
         })
         .collect();
+    // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
+    // operation-owned discard frame. Unlike an event-slice or global ledger,
+    // the frame remains exact through replacement redirection and cannot be
+    // satisfied by a sibling discard from the same source.
+    let mut discard_context;
+    let ability = if matches!(
+        ability.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        let result = state.resolution_stack.active_discard().and_then(|frame| {
+            frame
+                .results
+                .first()
+                .map(|result| (frame.id, result.clone()))
+        });
+        if let Some((frame_id, result)) = result {
+            discard_context = ability.clone();
+            discard_context.context.direct_discard_result = Some(result);
+            state.resolution_stack.take_discard(frame_id).expect(
+                "completed Recruit discard frame must remain live until direct-child hand-off",
+            );
+            &discard_context
+        } else {
+            // A prevented/no-op Recruit discard cannot satisfy its contingent
+            // instruction. Once no prompt remains, retire the operation frame
+            // instead of letting it leak into a later discard resolution.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(frame_id) = state
+                    .resolution_stack
+                    .active_discard()
+                    .map(|frame| frame.id)
+                {
+                    state.resolution_stack.take_discard(frame_id).expect(
+                        "settled Recruit discard frame must remain live until its gate is checked",
+                    );
+                }
+            }
+            ability
+        }
+    } else {
+        ability
+    };
     // CR 608.2c + CR 109.5: Accumulate player actions across the chain for
     // `PlayerFilter::PerformedActionThisWay`. This is distinct from
     // `last_zone_changed_ids`: "searched this way" keys off the player action
@@ -10314,9 +10376,10 @@ fn resolve_chain_body(
     if ability.sub_ability.as_ref().is_some_and(|sub| {
         sub.condition
             .as_ref()
-            .is_some_and(condition_contains_city_blessing)
+            .is_some_and(condition_contains_designation)
     }) {
         crate::game::sba::apply_city_blessing_if_triggered(state, events);
+        crate::game::sba::apply_enduring_story_if_triggered(state, events);
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -11841,6 +11904,23 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),
+        AbilityCondition::HasEnduringStory => eval_has_enduring_story(state, ability.controller),
+        // CR 701.9a + CR 608.2c + CR 400.7: Recruit reads the captured
+        // hand-time characteristics of the card discarded by its direct parent;
+        // a redirect and any destination-zone incarnation are irrelevant.
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => ability
+            .context
+            .direct_discard_result
+            .as_ref()
+            .is_some_and(|result| {
+                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    result.object_id,
+                    &result.lki,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         // CR 701.54a: Ring-bearer designation on the ability source.
         AbilityCondition::IsRingBearer => crate::game::effects::ring::is_current_ring_bearer(
             state,
@@ -23072,6 +23152,7 @@ mod tests {
     fn evaluate_condition_city_blessing_checks_ability_controller() {
         let mut state = GameState::new_two_player(42);
         state.city_blessing.insert(PlayerId(0));
+        state.enduring_story.insert(PlayerId(0));
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -23087,6 +23168,11 @@ mod tests {
             &state,
             &ability,
         ));
+        assert!(evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
+            &state,
+            &ability,
+        ));
 
         let opponent_ability = ResolvedAbility::new(
             Effect::Draw {
@@ -23099,6 +23185,11 @@ mod tests {
         );
         assert!(!evaluate_condition(
             &AbilityCondition::HasCityBlessing,
+            &state,
+            &opponent_ability,
+        ));
+        assert!(!evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
             &state,
             &opponent_ability,
         ));

@@ -4524,6 +4524,7 @@ pub(super) fn handle_resolution_choice(
                 effect_kind,
                 up_to,
                 unless_filter,
+                discard_frame,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -4579,11 +4580,12 @@ pub(super) fn handle_resolution_choice(
             let events_before_effect = events.len();
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                    effects::discard::discard_caused_by_effect_with_source(
+                    effects::discard::discard_caused_by_effect_with_source_and_frame(
                         state,
                         card_id,
                         player,
                         Some(source_id),
+                        discard_frame,
                         events,
                     )
                 {
@@ -4651,6 +4653,15 @@ pub(super) fn handle_resolution_choice(
                         .chain
                         .set_optional_effect_performed_recursive(true);
                 }
+            }
+
+            // CR 701.9a + CR 608.2c: A Recruit discard that paused for card
+            // selection now has its terminal LKI result in the operation-owned
+            // frame. Stamp that result only onto the deferred direct child before
+            // the continuation drains; the ordinary parent→child hand-off clears
+            // it again for grandchildren.
+            if let Some(frame_id) = discard_frame {
+                effects::discard::hand_off_recruit_discard_result(state, frame_id);
             }
 
             // CR 608.2c + CR 400.7j: A reflexive sub deferred across this

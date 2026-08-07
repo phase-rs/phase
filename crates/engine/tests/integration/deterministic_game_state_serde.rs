@@ -205,6 +205,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "public_revealed_cards",
         "player_actions_this_way",
         "city_blessing",
+        "enduring_story",
     ] {
         add_spec(
             &mut specs,
@@ -1192,6 +1193,7 @@ fn build_populated_state(reverse: bool) -> GameState {
         token_creator_order.reverse();
     }
     state.players_who_created_token_this_turn = token_creator_order.into_iter().collect();
+    state.enduring_story = player_order.iter().copied().collect();
     state.ring_level = player_order
         .into_iter()
         .map(|player| (player, player.0 + 1))
@@ -1331,6 +1333,7 @@ fn assert_representative_membership(state: &GameState) {
         assert!(state.players_who_created_token_this_turn.contains(&player));
     }
     assert_eq!(state.ring_level.len(), 2);
+    assert_eq!(state.enduring_story.len(), 2);
     assert_eq!(state.attacked_defenders_this_turn.len(), 2);
     assert_eq!(state.steps_to_skip.len(), 2);
     assert_eq!(state.objects.len(), 2);

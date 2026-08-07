@@ -16,6 +16,7 @@ export interface PlayerDesignations {
   isMonarch: boolean;
   hasInitiative: boolean;
   hasCityBlessing: boolean;
+  hasEnduringStory: boolean;
   ringLevel: number;
   ringBearerId: ObjectId | null;
   ringBearerName: string | null;
@@ -61,6 +62,7 @@ const EMPTY: PlayerDesignations = {
   isMonarch: false,
   hasInitiative: false,
   hasCityBlessing: false,
+  hasEnduringStory: false,
   ringLevel: 0,
   ringBearerId: null,
   ringBearerName: null,
@@ -97,6 +99,7 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
     const isMonarch = gs.monarch != null && gs.monarch === playerId;
     const hasInitiative = gs.initiative != null && gs.initiative === playerId;
     const hasCityBlessing = gs.city_blessing?.includes(playerId) ?? false;
+    const hasEnduringStory = gs.enduring_story?.includes(playerId) ?? false;
     const ringLevel = gs.ring_level?.[playerKey(playerId)] ?? 0;
     const ringBearerId = gs.ring_bearer?.[playerKey(playerId)] ?? null;
     const ringBearerName = ringBearerId != null ? (gs.objects[String(ringBearerId)]?.name ?? null) : null;
@@ -124,6 +127,7 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       isMonarch
       || hasInitiative
       || hasCityBlessing
+      || hasEnduringStory
       || activeDungeon != null
       || ringLevel > 0
       || energy > 0
@@ -136,6 +140,7 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       isMonarch,
       hasInitiative,
       hasCityBlessing,
+      hasEnduringStory,
       ringLevel,
       ringBearerId,
       ringBearerName,
@@ -150,4 +155,9 @@ export function usePlayerDesignations(playerId: PlayerId): PlayerDesignations {
       hasAny,
     };
   }, [gameState, playerId]);
+}
+
+/** Engine-projected player designation; this hook deliberately performs only membership lookup. */
+export function useHasEnduringStory(playerId: PlayerId): boolean {
+  return useGameStore((state) => state.gameState?.enduring_story?.includes(playerId) ?? false);
 }

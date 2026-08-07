@@ -2645,6 +2645,10 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
+        AbilityCondition::HasEnduringStory => Axes::NONE,
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => {
+            scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+        }
         AbilityCondition::IsRingBearer => Axes::NONE,
         AbilityCondition::TargetHasKeywordInstead { keyword: _ } => Axes::NONE,
         // `subject_slot: _` is a target-slot INDEX selector (CR 608.2c): `Some(n)`
@@ -3265,6 +3269,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             projected: true,
         },
         TriggerCondition::HasCityBlessing => Axes::NONE,
+        TriggerCondition::HasEnduringStory => Axes::NONE,
         TriggerCondition::CompletedDungeon { specific: _ } => Axes::NONE,
         TriggerCondition::SourceIsTapped => Axes::NONE,
         TriggerCondition::SourceIsTransformed => Axes::NONE,
@@ -3552,6 +3557,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
+        StaticCondition::HasEnduringStory => Axes::NONE,
         StaticCondition::CompletedADungeon => Axes::NONE,
         StaticCondition::WasStartingPlayer { controller, .. } => {
             let mut acc = Axes::NONE;
@@ -4564,6 +4570,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Exploit
         | Keyword::Explore
         | Keyword::Ascend
+        | Keyword::Storied
         | Keyword::StartYourEngines
         | Keyword::Dredge(_)
         | Keyword::Modular(_)
@@ -4829,6 +4836,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Exploit
         | Keyword::Explore
         | Keyword::Ascend
+        | Keyword::Storied
         | Keyword::StartYourEngines
         | Keyword::Dredge(_)
         | Keyword::Modular(_)

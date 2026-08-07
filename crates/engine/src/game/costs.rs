@@ -1094,6 +1094,7 @@ fn pay_ability_cost_inner(
                     effect_kind: EffectKind::PayCost,
                     up_to: false,
                     unless_filter: None,
+                    discard_frame: None,
                 };
             }
         }

@@ -7,7 +7,7 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult, ZoneMoveRequest,
     ZoneMoveResult,
 };
-use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -18,6 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
+use super::filter::{matches_target_filter, FilterContext};
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -265,6 +266,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 702.131b: A player controlling an Ascend permanent with ten or more
             // permanents gets the city's blessing for the rest of the game.
             check_city_blessing(state, events, &mut any_performed, &battlefield_snapshot);
+            check_enduring_story(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 704.5t: If a player's venture marker is on the bottommost room
@@ -363,6 +365,49 @@ fn check_city_blessing(
     }
 }
 
+fn check_enduring_story(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+) {
+    let historic_filter =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+    let players_to_designate: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !state.enduring_story.contains(player))
+        .filter(|player| {
+            let permanents: Vec<ObjectId> = battlefield_snapshot
+                .iter()
+                .copied()
+                .filter(|id| {
+                    live_battlefield_object(state, id).is_some_and(|obj| obj.controller == *player)
+                })
+                .collect();
+            let context = FilterContext::neutral();
+            permanents.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Storied))
+            }) && permanents
+                .iter()
+                .filter(|id| matches_target_filter(state, **id, &historic_filter, &context))
+                .count()
+                >= 3
+        })
+        .collect();
+
+    for player_id in players_to_designate {
+        state.enduring_story.insert(player_id);
+        crate::game::layers::mark_layers_full(state);
+        events.push(GameEvent::EnduringStoryGained { player_id });
+        *any_performed = true;
+    }
+}
+
 /// CR 702.131b + CR 702.131d: Eagerly re-evaluate the city's blessing for all
 /// players outside the normal SBA loop. Called from `resolve_chain_body` after
 /// a parent effect resolves and before a `HasCityBlessing`-gated sub-ability
@@ -372,6 +417,18 @@ fn check_city_blessing(
 pub(crate) fn apply_city_blessing_if_triggered(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut any_performed = false;
     check_city_blessing_eager(state, events, &mut any_performed);
+    if any_performed {
+        crate::game::layers::flush_layers(state);
+    }
+}
+
+pub(crate) fn apply_enduring_story_if_triggered(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut any_performed = false;
+    let battlefield = state.battlefield_phased_in_ids();
+    check_enduring_story(state, events, &mut any_performed, &battlefield);
     if any_performed {
         crate::game::layers::flush_layers(state);
     }
@@ -5392,6 +5449,119 @@ mod tests {
 
     fn add_filler_permanent(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
         create_creature(state, CardId(9002), owner, name, 1, 1)
+    }
+
+    fn add_storied_permanent(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_creature(state, CardId(9003), owner, "Storied", 1, 1);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Storied);
+        id
+    }
+
+    #[test]
+    fn storied_grants_enduring_story_for_each_historic_leg_and_latches() {
+        let mut state = setup();
+        add_storied_permanent(&mut state, PlayerId(0));
+
+        let legendary = add_filler_permanent(&mut state, PlayerId(0), "Legendary");
+        state
+            .objects
+            .get_mut(&legendary)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        let artifact = add_filler_permanent(&mut state, PlayerId(0), "Artifact");
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let saga = add_filler_permanent(&mut state, PlayerId(0), "Saga");
+        state
+            .objects
+            .get_mut(&saga)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Saga".into());
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnduringStoryGained {
+                player_id: PlayerId(0)
+            }
+        )));
+
+        state
+            .battlefield
+            .retain(|id| *id != legendary && *id != artifact && *id != saga);
+        let mut later_events = Vec::new();
+        check_state_based_actions(&mut state, &mut later_events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_live_storied_and_three_live_historic_permanents() {
+        let mut state = setup();
+        let storied = add_storied_permanent(&mut state, PlayerId(0));
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedIn;
+        state.battlefield.pop_back();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_a_storied_permanent() {
+        let mut state = setup();
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EnduringStoryGained { .. })));
     }
 
     #[test]

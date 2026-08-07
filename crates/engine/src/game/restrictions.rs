@@ -1635,6 +1635,7 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
         // CR 903.3 / CR 903.3d: owner-scoped ("your commander") vs any-owner ("a
         // commander") control. Delegates to the single `game::commander` authority —
         // the same helpers `layers.rs` uses for `StaticCondition::ControlsCommander` —
@@ -2440,6 +2441,18 @@ mod tests {
 
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.city_blessing.insert(player);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    #[test]
+    fn enduring_story_restriction_checks_player_designation() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let condition = ParsedCondition::HasEnduringStory;
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+        state.enduring_story.insert(player);
         assert!(evaluate_condition(&state, player, source_id, &condition));
     }
 

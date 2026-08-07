@@ -358,6 +358,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
     let mut result = ActionResult {
@@ -386,6 +387,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let mut result = ActionResult {
         events: Vec::new(),

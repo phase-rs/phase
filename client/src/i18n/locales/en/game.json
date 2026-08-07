@@ -480,6 +480,8 @@
     "initiativeTooltip": "Has the Initiative — ventures into Undercity at start of upkeep",
     "cityBlessing": "City's Blessing",
     "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
+    "enduringStory": "Enduring Story",
+    "enduringStoryTooltip": "Enduring Story — gained by a Storied permanent and three historic permanents",
     "dungeonAriaLabel": "Venturing in {{name}}, room {{room}}",
     "dungeonTooltip": "Venturing in {{name}} — room {{room}}",
     "poisonAriaLabel_one": "{{count}} poison counter",

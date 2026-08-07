@@ -1861,6 +1861,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -1879,6 +1880,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         }
         AbilityCondition::PreviousEffectAmount { rhs, .. } => legacy_quantity_expr(rhs),
         AbilityCondition::ScopedPlayerMatches { filter } => legacy_player_filter(filter),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => legacy_target_filter(filter),
         AbilityCondition::ConditionInstead { inner }
         | AbilityCondition::Not { condition: inner } => legacy_ability_condition(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -1923,6 +1925,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -1984,6 +1987,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
@@ -6093,6 +6097,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // feed — the read is the write's own reveal output). So `conservative()`
         // (which the coarse fallback assigned) falsely conflicts.
         AbilityCondition::RevealedHasCardType { .. } => RwProfile::empty(),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => RwProfile::empty(),
         AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::CastVariantPaid { .. }
@@ -6126,6 +6131,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -6243,6 +6249,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -6331,6 +6338,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
