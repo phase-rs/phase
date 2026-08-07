@@ -8410,11 +8410,12 @@ pub(crate) fn filter_consumed_trigger_events(
 /// ONE occurrence emitted twice — precisely what this filter should drop — and
 /// two DISTINCT occurrences are never byte-identical, because
 /// `ZoneChangeRecord::turn_zone_change_index` participates in `GameEvent`
-/// equality and is unique per occurrence within a turn. All THREE production
+/// equality and is unique per occurrence within a turn. All FOUR production
 /// sites that construct a `ZoneChanged` into an event buffer ship the index
 /// `restrictions::record_zone_change` assigned: `move_to_zone`'s tail,
-/// `record_and_emit_entry_from_no_zone`, and `merge.rs`'s CR 730.3c component
-/// split. A within-library reorder emits neither a `ZoneChanged` event nor a
+/// `record_and_emit_entry_from_no_zone`, `move_to_library_at_index` when
+/// `from != Zone::Library`, and `merge.rs`'s CR 730.3c component split. Only
+/// the same-library reorder branch emits neither a `ZoneChanged` event nor a
 /// ledger row. The recorder is the SOLE grower of `state.zone_changes_this_turn` (it reads
 /// `len()`, stamps, then pushes) and the ledger never shrinks mid-turn, so two
 /// distinct occurrences in one turn carry distinct indices and the `position()`
