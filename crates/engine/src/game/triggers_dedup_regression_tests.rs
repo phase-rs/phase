@@ -3756,8 +3756,8 @@ fn batched_zone_change_replay_guard_keeps_old_turn_markers_distinct_from_new_ind
     let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
     let (definition, definition_ref) = {
         let object = state.objects.get_mut(&observer).unwrap();
-        object.trigger_definitions[0].batched = true;
-        let definition = object.trigger_definitions[0].clone();
+        object.trigger_definitions[0].definition.batched = true;
+        let definition = object.trigger_definitions[0].definition.clone();
         let definition_ref = object.trigger_definition_ref(&object.trigger_definitions[0]);
         (definition, definition_ref)
     };
