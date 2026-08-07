@@ -319,7 +319,7 @@ fn begin_combat_trigger_fires_with_attackers() {
 #[test]
 fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
     let mut state = setup_game_at_main_phase();
-    for card_id in [201_u64, 202] {
+    for (card_id, amount) in [(201_u64, 1), (202, 2)] {
         let source_id = create_object(
             &mut state,
             CardId(card_id),
@@ -343,7 +343,7 @@ fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::GainLife {
-                        amount: QuantityExpr::Fixed { value: 1 },
+                        amount: QuantityExpr::Fixed { value: amount },
                         player: TargetFilter::Controller,
                     },
                 ))
