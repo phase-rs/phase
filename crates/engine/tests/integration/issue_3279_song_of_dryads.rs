@@ -18,6 +18,17 @@ const SONG_ORACLE: &str = "Enchant permanent\nEnchanted permanent is a colorless
 
 #[test]
 fn issue_3279_song_of_dryads_strips_enchanted_permanent_abilities() {
+    let mut control = GameScenario::new();
+    control.at_phase(Phase::PreCombatMain);
+    control.add_creature_from_oracle(P0, "Obuun, Mul Daya Ancestor", 3, 3, OBUUN_ORACLE);
+    let mut control_runner = control.build();
+    control_runner.pass_both_players();
+    control_runner.pass_both_players();
+    assert!(matches!(
+        control_runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. } | WaitingFor::OrderTriggers { .. }
+    ));
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
