@@ -661,6 +661,7 @@ mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_691_sheoldred_saga_lore;
 mod issue_6943_faerie_slumber_party;
+mod issue_7063_library_reorder;
 mod issue_709_regression;
 mod issue_718_dina_sacrifice_draw;
 mod issue_735_amalia_power_threshold;

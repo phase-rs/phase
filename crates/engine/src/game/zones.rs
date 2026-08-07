@@ -1671,12 +1671,13 @@ pub(crate) fn capture_combat_status(
 }
 
 /// Reorder objects that remain in one player's library without performing a
-/// zone change. `ordered` is placed at `start_index` in the supplied order.
+/// zone change. `ordered` is placed at `index` in the supplied order, or
+/// appended when `index` is `None`.
 pub(crate) fn reorder_within_library(
     state: &mut GameState,
     player: PlayerId,
     ordered: &[ObjectId],
-    start_index: usize,
+    index: Option<usize>,
 ) {
     let player_state = state
         .players
@@ -1684,8 +1685,13 @@ pub(crate) fn reorder_within_library(
         .find(|candidate| candidate.id == player)
         .expect("player exists");
     player_state.library.retain(|id| !ordered.contains(id));
+    let insert_index = index
+        .unwrap_or(player_state.library.len())
+        .min(player_state.library.len());
     for (offset, &object_id) in ordered.iter().enumerate() {
-        player_state.library.insert(start_index + offset, object_id);
+        player_state
+            .library
+            .insert(insert_index + offset, object_id);
     }
 
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
@@ -1742,12 +1748,16 @@ pub fn move_to_library_at_index(
         return;
     }
 
-    // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
-    state.commander_declined_zone_return.remove(&object_id);
-
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    if from == Zone::Library {
+        reorder_within_library(state, owner, &[object_id], index);
+        return;
+    }
+
+    // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
+    state.commander_declined_zone_return.remove(&object_id);
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -3232,41 +3242,8 @@ mod tests {
         assert_eq!(state.players[0].library[1], id2); // goes to bottom
     }
 
-    /// U6 — CR 400.7 + CR 701.20b: a within-Library reposition is ZERO MOVES, so
-    /// two repositions of ONE card in one turn are separated by
-    /// `turn_zone_change_index` ALONE.
-    ///
-    /// This is the ONE production family in which the occurrence index is the SOLE
-    /// discriminator. The zero-bump branch below (`if from != Zone::Library`) is
-    /// rules-correct — CR 701.20b: "Revealing a card doesn't cause it to leave the
-    /// zone it's in", and CR 400.7 only makes a new object on a move BETWEEN zones —
-    /// and its correctness is exactly what kills the other three separators:
-    ///   * `object_id`                                  — same object, twice;
-    ///   * `entered_incarnation`                        — `None` on both (not a
-    ///     battlefield destination; `snapshot_for_zone_change` seeds `None`);
-    ///   * `trigger_source_context…reference.incarnation` — identical on both (the
-    ///     incarnation is deliberately not bumped).
-    ///
-    /// Every other family is over-determined and would survive losing the index.
-    /// This one would not.
-    ///
-    /// The sibling rows `move_to_library_top` and `move_to_library_bottom` above
-    /// cover the `from != Library` (bumping) arm of the same branch; this row
-    /// covers the `from == Library` arm.
-    ///
-    /// Reached in production from clash placement (CR 701.30a,
-    /// `engine_resolution_choices.rs`), the `EffectZoneChoice` library-origin
-    /// repositioners, and both `zone_pipeline` library-placement arms; and reached
-    /// inside a `park_search_observer_triggers` slice by the tutor-to-top class
-    /// (`SearchLibrary -> Shuffle -> PutAtLibraryPosition{Top}`).
-    ///
-    /// Goes red under EITHER of:
-    ///   * a `ZoneChangeRecord` `PartialEq` that stops comparing
-    ///     `turn_zone_change_index` (the two events become fully equal); or
-    ///   * an emit-site-3 regression that ships the `0` placeholder instead of the
-    ///     index `restrictions::record_zone_change` returned.
     #[test]
-    fn within_library_repositions_are_separated_only_by_the_occurrence_index() {
+    fn within_library_reposition_does_not_create_a_zone_change() {
         let mut state = setup();
         let filler = create_object(
             &mut state,
@@ -3284,79 +3261,67 @@ mod tests {
         );
 
         let incarnation_before = state.objects[&card].incarnation;
+        state.commander_declined_zone_return.insert(card);
         let mut events = Vec::new();
         move_to_library_at_index(&mut state, card, Some(0), &mut events); // to top
         move_to_library_at_index(&mut state, card, None, &mut events); // to bottom
 
-        let zone_changes: Vec<&GameEvent> = events
-            .iter()
-            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
-            .collect();
-        assert_eq!(
-            zone_changes.len(),
-            2,
-            "each reposition emits exactly one ZoneChanged"
-        );
-
-        let GameEvent::ZoneChanged {
-            object_id: first_object,
-            from: first_from,
-            to: first_to,
-            record: first,
-        } = zone_changes[0]
-        else {
-            panic!("the first reposition must emit a ZoneChanged");
-        };
-        let GameEvent::ZoneChanged {
-            object_id: second_object,
-            from: second_from,
-            to: second_to,
-            record: second,
-        } = zone_changes[1]
-        else {
-            panic!("the second reposition must emit a ZoneChanged");
-        };
-
-        assert_eq!(*first_object, card);
-        assert_eq!(*second_object, card);
-        assert_eq!(*first_from, Some(Zone::Library));
-        assert_eq!(*second_from, Some(Zone::Library));
-        assert_eq!(*first_to, Zone::Library);
-        assert_eq!(*second_to, Zone::Library);
-
         assert_eq!(
             state.objects[&card].incarnation, incarnation_before,
-            "CR 400.7 + CR 701.20b: a within-Library reposition is zero moves, so \
-             the zero-bump branch must have been taken"
+            "a within-library reposition must preserve object identity"
         );
         assert!(
-            state.players[0].library.contains(&filler) && state.players[0].library.contains(&card),
-            "both cards stay in the library across the two repositions"
+            state.players[0].library.contains(&filler) && state.players[0].library.contains(&card)
         );
-
         assert!(
-            first.entered_incarnation.is_none() && second.entered_incarnation.is_none(),
-            "CR 400.7: a within-Library reposition has no battlefield entry, so \
-             `entered_incarnation` separates nothing here"
+            events.is_empty(),
+            "repositioning within a library emits no events"
         );
-        assert_eq!(
-            first.trigger_source_context, second.trigger_source_context,
-            "CR 701.20b: the zero-bump branch leaves the source context identical, so it \
-             separates nothing here"
+        assert!(
+            state.zone_changes_this_turn.is_empty(),
+            "repositioning within a library does not enter the zone-change ledger"
+        );
+        assert!(
+            state.commander_declined_zone_return.contains(&card),
+            "without a zone change, the commander marker must be preserved"
+        );
+    }
+
+    #[test]
+    fn reorder_within_library_clamps_after_removal_and_appends_when_unspecified() {
+        let mut state = setup();
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
         );
 
+        reorder_within_library(&mut state, PlayerId(0), &[first, third], Some(99));
         assert_eq!(
-            second.turn_zone_change_index,
-            first.turn_zone_change_index + 1,
-            "restrictions::record_zone_change is the sole allocator and never shrinks the \
-             ledger, so two repositions in one turn get consecutive indices; emit site 3 \
-             (zones.rs:1829) must ship the allocator's value, not the `0` placeholder"
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, first, third]
         );
-        assert_ne!(
-            zone_changes[0], zone_changes[1],
-            "turn_zone_change_index is the ONLY field separating these two events — dropping \
-             it from ZoneChangeRecord's equality collapses two distinct CR 603.2c occurrences \
-             into one"
+
+        reorder_within_library(&mut state, PlayerId(0), &[first], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, third, first]
         );
     }
 

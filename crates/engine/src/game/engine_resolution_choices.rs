@@ -8080,7 +8080,7 @@ fn surveil_keep_on_top(
     player: crate::types::player::PlayerId,
     top_cards: &[ObjectId],
 ) {
-    zones::reorder_within_library(state, player, top_cards, 0);
+    zones::reorder_within_library(state, player, top_cards, Some(0));
 }
 
 fn resume_with_error_propagation(
