@@ -15898,7 +15898,7 @@ mod stage2_injector_tests {
                 // `scoped_library_search.rs`, neither of which this change touches, and the
                 // test module it adds contains no line matching the needle — total still 37,
                 // partition still 5/7/25.
-                "game/engine.rs:11828".to_string(),
+                "game/engine.rs:11841".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
