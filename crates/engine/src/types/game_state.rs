@@ -7647,10 +7647,11 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
 /// current turn and the ledger position together, but historical payloads may
 /// omit either field and deserialize them as zero.
 ///
-/// This runs on serialized state before `ResolutionStateWire` materializes it,
-/// because Raw and Trusted persistence are both fallible at that boundary.
-/// Rebinding an event after deserialization would be too late: `into_game_state`
-/// is infallible and callers could already observe an ambiguous trigger event.
+/// This runs against canonical serialized `GameState` after `ResolutionStateWire`
+/// has projected legacy and v2 frame payloads into their typed live carriers.
+/// Raw and Trusted persistence are both fallible at that boundary, and rebinding
+/// after the direct-current decoder returns would be too late: callers could
+/// already observe an ambiguous trigger event.
 fn reconcile_persisted_zone_change_occurrences(
     value: &mut serde_json::Value,
 ) -> Result<(), String> {
@@ -15573,10 +15574,12 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
-        reconcile_persisted_zone_change_occurrences(&mut value)?;
-        let mut state = serde_json::from_value::<ResolutionStateWire>(value)
+        let state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
+        let mut canonical = serde_json::to_value(state).map_err(|error| error.to_string())?;
+        reconcile_persisted_zone_change_occurrences(&mut canonical)?;
+        let mut state = Self::decode(canonical, GameStateDecodeMode::DirectCurrentRaw)?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -23134,6 +23137,58 @@ mod tests {
                 .expect("v1 continuation restores")
                 .trigger_firing,
             Some(TriggerFiring::LegacyDelayed)
+        );
+    }
+
+    #[test]
+    fn v1_continuation_zone_change_event_reconciles_after_frame_projection() {
+        let mut state = trigger_continuation_fixture();
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_171), state.turn_number, 0);
+        let event = persisted_zone_change_event(record.clone());
+        state.zone_changes_this_turn.push_back(record);
+        state.current_trigger_event = Some(event.clone());
+        state.current_trigger_events = vec![event];
+
+        let continuation = PendingContinuation::new(
+            state
+                .pending_trigger
+                .as_ref()
+                .expect("fixture has an active trigger")
+                .ability
+                .clone(),
+            &state,
+        );
+        state.resolution_stack = ResolutionStack::default();
+        let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
+        v1["resolution_state_version"] = serde_json::Value::from(1);
+        v1["pending_continuation"] =
+            serde_json::to_value(continuation).expect("legacy continuation serializes");
+        let record = v1["pending_continuation"]["trigger_context"]["event"]["data"]["record"]
+            .as_object_mut()
+            .expect("legacy continuation has a ZoneChanged trigger event");
+        record.remove("recorded_turn_number");
+        record.remove("turn_zone_change_index");
+
+        let restored = serde_json::from_value::<PersistedGameState>(v1)
+            .expect("legacy continuation event reconciles after frame projection")
+            .into_game_state();
+        let GameEvent::ZoneChanged { record, .. } = &restored
+            .active_ability_continuation()
+            .expect("legacy continuation projects into the canonical frame stack")
+            .trigger_context
+            .as_ref()
+            .expect("continuation retains its trigger context")
+            .event
+            .as_ref()
+            .expect("continuation retains the triggering event")
+        else {
+            panic!("continuation trigger context retains a ZoneChanged event");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "projected continuation event is reconciled to its current ledger occurrence"
         );
     }
 
