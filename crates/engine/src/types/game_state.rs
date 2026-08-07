@@ -22273,7 +22273,7 @@ mod tests {
         assert_eq!(record.recorded_turn_number, 19);
 
         let mut legacy_wire = wire;
-        legacy_wire["deferred_triggers"][0]["trigger_events"][0]["ZoneChanged"]["record"]
+        legacy_wire["deferred_triggers"][0]["trigger_events"][0]["data"]["record"]
             .as_object_mut()
             .expect("nested record is an object")
             .remove("recorded_turn_number");

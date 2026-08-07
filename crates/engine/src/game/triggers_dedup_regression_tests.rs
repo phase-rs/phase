@@ -3732,8 +3732,13 @@ fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
         .push(queued_context_for(old_event.clone()));
 
     assert!(
-        filter_already_collected_trigger_events_from(&state, &[old_event.clone()], 0, &[])
-            .is_empty(),
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&old_event),
+            0,
+            &[]
+        )
+        .is_empty(),
         "the same-turn queued witness must suppress its own occurrence"
     );
 
@@ -3744,7 +3749,12 @@ fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
     };
     assert_eq!(record.turn_zone_change_index, 0);
     assert_eq!(
-        filter_already_collected_trigger_events_from(&state, &[new_event.clone()], 0, &[]),
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&new_event),
+            0,
+            &[],
+        ),
         vec![new_event],
         "a deferred witness from turn {old_turn} must not consume index 0 from turn {}",
         state.turn_number
