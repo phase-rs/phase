@@ -4815,8 +4815,9 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         );
     }
 
-    /// R7(c): an `object_pronoun_ref` pin (CR 603.4 intervening-if zone pins,
-    /// spell-cast object pins) SURVIVES the subject filter — with no
+    /// R7(c): an `object_pronoun_ref` pin (for example, a specific untargeted
+    /// object previously referred to by a trigger condition; CR 608.2k)
+    /// SURVIVES the subject filter — with no
     /// mode-internal referent preceding the pronoun, `parent_target_available`
     /// is false, the ParentTarget branch cannot fire, and `resolve_it_pronoun`
     /// still serves the pin.
