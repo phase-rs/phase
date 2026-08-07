@@ -2244,6 +2244,10 @@
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
   },
+  "debugPanel": {
+    "aiDecisionCapture": "Capturer les décisions de l’IA",
+    "aiDecisionUnavailable": "Les diagnostics de décision de l’IA ne sont pas disponibles pour cette partie."
+  },
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",

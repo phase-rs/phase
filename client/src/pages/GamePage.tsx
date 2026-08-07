@@ -18,8 +18,9 @@ import type {
   MatchConfig,
   ObjectId,
   SerializedAbilityCost,
+  AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsMatchConcede } from "../adapter/types";
+import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -954,6 +955,25 @@ function GamePageContent({
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
+  // GamePage owns the only local diagnostic subscription. Adapter events remain
+  // gameplay-only so no receipt can enter P2P/server state or wire traffic.
+  useEffect(() => {
+    setAiDecisionReceipt(null);
+    if (!supportsAiDecisionDiagnostics(adapter)) {
+      return;
+    }
+    adapter.setAiDecisionDiagnosticsEnabled(aiDecisionCaptureEnabled);
+    if (!aiDecisionCaptureEnabled) {
+      return;
+    }
+    const unsubscribe = adapter.subscribeAiDecisionDiagnostics(setAiDecisionReceipt);
+    return () => {
+      unsubscribe();
+      adapter.setAiDecisionDiagnosticsEnabled(false);
+    };
+  }, [adapter, aiDecisionCaptureEnabled]);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1758,7 +1778,10 @@ function GamePageContent({
       </AnimatePresence>
 
       {/* Overlay layers */}
-      <DebugPanel />
+      <DebugPanel
+        aiDecisionReceipt={aiDecisionReceipt}
+        aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
+      />
       <ResolutionProgressOverlay />
 
       {preferencesOpen && (

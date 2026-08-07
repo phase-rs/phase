@@ -2244,6 +2244,10 @@
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
   },
+  "debugPanel": {
+    "aiDecisionCapture": "Capturar decisões da IA",
+    "aiDecisionUnavailable": "Os diagnósticos de decisão da IA não estão disponíveis para este jogo."
+  },
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",

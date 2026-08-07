@@ -109,6 +109,7 @@ export function getFormatRegistry(): any;
  * on every successful state mutation, restore, resume, reset, and new game.
  */
 export function get_ai_action_proposal(difficulty: string, player_id: number): any;
+export function get_ai_action_proposal_with_diagnostics(difficulty: string, player_id: number): any;
 
 /**
  * Convert score-only worker output into an authority-bound proposal.
@@ -120,6 +121,7 @@ export function get_ai_action_proposal(difficulty: string, player_id: number): a
  * score-to-`GameAction` endpoint.
  */
 export function get_ai_action_proposal_from_scores(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
+export function get_ai_action_proposal_from_scores_with_diagnostics(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
 
 /**
  * Score candidates inside an isolated AI worker. These are plain,

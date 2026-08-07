@@ -3624,6 +3624,38 @@ export interface AiActionProposal {
   action: GameAction;
 }
 
+/** Local-only explanation bound to an opaque AI proposal token. */
+export interface AiDecisionDiagnosticReceipt {
+  semanticOwner: PlayerId;
+  authorizedActor: PlayerId;
+  selectedAction: GameAction;
+  status: "ranked" | "direct";
+  candidates: AiDecisionDiagnosticCandidate[];
+}
+
+export interface AiDecisionDiagnosticCandidate {
+  action: GameAction;
+  rank: number | null;
+  isTopRanked: boolean;
+  isSelected: boolean;
+  score: number | null;
+  weight: number | null;
+  probability: number | null;
+}
+
+export interface AiDecisionDiagnosticsCapability {
+  setAiDecisionDiagnosticsEnabled(enabled: boolean): void;
+  subscribeAiDecisionDiagnostics(listener: (receipt: AiDecisionDiagnosticReceipt) => void): () => void;
+}
+
+export function supportsAiDecisionDiagnostics(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & AiDecisionDiagnosticsCapability {
+  return adapter != null
+    && "setAiDecisionDiagnosticsEnabled" in adapter
+    && "subscribeAiDecisionDiagnostics" in adapter;
+}
+
 /** Result of the engine-owned game-scoped AI worker card-data build. */
 export type AiCardSubsetResult =
   | { kind: "full" }

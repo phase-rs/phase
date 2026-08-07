@@ -194,7 +194,7 @@ pub fn choose_action(
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
     let session = AiSession::arc_from_game(state);
-    choose_action_with_session_inner(state, ai_player, config, rng, &session, false)
+    choose_action_with_session_inner(state, ai_player, config, rng, &session, false, false).action
 }
 
 /// Choose the best action using a caller-owned per-game session cache.
@@ -205,7 +205,25 @@ pub fn choose_action_with_session(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> Option<GameAction> {
-    choose_action_with_session_inner(state, ai_player, config, rng, session, true)
+    choose_action_with_session_inner(state, ai_player, config, rng, session, true, false).action
+}
+
+/// Select once using the canonical chooser and retain an optional, read-only
+/// receipt of that same choice for the local WASM authority.
+pub fn choose_action_with_session_diagnostic(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+) -> AiDecisionSelection {
+    choose_action_with_session_inner(state, ai_player, config, rng, session, true, true)
+}
+
+#[derive(Clone, Debug)]
+pub struct AiDecisionSelection {
+    pub action: Option<GameAction>,
+    pub receipt: Option<crate::decision_receipt::AiDecisionDiagnosticReceipt>,
 }
 
 fn choose_action_with_session_inner(
@@ -215,8 +233,19 @@ fn choose_action_with_session_inner(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
     durable_pact_routes: bool,
-) -> Option<GameAction> {
+    diagnostics: bool,
+) -> AiDecisionSelection {
     let contract = AiDecisionContract::issue(state, ai_player);
+    let direct = |action: Option<GameAction>| AiDecisionSelection {
+        receipt: diagnostics
+            .then(|| {
+                action.as_ref().map(|action| {
+                    crate::decision_receipt::direct_receipt(&contract, action.clone())
+                })
+            })
+            .flatten(),
+        action,
+    };
     // `AiDecisionContract` holds the finite domain the action boundary accepts.
     // A heuristic's pick is usable only if the engine's enumerator issued it —
     // `build_decision_context` states the rule: "the tactical layer must receive
@@ -274,12 +303,12 @@ fn choose_action_with_session_inner(
         WaitingFor::MulliganDecision { pending, .. }
             if !pending.iter().any(|e| e.player == ai_player) =>
         {
-            return None;
+            return direct(None);
         }
         WaitingFor::OpeningHandBottomCards { pending, .. }
             if !pending.iter().any(|e| e.player == ai_player) =>
         {
-            return None;
+            return direct(None);
         }
         _ => {}
     }
@@ -292,11 +321,13 @@ fn choose_action_with_session_inner(
     // Do not wait for speculative cast/payment scoring to fail before answering
     // it: the engine-issued domain already supplies a valid path forward.
     if target_selection_has_no_modeled_effect(state) {
-        return issued_domain()
-            .into_iter()
-            .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
-            .or_else(|| fallback_action(state, config, &contract))
-            .and_then(&bind_specialist);
+        return direct(
+            issued_domain()
+                .into_iter()
+                .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
+                .or_else(|| fallback_action(state, config, &contract))
+                .and_then(&bind_specialist),
+        );
     }
 
     // Gated on the variant so the hot `Priority` path never materializes the
@@ -305,7 +336,7 @@ fn choose_action_with_session_inner(
         if let Some(action) = random_card_predicate_guess(state, ai_player, &issued_domain(), rng)
             .and_then(&bind_specialist)
         {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -319,7 +350,7 @@ fn choose_action_with_session_inner(
             })
             .and_then(&bind_specialist)
         {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -341,7 +372,7 @@ fn choose_action_with_session_inner(
                     if let Ok(mut follow_ups) = session.prospective_fetch_follow_up.write() {
                         follow_ups.insert(ai_player, prompt.follow_up());
                     }
-                    return Some(action);
+                    return direct(Some(action));
                 }
             }
         }
@@ -350,7 +381,7 @@ fn choose_action_with_session_inner(
             deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
                 .and_then(&bind_specialist)
         {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -363,7 +394,7 @@ fn choose_action_with_session_inner(
             deterministic_choice(state, ai_player, config, &issued_domain(), Some(&context))
                 .and_then(&bind_specialist)
         {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -386,7 +417,7 @@ fn choose_action_with_session_inner(
             .filter(|action| matches!(action, GameAction::ChooseOption { .. }))
             .collect();
         if let Some(action) = guesses.choose(rng).cloned().and_then(&bind_specialist) {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -396,7 +427,7 @@ fn choose_action_with_session_inner(
                 .action_for(state, ai_player)
                 .and_then(&bind_specialist)
             {
-                return Some(action);
+                return direct(Some(action));
             }
         }
     }
@@ -414,7 +445,7 @@ fn choose_action_with_session_inner(
             arm_certified_pact_route(state, &action, ai_player, session);
         }
         if let Some(action) = bind_specialist(action) {
-            return Some(action);
+            return direct(Some(action));
         }
     }
 
@@ -427,29 +458,49 @@ fn choose_action_with_session_inner(
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
-        return fallback_action(state, config, &contract)
-            .filter(|action| root_action_is_allowed(state, ai_player, action))
-            .filter(|action| {
-                durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
-            })
-            .filter(&in_contract);
+        return direct(
+            fallback_action(state, config, &contract)
+                .filter(|action| root_action_is_allowed(state, ai_player, action))
+                .filter(|action| {
+                    durable_pact_routes || !is_certified_pact_root(state, ai_player, action)
+                })
+                .filter(&in_contract),
+        );
     }
     // Issue #4878: total order before softmax so equal scores never depend on
     // HashSet/HashMap allocation order.
     scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
     let chosen = if scored.len() == 1 {
-        Some(scored[0].0.clone())
+        Some((0, scored[0].0.clone()))
     } else {
-        softmax_select_pairs(&scored, config.temperature, rng)
+        softmax_select_index(&scored, config.temperature, rng)
+            .map(|index| (index, scored[index].0.clone()))
     };
-    if let Some(action) = &chosen {
+    if let Some((_, action)) = &chosen {
         arm_certified_fetch_prompt(action, ai_player, session);
         if durable_pact_routes {
             arm_certified_pact_route(state, action, ai_player, session);
         }
         emit_decision_trace(state, ai_player, config, action, session);
     }
-    chosen.filter(&in_contract)
+    let selected_index = chosen.as_ref().map(|(index, _)| *index);
+    let action = chosen.map(|(_, action)| action).filter(&in_contract);
+    AiDecisionSelection {
+        receipt: diagnostics
+            .then(|| {
+                action.as_ref().map(|selected| {
+                    crate::decision_receipt::ranked_receipt(
+                        &contract,
+                        &scored,
+                        selected_index,
+                        config.temperature,
+                        selected.clone(),
+                    )
+                })
+            })
+            .flatten(),
+        action,
+    }
 }
 
 fn random_card_predicate_guess(
@@ -4117,8 +4168,20 @@ pub fn select_safe_action_from_scores(
     temperature: f64,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
-    softmax_select_pairs(scored, temperature, rng)
-        .filter(|action| !is_pact_payment_cast(state, action))
+    select_safe_action_index_from_scores(state, scored, temperature, rng)
+        .map(|index| scored[index].0.clone())
+}
+
+/// Canonical score-worker selection index, retained so diagnostics can mark an
+/// exact duplicate row without a second selector pass.
+pub fn select_safe_action_index_from_scores(
+    state: &GameState,
+    scored: &[(GameAction, f64)],
+    temperature: f64,
+    rng: &mut impl Rng,
+) -> Option<usize> {
+    softmax_select_index(scored, temperature, rng)
+        .filter(|index| !is_pact_payment_cast(state, &scored[*index].0))
 }
 
 /// Internal softmax primitive for the canonical chooser and phase-AI tests.
@@ -4129,11 +4192,21 @@ pub(crate) fn softmax_select_pairs(
     temperature: f64,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    softmax_select_index(scored, temperature, rng).map(|index| scored[index].0.clone())
+}
+
+/// The canonical selector's chosen vector index. Kept private to the tactical
+/// layer so diagnostics can identify duplicate rows without comparing actions.
+fn softmax_select_index(
+    scored: &[(GameAction, f64)],
+    temperature: f64,
+    rng: &mut impl Rng,
+) -> Option<usize> {
     if scored.is_empty() {
         return None;
     }
     if scored.len() == 1 {
-        return Some(scored[0].0.clone());
+        return Some(0);
     }
 
     // Numerical stability: subtract max score
@@ -4150,12 +4223,14 @@ pub(crate) fn softmax_select_pairs(
         // issue #4878).
         return scored
             .iter()
-            .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                left.1
+                    .partial_cmp(&right.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp_stable(&b.0))
+                    .then_with(|| left.0.cmp_stable(&right.0))
             })
-            .map(|s| s.0.clone());
+            .map(|(index, _)| index);
     }
 
     let threshold: f64 = rng.random::<f64>() * total;
@@ -4163,12 +4238,12 @@ pub(crate) fn softmax_select_pairs(
     for (i, w) in weights.iter().enumerate() {
         cumulative += w;
         if cumulative >= threshold {
-            return Some(scored[i].0.clone());
+            return Some(i);
         }
     }
 
     // Fallback to last
-    Some(scored.last().unwrap().0.clone())
+    Some(scored.len() - 1)
 }
 
 #[cfg(test)]

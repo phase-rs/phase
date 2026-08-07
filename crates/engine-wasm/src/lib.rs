@@ -39,6 +39,7 @@ use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
 
 use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
+use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
@@ -2010,6 +2011,57 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
     })?
 }
 
+/// Mint an ordinary opaque proposal together with a local-only diagnostic
+/// receipt. The receipt is an observation of the minted capability, never an
+/// additional action-selection API.
+#[wasm_bindgen]
+pub fn get_ai_action_proposal_with_diagnostics(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let requested_ai = PlayerId(player_id);
+        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
+            requested_ai
+        } else {
+            state
+                .waiting_for
+                .acting_player()
+                .or_else(|| state.waiting_for.acting_players().first().copied())
+                .unwrap_or(requested_ai)
+        };
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let selection = choose_action_with_session_diagnostic(
+            state,
+            semantic_owner,
+            &config,
+            &mut rng,
+            &session,
+        );
+        let Some(action) = selection.action else {
+            return Ok(JsValue::NULL);
+        };
+        if !contract.contains_action(state, &action) {
+            return Ok(JsValue::NULL);
+        }
+        let actor = contract.authorized_actor;
+        let receipt = selection
+            .receipt
+            .expect("diagnostic chooser must observe its selected action");
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
+        })))
+    })?
+}
+
 /// Score candidates inside an isolated AI worker. These are plain,
 /// serializable hints rather than capabilities: they cannot cross the action
 /// boundary until the live main engine reissues an exact proposal.
@@ -2086,6 +2138,64 @@ pub fn get_ai_action_proposal_from_scores(
             "semanticOwner": semantic_owner.0,
             "actor": actor.0,
             "action": action,
+        })))
+    })?
+}
+
+/// Diagnostic counterpart of score-worker proposal rebinding. It preserves the
+/// existing authority filter and selector; the returned receipt is local WASM
+/// observability data bound to the same opaque token.
+#[wasm_bindgen]
+pub fn get_ai_action_proposal_from_scores_with_diagnostics(
+    scores_json: &str,
+    difficulty: &str,
+    player_id: u8,
+    rng_seed: u64,
+) -> Result<JsValue, JsValue> {
+    let scored: Vec<(GameAction, f64)> = serde_json::from_str(scores_json)
+        .map_err(|error| JsValue::from_str(&format!("Failed to deserialize AI scores: {error}")))?;
+    let difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let requested_ai = PlayerId(player_id);
+        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
+            requested_ai
+        } else {
+            state
+                .waiting_for
+                .acting_player()
+                .or_else(|| state.waiting_for.acting_players().first().copied())
+                .unwrap_or(requested_ai)
+        };
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let admissible_scores: Vec<(GameAction, f64)> = scored
+            .into_iter()
+            .filter(|(action, _)| contract.contains_action(state, action))
+            .collect();
+        let config =
+            create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
+        let Some(selected_index) = phase_ai::select_safe_action_index_from_scores(
+            state,
+            &admissible_scores,
+            config.temperature,
+            &mut rng,
+        ) else {
+            return Ok(JsValue::NULL);
+        };
+        let action = admissible_scores[selected_index].0.clone();
+        let actor = contract.authorized_actor;
+        let receipt = phase_ai::decision_receipt::ranked_receipt(
+            &contract,
+            &admissible_scores,
+            Some(selected_index),
+            config.temperature,
+            action.clone(),
+        );
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
         })))
     })?
 }

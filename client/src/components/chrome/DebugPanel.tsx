@@ -3,7 +3,7 @@ import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameState } from "../../adapter/types";
+import type { AiDecisionDiagnosticReceipt, GameState } from "../../adapter/types";
 import { supportsServerRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
@@ -58,7 +58,13 @@ function patchConsole(): void {
 // Patch immediately so we capture logs from app startup
 patchConsole();
 
-export function DebugPanel() {
+export function DebugPanel({
+  aiDecisionReceipt,
+  aiDecisionDiagnosticsAvailable,
+}: {
+  aiDecisionReceipt: AiDecisionDiagnosticReceipt | null;
+  aiDecisionDiagnosticsAvailable: boolean;
+}) {
   const { t } = useTranslation();
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
@@ -93,6 +99,8 @@ export function DebugPanel() {
   // can open the panel straight to "actions" via `openSandboxTools()`.
   const activeTab = useUiStore((s) => s.debugPanelTab);
   const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
   // Deliberately NOT `!hasRemoteHumans(gameMode)`, despite reading like a
   // company question. This is the set of modes whose adapter implements
   // `restoreState`: `WasmAdapter` does; `WebSocketAdapter.restoreState`
@@ -346,6 +354,34 @@ export function DebugPanel() {
           </svg>
           {t("help.reportCardNudge.open")}
         </button>
+      </section>
+
+      <section className="border-b border-gray-700 px-3 py-2">
+        <label className="flex items-center justify-between gap-2 text-xs text-gray-300">
+          <span>{t("debugPanel.aiDecisionCapture")}</span>
+          <input
+            type="checkbox"
+            disabled={!aiDecisionDiagnosticsAvailable}
+            checked={aiDecisionCaptureEnabled}
+            onChange={(event) => setAiDecisionCaptureEnabled(event.target.checked)}
+          />
+        </label>
+        {!aiDecisionDiagnosticsAvailable ? (
+          <p className="mt-1 text-xs text-gray-500">{t("debugPanel.aiDecisionUnavailable")}</p>
+        ) : aiDecisionReceipt ? (
+          <div className="mt-2 font-mono text-[10px] text-gray-400">
+            <p>{JSON.stringify(aiDecisionReceipt.selectedAction)}</p>
+            <ol className="mt-1 space-y-1">
+              {aiDecisionReceipt.candidates.map((candidate, index) => (
+                <li key={index}>
+                  {candidate.rank ?? "—"} {candidate.isTopRanked ? "★" : ""}{" "}
+                  {candidate.isSelected ? "✓" : ""} {JSON.stringify(candidate.action)} {" "}
+                  {candidate.score ?? "—"} / {candidate.weight ?? "—"} / {candidate.probability ?? "—"}
+                </li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
       </section>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
