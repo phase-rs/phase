@@ -26960,7 +26960,7 @@ fn u11_and_or_composition() {
 // ---------------------------------------------------------------------------
 // Existential exiled-with-source intervening-if — the bare-plural existential
 // axis ("there are [no] cards exiled with [source]") plus the plural anaphor
-// it introduces ("put THEM ..."). CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k.
+// it introduces ("put THEM ..."). CR 603.4 + CR 406.6 + CR 607.2a.
 // SHAPE tests over the FULL pipeline (`parse_oracle_text`), verbatim Oracle
 // text per /card-test.
 // ---------------------------------------------------------------------------
@@ -26998,7 +26998,7 @@ fn count_unimplemented_in_chain(ability: &AbilityDefinition) -> usize {
 /// SHAPE (P2) — Valakut Exploration trigger 2: the bare existential
 /// intervening-if is hoisted to the trigger condition (CR 603.4), the swept
 /// plural anaphor binds to the linked-exile pool as a mass move
-/// (CR 608.2k + CR 406.6 + CR 607.2a), and the conjoined ", then ~ deals that
+/// (CR 406.6 + CR 607.2a), and the conjoined ", then ~ deals that
 /// much damage to each opponent" clause is caught by the coverage-honesty
 /// gate (issue #7046): it parses to a NAMED, fragment-carrying
 /// `Effect::Unimplemented` marker rather than a raw `DamageEachPlayer` node,
@@ -27101,13 +27101,15 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
     // Trigger 1 (landfall) must carry zero — the sweep/condition negatives
     // above cannot pass vacuously via an unrelated gap on the OTHER trigger.
     let landfall = &parsed.triggers[0];
-    if let Some(landfall_execute) = landfall.execute.as_deref() {
-        assert_eq!(
-            count_unimplemented_in_chain(landfall_execute),
-            0,
-            "trigger 1 (landfall) must carry zero Unimplemented"
-        );
-    }
+    let landfall_execute = landfall
+        .execute
+        .as_deref()
+        .expect("landfall execute ability");
+    assert_eq!(
+        count_unimplemented_in_chain(landfall_execute),
+        0,
+        "trigger 1 (landfall) must carry zero Unimplemented"
+    );
 }
 
 /// SHAPE (P3) — Evercoat Ursine: the same bare existential gate binds on a

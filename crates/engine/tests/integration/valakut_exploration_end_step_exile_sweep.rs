@@ -34,7 +34,7 @@
 //!   * `end_step_trigger_does_not_fire_on_empty_pool` — CR 603.4 empty-pool
 //!     gate. Reverted, `condition: None` lets the trigger fire; fixed, it
 //!     never goes on the stack. Paired positive reach-guard: the two tests
-//!     above drive the identical path with a non-empty pool.
+//!     above drive the identical path with a non-empty pool and sweep it.
 //!   * `sweep_and_damage_respect_per_source_link_authority` — multi-authority
 //!     hostile fixture: a second source's `ExileLink` must be neither swept
 //!     nor counted (`linked_exile_cards_for_source` filters on
@@ -88,6 +88,7 @@
 //!     above.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::Effect;
 use engine::types::game_state::{ExileLink, ExileLinkKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -124,6 +125,31 @@ fn life_of(runner: &engine::game::scenario::GameRunner, player: PlayerId) -> i32
         .life
 }
 
+fn assert_queued_gated_damage_continuation(
+    runner: &engine::game::scenario::GameRunner,
+    source: ObjectId,
+) {
+    let ability = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == source)
+        .and_then(|entry| entry.ability())
+        .expect("Valakut end-step trigger must be queued");
+    let damage = ability
+        .sub_ability
+        .as_deref()
+        .expect("Valakut damage continuation must be queued");
+    assert!(
+        matches!(
+            &damage.effect,
+            Effect::Unimplemented { name, .. } if name == "mass_move_total_damage"
+        ),
+        "the queued damage continuation must carry the mass-move-total-damage marker, got {:?}",
+        damage.effect
+    );
+}
+
 /// T1 — the end-step trigger sweeps the WHOLE pool into the owners'
 /// graveyards (CR 404.1: each card to its own owner's graveyard; CR 603.4:
 /// the gate held), but the chained damage clause is the strict-failure
@@ -152,6 +178,7 @@ fn end_step_trigger_sweeps_pool_and_damages_each_opponent() {
     let p2_life = life_of(&runner, P2);
 
     runner.advance_to_end_step();
+    assert_queued_gated_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     // CR 404.1: each swept card lands in its OWN owner's graveyard.
@@ -208,7 +235,7 @@ fn end_step_trigger_sweeps_pool_and_damages_each_opponent() {
 fn landfall_exile_links_and_end_step_sweep_pipeline() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PostCombatMain);
-    scenario
+    let valakut = scenario
         .add_enchantment_from_oracle(P0, "Valakut Exploration", VALAKUT_EXPLORATION_ORACLE)
         .id();
     scenario.with_library_top(P0, &["Impulse Hit"]);
@@ -265,6 +292,7 @@ fn landfall_exile_links_and_end_step_sweep_pipeline() {
     );
 
     runner.advance_to_end_step();
+    assert_queued_gated_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -288,8 +316,8 @@ fn landfall_exile_links_and_end_step_sweep_pipeline() {
 
 /// T3 — CR 603.4 fire-time gate: with an EMPTY pool the trigger never goes on
 /// the stack and no life changes. Paired positive reach-guard = T1/T2 (the
-/// identical path with a non-empty pool produces positive deltas), so this
-/// negative cannot pass vacuously.
+/// identical path with a non-empty pool sweeps linked cards), so this negative
+/// cannot pass vacuously.
 #[test]
 fn end_step_trigger_does_not_fire_on_empty_pool() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -339,6 +367,7 @@ fn sweep_and_damage_respect_per_source_link_authority() {
     let p1_life = life_of(&runner, P1);
 
     runner.advance_to_end_step();
+    assert_queued_gated_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     assert_eq!(
