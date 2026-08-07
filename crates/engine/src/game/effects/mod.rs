@@ -26765,15 +26765,15 @@ mod tests {
     }
 
     #[test]
-    fn condition_contains_city_blessing_recurses_through_condition_instead() {
+    fn condition_contains_designation_recurses_through_condition_instead() {
         let condition = AbilityCondition::ConditionInstead {
             inner: Box::new(AbilityCondition::HasCityBlessing),
         };
 
         assert!(
-            condition_contains_city_blessing(&condition),
-            "city's-blessing gated continuations wrapped in ConditionInstead must run the \
-             mid-chain blessing check before the condition is evaluated"
+            condition_contains_designation(&condition),
+            "designation-gated continuations wrapped in ConditionInstead must run the \
+             mid-chain designation check before the condition is evaluated"
         );
     }
 
