@@ -5295,13 +5295,14 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         "migrated fixture must decode through the PRODUCTION decoder"
     );
 
-    // R8 — THE ROUTING IS STATE-NEUTRAL. The six loaders stopped decoding a bare
-    // `GameState` and wrapping it in `PersistedGameState::Raw`, and started decoding AS
+    // R8 — THE ROUTING CANONICALIZES PERSISTED PROVENANCE. The six loaders stopped decoding
+    // a bare `GameState` and wrapping it in `PersistedGameState::Raw`, and started decoding AS
     // `PersistedGameState`: a different type, a different `Deserialize`, and a different
     // conversion (`decode_persisted_resolution_state`, which injects
     // `resolution_state_version` and decodes the resolution state as `ResolutionStateWire`).
-    // That is a real change to how six fixtures restore, and the two arms above cannot
-    // witness it — they assert only that a decode succeeds or fails.
+    // The persistence boundary assigns the current-turn occurrence namespace to the old
+    // ledger and matching live stack events; direct-current raw decode deliberately does not.
+    // Every other serialized surface must remain unchanged.
     //
     // `GameState` has no `PartialEq`, so compare its serialized forms recursively.
     // Hash-backed owners now serialize canonically at their field boundaries; arrays are
@@ -5365,22 +5366,89 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         "state",
         &mut diffs,
     );
+    assert_eq!(
+        diffs,
+        vec![
+            "state.stack (different elements)".to_string(),
+            "state.zone_changes_this_turn (different elements)".to_string(),
+        ],
+        "the production restore changes only the persisted zone-change provenance surfaces"
+    );
+
+    let stack_zone_change_keys = |state: &GameState| {
+        state
+            .stack
+            .iter()
+            .filter_map(|entry| {
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                    ..
+                } = &entry.kind
+                else {
+                    return None;
+                };
+                Some((record.recorded_turn_number, record.turn_zone_change_index))
+            })
+            .collect::<Vec<_>>()
+    };
+    let legacy_stack_keys = stack_zone_change_keys(&legacy_restored);
+    let routed_stack_keys = stack_zone_change_keys(&routed_restored);
     assert!(
-        diffs.is_empty(),
-        "routing the six dump loaders through the production decoder must restore the SAME \
-         state they restored before; differing paths: {diffs:?}"
+        !legacy_stack_keys.is_empty(),
+        "reach-guard: the fixture has live stack ZoneChanged trigger contexts"
+    );
+    assert!(
+        legacy_restored
+            .zone_changes_this_turn
+            .iter()
+            .all(|record| record.recorded_turn_number == 0)
+            && legacy_stack_keys.iter().all(|(turn, _)| *turn == 0),
+        "direct-current raw decode retains the historical zero provenance defaults"
+    );
+    assert_eq!(
+        routed_restored
+            .zone_changes_this_turn
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (
+                record.recorded_turn_number,
+                record.turn_zone_change_index,
+                index
+            ))
+            .collect::<Vec<_>>(),
+        (0..routed_restored.zone_changes_this_turn.len())
+            .map(|index| (routed_restored.turn_number, index, index))
+            .collect::<Vec<_>>(),
+        "production restore stamps each retained ledger row in its current-turn namespace"
+    );
+    assert!(
+        routed_stack_keys
+            .iter()
+            .all(|(turn, _)| *turn == routed_restored.turn_number),
+        "production restore stamps every matching live stack event with the current turn"
+    );
+    assert_eq!(
+        routed_stack_keys
+            .iter()
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>(),
+        legacy_stack_keys
+            .iter()
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>(),
+        "production restore preserves each stack event's ledger occurrence identity"
     );
 
     // The perturbation IS that assertion's reach-guard: without it, a comparison that
     // compared a value to itself — or explained every difference away as set order — would
     // pass on any two states at all. Perturb ONE scalar; the comparison must SEE it, and
     // must name the field it saw.
-    let mut perturbed = legacy_restored;
+    let mut perturbed = legacy_restored.clone();
     perturbed.turn_number += 1;
     let mut perturbed_diffs = Vec::new();
     differences(
         &serialized(&perturbed),
-        &routed_value,
+        &serialized(&legacy_restored),
         "state",
         &mut perturbed_diffs,
     );
@@ -5388,7 +5456,7 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         perturbed_diffs,
         vec!["state.turn_number".to_string()],
         "the comparison must see a one-scalar difference AND name it; if it cannot, the \
-         equality above proves nothing"
+         canonicalization-surface comparison above proves nothing"
     );
 
     // NEGATIVE (the anti-vacuity control): strip the field back out and both must reject.
