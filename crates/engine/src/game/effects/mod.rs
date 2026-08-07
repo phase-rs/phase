@@ -888,6 +888,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
             drain_pending_continuation(state, events)
         }
+        ResolutionFrame::Discard(_) => {}
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {

@@ -201,7 +201,7 @@ pub enum ResolutionFrame {
     CoinFlip(PendingCoinFlip),
     Proliferate(PendingProliferateActions),
     MultiDraw(MultiDrawFrame),
-    Discard(DiscardFrame),
+    Discard(Box<DiscardFrame>),
     ConniveReentry(PendingConniveReentry),
     LifeTotalAssignment(PendingLifeTotalAssignment),
     SpellResolution(PendingSpellResolution),
@@ -1986,7 +1986,7 @@ impl ResolutionStack {
             .iter()
             .rposition(|frame| matches!(frame, ResolutionFrame::Discard(frame) if frame.id == id))
             .and_then(|index| match self.frames.remove(index) {
-                ResolutionFrame::Discard(frame) => Some(frame),
+                ResolutionFrame::Discard(frame) => Some(*frame),
                 _ => unreachable!("discard frame index must contain a discard frame"),
             })
     }
@@ -1999,7 +1999,7 @@ impl ResolutionStack {
                 let ResolutionFrame::Discard(frame) = self.pop_expected(FrameKind::Discard)? else {
                     unreachable!("checked discard frame kind must match")
                 };
-                Ok(Some(frame))
+                Ok(Some(*frame))
             }
             Some(frame) => Err(ResolutionStackError::UnexpectedTop {
                 expected: FrameKind::Discard,
@@ -2011,7 +2011,7 @@ impl ResolutionStack {
     /// Parks a discard operation before it enters replacement processing.
     pub fn push_discard(&mut self, frame: DiscardFrame) {
         self.observe_discard_frame_id(frame.id);
-        self.push_inner(ResolutionFrame::Discard(frame));
+        self.push_inner(ResolutionFrame::Discard(Box::new(frame)));
     }
 
     /// Returns a life-total assignment tail only when it owns the active stack

@@ -2402,37 +2402,37 @@ pub(crate) fn deliver_replaced_zone_change(
             discard_frame,
             discard_lki,
             state.objects.get(&object_id).map(|object| object.zone),
-        )
-            .filter(|(_, _, final_zone)| *final_zone != Zone::Hand)
-        {
-            let (recorded, source_id) = {
-                let frame = state
-                    .resolution_stack
-                    .discard_mut(frame_id)
-                    .expect("discard provenance must name a live discard frame");
-                let recorded = frame.results.is_empty();
-                let source_id = frame.source_id;
+        ) {
+            if final_zone != Zone::Hand {
+                let (recorded, source_id) = {
+                    let frame = state
+                        .resolution_stack
+                        .discard_mut(frame_id)
+                        .expect("discard provenance must name a live discard frame");
+                    let recorded = frame.results.is_empty();
+                    let source_id = frame.source_id;
+                    if recorded {
+                        frame
+                            .results
+                            .push(crate::types::ability::DiscardedCardResult {
+                                object_id,
+                                lki: lki.clone(),
+                                final_zone,
+                            });
+                    }
+                    (recorded, source_id)
+                };
                 if recorded {
-                    frame
-                        .results
-                        .push(crate::types::ability::DiscardedCardResult {
-                            object_id,
-                            lki: lki.clone(),
-                            final_zone,
-                        });
+                    crate::game::restrictions::record_discard(state, lki.owner);
+                    if final_zone == Zone::Graveyard {
+                        crate::game::restrictions::record_card_discarded(state, object_id);
+                    }
+                    events.push(GameEvent::Discarded {
+                        player_id: lki.owner,
+                        object_id,
+                        source_id,
+                    });
                 }
-                (recorded, source_id)
-            };
-            if recorded {
-                crate::game::restrictions::record_discard(state, lki.owner);
-                if final_zone == Zone::Graveyard {
-                    crate::game::restrictions::record_card_discarded(state, object_id);
-                }
-                events.push(GameEvent::Discarded {
-                    player_id: lki.owner,
-                    object_id,
-                    source_id,
-                });
             }
         }
         // Roll back the face-down preflight flag when the entry was rejected, so a
