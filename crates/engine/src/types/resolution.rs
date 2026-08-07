@@ -1985,8 +1985,8 @@ impl ResolutionStack {
         self.frames
             .iter()
             .rposition(|frame| matches!(frame, ResolutionFrame::Discard(frame) if frame.id == id))
-            .and_then(|index| match self.frames.remove(index) {
-                ResolutionFrame::Discard(frame) => Some(*frame),
+            .map(|index| match self.frames.remove(index) {
+                ResolutionFrame::Discard(frame) => *frame,
                 _ => unreachable!("discard frame index must contain a discard frame"),
             })
     }
@@ -3660,7 +3660,7 @@ fn project_frames_into_legacy_state(
 }
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
-    state.resolution_stack = Box::default();
+    *state.resolution_stack = Default::default();
 }
 
 fn legacy_resolution_wire_field(object: &Map<String, Value>) -> Option<&str> {

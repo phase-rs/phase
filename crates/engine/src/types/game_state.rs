@@ -17925,7 +17925,7 @@ impl GameState {
             }
         }
         resolution_stack.validate(&self.waiting_for)?;
-        self.resolution_stack = Box::new(resolution_stack);
+        *self.resolution_stack = resolution_stack;
         Ok(())
     }
 
