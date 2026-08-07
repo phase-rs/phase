@@ -482,6 +482,11 @@
     "pendingCheaper": "A próxima mágica custa {{amount}} a menos",
     "companion": "Companheiro",
     "unboundedTooltip": "{{resource}} ilimitado (∞)",
+    "unboundedScheduledTooltip": "{{resource}} ilimitado (∞) — colapso pendente; será escolhida uma quantidade finita",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "{{resource}} ilimitado (∞) — colapso pendente; isto pode continuar ilimitado",
+    "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte deste grupo tem um colapso pendente; parte continua ilimitada",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Mana ilimitada (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "vida",
@@ -625,6 +630,10 @@
     "cardBack": "Verso da carta",
     "organizeLabel": "Organizar mão",
     "reorderPausedHint": "Arrastar para reordenar está pausado enquanto a mão está ordenada ou filtrada."
+  },
+  "storm": {
+    "copies_one": "Tempestade: {{count}} cópia",
+    "copies_other": "Tempestade: {{count}} cópias"
   },
   "opponentHud": {
     "ally": "Aliado",

@@ -1,7 +1,7 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
+    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -17,11 +17,38 @@ use crate::types::zones::Zone;
 use super::game_object::GameObject;
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
-/// CR 111.7 / CR 111.8: A token outside the battlefield ceases to exist at
-/// the next SBA, and can't change zones before then. Stack tokens are excluded
-/// so spell copies can finish resolving before the next SBA check.
-pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+/// CR 109.1 + CR 601.2a + CR 405.1: A spell is an object on the stack from
+/// announcement, even while this engine retains its origin-zone field until
+/// finalization. The retained-origin representation is stack-resident only while
+/// the exact spell's `PendingCast` lifecycle and announcement placeholder both
+/// remain live; a bare same-id stack entry is insufficient.
+fn object_has_stack_residency(state: &GameState, obj: &GameObject) -> bool {
+    if obj.zone == Zone::Stack {
+        return true;
+    }
+
+    let is_pending_spell = |pending: &crate::types::game_state::PendingCast| {
+        pending.object_id == obj.id && pending.activation_ability_index.is_none()
+    };
+    let has_pending_spell = state.pending_cast.as_deref().is_some_and(is_pending_spell)
+        || state
+            .waiting_for
+            .pending_cast_ref()
+            .is_some_and(is_pending_spell);
+
+    has_pending_spell
+        && state
+            .stack
+            .iter()
+            .any(|entry| entry.id == obj.id && matches!(entry.kind, StackEntryKind::Spell { .. }))
+}
+
+/// CR 704.5d / CR 111.7 / CR 111.8: A token outside the battlefield ceases to
+/// exist at the next SBA and can't change zones before then. Effectively
+/// stack-resident tokens are excluded so announced spell copies can finish
+/// casting and resolving before the next applicable SBA check.
+pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &GameObject) -> bool {
+    obj.is_token && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
@@ -30,8 +57,11 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// (CR 707.10f makes a permanent copy a token there) and may change zones freely
 /// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
 /// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
-pub(super) fn copy_of_card_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_copy && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+pub(super) fn copy_of_card_outside_battlefield_and_stack(
+    state: &GameState,
+    obj: &GameObject,
+) -> bool {
+    obj.is_copy && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
@@ -941,7 +971,7 @@ pub fn move_to_zone(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
         return;
     }
@@ -1707,7 +1737,7 @@ pub fn move_to_library_at_index(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
         return;
     }

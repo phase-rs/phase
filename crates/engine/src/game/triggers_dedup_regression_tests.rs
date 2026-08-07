@@ -3326,6 +3326,7 @@ fn order_triggers_distinct_event_context_still_prompt() {
             may_trigger_origin: None,
             subject_match_count: Some(count),
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), 1);
@@ -3385,6 +3386,7 @@ fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
     let ctx_a = make_ctx(ObjectId(1), ObjectId(11));
@@ -3436,6 +3438,7 @@ fn archenemy_hero_team_orders_triggers_from_multiple_heroes_together() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     };
 
@@ -3642,4 +3645,195 @@ fn order_triggers_apnap_three_players() {
             "stack top must contain NAP triggers (CR 405.3 + 603.3b)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.2c: the shared "already collected" authority
+// (`filter_already_collected_trigger_events_from`).
+//
+// These pin the exact semantics of the queued-context witness, which is a BOUND
+// and not an occurrence count: `deferred_triggers` holds one context per matching
+// observer, so N observers of ONE occurrence contribute N copies of that value.
+// ---------------------------------------------------------------------------
+
+/// A byte-identical `ZoneChanged` builder — `ZoneChangeRecord::test_minimal` is
+/// fully deterministic, so two calls with the same arguments compare equal.
+fn zone_change_event(object_id: ObjectId) -> GameEvent {
+    GameEvent::ZoneChanged {
+        object_id,
+        from: Some(Zone::Library),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord::test_minimal(
+            object_id,
+            Some(Zone::Library),
+            Zone::Battlefield,
+        )),
+    }
+}
+
+/// One queued context carrying exactly one copy of `event`, matching the
+/// one-witness-copy-per-matched-observer shape
+/// `collect_pending_triggers_with_collection` produces. That function builds
+/// `PendingTriggerContext::batched(matched.pending, matched.trigger_events)`, but
+/// for a non-batched trigger `matched.trigger_events` is the singleton
+/// `vec![event.clone()]` — so a `::single` context is the same one-copy shape and
+/// is used here because `::batched` is private to `triggers`.
+fn queued_context_for(event: GameEvent) -> PendingTriggerContext {
+    PendingTriggerContext::single(PendingTrigger {
+        source_id: ObjectId(99),
+        controller: PlayerId(0),
+        condition: None,
+        ability: Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(99),
+            PlayerId(0),
+        )),
+        timestamp: 0,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: Some(event),
+        modal: None,
+        mode_abilities: Vec::new(),
+        description: None,
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+        provenance: None,
+    })
+}
+
+fn zone_change_count(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .count()
+}
+
+/// U1 — the queued witness is COUNT-LIMITED, not set membership.
+///
+/// Two byte-identical `ZoneChanged` in the slice against ONE queued context
+/// carrying that value must leave exactly one survivor. Set membership would
+/// return 0, and so would a blanket `ZoneChanged` drop; both are wrong, because
+/// the second occurrence belongs to no owner.
+#[test]
+fn owner_collected_filter_consumes_one_witness_per_queued_context() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        1,
+        "exactly one context must be queued"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        1,
+        "CR 603.2c: one queued witness consumes one copy, not every copy"
+    );
+}
+
+/// U2 — the consumed-occurrence ledger alone suppresses, with an empty queue.
+///
+/// This is the witness that survives an intervening `drain_deferred_trigger_queue`.
+/// Production isolation of this case at the search-delivery park is an open gap;
+/// it is evidenced here at the authority layer.
+#[test]
+fn owner_collected_filter_honors_consumed_ledger_with_empty_queue() {
+    let state = setup();
+    let claimed = zone_change_event(ObjectId(7));
+    let other = zone_change_event(ObjectId(8));
+    let events = vec![claimed.clone(), other.clone()];
+
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "the queued-context witness must be absent so the ledger is isolated"
+    );
+
+    let consumed = vec![ConsumedTriggerEventOccurrence {
+        event: claimed.clone(),
+        occurrence: 0,
+    }];
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &consumed);
+    assert_eq!(
+        survivors,
+        vec![other],
+        "the ledger-claimed occurrence is removed and the unrelated one survives"
+    );
+}
+
+/// U3 — the queued witness never touches a non-`ZoneChanged` event.
+#[test]
+fn owner_collected_filter_never_drops_non_zone_change_events() {
+    let mut state = setup();
+    let zone_change = zone_change_event(ObjectId(7));
+    let life = GameEvent::LifeChanged {
+        player_id: PlayerId(0),
+        amount: -1,
+    };
+    let events = vec![zone_change.clone(), life.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(zone_change));
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert!(
+        !survivors.is_empty(),
+        "the non-zone event must not be swept away with the zone change"
+    );
+    assert_eq!(
+        survivors,
+        vec![life],
+        "only the owner-collected ZoneChanged is removed"
+    );
+}
+
+/// U4 — the witness counts CONTEXT COPIES, not occurrences.
+///
+/// Two observers of ONE occurrence queue two contexts, each carrying that same
+/// single value. A slice holding two byte-identical copies therefore loses BOTH.
+/// This is the documented bound in
+/// `filter_already_collected_trigger_events_from`'s contract, made executable so
+/// no future author can re-assert occurrence-exactness without deliberately
+/// updating this row.
+#[test]
+fn owner_collected_filter_counts_contexts_not_occurrences() {
+    let mut state = setup();
+    let event = zone_change_event(ObjectId(7));
+    let events = vec![event.clone(), event.clone()];
+    state
+        .deferred_triggers
+        .push(queued_context_for(event.clone()));
+    state.deferred_triggers.push(queued_context_for(event));
+
+    assert_eq!(
+        zone_change_count(&events),
+        2,
+        "the slice must really hold two byte-identical ZoneChanged"
+    );
+    assert_eq!(
+        state.deferred_triggers.len(),
+        2,
+        "two observers of one occurrence queue two contexts"
+    );
+
+    let survivors = filter_already_collected_trigger_events_from(&state, &events, 0, &[]);
+    assert_eq!(
+        zone_change_count(&survivors),
+        0,
+        "the queued witness is a min(queued_copies, slice_copies) BOUND, and is \
+         NOT occurrence-exact"
+    );
 }

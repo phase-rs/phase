@@ -521,6 +521,11 @@
     "pendingCheaper": "Next spell costs {{amount}} less",
     "companion": "Companion",
     "unboundedTooltip": "Unbounded {{resource}} (∞)",
+    "unboundedScheduledTooltip": "Unbounded {{resource}} (∞) — collapse pending; a finite amount will be chosen",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded",
+    "unboundedMixedTooltip": "Unbounded {{resource}} (∞) — part of this group has a pending collapse; part remains unbounded",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Unbounded mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "life",
@@ -664,6 +669,10 @@
     "cardBack": "Card back",
     "organizeLabel": "Organize hand",
     "reorderPausedHint": "Drag-to-reorder is paused while the hand is sorted or filtered."
+  },
+  "storm": {
+    "copies_one": "Storm: {{count}} copy",
+    "copies_other": "Storm: {{count}} copies"
   },
   "opponentHud": {
     "ally": "Ally",

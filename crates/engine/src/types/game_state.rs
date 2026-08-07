@@ -3558,7 +3558,10 @@ pub enum PersistentAxisMaterialization {
 /// remaining consumers are LIVE, and byte-identical to the pre-extraction nested
 /// `counter_axis` helper they already used:
 ///   • `scheduled_collapse_axes` — read by `clear_collapsed_materializations` to pick the
-///     removals. Exactly the fail-open described above: a removal that finds nothing.
+///     removals, AND by `derive_views` (through `scheduled_display_axes`) to flag each `∞` row.
+///     Exactly the fail-open described above: a removal that finds nothing, and an axis that
+///     flags no row. An unflagged row renders plain `∞` rather than `∞→N`, so the polarity is
+///     unchanged — nothing is hidden, one affordance is merely not offered.
 ///   • `clear_collapsed_materializations`' own surviving-target guard.
 ///
 /// That fail-open polarity is the SAME one this phase mandates everywhere else (an axis
@@ -8878,13 +8881,31 @@ impl GameState {
     /// captured inside an object-growth shortcut proposal/response window
     /// (`WaitingFor::LoopShortcut` / `RespondToShortcut`), where the pending accept→materialize
     /// resolution still re-derives the ∞ pile from it (`current_period_fodder`). In every
-    /// other loaded state the only consumer is the live detection re-drive
-    /// (`try_offer_object_growth_shortcut`), which requires `Priority` + an empty stack and is only
-    /// HARMED by a stale loaded prefix (it re-drives from a pinless `seq[0]` and aborts — the Kilo
-    /// bug), so dropping is strictly safe. Called from `PersistedGameState::into_game_state`, the
-    /// single production restore chokepoint for both the server (`GameSession::from_persisted`) and
-    /// WASM (`decode_restored_game_state`) paths. Applies only at the load boundary, never during
-    /// live play (where a populated sequence at `Priority` is the legitimate detection signal).
+    /// other loaded state the field is a ROUTING SIGNAL with SEVEN consumers — the live detection
+    /// re-drive (`try_offer_object_growth_shortcut`), its own empty-stack bridge precondition, the
+    /// bounded mint's step (1b), the `materialize_fixed_shortcut` and `apply_until_lethal_shortcut`
+    /// drive dispatches, `handle_declare_shortcut`'s `template: None` arm, and the certification
+    /// window's cast-set scoping (`analysis::resource::window_cast_card_ids`). Dropping is still
+    /// safe, but for a different reason than the one recorded here before: all seven ask the SAME
+    /// question ([`GameState::loop_period_controller`]) and every one of them fails CLOSED on
+    /// `None`, so a cleared field routes to the drain/manual path, grants no soundness relief, and
+    /// never reaches a pin-consuming drive with nothing to re-derive from. (It is also true that a
+    /// stale loaded prefix only HARMS the re-drive, which re-drives from a pinless `seq[0]` and
+    /// aborts — the Kilo bug.)
+    ///
+    /// ⚠ THE PRIOR REVISION OF THIS DOC CLAIMED the re-drive was "the only consumer". That was
+    /// FALSE — the other six are not re-drives — and the false premise is precisely why the
+    /// routing signal went un-audited against its own consumer. The revision after it named five
+    /// and missed the bridge precondition and the cast-set scoping, i.e. it corrected an
+    /// undercount with a smaller one. The count above is the enumerated call set of
+    /// `loop_period_controller` outside `#[cfg(test)]`; the conclusion survives either way.
+    /// (`handle_decline_shortcut` also reads the accessor, but as a WRITER — it scopes its own
+    /// clear — so it is not a consumer of the routing signal and is deliberately not counted.)
+    ///
+    /// Called from `PersistedGameState::into_game_state`, the single production restore chokepoint
+    /// for both the server (`GameSession::from_persisted`) and WASM (`decode_restored_game_state`)
+    /// paths. Applies only at the load boundary, never during live play (where a populated sequence
+    /// at `Priority` is the legitimate detection signal).
     pub fn migrate_transient_loop_sequence(&mut self) {
         if !matches!(
             self.waiting_for,
@@ -8892,6 +8913,31 @@ impl GameState {
         ) {
             self.last_loop_action_sequence.clear();
         }
+    }
+
+    /// CR 732.2a: the seat whose driving period `last_loop_action_sequence` currently records.
+    ///
+    /// CR 732.2a lets "the player with priority … suggest a shortcut by describing a sequence of
+    /// game choices, for all players, that may be legally taken based on the current game state
+    /// and the predictable results of the sequence of choices" — so a recorded period is evidence
+    /// about ONE seat's predictable continuation and describes nothing another seat can take.
+    /// `None` when no period is accumulating, or when the recorded steps do not all belong to one
+    /// seat (fail-closed: a heterogeneous run is nobody's loop).
+    ///
+    /// This is the SAME whole-period test `try_offer_object_growth_shortcut` applies to its own
+    /// admission, hoisted into one authority so the routing signal and the consumer it routes to
+    /// cannot disagree. Every routing site reads `loop_period_controller() == Some(proposer)`,
+    /// which is exactly "the object-growth route is live for this seat"; each fails closed on
+    /// `None`.
+    ///
+    /// The homogeneity clause is a backstop, not a live case: `accumulate_loop_action_step` clears
+    /// the sequence on a controller change, so a heterogeneous run should be unreachable in play.
+    pub(crate) fn loop_period_controller(&self) -> Option<PlayerId> {
+        let owner = self.last_loop_action_sequence.first()?.controller;
+        self.last_loop_action_sequence
+            .iter()
+            .all(|step| step.controller == owner)
+            .then_some(owner)
     }
 }
 
@@ -10129,6 +10175,20 @@ pub enum WaitingFor {
     /// shortcut, each other living player is prompted in turn order (drain-one-advance
     /// via `remaining_players`, mirroring `OpponentMayChoice.remaining`). `player` is the
     /// current responder; `proposal` is the public offer summary.
+    ///
+    /// This IS CR 732.2b's structure, not an analogue of it. The rule: "Each other player, in turn
+    /// order starting after the player who suggested the shortcut, may either accept the proposed
+    /// sequence, or shorten it by naming a place where they will make a game choice that's
+    /// different than what's been proposed. (The player doesn't need to specify at this time what
+    /// the new choice will be.) This place becomes the new ending point of the proposed sequence."
+    /// Each clause has a carrier here — turn order via `game::players::apnap_order_from` starting
+    /// after the proposer, the two answers via `ShortcutResponse::{Accept, Shorten}`, and the
+    /// declare-now/specify-later property via `Shorten` carrying only `at_iteration` and no choice.
+    ///
+    /// The window is what makes CR 732.2c's "once the LAST player has either accepted or
+    /// shortened" a real condition rather than an assumption: no advance occurs until this queue
+    /// drains. See `ShortcutResponse` for how a `Shorten` is realized, which is deliberately
+    /// conservative and disclosed there.
     RespondToShortcut {
         player: PlayerId,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -11112,8 +11172,20 @@ pub enum PayableResource {
     Speed,
     /// CR 732.2a: NOT a resource payment. The finite count an accepted
     /// object-growth loop shortcut collapses into, named by the loop controller
-    /// at the next phase/step boundary (the shortcut's ending point is a priority
-    /// window). The submit handler reads the deferred materialization stash by
+    /// at the next phase/step boundary.
+    ///
+    /// CR 732.2a + CR 732.2c — WHERE THE PROPOSAL ENDS, AND WHY THAT IS HERE. CR 732.2a requires
+    /// the ending point be "a place where a player has priority", so it is NOT the phase/step end
+    /// itself: CR 500.5 makes that a turn-based action and CR 117.3a gives priority at the
+    /// BEGINNING of the next step. The ending point is the priority window that follows, and the
+    /// materialization at the CR 500.5 boundary happens DURING THE ADVANCE to it. CR 732.2c is
+    /// then satisfied on its own terms — "the game advances to the last proposed ending point,
+    /// with all game choices contained in the shortcut proposal having been taken": every choice
+    /// is taken at accept (the count is fixed there, see `pending_materialization_count`), and the
+    /// observable state at the ending point is the proposed one. The advance is not instantaneous
+    /// under any reading of 732.2c; what the rule constrains is where it LANDS.
+    ///
+    /// The submit handler reads the deferred materialization stash by
     /// player and applies it — it deducts nothing. `axis` is a DISPLAY-ONLY label
     /// (derived from the stash at construction, `turns.rs`) so the prompt names the
     /// correct growth axis (tokens / counters / life / mixed); resolution ignores it
@@ -12014,6 +12086,18 @@ pub struct StackEntry {
     pub kind: StackEntryKind,
 }
 
+/// Engine-authored identity for a synthesized triggered ability whose display
+/// needs a fact unavailable on ordinary Oracle-defined triggers.
+///
+/// This is presentation provenance, not a second rules implementation: the
+/// trigger's resolved ability remains the authority that actually resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum SyntheticTriggerProvenance {
+    /// CR 702.40a: The Storm trigger will copy its source spell this many times.
+    Storm { copy_count: u32 },
+}
+
 /// CR 400.7j: from→to record of a source object moved by its own resolving
 /// ability, so `source_is_current` can re-find it after the all-zone incarnation
 /// bump. `original_stamp` is the incarnation the resolving ability captured (fixed
@@ -12590,6 +12674,10 @@ pub enum StackEntryKind {
         /// `die_result_this_resolution`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         die_result: Option<i32>,
+        /// Typed identity for synthesized keyword triggers. The frontend reads
+        /// this only through `StackEntryDisplay`, never from raw stack state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<SyntheticTriggerProvenance>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -13476,10 +13564,22 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_trigger_order: Option<PendingTriggerOrder>,
 
-    /// CR 603.3b: PhaseChanged occurrences whose delayed triggers were merged
-    /// into a simultaneous normal-trigger ordering batch before priority. The
-    /// generic delayed-trigger pass filters these exact occurrences so the same
-    /// delayed ability is not dispatched again. Transient engine coordination,
+    /// CR 603.2c: Event occurrences already collected before a player would
+    /// receive priority — including the `PhaseChanged` delayed/normal merge, an
+    /// activation trigger collection (`casting_costs.rs`,
+    /// `engine_priority::stage_pending_activation_trigger_events`), a dispatched
+    /// batch's consumed events, and the `ZoneChanged` occurrences claimed by
+    /// `triggers::mark_logical_zone_events_consumed_before_priority`. Consumed by
+    /// `triggers::filter_consumed_trigger_events{,_from}` and
+    /// `triggers::filter_already_collected_trigger_events_from`, so the same
+    /// occurrence is neither re-collected nor re-dispatched. Ordinals are exact
+    /// only when the marking owner passed the whole, un-reordered action buffer;
+    /// one `zone_pipeline.rs` owner passes a sub-slice (rebased ordinals) and the
+    /// other marks after its buffer has been re-assembled by the batch drain.
+    /// NOTE: this ledger is ALSO the delayed-trigger input filter
+    /// (`engine_priority.rs`) — claiming an occurrence hides it from
+    /// `check_delayed_triggers` too, which is why only three of the seven logical
+    /// zone-change owners mark (CR 603.7b). Transient engine coordination,
     /// cleared at action/pipeline boundaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed_before_priority_trigger_events:
@@ -19834,13 +19934,112 @@ impl GameState {
     }
 
     /// CR 732.2a: the exact `ResourceAxis` set a deferred materialization stash will
-    /// collapse at the next CR 500.5 boundary. SINGLE AUTHORITY with ONE production caller,
-    /// `clear_collapsed_materializations`, which REMOVES these axes once the growth was applied.
+    /// collapse at the next CR 500.5 boundary. SINGLE AUTHORITY with TWO production callers:
+    /// `clear_collapsed_materializations`, which REMOVES these axes once the growth was applied,
+    /// and `game::derived_views::scheduled_display_axes`, which flags each `∞` row's `scheduled`
+    /// field.
     ///
-    /// NOT a display filter, and deliberately not read by `game::derived_views`. This stash is the
-    /// engine's DEFERRAL of an accepted shortcut's results — an engine deviation, pre-existing and
-    /// deliberate, that no CR licenses. The count itself is already fixed at accept
-    /// (`pending_materialization_count`); what is deferred is putting the growth on the board.
+    /// NOT a display FILTER. `derive_views` reads this to ANNOTATE a row, never to decide whether
+    /// the row exists. Which surfaces exist is gated on their own stores and on live battlefield
+    /// membership, never on this set. (This doc has been stale twice — it once said "ONE
+    /// production caller" and "deliberately not read by `game::derived_views`"; then it named a
+    /// since-removed tag loop as the caller. Each time the mirror sentence in `derived_views` was
+    /// updated and this one — the doc a future caller reads first — was not. Hence it now names
+    /// the FUNCTION, not the consumer, so adding a consumer inside `derived_views` cannot make it
+    /// stale again.)
+    ///
+    /// CR 732.2a + CR 732.2c — WHAT THIS STASH IS, STATED AS THE RULE RATHER THAN AS A CONCESSION.
+    /// This doc previously called the stash an engine deviation "that no CR licenses". That was
+    /// wrong: it conceded a rule the code satisfies. The count is fixed AT ACCEPT
+    /// (`pending_materialization_count`), so every game choice in the proposal is taken there,
+    /// exactly as CR 732.2c requires. What the stash carries is the growth still in flight along
+    /// the advance to the proposal's ending point — and per CR 732.2a that ending point is a
+    /// PRIORITY WINDOW, not the CR 500.5 boundary the stash is cashed out at (CR 117.3a: priority
+    /// arrives at the beginning of the next step). Landing the growth during that advance is not a
+    /// deferral of CR 732.2c; it is CR 732.2c's advance. See `PayableResource::LoopCollapse`.
+    ///
+    /// THIS DOC IS THE SUBSYSTEM'S SINGLE AUTHORITY FOR THE CR 732 READING. Other sites point here
+    /// rather than restating it, so there is one place to correct if it is ever wrong. Four
+    /// positions, each anchored on a clause rather than on a vibe:
+    ///
+    /// 1. TIMING — the loop ends by proceeding directly to the phase change, iterations elided per
+    ///    CR 732.1b ("without having to actually perform them"); the opposing player then has
+    ///    priority, and that window is the CR 732.2a-legal ending point. Full statement at
+    ///    `game::engine::try_offer_object_growth_shortcut`.
+    /// 2. NO CONDITIONAL ACTIONS — CR 732.2a bars a sequence "where the outcome of a game event
+    ///    determines the next action a player takes", and requires "predictable results". Pins fix
+    ///    every free choice BEFORE the offer, and `DecisionTemplate`'s schedules are pure functions
+    ///    of (iteration index, live legal set) — never of a prior iteration's outcome, which makes
+    ///    a react-to-what-happened choice unrepresentable rather than merely unused. With the
+    ///    coin/die/random rejection at the offer gate and `elimination_bounds` stopping short of
+    ///    every CR 704 threshold, predictability holds BY CONSTRUCTION.
+    /// 3. THE COUNT — CR 732.2a lets a proposal be "a loop that repeats a specified number of
+    ///    times", and the proposer is who specifies it. The collapse prompt (`game::turns`) is that
+    ///    specification, bounded above by what the table accepted; `SubmitPayAmount` rejects any
+    ///    over-collapse. Choosing fewer repetitions is CR 732.2b/2c shortening realized — a player
+    ///    names a place for a different choice without specifying it then (CR 732.2b), and at the
+    ///    new ending point makes a different game choice (CR 732.2c).
+    /// 4. WHEN THE LOOP CLOSES — CR 732.1a: "As long as each player in the game understands the
+    ///    intent of each other player, any shortcut system they use is acceptable." This engine IS
+    ///    that system. Fixing and enforcing where the elided loop closes is the system doing its
+    ///    job, and CR 732.1b names that job outright: the shortcut rules determine "how many times
+    ///    those actions are repeated ... and HOW THE LOOP IS BROKEN".
+    ///
+    /// # THE FIDELITY INVARIANT — why all four positions hold at once
+    ///
+    /// **ELISION ≡ PERFORMANCE. The engine can never advance to a state that performing the
+    /// proposal's choices would not produce.** CR 732.2c defines the advance as reaching the ending
+    /// point "with all game choices contained in the shortcut proposal having been taken", so the
+    /// end state must be the state those choices produce. There are exactly three materialization
+    /// routes and each preserves that identity:
+    ///
+    /// (a) UNOBSERVED → batch. `batch(N) ≡ perform-each(N)` by the growth-observed firewall's own
+    ///     precondition: the batch route is entered only when no observer can make the lump apply
+    ///     differently from N separate applications.
+    /// (b) OBSERVED AT ACCEPT → `DriveSequence`, which literally performs the iterations, so
+    ///     observers fire exactly as they would in manual play.
+    /// (c) BECAME OBSERVED IN-WINDOW → `engine_resolution_choices::boundary_declines` → manual
+    ///     play, where the player performs the actions.
+    ///
+    /// Route (c) is the one the review indicted, and it is the route that ENFORCES CR 732.2c rather
+    /// than departing from it. Once an observer appears, the other two options both break the
+    /// identity: a batch advance would reach a state the proposal's choices would NOT produce, and
+    /// replaying an observer-laden sequence would execute a proposal nobody made or accepted.
+    /// Decline-to-manual is the only CR 732-faithful behavior left. **The gate is not the
+    /// deviation; the two alternatives it forecloses are.** `boundary_declines` is exhaustive over
+    /// `PersistentAxisMaterialization` with no wildcard — `Tokens` (real ETB events) and
+    /// `DriveSequence` (real replay) never decline; only the batched `Counters`/`Life` axes can,
+    /// and only when their own observer appeared.
+    ///
+    /// Supporting lemmas, each checkable at a symbol rather than by argument:
+    /// * **L1 OPTIONALITY** — the offer gate admits only voluntarily-repeatable periods, and
+    ///   `LoopAction::is_voluntarily_repeatable` is `true` on an exhaustive match over all three
+    ///   variants (`Recast`, `Activate`, `TapLandForMana`), every one player-initiated. A mandatory
+    ///   loop never produces this shape and stays on the CR 104.4b draw / lethal paths. So in
+    ///   manual play the controller may stop after any prefix.
+    /// * **L2 UNCONDITIONALITY BY CONSTRUCTION** — pins plus the static randomness scan plus the
+    ///   runtime rng-position backstop satisfy CR 732.2a's "predictable results" and
+    ///   no-conditional-actions clauses before an offer exists
+    ///   (`analysis::decision_template::predictability_gate`).
+    /// * **L3 PREFIX CONSENT** — accepting a proposal of bound N is declining CR 732.2b shortening
+    ///   at every place up to N, i.e. consenting to every prefix. The collapse prompt's `[0, N]`
+    ///   range therefore only ever lands on a consented, manually-reachable prefix.
+    /// * **L5 THIRD-PARTY INVARIANCE** — the batch route is reachable only when unobserved, so no
+    ///   non-controller state depends on the count; under-delivery moves only the controller's own
+    ///   gain (and tapped tokens carry no lethal driver, per `game::turns`).
+    ///
+    /// THE HONEST BOUNDARY, STATED BECAUSE IT IS THE ARGUMENT AND NOT A CONCESSION: this engine does
+    /// not follow the CR 732.2 procedure verbatim. It is a CR 732.1a-licensed VARIANT — "as long as
+    /// each player in the game understands the intent of each other player, any shortcut system
+    /// they use is acceptable" — and the published badge/window semantics are what make that mutual
+    /// understanding hold by construction. Reading the window as illegal requires CR 732.2 to be
+    /// the exclusive procedure, which CR 732.1a's plain text contradicts. The in-window
+    /// interactivity is CR 732.2b's shortening right made continuous: strictly MORE player rights
+    /// than the paper procedure, never fewer.
+    ///
+    /// `FamilyCollapseState` still distinguishes `Committed` from the weaker variants, because a
+    /// badge that reads `∞→N` is a promise about what WILL land and the engine only makes that
+    /// promise where it can keep it.
     /// While it is pending, the `∞` HUD rows, the ∞ object pile and the ∞ counter pills all keep
     /// projecting, because the marks and their enablers are still live. This set says nothing
     /// about them — it names what the boundary will REMOVE, not what the display may show.
@@ -21939,6 +22138,7 @@ mod tests {
                 source_name: "Normal trigger source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state
@@ -23123,6 +23323,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         a.lki_by_incarnation
@@ -26088,6 +26289,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -26154,6 +26356,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         }));
         state.pending_trigger_firing = Some(TriggerFiring::Ordinary);
 
@@ -26638,6 +26841,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }

@@ -9,6 +9,8 @@ type DraftMode = "quick" | "pod";
 interface DraftIntroProps {
   mode: DraftMode;
   podSize?: number;
+  packCount?: number;
+  cardsPerPack?: number;
   onContinue: () => void;
 }
 
@@ -21,11 +23,17 @@ interface Step {
 
 // ── Component ───────────────────────────────────────────────────────────
 
-export function DraftIntro({ mode, podSize = 8, onContinue }: DraftIntroProps) {
+export function DraftIntro({
+  mode,
+  podSize = 8,
+  packCount = 3,
+  cardsPerPack = 14,
+  onContinue,
+}: DraftIntroProps) {
   const { t } = useTranslation("draft");
 
   const quickSteps: Step[] = [
-    { icon: "1", text: t("intro.quick.step1") },
+    { icon: "1", text: t("intro.quick.step1", { packCount, cardsPerPack }) },
     { icon: "2", text: t("intro.quick.step2") },
     { icon: "3", text: t("intro.quick.step3") },
     { icon: "4", text: t("intro.quick.step4") },

@@ -5,11 +5,12 @@ import { getCardPrintings } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
+import type { CardHoverHandler } from "./hoverPreview";
 
 interface PrintingPickerModalProps {
   cardName: string;
   oracleId: string;
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: CardHoverHandler;
   onClose: () => void;
 }
 
@@ -140,7 +141,7 @@ export function PrintingPickerModal({
                   key={printing.id}
                   type="button"
                   onClick={() => handleSelect(printing)}
-                  onMouseEnter={() => onCardHover?.(cardName, printing.id)}
+                  onMouseEnter={() => onCardHover?.({ name: cardName, scryfallId: printing.id })}
                   onMouseLeave={() => onCardHover?.(null)}
                   className={`group relative overflow-hidden rounded-xl border transition-all ${
                     isSelected

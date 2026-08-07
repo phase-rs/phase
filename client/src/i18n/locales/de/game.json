@@ -482,6 +482,11 @@
     "pendingCheaper": "Nächster Zauber kostet {{amount}} weniger",
     "companion": "Gefährte",
     "unboundedTooltip": "Unbegrenzt: {{resource}} (∞)",
+    "unboundedScheduledTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; eine endliche Anzahl wird gewählt",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben",
+    "unboundedMixedTooltip": "Unbegrenzt: {{resource}} (∞) — ein Teil dieser Gruppe hat eine ausstehende Auflösung; ein Teil bleibt unbegrenzt",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Unbegrenztes Mana (∞)",
     "unboundedMana": "Mana",
     "unboundedLife": "Leben",
@@ -625,6 +630,10 @@
     "cardBack": "Kartenrückseite",
     "organizeLabel": "Hand ordnen",
     "reorderPausedHint": "Das Umsortieren per Ziehen ist pausiert, solange die Hand sortiert oder gefiltert ist."
+  },
+  "storm": {
+    "copies_one": "Sturm: {{count}} Kopie",
+    "copies_other": "Sturm: {{count}} Kopien"
   },
   "opponentHud": {
     "ally": "Verbündeter",

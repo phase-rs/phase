@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! Engine-authored presentation projections over `GameState`.
 //!
 //! These "derived views" are computed just-in-time at serialization
@@ -21,7 +22,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
+    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
@@ -30,13 +31,14 @@ use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
+    SyntheticTriggerProvenance,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 fn is_false(value: &bool) -> bool {
@@ -98,6 +100,10 @@ pub struct StackEntryDisplay {
     pub paid: Vec<StackPaidFactView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_context: Vec<TriggerContextDisplay>,
+    /// Typed synthesized-trigger presentation provenance. This is the only
+    /// stack provenance surface consumed by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SyntheticTriggerProvenance>,
 }
 
 /// A single player-affecting condition the HUD surfaces as a status icon.
@@ -149,9 +155,10 @@ pub struct PlayerStatusView {
 }
 
 /// One rendered `∞` HUD row: a detected/forced unbounded loop pumps `axis`, and
-/// the engine attributes the badge to `player` (the HUD it attaches to). `axis`
-/// is the engine-provided identity the frontend formats to a family label — the
-/// display layer never decides attribution or which axes are unbounded.
+/// the engine attributes the badge to `player` (the HUD it attaches to). `axis` is the
+/// engine-provided identity, and the engine also owns the display family it groups into
+/// ([`family_of`], published per seat as [`UnboundedFamilyView`]) — the display layer decides
+/// neither attribution, nor which axes are unbounded, nor whether a collapse is coming.
 ///
 /// `player` is computed by [`attribution_player`] (NOT the raw producing
 /// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
@@ -161,6 +168,182 @@ pub struct PlayerStatusView {
 pub struct UnboundedResourceView {
     pub player: PlayerId,
     pub axis: ResourceAxis,
+}
+
+/// The display family an unbounded [`ResourceAxis`] groups into. No CR governs a display
+/// grouping (cf. `game/filter.rs`'s `context_free_prop_matches_face` Kleene `AnyOf` arm).
+///
+/// NOT `analysis::corpus::ResourceFamily` — different module, lossy
+/// family→representative-axis map, no total inverse, no `Poison`→counters variant.
+///
+/// `rename_all` so the wire strings ARE the client's family literals — one type, no mirror map.
+/// Pinned against the client's `Record<ResourceAxisTag, UnboundedFamily>` by the
+/// `unbounded-family-tags.json` golden, which carries all 17 axis-tag→family pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnboundedFamily {
+    Mana,
+    Life,
+    Damage,
+    Mill,
+    Counters,
+    Tokens,
+    Cards,
+    Casts,
+    Combats,
+    Turns,
+    Triggers,
+}
+
+/// Whether the boundary can still fail to apply this scheduled collapse. No CR governs it — it is
+/// derived from `engine_resolution_choices::materialization_certainty`, which reads the boundary's
+/// own non-push-exit census, never a copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollapseCertainty {
+    Committed,
+    Conditional,
+}
+
+impl CollapseCertainty {
+    /// `Conditional` wins: a family is only as certain as its least certain member. No CR governs
+    /// this — it is a meet over a display promise, not a rules behavior (cf. `game/filter.rs`'s
+    /// `context_free_prop_matches_face` Kleene `AnyOf` arm).
+    fn weaker(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Committed, Self::Committed) => Self::Committed,
+            _ => Self::Conditional,
+        }
+    }
+}
+
+/// This family's collapse coverage. `Scheduled` displays
+/// `GameState::pending_unbounded_materialization` — growth whose count was fixed at accept and
+/// which is in flight along CR 732.2c's advance to the proposal's ending point, that point being a
+/// priority window per CR 732.2a and not the CR 500.5 boundary the stash is cashed out at
+/// (`types/game_state.rs`'s `scheduled_collapse_axes` doc, and this file's
+/// `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block). An earlier version of this doc called that
+/// stash unlicensed; it is not — see `scheduled_collapse_axes` for the four-position reading.
+/// `Scheduled` is nonetheless a WEAKER claim than `Committed`, and that distinction is the point of
+/// this enum: `Committed` is what licenses the `∞→N` badge, which is a promise about what will
+/// land, and the engine makes that promise only where it can keep it. `Mixed` is a join result.
+///
+/// `Unscheduled` is the one variant a CR describes, and only in the SHAPED sense the rest of this
+/// crate uses (this file's `IS AN ENGINE-STATE ARGUMENT, NOT A RULES ONE` block): CR 732.1b's
+/// antecedent is a state "in which a set of actions could be repeated indefinitely", and an ∞ axis
+/// with nothing staged is exactly that — a legal, ordinary game state, pre-proposal. The rule's
+/// PERMISSION clause is not what is cited and is never authority for engine conduct.
+///
+/// NOTE — distinct from `types/game_state.rs`'s `LoopCollapseAxis::Mixed`, which means "the stash
+/// spans ≥2 axis KINDS" and only labels the finite-count prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum FamilyCollapseState {
+    Unscheduled,
+    Mixed,
+    Scheduled(CollapseCertainty),
+}
+
+impl FamilyCollapseState {
+    /// Join: `Scheduled(a) ⊔ Scheduled(b) = Scheduled(weaker)`, `Unscheduled ⊔ Scheduled(_) =
+    /// Mixed`, `Mixed` is top. Commutative + associative + idempotent because it IS a join —
+    /// load-bearing: the FE fold it replaces documented a last-wins order hazard, and its open
+    /// question ("what would make the over-report reachable") is settled here rather than avoided:
+    /// `Mixed` is REPRESENTABLE, so a mixed family renders a bare `∞` instead of a wrong `∞→N`.
+    /// Witnessed by `mixed_family_is_not_scheduled` and
+    /// `two_controllers_draining_one_victim_do_not_cross_schedule`.
+    ///
+    /// No CR governs this — it is a join over a display projection, not a rules behavior
+    /// (cf. `game/filter.rs`'s `context_free_prop_matches_face` Kleene `AnyOf` arm).
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Mixed, _) | (_, Self::Mixed) => Self::Mixed,
+            (Self::Unscheduled, Self::Unscheduled) => Self::Unscheduled,
+            (Self::Unscheduled, Self::Scheduled(_)) | (Self::Scheduled(_), Self::Unscheduled) => {
+                Self::Mixed
+            }
+            (Self::Scheduled(a), Self::Scheduled(b)) => Self::Scheduled(a.weaker(b)),
+        }
+    }
+}
+
+/// One HUD badge's engine-owned collapse state, keyed per seat and per display family.
+///
+/// COMPUTED HERE, AT THE PRODUCING CONTROLLER KEY, and never by joining two channels downstream.
+/// The primary reason is layering — a join is a computation over game state, which the display
+/// layer does not perform (see `CLAUDE.md`). The supporting reason is that a downstream join is not
+/// even well-defined: the row channel keys on [`attribution_player`], so a victim-attributed axis
+/// (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`/`Poison(p)`) names its VICTIM; two controllers
+/// draining the same victim would collide on `(victim, Life(victim))` and any `(player, axis)` join
+/// would mark the wrong controller's row scheduled. The controller key is not recoverable after
+/// attribution, so only the producing loop can answer it. That is exactly why the state below is
+/// resolved on the controller key, BEFORE attribution runs.
+///
+/// WHY `(player, FAMILY)` AND NOT `(player, axis)`: the badge is per family, so a single glyph
+/// would have to say two things when two same-family axes disagree. It says the true weaker one
+/// instead — `Scheduled(_) ⊔ Unscheduled = Mixed`, which renders a bare `∞`. Witnessed by
+/// `two_controllers_draining_one_victim_do_not_cross_schedule`.
+///
+/// `GameState::pending_unbounded_materialization` remains THE authority for the accepted-collapse
+/// contract, and it is what the boundary reads to cash the collapse out. It holds an accepted
+/// shortcut's results in flight along CR 732.2c's advance to the proposal's ending point — a
+/// priority window per CR 732.2a, not the CR 500.5 boundary itself
+/// (`types/game_state.rs`'s `scheduled_collapse_axes` doc). It is still not a GUARANTEE of the
+/// final amount: the boundary's growth re-check and the controller's CR 732.2a count choice can
+/// both reduce what lands, which is why the display carries certainty rather than a
+/// number. A second channel mirroring
+/// the stash is no longer "a contract with no reader", which it genuinely was when that objection
+/// was written:
+/// THIS is the reader — `usePlayerDesignations` → `UnboundedBadge`, pinned on the wire by
+/// `unbounded-declined-wire.json`.
+///
+/// SAME-FRAME ASYMMETRY — UNCHANGED AND LIVE. Carried forward from the `scheduled` flag this
+/// channel replaced, because retyping the flag as [`FamilyCollapseState`] did not answer the
+/// objection, and a reader still sees it on screen. Only THIS channel carries a collapse state.
+/// `unbounded_pile` (card groups) and `unbounded_counters` (counter pills) are `ObjectId`-keyed and
+/// carry no collapse projection at all, so during the accept→boundary window one loop can show
+/// `∞→N` on the badge and a plain `∞` on its own token group and counter pill in the SAME frame.
+/// Witnessed rather than asserted:
+/// `kilo_live_offer_from_real_dump::kilo_accept_marks_pentad_charge_as_unbounded_display_target`
+/// pins `unbounded_counters[Pentad] == [charge]` — a bare `∞` pill — in the exact frame whose
+/// golden family state is `Scheduled(Committed)`.
+///
+/// THE ANSWER, not a disclosure: this is not the `Mana(_)` false-promise case. The collapse really
+/// IS scheduled for that axis, so the quiet surfaces under-announce; none of them promises a bound
+/// it will not keep. Announcing it on the object-keyed channels would require a
+/// `(player, family)` → `ObjectId` join that the engine does not put on the wire, and computing
+/// that join downstream is precisely the display-layer computation this channel exists to remove
+/// (see `CLAUDE.md`). `Mana(_)` is different in kind — its promise is false the moment it is made —
+/// and it is handled by exclusion upstream at `scheduled_display_axes`, not by this asymmetry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundedFamilyView {
+    pub player: PlayerId,
+    pub family: UnboundedFamily,
+    pub state: FamilyCollapseState,
+}
+
+/// The display family a pumped [`ResourceAxis`] groups into. Exhaustive by design (no wildcard) —
+/// a new `ResourceAxis` variant must make a deliberate grouping choice here. Payload-independent
+/// by construction: only the variant tag decides the family, exactly as the client's
+/// `Record<ResourceAxisTag, UnboundedFamily>` keys on the tag. No CR governs a display grouping.
+pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
+    match axis {
+        ResourceAxis::Mana(_) => UnboundedFamily::Mana,
+        ResourceAxis::Life(_) => UnboundedFamily::Life,
+        ResourceAxis::DamageDealt(_) => UnboundedFamily::Damage,
+        ResourceAxis::LibraryDelta(_) => UnboundedFamily::Mill,
+        ResourceAxis::Counter(_, _) | ResourceAxis::Poison(_) => UnboundedFamily::Counters,
+        ResourceAxis::TokensCreated => UnboundedFamily::Tokens,
+        ResourceAxis::CardsDrawn => UnboundedFamily::Cards,
+        ResourceAxis::Casts => UnboundedFamily::Casts,
+        ResourceAxis::CombatPhases => UnboundedFamily::Combats,
+        ResourceAxis::ExtraTurns => UnboundedFamily::Turns,
+        ResourceAxis::Trigger(_)
+        | ResourceAxis::LandfallTriggers
+        | ResourceAxis::DeathTriggers
+        | ResourceAxis::EtbTriggers
+        | ResourceAxis::LtbTriggers
+        | ResourceAxis::SacTriggers => UnboundedFamily::Triggers,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +465,12 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
 
+    /// CR 702.40a: copy counts for Storm spells in the viewing player's hand.
+    /// Keyed only by that viewer's hand object ids so hidden opponents' card
+    /// abilities and the table-wide spell ledger cannot leak through the view.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub prospective_storm_counts: HashMap<ObjectId, u32>,
+
     /// CR 303.4 + CR 702.5: Auras attached to each player (Curse cycle,
     /// Faith's Fetters-class). Players have no `attachments` back-link
     /// because they aren't `GameObject`s — this projection is the engine's
@@ -350,11 +539,29 @@ pub struct DerivedViews {
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
-    /// engine decides both the axis identity and the player attribution
-    /// ([`attribution_player`]); the frontend only formats each axis to a display
-    /// family. Empty (and omitted) in the dominant case where no loop is active.
+    /// engine decides the axis identity, the player attribution
+    /// ([`attribution_player`]) and the display family ([`family_of`], published as
+    /// `unbounded_families` below); the frontend renders what it is handed.
+    /// Empty (and omitted) in the dominant case where no loop is active.
+    ///
+    /// NOT a straight projection of the mark: a TOKEN-axis row is withheld when its entire
+    /// registered pile has left the battlefield ([`object_growth_backing`]), so this can carry
+    /// FEWER axes than `GameState::unbounded_resources` marks. The mark and the accepted stash
+    /// are both unaffected by that — it is a display decision, never a cancellation of agreed
+    /// growth (CR 732.2c). A withheld row therefore does NOT mean the collapse was cancelled;
+    /// `pending_unbounded_materialization` still carries it and the boundary still applies it,
+    /// which `combo_infinite_pile::object_growth_infinity_row_dies_with_its_last_pile_member`
+    /// asserts at the store level.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_resources: Vec<UnboundedResourceView>,
+
+    /// The engine-owned per-seat, per-display-family collapse state behind each `∞` badge —
+    /// the channel that replaced the client's row-flag OR-fold. One row per
+    /// `(attributed player, family)` actually rendered; see [`UnboundedFamilyView`] for why the
+    /// state is resolved on the PRODUCING CONTROLLER key and joined at family granularity.
+    /// Empty (and omitted) whenever `unbounded_resources` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_families: Vec<UnboundedFamilyView>,
 
     /// CR 732.2a / CR 110.1: the battlefield objects forming an accepted
     /// object-growth loop's "∞ pile" — the winning controller's tapped fodder-class
@@ -720,8 +927,79 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // answer.
     views.copied_permanents.sort_unstable();
 
-    // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
+    // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {
+        if let Some(player) = state.players.iter().find(|player| player.id == viewer) {
+            // `effective_spell_keywords` evaluates every keyword-grant source. Most
+            // snapshots have neither a Storm card nor a possible Storm grant, so only
+            // take that expensive path when one exists. The fallback remains necessary
+            // for CR 604.1 / CR 611.2c / CR 601.2f grants.
+            let may_have_granted_storm =
+                (crate::game::functioning_abilities::static_kind_present(
+                    state,
+                    StaticModeKind::CastWithKeyword,
+                ) && crate::game::functioning_abilities::game_active_statics(state).any(
+                    |(_, definition)| {
+                        matches!(
+                            &definition.mode,
+                            StaticMode::CastWithKeyword {
+                                keyword: Keyword::Storm
+                            }
+                        )
+                    },
+                )) || state.transient_continuous_effects.iter().any(|effect| {
+                    matches!(&effect.affected, TargetFilter::SpecificPlayer { id } if *id == viewer)
+                        && effect.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::GrantStaticAbility { definition }
+                                    if matches!(
+                                        &definition.mode,
+                                        StaticMode::CastWithKeyword {
+                                            keyword: Keyword::Storm
+                                        }
+                                    )
+                            )
+                        })
+                }) || state.pending_next_spell_modifiers.iter().any(|modifier| {
+                    matches!(
+                        modifier,
+                        crate::types::game_state::PendingNextSpellModifier {
+                            player,
+                            modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                                keyword: Keyword::Storm
+                            },
+                            ..
+                        } if *player == viewer
+                    )
+                });
+            let mut copy_count = None;
+            for &hand_id in player.hand.iter() {
+                let has_printed_storm = state.objects.get(&hand_id).is_some_and(|object| {
+                    object
+                        .keywords
+                        .iter()
+                        .any(|keyword| matches!(keyword, Keyword::Storm))
+                });
+                if has_printed_storm
+                    || (may_have_granted_storm
+                        && crate::game::casting::effective_spell_keywords(state, viewer, hand_id)
+                            .iter()
+                            .any(|keyword| matches!(keyword, Keyword::Storm)))
+                {
+                    let copy_count = *copy_count.get_or_insert_with(|| {
+                        state
+                            .spells_cast_this_turn_by_player
+                            .values()
+                            .map(|records| records.len())
+                            .sum::<usize>() as u32
+                    });
+                    views.prospective_storm_counts.insert(hand_id, copy_count);
+                }
+            }
+        }
+
+        // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
         let has_web_slinging_static =
             crate::game::functioning_abilities::game_active_statics(state).any(|(_, def)| {
                 matches!(
@@ -793,16 +1071,25 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
 
-    // WHY THE THREE ∞ CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
+    // WHY THE THREE ∞ SURFACE CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
     //
-    // THE WINDOW IS AN ENGINE DEVIATION, PRE-EXISTING AND DELIBERATE — NOT A RULES ENTITLEMENT, and
-    // no CR is cited as licensing it. CR 732.2c has the shortcut taken the moment the last player
-    // accepts, with the game advancing to the last proposed ending point; this engine instead parks
-    // at priority with the accepted count recorded but its results UNAPPLIED, and settles them at
-    // the next CR 500.5 boundary (`game::turns`, unchanged by this projection). Nothing below
-    // claims otherwise. What IS resolved at accept is the count itself
-    // (`pending_materialization_count`); what is deferred is applying it, plus `turns.rs`' `min: 0`
-    // under-delivery tolerance, which that file documents in its own words.
+    // THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE, NOT A DEVIATION FROM IT. CR 732.2c: once the
+    // last player accepts, "the game advances to the last proposed ending point, with all game
+    // choices contained in the shortcut proposal having been taken". Per CR 732.2a that ending
+    // point "must be a place where a player has priority" — so it is NOT the CR 500.5 step/phase
+    // end, which is a turn-based action, with priority arriving at the beginning of the next step
+    // (CR 117.3a). The count is resolved at accept (`pending_materialization_count`), and the
+    // growth lands at the CR 500.5 boundary while the game is still advancing toward that priority
+    // window. State AT the ending point is the proposed state. An earlier version of this block
+    // called the whole window unlicensed; that conceded rules the code satisfies. The full
+    // four-position reading lives at `types/game_state.rs`'s `scheduled_collapse_axes` doc.
+    //
+    // WHY THE CHANNELS BELOW STILL CARRY `FamilyCollapseState` RATHER THAN A BARE FLAG: being
+    // rules-correct about WHEN the loop closes is not the same as knowing WHAT NUMBER will land.
+    // The boundary re-checks whether the growth is still observed, and the controller names the
+    // count at the ending point (CR 732.2a's "specified number of times"), so the final amount is
+    // not knowable while the badge is on screen. `∞→N` is a promise; the engine makes it only for
+    // a family whose amount it can already stand behind, and shows `∞→?` otherwise.
     //
     // The two CRs this code does rely on, each for what it actually governs:
     //  • CR 732.2c — the shortcut is taken at the count every player accepted, so the collapse may
@@ -813,8 +1100,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     //    until-end-of-step effects expire and unspent mana empties. That mana drain is the one
     //    thing here CR 500.5 genuinely governs (`turns::drain_pending_phase_transition_progress`,
     //    and it is why a `Mana(_)` ∞ ends there). It does NOT license CASHING OUT the deferred
-    //    token/life/counter growth at that moment — the engine chose that landmark, and that
-    //    choice is part of the same uncited deviation described above.
+    //    token/life/counter growth at that moment — the engine chose that landmark as the point
+    //    along CR 732.2c's advance at which the elided loop closes (CR 732.1b), as described above.
     //
     // WHY `∞` IS RIGHT HERE IS AN ENGINE-STATE ARGUMENT, NOT A RULES ONE. Throughout the window the
     // loop's enabling permanents are still on the battlefield and `unbounded_resources` still
@@ -849,14 +1136,29 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // materialized `Mana(_)` axis that `mana_payment::refill_infinite_mana` keeps topping back up,
     // i.e. it hid a badge beside a pool the player can visibly keep spending.
     //
-    // The three loops below therefore read only the `∞` stores and the LIVE battlefield; none
-    // consults `GameState::scheduled_collapse_axes` (whose sole production caller is
-    // `clear_collapsed_materializations`). This sentence used to read "only their own stores",
-    // which the row guard below falsified the moment it was added: `object_growth_backing`
-    // deliberately cross-reads the pile and counter-target stores, because whether a ROW is still
-    // live is a question about those backing sets, not about its own. Corrected here rather than
-    // left standing — a stale claim introduced by the commit that exists to fix stale claims is
-    // the one defect this change cannot afford. The stores are not filtered either:
+    // NO SURFACE IS FILTERED BY THE SCHEDULE — that, and only that, is the invariant here. Which
+    // rows/groups/pills EXIST is decided by the `∞` stores and the LIVE battlefield alone; nothing
+    // below hides a surface because a collapse is scheduled. The schedule is read to ANNOTATE, not
+    // to filter: the row loop accumulates a per-`(player, family)` `FamilyCollapseState` emitted as
+    // a SEPARATE channel (`unbounded_families`), and NO row carries a flag. Still additive.
+    //
+    // Phrased as an invariant rather than a census of readers, because the census version has now
+    // outlived the code beneath it THREE times:
+    //   1. "the surface loops read only their own stores" — falsified by `object_growth_backing`,
+    //      which deliberately cross-reads the pile and counter-target stores, because whether a
+    //      ROW is still live is a question about those backing sets, not about its own.
+    //   2. "no surface reads `scheduled_collapse_axes`" — falsified when the `scheduled` flag
+    //      moved into the row loop.
+    //   3. "…and the tag loop projects the schedule" — falsified when that channel was removed
+    //      for having no consumer; and falsified AGAIN, in the opposite direction, when a separate
+    //      schedule channel was REINSTATED because a consumer now exists. The reader is
+    //      `unbounded_families`, consumed by `usePlayerDesignations` → `UnboundedBadge` and pinned
+    //      on the wire by `unbounded-declined-wire.json`.
+    //   4. "…and the schedule rides on each row as a `scheduled` flag" — falsified when that flag
+    //      was deleted. A per-FAMILY badge cannot render a per-ROW flag honestly: two same-family
+    //      axes that disagree need a third answer, which is what `FamilyCollapseState::Mixed` is.
+    // Naming WHO reads the schedule is a claim every future consumer can break; naming what the
+    // schedule may not DO is not. The stores are not filtered either:
     // `unbounded_resources` keeps the mark until the boundary applies the growth. (`unbounded_loop_enablers` is held in
     // lockstep with it as an ENGINE-STATE invariant required by no CR — but see the inertness note
     // above: for the object-growth class that map is EMPTY, so the lockstep is vacuously satisfied
@@ -868,11 +1170,21 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // phase ends (CR 500.5).
 
     // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
-    // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
-    // short-circuit below) and stays empty (field omitted) when no loop is
+    // `∞` HUD rows, and accumulate the per-(player, family) collapse state the badge
+    // actually renders. Runs in every format (placed BEFORE the Commander
+    // short-circuit below) and stays empty (both fields omitted) when no loop is
     // active — the dominant case. The engine owns attribution
-    // (`attribution_player`); the frontend only formats each axis to a family.
+    // (`attribution_player`) AND the display family (`family_of`).
+    let mut families: BTreeMap<(PlayerId, UnboundedFamily), FamilyCollapseState> = BTreeMap::new();
     for (&controller, axes) in &state.unbounded_resources {
+        // Which axes THIS controller has an accepted-but-unapplied collapse for, and how certain
+        // each one is. Resolved once per controller, on the controller key, BEFORE attribution
+        // rewrites `player` — that ordering is the whole point. After `attribution_player` runs, a
+        // victim-attributed axis no longer carries the identity of the loop that produced it, so no
+        // downstream consumer (engine or frontend) can answer this correctly; two controllers
+        // draining one victim would collide. This reads the ENGINE'S DEFERRAL STASH, which no CR
+        // licenses (see `FamilyCollapseState`) — it is not a projection of CR 732.2c.
+        let scheduled_axes = scheduled_display_axes(state, controller);
         for &axis in axes {
             // CR 732.2a + CR 110.1: an object-growth ∞ whose ENTIRE registered display set
             // has left the battlefield has no live board backing left — drop the row rather
@@ -882,19 +1194,37 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             if object_growth_backing(state, controller, axis) == Some(false) {
                 continue;
             }
-            views.unbounded_resources.push(UnboundedResourceView {
-                player: attribution_player(axis, controller),
-                axis,
-            });
+            let player = attribution_player(axis, controller);
+            let state_for_axis = match scheduled_axes.get(&axis) {
+                Some(&certainty) => FamilyCollapseState::Scheduled(certainty),
+                None => FamilyCollapseState::Unscheduled,
+            };
+            families
+                .entry((player, family_of(axis)))
+                .and_modify(|acc| *acc = acc.merge(state_for_axis))
+                .or_insert(state_for_axis);
+            views
+                .unbounded_resources
+                .push(UnboundedResourceView { player, axis });
         }
     }
+    // Emitted HERE, above the Commander short-circuit below, for the same reason the row loop is:
+    // that `return` would drop this channel in every non-Commander format.
+    views.unbounded_families = families
+        .into_iter()
+        .map(|((player, family), state)| UnboundedFamilyView {
+            player,
+            family,
+            state,
+        })
+        .collect();
 
     // CR 732.2a / CR 110.1: project the accepted object-growth loop's ∞ pile — the
     // winning controller's tapped fodder-class members — dropping any that have since
     // left the battlefield (stale member). Public board state (no viewer filtering);
     // the frontend renders `∞` on any group whose members are all pile members.
     //
-    // Unconditional while a collapse is merely scheduled — see the engine-deviation block above.
+    // Unconditional while a collapse is merely scheduled — see the CR 732 timing block above.
     for ids in state.unbounded_loop_pile.values() {
         for id in ids {
             if state.battlefield.contains(id) {
@@ -910,7 +1240,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
     // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
     //
-    // Unconditional while a collapse is merely scheduled — see the engine-deviation block above.
+    // Unconditional while a collapse is merely scheduled — see the CR 732 timing block above.
     for targets in state.unbounded_counter_targets.values() {
         for (id, ct) in targets {
             if !state.battlefield.contains(id) {
@@ -1051,6 +1381,85 @@ fn turn_order_views(
     (turn_order, viewer_turn_number)
 }
 
+/// The axes `controller` has an accepted-but-unapplied collapse for, as the HUD should announce
+/// them, each carrying how CERTAIN that collapse is.
+///
+/// This reads the stash of growth in flight along CR 732.2c's advance to the proposal's ending
+/// point — a priority window per CR 732.2a, reached after the CR 500.5 boundary where the growth
+/// lands. What it announces is therefore a real accepted result, not a parking spot; the reason it
+/// announces CERTAINTY rather than a number is that the boundary re-checks whether the growth is
+/// still observed and the controller names the count at the ending point (CR 732.2a). See
+/// `FamilyCollapseState`, the `THE WINDOW'S TIMING IS CR 732.2c'S ADVANCE` block above, and
+/// `types/game_state.rs`'s `scheduled_collapse_axes` doc for the reading.
+///
+/// Named rather than inlined into its one caller because the SCOPE LIMIT below is a rule, not a
+/// line of the row loop, and it has already proved it drifts when written twice: an earlier cut of
+/// this change had a second consumer (a `scheduled_collapse` tag channel, since removed for having
+/// no reader) and the guard lived in that consumer alone, so mana rows shipped flagged while the
+/// tag omitted them. Any future second consumer calls THIS, and inherits the limit.
+///
+/// SCOPE LIMIT — `Mana(_)` is excluded. This is about what the badge would TELL the player, not
+/// about which code path ends the axis, and it is scoped to THE WINDOW THE BADGE RENDERS IN
+/// (accept → CR 500.5 boundary). Inside that window:
+/// - The pool is already unbounded and spendable — `mana_payment::refill_infinite_mana` re-tops it
+///   off the store after every action — so the chosen `N` does not bound what the player may
+///   spend. "A finite amount will be chosen" is false for this axis while it is true for every
+///   deferred one, and the badge is only on screen here.
+/// - CR 500.5 ends the badge at the step/phase end when the pool empties, on a schedule the
+///   accepted count does not move.
+///
+/// ACROSS the boundary it is not unconditional, and the sentence above is deliberately not written
+/// as if it were: a `DriveSequence` collapse replays the captured sequence `N` times after that
+/// empty, so the post-collapse pool genuinely is bounded by `N`. The badge is gone by then.
+///
+/// THE OTHER OVER-PROMISE — NOW TYPED, NOT DISCLOSED. `Counters` and `Life` axes can be scheduled
+/// here and then NOT collapse: the boundary re-runs the observed-growth firewall
+/// (`engine_resolution_choices`) and DECLINES the batched apply if a counter/life observer (Heliod,
+/// Corpsejack) appeared during the accept→boundary window, and a `Tokens` axis can park on a
+/// replacement choice instead. Each kind's answer comes from
+/// `engine_resolution_choices::materialization_certainty`, which reads that loop's own non-push-exit
+/// census rather than a copy of it, and it lands here as [`CollapseCertainty`]: `Conditional` for
+/// the three kinds with a hold, `Committed` only for `DriveSequence`, which cannot park. Witnessed
+/// by `combo_infinite_pile::real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_mints_tokens`.
+///
+/// It is NOT fixable at flag time — the observer can appear after this projection ran, so no value
+/// computed here can be right for the whole window — and THAT is precisely why `Conditional` is a
+/// variant rather than an apology: the badge stops promising a bound it cannot keep and says
+/// "collapse pending; this may stay unbounded" instead. `Mana(_)` is excluded above because its
+/// promise is false the moment it is made; this one can only become false later, which is why the
+/// two are handled differently.
+///
+/// Note this exclusion is also NOT "no materialization touches mana": a `DriveSequence` names the
+/// loop's whole `proposal.unbounded` set, so `clear_collapsed_materializations` really does drop
+/// the `Mana(_)` axis when that collapse applies. (On the production path that drop is usually a
+/// no-op, because `turns::drain_pending_phase_transition_progress` has already removed the mana
+/// axis at CR 500.5 before the prompt that reaches it; it stays live for `debug_infinite_mana`
+/// seats, which that clear excludes.) The badge still must not promise a bound the player's
+/// spendable pool never had.
+fn scheduled_display_axes(
+    state: &GameState,
+    controller: PlayerId,
+) -> BTreeMap<ResourceAxis, CollapseCertainty> {
+    let mut axes: BTreeMap<ResourceAxis, CollapseCertainty> = BTreeMap::new();
+    let Some(items) = state.pending_unbounded_materialization.get(&controller) else {
+        return axes;
+    };
+    for item in items {
+        // Per ITEM, so each axis inherits the certainty of the kind that actually scheduled it;
+        // two items naming the same axis merge to the weaker answer.
+        let certainty = crate::game::engine_resolution_choices::materialization_certainty(item);
+        for axis in state.scheduled_collapse_axes(std::slice::from_ref(item)) {
+            if matches!(axis, ResourceAxis::Mana(_)) {
+                continue;
+            }
+            axes.entry(axis)
+                .and_modify(|acc| *acc = acc.weaker(certainty))
+                .or_insert(certainty);
+        }
+    }
+    axes
+}
+
 /// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
 /// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
 /// variant must make a deliberate attribution choice here, never silently inherit
@@ -1058,9 +1467,10 @@ fn turn_order_views(
 ///
 /// A payload-keyed axis names the player it acts on, so the badge follows the
 /// payload, NOT permanent control:
-/// - CR 704.5a: `Life(p)` — a drain drives an opponent's life down (the win
-///   condition is the afflicted player reaching 0 life) and lifegain raises the
-///   controller's own; either way the badge belongs on `p`'s HUD.
+/// - CR 119.3 + CR 704.5a: `Life(p)` — CR 119.3 makes `p` the player whose life total the
+///   effect adjusts, and CR 704.5a is why that matters (the afflicted player reaching 0 life
+///   loses). A drain drives an opponent's total down and lifegain raises the controller's own;
+///   either way the badge belongs on `p`'s HUD.
 /// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
 ///   opponent-burn loop shows `∞` on the victim's HUD.
 /// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
@@ -1398,6 +1808,12 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
+        provenance: match &entry.kind {
+            StackEntryKind::TriggeredAbility { provenance, .. } => provenance.clone(),
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::KeywordAction { .. } => None,
+        },
     }
 }
 
@@ -2484,6 +2900,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -2502,6 +2919,124 @@ mod tests {
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
         );
+    }
+
+    #[test]
+    fn prospective_storm_counts_are_viewer_scoped() {
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_storm = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grapeshot".to_string(),
+            Zone::Hand,
+        );
+        let p1_storm = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Empty the Warrens".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&p0_storm)
+            .unwrap()
+            .keywords
+            .push(Keyword::Storm);
+        state
+            .objects
+            .get_mut(&p1_storm)
+            .unwrap()
+            .keywords
+            .push(Keyword::Storm);
+        state.players[0].hand.push_back(p0_storm);
+        state.players[1].hand.push_back(p1_storm);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![
+                crate::types::game_state::SpellCastRecord::default();
+                2
+            ]),
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(views.prospective_storm_counts.get(&p0_storm), Some(&2));
+        assert!(!views.prospective_storm_counts.contains_key(&p1_storm));
+    }
+
+    #[test]
+    fn prospective_storm_counts_include_effectively_granted_storm() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Storm Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Storm,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+            ))]
+            .into();
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Granted Storm Spell".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        state.players[0].hand.push_back(spell);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::types::game_state::SpellCastRecord::default()]),
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+
+        assert_eq!(views.prospective_storm_counts.get(&spell), Some(&1));
+    }
+
+    #[test]
+    fn prospective_storm_counts_include_next_spell_granted_storm() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Next Storm Spell".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand.push_back(spell);
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: crate::types::game_state::NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Storm,
+                },
+                spell_filter: None,
+                source_id: None,
+            },
+        );
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+
+        assert_eq!(views.prospective_storm_counts.get(&spell), Some(&0));
     }
 
     /// SHAPE test (constructs `pending_cast`/pool directly, not via the cast
@@ -2657,6 +3192,58 @@ mod tests {
     }
 
     #[test]
+    fn stack_entry_details_projects_storm_provenance_to_the_client_wire() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grapeshot".to_string(),
+            Zone::Stack,
+        );
+        let trigger = ObjectId(2);
+        state.stack.push_back(StackEntry {
+            id: trigger,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "storm".to_string(),
+                        description: None,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("Storm".to_string()),
+                source_name: "Grapeshot".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
+            },
+        });
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(
+            views.stack_entry_details[&trigger].provenance,
+            Some(SyntheticTriggerProvenance::Storm { copy_count: 2 }),
+            "the stack detail projection carries typed Storm provenance"
+        );
+
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+            .expect("serialize client game state");
+        assert_eq!(
+            wire["derived"]["stack_entry_details"][trigger.0.to_string()]["provenance"],
+            serde_json::json!({"type": "Storm", "data": {"copy_count": 2}}),
+            "the frontend's derived stack-detail wire retains Storm provenance",
+        );
+    }
+
+    #[test]
     fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
         let mut state = GameState::new_two_player(42);
         let spell = create_object(
@@ -2746,6 +3333,7 @@ mod tests {
             targets: Vec::new(),
             paid: Vec::new(),
             trigger_context: Vec::new(),
+            provenance: None,
         };
         let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
         assert!(
@@ -2845,6 +3433,7 @@ mod tests {
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -2965,6 +3554,7 @@ mod tests {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
                 provenance,
             )
@@ -3392,6 +3982,113 @@ mod tests {
         assert_eq!(attribution_player(ResourceAxis::TokensCreated, p0), p0);
     }
 
+    /// Two controllers draining the SAME victim, only one of them accepted.
+    ///
+    /// THIS DOC ANSWERS THE OBJECTION IT USED TO MAKE. It previously argued that a separate
+    /// schedule channel cannot represent this shape and that the flag therefore had to ride on the
+    /// row. That was RIGHT about a `(player, axis)`-keyed ROW-MARKING channel, and it remains a
+    /// correct reason never to build one: both rows are attributed to the victim (CR 119.3 +
+    /// CR 704.5a, the same pair `attribution_player` cites), so they share an identical
+    /// `(player, axis)` wire key, and any join on that key marks P0's row scheduled off P1's
+    /// accepted stash.
+    ///
+    /// This projection does not build one. It deletes the row flag and publishes a
+    /// `(player, FAMILY)`-keyed [`FamilyCollapseState`] whose join lattice DOES represent the
+    /// disagreement. Both drains fold into the victim's `life` family, and
+    /// `Scheduled(_) ⊔ Unscheduled = Mixed`, which renders a bare `∞` — the honest answer, where
+    /// the old frontend OR-fold rendered a wrong `∞→N`. The per-controller distinction is joined
+    /// at family granularity deliberately, BECAUSE THE BADGE IS PER FAMILY: a single glyph cannot
+    /// say two things, so it says the true weaker one. The controller key still does the work — it
+    /// is read before `attribution_player` erases it — it just no longer has to survive onto the
+    /// wire.
+    ///
+    /// MUTATIONS THAT RED THIS (two-sided): (a) compute the state by testing each axis against the
+    /// union of every controller's scheduled set — the `(player, axis)` join — instead of
+    /// `controller`'s own ⇒ the family comes back `Scheduled(Conditional)`; (b) never consult the
+    /// stash ⇒ it comes back `Unscheduled`.
+    #[test]
+    fn two_controllers_draining_one_victim_do_not_cross_schedule() {
+        use crate::types::game_state::PersistentAxisMaterialization;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let (p0, p1, victim) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let axis = ResourceAxis::Life(victim);
+
+        // Both controllers run their own drain loop on the same victim.
+        state.mark_unbounded_loop(p0, &[axis]);
+        state.mark_unbounded_loop(p1, &[axis]);
+        // Only P1's collapse has been accepted.
+        state.register_pending_materialization(
+            p1,
+            PersistentAxisMaterialization::Life {
+                player: victim,
+                per_cycle_delta: 1,
+            },
+        );
+
+        let views = derive_views(&state, Some(victim));
+        let rows: Vec<&UnboundedResourceView> = views
+            .unbounded_resources
+            .iter()
+            .filter(|r| r.axis == axis)
+            .collect();
+
+        // REACH GUARD: both loops really reached the wire, and both landed on the victim's HUD.
+        // Without this, the `{false, true}` assertion below could be satisfied by a single row
+        // plus a phantom, or by rows that never got attributed to the victim at all.
+        assert_eq!(
+            rows.len(),
+            2,
+            "reach: both controllers' drain loops must project a row, got {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.player == victim),
+            "reach: a life axis attributes to the victim (CR 119.3 + CR 704.5a), got {rows:?}"
+        );
+
+        // THE assertion, and WHY IT FLIPPED FROM THE OLD ONE. This test used to assert
+        // `{false, true}` over the two rows' `scheduled` flags — a claim only expressible on a
+        // per-row channel. The row flag is gone; the badge is per family, so the engine now answers
+        // per family and the two disagreeing controllers collapse to ONE `life` row on the victim
+        // whose state is `Mixed`. That is a strictly more honest answer than either old flag: the
+        // frontend used to OR them and render `∞→N` for a collapse only one controller accepted.
+        let life_rows: Vec<&UnboundedFamilyView> = views
+            .unbounded_families
+            .iter()
+            .filter(|f| f.player == victim && f.family == UnboundedFamily::Life)
+            .collect();
+        assert_eq!(
+            life_rows.len(),
+            1,
+            "one badge per (seat, family), even with two controllers on the axis, got {life_rows:?}"
+        );
+        assert_eq!(
+            life_rows[0].state,
+            FamilyCollapseState::Mixed,
+            "P1 accepted a collapse and P0 did not, so the victim's life family is Mixed and \
+             renders a bare ∞ — a (player, axis) union join would say Scheduled(Conditional) and \
+             never consulting the stash would say Unscheduled; got {:?}",
+            life_rows[0]
+        );
+
+        // CROSS-CHECK AGAINST THE CONTRACT'S OWN AUTHORITY, not against a second wire channel.
+        // `pending_unbounded_materialization` is what the boundary reads to cash the collapse out,
+        // so it — not the projection — decides how many accepted collapses exist. Asserting the
+        // flag against it is what keeps the flag a display shadow rather than a second source of
+        // truth: exactly one controller accepted, and it is the one whose row came back `true`.
+        let accepted: Vec<PlayerId> = state
+            .pending_unbounded_materialization
+            .iter()
+            .filter(|(_, items)| state.scheduled_collapse_axes(items).contains(&axis))
+            .map(|(pid, _)| *pid)
+            .collect();
+        assert_eq!(
+            accepted,
+            vec![p1],
+            "the accepted-collapse contract names exactly P1 for this axis, got {accepted:?}"
+        );
+    }
+
     /// PR-6 test 1: a REAL opponent-burn certificate's axes project into victim-HUD
     /// rows. The axis set is derived via the SAME authority `detect_loop` uses
     /// (`ResourceVector::unbounded_axes_for`) from the delta a damage pinger loop
@@ -3492,13 +4189,39 @@ mod tests {
         );
     }
 
+    /// Minimal 1/1 token profile for the `Tokens` stash kind. Only the VARIANT matters to these
+    /// tests — `family_of` and `materialization_certainty` are both payload-independent.
+    fn family_test_token_profile() -> Box<crate::types::ability::CopiableValues> {
+        Box::new(crate::types::ability::CopiableValues {
+            name: "Saproling".to_string(),
+            mana_cost: ManaCost::default(),
+            color: vec![],
+            card_types: crate::types::card_type::CardType::default(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            printed_loyalty: None,
+            keywords: vec![],
+            abilities: std::sync::Arc::default(),
+            trigger_definitions: std::sync::Arc::default(),
+            replacement_definitions: std::sync::Arc::default(),
+            static_definitions: std::sync::Arc::default(),
+        })
+    }
+
     /// PR-6 test 3 (projection half): a NON-mana unbounded axis still projects an
     /// `∞` row attributed to its controller; the empty map yields no rows (field
     /// omitted). The mana-vs-non-mana refill gating half lives in
     /// `mana_payment::refill_infinite_mana_gated_on_mana_axis_only`.
     ///
+    /// M-F3 EXTENSION — the FORMAT branch for `unbounded_families`. This is a
+    /// `FormatConfig::standard()` game, so it runs past the Commander short-circuit that would
+    /// swallow a channel emitted too late.
+    ///
     /// REVERT-PROBE: delete the `derive_views` projection loop → the `TokensCreated`
-    /// row is absent → the `contains` assertion fails.
+    /// row is absent → the `contains` assertion fails. MOVE the `unbounded_families` emit below
+    /// the `commander_damage_threshold.is_none()` return → assertions (a) and (b) fail HERE while
+    /// every Commander test stays green.
     #[test]
     fn non_mana_axis_projects_to_controller_hud() {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
@@ -3512,11 +4235,343 @@ mod tests {
             }),
             "a non-mana unbounded axis must still project an ∞ row on its controller"
         );
-
-        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        // (a) nothing accepted yet ⇒ the badge promises nothing.
         assert!(
-            derive_views(&empty, None).unbounded_resources.is_empty(),
+            views.unbounded_families.contains(&UnboundedFamilyView {
+                player: PlayerId(0),
+                family: UnboundedFamily::Tokens,
+                state: FamilyCollapseState::Unscheduled,
+            }),
+            "an un-accepted ∞ tokens axis is Unscheduled in a non-Commander game, got {:?}",
+            views.unbounded_families
+        );
+
+        // (b) once the accept registers a stash, the SAME frame reports the schedule — and
+        // `Tokens` is Conditional, because its boundary mint can park on a replacement choice.
+        state.register_pending_materialization(
+            PlayerId(0),
+            crate::types::game_state::PersistentAxisMaterialization::Tokens(
+                family_test_token_profile(),
+            ),
+        );
+        let scheduled_views = derive_views(&state, None);
+        assert!(
+            scheduled_views
+                .unbounded_families
+                .contains(&UnboundedFamilyView {
+                    player: PlayerId(0),
+                    family: UnboundedFamily::Tokens,
+                    state: FamilyCollapseState::Scheduled(CollapseCertainty::Conditional),
+                }),
+            "an accepted Tokens collapse is Scheduled(Conditional) — never Committed; got {:?}",
+            scheduled_views.unbounded_families
+        );
+
+        // (c) the empty state: no loop ⇒ neither channel exists.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_views = derive_views(&empty, None);
+        assert!(
+            empty_views.unbounded_resources.is_empty(),
             "no unbounded loop → no ∞ rows (field omitted)"
+        );
+        assert!(
+            empty_views.unbounded_families.is_empty(),
+            "no unbounded loop → no family rows either (field omitted)"
+        );
+    }
+
+    /// M1-a: a family holding one SCHEDULED and one UNSCHEDULED axis is `Mixed`, never
+    /// `Scheduled`. `Poison(_)` and `Counter(_, _)` both fold into the `counters` family
+    /// (an ADJACENT-VARIANT hostile fixture: the two axes are different `ResourceAxis`
+    /// variants that must nonetheless share one badge).
+    ///
+    /// MUTATIONS: (a) fold with OR ("scheduled if ANY member is") ⇒ `Scheduled(Conditional)`;
+    /// (b) fold with AND ⇒ `Unscheduled`. (c) MATCHED POSITIVE in this same test: the same
+    /// state without the `Poison` seed yields `Scheduled(Conditional)`, so a badge that never
+    /// reports a schedule at all cannot pass either.
+    #[test]
+    fn mixed_family_is_not_scheduled() {
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::PersistentAxisMaterialization;
+
+        let p0 = PlayerId(0);
+        let charge = CounterType::Generic("charge".into());
+        let seed = |also_poison: bool| {
+            let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+            let prism = create_object(
+                &mut state,
+                CardId(1),
+                p0,
+                "Pentad Prism".into(),
+                Zone::Battlefield,
+            );
+            let counter_axis =
+                crate::types::game_state::collapsed_counter_axis(&state, prism, &charge);
+            let mut axes = vec![counter_axis];
+            if also_poison {
+                axes.push(ResourceAxis::Poison(p0));
+            }
+            state.mark_unbounded_loop(p0, &axes);
+            // Only the counter axis is accepted; `Poison` is marked ∞ but unscheduled.
+            state.register_pending_materialization(
+                p0,
+                PersistentAxisMaterialization::Counters(vec![
+                    crate::types::game_state::CounterGrowth {
+                        object: prism,
+                        counter: charge.clone(),
+                        per_cycle_delta: 1,
+                    },
+                ]),
+            );
+            (state, counter_axis)
+        };
+
+        let (mixed_state, counter_axis) = seed(true);
+        // IN-TEST PREMISE GUARD: the stash really does schedule the counter axis and only it.
+        let stash = mixed_state
+            .pending_unbounded_materialization
+            .get(&p0)
+            .expect("the fixture registered a stash")
+            .clone();
+        assert_eq!(
+            mixed_state
+                .scheduled_collapse_axes(&stash)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![counter_axis],
+            "premise: the stash schedules exactly the counter axis; if this drifts the Mixed \
+             assertion below measures something else"
+        );
+
+        let counters_rows: Vec<UnboundedFamilyView> = derive_views(&mixed_state, None)
+            .unbounded_families
+            .into_iter()
+            .filter(|f| f.player == p0 && f.family == UnboundedFamily::Counters)
+            .collect();
+        assert_eq!(
+            counters_rows.len(),
+            1,
+            "Counter(..) and Poison(..) share ONE counters badge, got {counters_rows:?}"
+        );
+        assert_eq!(
+            counters_rows[0].state,
+            FamilyCollapseState::Mixed,
+            "one scheduled axis and one unscheduled axis in the same family is Mixed — an OR fold \
+             would say Scheduled(Conditional), an AND fold Unscheduled; got {:?}",
+            counters_rows[0]
+        );
+
+        // MATCHED POSITIVE: drop the unscheduled sibling and the same family does report a
+        // schedule, so the assertion above is not satisfied by a badge that never schedules.
+        let (positive_state, _) = seed(false);
+        let scheduled_rows: Vec<UnboundedFamilyView> = derive_views(&positive_state, None)
+            .unbounded_families
+            .into_iter()
+            .filter(|f| f.player == p0 && f.family == UnboundedFamily::Counters)
+            .collect();
+        assert_eq!(
+            scheduled_rows.len(),
+            1,
+            "matched positive: one counters badge, got {scheduled_rows:?}"
+        );
+        assert_eq!(
+            scheduled_rows[0].state,
+            FamilyCollapseState::Scheduled(CollapseCertainty::Conditional),
+            "matched positive: with no unscheduled sibling the counters family IS scheduled, and \
+             a batched Counters collapse is Conditional; got {:?}",
+            scheduled_rows[0]
+        );
+    }
+
+    /// M1-c (migrated from `PlayerHud.designations.test.tsx`, where the frontend used to do this
+    /// fold): two distinct `Mana(_)` axes collapse to ONE `mana` badge, and it is `Unscheduled` —
+    /// `scheduled_display_axes` excludes `Mana(_)` because the pool is spendable throughout the
+    /// window, so no `N` bounds it. Migrating the test IS the evidence the fold moved into the
+    /// engine.
+    ///
+    /// MUTATION: key the accumulator by `axis` instead of `family` ⇒ two mana rows ⇒ RED.
+    /// MUTATION: drop the `Mana(_)` exclusion in `scheduled_display_axes` ⇒ `Mixed` ⇒ RED.
+    #[test]
+    fn two_mana_axes_fold_to_one_family_row() {
+        use crate::types::game_state::PersistentAxisMaterialization;
+        use crate::types::mana::ManaType;
+
+        let p0 = PlayerId(0);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.mark_unbounded_loop(
+            p0,
+            &[
+                ResourceAxis::Mana(ManaType::Green),
+                ResourceAxis::Mana(ManaType::White),
+            ],
+        );
+        // A DriveSequence naming the whole unbounded set — the one stash kind that would schedule
+        // a mana axis if the exclusion were dropped.
+        state.register_pending_materialization(
+            p0,
+            PersistentAxisMaterialization::DriveSequence {
+                sequence: vec![],
+                collapsed_axes: vec![
+                    ResourceAxis::Mana(ManaType::Green),
+                    ResourceAxis::Mana(ManaType::White),
+                ],
+            },
+        );
+
+        let views = derive_views(&state, None);
+        assert_eq!(
+            views.unbounded_resources.len(),
+            2,
+            "reach: both mana axes must project rows, got {:?}",
+            views.unbounded_resources
+        );
+        assert_eq!(
+            views.unbounded_families,
+            vec![UnboundedFamilyView {
+                player: p0,
+                family: UnboundedFamily::Mana,
+                state: FamilyCollapseState::Unscheduled,
+            }],
+            "two mana axes are ONE mana badge, and mana is never scheduled — the pool stays \
+             spendable for the whole window"
+        );
+    }
+
+    /// F4: the cross-language family-grouping guard. Emits every `ResourceAxis` TAG paired with
+    /// the family `family_of` puts it in, as the golden the client's
+    /// `Record<ResourceAxisTag, UnboundedFamily>` is checked against. Without it the offer modal
+    /// and the HUD badge could group the same axis differently in the two languages.
+    ///
+    /// WRITE-FIRST, per the golden-emitter ordering rule: both assertions sit BELOW the write, so
+    /// a mutation that reds one can still regenerate the golden and let the client-side half of
+    /// the same probe run. An assert panic aborts the test.
+    ///
+    /// COMPLETENESS is enforced by three independent breaks, with no scaffolding: an 18th
+    /// `ResourceAxis` build-breaks `family_of` (no wildcard); it build-breaks the client's
+    /// `Record<ResourceAxisTag, …>`; and until `AXIS_REPRESENTATIVES` is extended the golden
+    /// carries 17 keys while TS carries 18, so the seam test's key-set equality reds.
+    #[test]
+    fn family_tag_table_matches_the_client_golden() {
+        use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
+        use crate::types::mana::ManaType;
+
+        // One representative per tag. Payloads are arbitrary because `family_of` is
+        // payload-independent by construction, exactly as the client's Record keys on the tag.
+        const AXIS_REPRESENTATIVES: [ResourceAxis; 17] = [
+            ResourceAxis::Mana(ManaType::Colorless),
+            ResourceAxis::Life(PlayerId(0)),
+            ResourceAxis::DamageDealt(PlayerId(0)),
+            ResourceAxis::LibraryDelta(PlayerId(0)),
+            ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ResourceAxis::Trigger(TriggerKind::Proliferate),
+            ResourceAxis::TokensCreated,
+            ResourceAxis::CardsDrawn,
+            ResourceAxis::Casts,
+            ResourceAxis::LandfallTriggers,
+            ResourceAxis::CombatPhases,
+            ResourceAxis::ExtraTurns,
+            ResourceAxis::DeathTriggers,
+            ResourceAxis::EtbTriggers,
+            ResourceAxis::LtbTriggers,
+            ResourceAxis::SacTriggers,
+            ResourceAxis::Poison(PlayerId(0)),
+        ];
+
+        // Tag extraction uses the SAME rule as the client's `axisTag`: externally-tagged serde
+        // gives a bare string for unit variants and a single-key object for data variants.
+        let serde_tag = |axis: &ResourceAxis| -> String {
+            match serde_json::to_value(axis).expect("ResourceAxis serializes") {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Object(map) => map
+                    .keys()
+                    .next()
+                    .cloned()
+                    .expect("a data variant serializes to exactly one key"),
+                other => panic!("unexpected ResourceAxis encoding: {other}"),
+            }
+        };
+
+        let table: BTreeMap<String, UnboundedFamily> = AXIS_REPRESENTATIVES
+            .iter()
+            .map(|a| (serde_tag(a), family_of(*a)))
+            .collect();
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../client/src/test/fixtures/unbounded-family-tags.json"
+        );
+        if std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
+            std::fs::create_dir_all(
+                std::path::Path::new(path)
+                    .parent()
+                    .expect("golden has a parent"),
+            )
+            .expect("create the client wire-golden directory");
+            std::fs::write(
+                path,
+                format!("{}\n", serde_json::to_string_pretty(&table).unwrap()),
+            )
+            .expect("write the family-tag golden");
+        }
+
+        assert_eq!(
+            table.len(),
+            17,
+            "one entry per ResourceAxis tag — a duplicate representative silently shrinks this"
+        );
+        let committed: BTreeMap<String, UnboundedFamily> =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("committed family golden"))
+                .expect("the family golden parses as tag -> UnboundedFamily");
+        assert_eq!(
+            table, committed,
+            "the client's family-tag golden drifted — re-run with UPDATE_WIRE_GOLDEN=1"
+        );
+    }
+
+    /// M1-d (migrated from the frontend's U6): `FamilyCollapseState::merge` is a genuine join —
+    /// commutative, associative, idempotent. That is what makes the accumulation order of the row
+    /// loop irrelevant; the frontend fold it replaces documented a last-wins order hazard.
+    ///
+    /// MUTATION: make `merge` last-wins (`|_, other| other`) ⇒ commutativity reds in exactly one
+    /// order, e.g. `Unscheduled ⊔ Mixed` vs `Mixed ⊔ Unscheduled`.
+    #[test]
+    fn family_collapse_state_merge_is_a_join() {
+        let all = [
+            FamilyCollapseState::Unscheduled,
+            FamilyCollapseState::Mixed,
+            FamilyCollapseState::Scheduled(CollapseCertainty::Committed),
+            FamilyCollapseState::Scheduled(CollapseCertainty::Conditional),
+        ];
+        for x in all {
+            assert_eq!(x.merge(x), x, "idempotent: {x:?}");
+            for y in all {
+                assert_eq!(
+                    x.merge(y),
+                    y.merge(x),
+                    "commutative: {x:?} ⊔ {y:?} must equal {y:?} ⊔ {x:?}"
+                );
+                for z in all {
+                    assert_eq!(
+                        x.merge(y).merge(z),
+                        x.merge(y.merge(z)),
+                        "associative: ({x:?} ⊔ {y:?}) ⊔ {z:?} must equal {x:?} ⊔ ({y:?} ⊔ {z:?})"
+                    );
+                }
+            }
+        }
+        // The lattice's load-bearing shape, stated so a reader need not re-derive it.
+        assert_eq!(
+            FamilyCollapseState::Scheduled(CollapseCertainty::Committed).merge(
+                FamilyCollapseState::Scheduled(CollapseCertainty::Conditional)
+            ),
+            FamilyCollapseState::Scheduled(CollapseCertainty::Conditional),
+            "two schedules keep the WEAKER certainty"
+        );
+        assert_eq!(
+            FamilyCollapseState::Scheduled(CollapseCertainty::Committed)
+                .merge(FamilyCollapseState::Unscheduled),
+            FamilyCollapseState::Mixed,
+            "a schedule beside an unscheduled sibling is Mixed, never Scheduled"
         );
     }
 

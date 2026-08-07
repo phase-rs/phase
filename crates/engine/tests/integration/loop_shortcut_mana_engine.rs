@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! P7 v3 (CR 732.2a): capture + drive a MULTI-ACTION mana-engine loop.
 //!
 //! Real-card acceptance: **Basalt Monolith + Power Artifact** — the canonical 2-card infinite-mana
@@ -17,6 +18,7 @@ use engine::analysis::loop_check::{ShortcutResponse, WinKind};
 use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
+use engine::game::derived_views::{CollapseCertainty, FamilyCollapseState, UnboundedFamily};
 use engine::game::effects::attach::attach_to;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1017,8 +1019,9 @@ fn mana_engine_accept_records_no_collapse_bound() {
 /// what makes this the strongest rig in the file for the projection's schedule-independence.
 ///
 /// The `Life(P0)` axis is DEFERRED: no life has been gained, and none will be until the CR 500.5
-/// boundary applies the growth. That deferral is an engine deviation, pre-existing and deliberate,
-/// and no CR licenses it — nothing here claims one does. What it means for the DISPLAY is only
+/// boundary applies the growth. The growth is in flight along CR 732.2c's advance to the
+/// proposal's ending point (`types::game_state`'s `scheduled_collapse_axes` doc). For the DISPLAY
+/// what matters is only
 /// that the mark and its enablers are still live through the window, so the ∞ renders current
 /// engine state rather than a stale mark.
 ///
@@ -1156,7 +1159,9 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     );
 
     for viewer in [None, Some(P0), Some(P1)] {
-        let rows = engine::game::derived_views::derive_views(state, viewer).unbounded_resources;
+        let views = engine::game::derived_views::derive_views(state, viewer);
+        let rows = views.unbounded_resources;
+        let families = views.unbounded_families;
         let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
         // (5) the already-materialized mana axis keeps its ∞ row on the WIRE.
         assert!(
@@ -1171,6 +1176,49 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
             axes.contains(&ResourceAxis::Life(P0)),
             "the deferred Life axis of the same scheduled drive still projects its ∞ \
              row while the collapse is merely scheduled (viewer {viewer:?}), got {axes:?}"
+        );
+
+        // (8) R4 — the documented `Mana(_)` scope limit is FALSIFIABLE, not dead code: (4) above
+        // proves the collapse authority names BOTH axes on this exact stash, so the mana axis
+        // going unflagged below can only come from the projection's own guard. Assertion (5)
+        // already pins that the mana ROW still exists, so the scope limit governing the AFFORDANCE
+        // rather than row EXISTENCE is covered there; a duplicate pin here would be subsumed by it
+        // and by the same `derive_views` output, so this reuses `rows` instead of recomputing.
+
+        // (9) R4/agree — the FAMILY COLLAPSE STATE obeys the `Mana(_)` scope limit.
+        //
+        // MEASURED DEFECT this pins: the limit once lived in a separate tag channel's loop and not
+        // in the row loop, so on this exact state the mana row shipped `scheduled: true`. The HUD
+        // folded that flag into the "mana" family and rendered `∞→N` with a "collapse pending; a
+        // finite amount will be chosen" tooltip — beside a pool `refill_infinite_mana` is still
+        // topping up, and beside `ManaPoolSummary`'s plain `∞` for the same pool in the same
+        // frame. The whole suite was green over it: every other schedule assertion in the repo
+        // sits on a non-mana axis, so nothing chose between that behaviour and its opposite. The
+        // tag channel is gone and so is the row flag; this assertion is what keeps the scope limit
+        // honest on the channel that replaced them.
+        //
+        // TWO-SIDED on purpose. The `life` half is the matched positive, from the SAME stash and
+        // the SAME `derive_views` call: without it, `Unscheduled` everywhere satisfies the mana
+        // half, and this row would pass against a channel that can never report a schedule.
+        let state_of = |want: UnboundedFamily| {
+            families
+                .iter()
+                .find(|f| f.player == P0 && f.family == want)
+                .unwrap_or_else(|| panic!("R4/agree reach: no {want:?} family (viewer {viewer:?})"))
+                .state
+        };
+        assert_eq!(
+            state_of(UnboundedFamily::Mana),
+            FamilyCollapseState::Unscheduled,
+            "R4/agree: the mana family must not report a schedule — the accepted count bounds \
+             nothing the player can spend (viewer {viewer:?})"
+        );
+        assert_eq!(
+            state_of(UnboundedFamily::Life),
+            FamilyCollapseState::Scheduled(CollapseCertainty::Committed),
+            "R4/agree positive: the deferred life family of the SAME stash IS scheduled, so the \
+             mana assertion above is discriminating rather than vacuous. It is COMMITTED because \
+             a `DriveSequence` replays real cycles and has no non-push exit (viewer {viewer:?})"
         );
     }
 

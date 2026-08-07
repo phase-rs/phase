@@ -205,6 +205,7 @@ fn resolve_trigger_body(
                 source_name: source_name.to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         },
         &mut vec![],

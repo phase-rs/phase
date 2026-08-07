@@ -5,7 +5,8 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use engine::ai_support::{
-    build_decision_context, certify_fetch_then_cast, certify_pact_plan, is_pact_payment_cast,
+    build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
+    certify_pact_plan, is_pact_payment_cast, root_may_yield_adverse_exchange,
     targeted_exchange_verdict, validated_candidate_actions_for_semantic_owner, AiDecisionContract,
     TargetedExchangeVerdict,
 };
@@ -529,14 +530,28 @@ fn fast_priority_action(
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
 }
 
-/// Keep direct priority shortcuts under the same pre-cast exchange gate as the
-/// scored candidate pipeline.  The engine candidate is recovered by semantic
-/// owner so replay keeps its authenticated actor instead of fabricating one.
+/// Keep the direct priority shortcuts under the pre-cast exchange gate. The
+/// engine candidate is recovered by semantic owner so replay keeps its
+/// authenticated actor instead of fabricating one.
+///
+/// The engine's clone-free precondition runs FIRST: a root whose source carries
+/// no adverse-exchange effect shape can never be rejected, so recovering its
+/// candidate — a full `validated_candidate_actions_for_semantic_owner` pass,
+/// with a `GameState` clone per candidate the cheap filters decline — is pure
+/// cost. This gate is invoked once per action from a filter over the whole
+/// priority list, so the recovery must stay behind the precondition or the pass
+/// count is quadratic in the number of castable roots. The reordering is
+/// behavior-identical: with the same precondition inside
+/// `targeted_exchange_verdict`, the old path returned `true` on every root this
+/// one short-circuits.
 fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
     if !matches!(
         action,
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
     ) {
+        return true;
+    }
+    if !root_may_yield_adverse_exchange(state, action) {
         return true;
     }
     validated_candidate_actions_for_semantic_owner(state, ai_player)
@@ -1984,7 +1999,14 @@ pub fn fallback_action(
             choice,
             context,
         } => match context {
-            ManaChoiceContext::ResolvingEffect(_) => resolving_effect_mana_choice(state, *player),
+            ManaChoiceContext::ResolvingEffect(_) => {
+                let issued_actions: Vec<_> = contract
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.action.clone())
+                    .collect();
+                resolving_effect_mana_choice(state, *player, &issued_actions)
+            }
             ManaChoiceContext::ManaAbility(_) => canonical_mana_color_choice(choice),
         },
         WaitingFor::PayManaAbilityMana { options, .. } => {
@@ -2328,7 +2350,11 @@ fn priority_action_is_allowed_by_loop_guards(
 /// mana. Exact payment remains in the engine; this only ranks a legal color
 /// product from the complete prompt using known hand demand, then the AI
 /// player's known deck composition, then canonical `ManaType` order.
-fn resolving_effect_mana_choice(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+fn resolving_effect_mana_choice(
+    state: &GameState,
+    ai_player: PlayerId,
+    issued_actions: &[GameAction],
+) -> Option<GameAction> {
     let WaitingFor::ChooseManaColor {
         player,
         choice,
@@ -2344,34 +2370,63 @@ fn resolving_effect_mana_choice(state: &GameState, ai_player: PlayerId) -> Optio
     let hand_demand =
         engine::game::mana_payment::compute_hand_color_demand(state, *player, resume.source_id);
     let deck_demand = deck_color_demand(state, *player);
-    if !has_mana_demand(hand_demand, deck_demand) {
-        return canonical_mana_color_choice(choice);
-    }
-    match choice {
-        ManaChoicePrompt::SingleColor { options } => {
-            best_mana_type(options, hand_demand, deck_demand).map(|color| {
-                GameAction::ChooseManaColor {
-                    choice: ManaChoice::SingleColor(color),
+    let preferred = if !has_mana_demand(hand_demand, deck_demand) {
+        canonical_mana_color_choice(choice)
+    } else {
+        match choice {
+            ManaChoicePrompt::SingleColor { options } => {
+                best_mana_type(options, hand_demand, deck_demand).map(|color| {
+                    GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(color),
+                        count: 1,
+                    }
+                })
+            }
+            ManaChoicePrompt::Combination { options } => options
+                .iter()
+                .max_by_key(|colors| mana_product_rank(colors, hand_demand, deck_demand))
+                .map(|colors| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(colors.clone()),
                     count: 1,
-                }
-            })
+                }),
+            ManaChoicePrompt::AnyCombination { count, options } => {
+                demand_saturating_mana_combination(options, *count, hand_demand, deck_demand).map(
+                    |colors| GameAction::ChooseManaColor {
+                        choice: ManaChoice::Combination(colors),
+                        count: 1,
+                    },
+                )
+            }
         }
-        ManaChoicePrompt::Combination { options } => options
+    };
+
+    let preferred_issued = preferred.and_then(|preferred| {
+        issued_actions
             .iter()
-            .max_by_key(|colors| mana_product_rank(colors, hand_demand, deck_demand))
-            .map(|colors| GameAction::ChooseManaColor {
-                choice: ManaChoice::Combination(colors.clone()),
-                count: 1,
-            }),
-        ManaChoicePrompt::AnyCombination { count, options } => {
-            demand_saturating_mana_combination(options, *count, hand_demand, deck_demand).map(
-                |colors| GameAction::ChooseManaColor {
-                    choice: ManaChoice::Combination(colors),
-                    count: 1,
-                },
-            )
-        }
+            .find(|issued| {
+                matches!(issued, GameAction::ChooseManaColor { .. })
+                    && issued.cmp_stable(&preferred).is_eq()
+            })
+            .cloned()
+    });
+    if preferred_issued.is_some() || !has_mana_demand(hand_demand, deck_demand) {
+        return preferred_issued;
     }
+
+    // `AnyCombination` is deliberately capped by the engine. A preferred
+    // product beyond that finite domain is not an action the boundary can
+    // accept, so rank only the issued products by the same demand signal.
+    issued_actions
+        .iter()
+        .filter_map(|issued| {
+            issued_mana_rank(issued, hand_demand, deck_demand).map(|rank| (issued, rank))
+        })
+        .max_by(|(left, left_rank), (right, right_rank)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| right.cmp_stable(left))
+        })
+        .map(|(issued, _)| issued.clone())
 }
 
 /// Preserve the engine-issued option order for a mana ability. Mana production
@@ -2468,6 +2523,24 @@ fn mana_product_rank(
         .map(|(produced, demand)| (*produced).min(demand))
         .sum();
     (hand, deck, std::cmp::Reverse(colors.to_vec()))
+}
+
+/// Score one engine-issued flexible-mana response by the same demand model as
+/// the raw preference. The caller owns the finite action domain (CR 106.3).
+fn issued_mana_rank(
+    action: &GameAction,
+    hand_demand: [u32; 5],
+    deck_demand: [u32; 5],
+) -> Option<(u32, u32, std::cmp::Reverse<Vec<ManaType>>)> {
+    let GameAction::ChooseManaColor { choice, .. } = action else {
+        return None;
+    };
+    Some(match choice {
+        ManaChoice::SingleColor(color) => {
+            mana_product_rank(std::slice::from_ref(color), hand_demand, deck_demand)
+        }
+        ManaChoice::Combination(colors) => mana_product_rank(colors, hand_demand, deck_demand),
+    })
 }
 
 fn mana_type_rank(
@@ -2810,16 +2883,34 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
-    if let Some(action) = resolving_effect_mana_choice(state, ai_player)
-        .or_else(|| evoke_variant_choice(state, ai_player))
-    {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::ChooseManaColor {
+            context: ManaChoiceContext::ResolvingEffect(_),
+            ..
+        }
+    ) {
+        let issued_actions = build_decision_context_for_semantic_owner(state, ai_player)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect::<Vec<_>>();
+        if let Some(action) = resolving_effect_mana_choice(state, ai_player, &issued_actions) {
+            return vec![(action, 1.0)];
+        }
+    }
+    if let Some(action) = evoke_variant_choice(state, ai_player) {
         return vec![(action, 1.0)];
     }
     if let Some(action) = fast_priority_action(state, ai_player, config, session) {
         return vec![(action, 1.0)];
     }
 
-    let ctx = build_decision_context(state);
+    // The scored path may be called for a named owner while another owner is
+    // also pending. Reuse that owner's exact engine-issued domain throughout;
+    // the generic context picks the first pending owner and can make a valid
+    // choice disappear at the action boundary.
+    let ctx = build_decision_context_for_semantic_owner(state, ai_player);
     #[cfg(test)]
     let policies = session
         .policy_registry_override
@@ -3216,7 +3307,7 @@ pub(crate) fn deterministic_choice(
     actions: &[GameAction],
     context: Option<&AiContext>,
 ) -> Option<GameAction> {
-    if let Some(action) = resolving_effect_mana_choice(state, ai_player)
+    if let Some(action) = resolving_effect_mana_choice(state, ai_player, actions)
         .or_else(|| evoke_variant_choice(state, ai_player))
     {
         return Some(action);
@@ -6621,6 +6712,14 @@ mod tests {
         state
     }
 
+    fn issued_actions(state: &GameState, owner: PlayerId) -> Vec<GameAction> {
+        build_decision_context_for_semantic_owner(state, owner)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect()
+    }
+
     #[test]
     fn resolving_effect_without_demand_uses_canonical_prompt_order_in_every_route() {
         let state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
@@ -6635,7 +6734,7 @@ mod tests {
             "the fallback consumes the same resolving-effect chooser"
         );
         assert_eq!(
-            deterministic_choice(&state, P0, &config, &[], None),
+            deterministic_choice(&state, P0, &config, &issued_actions(&state, P0), None),
             Some(expected.clone()),
             "the direct deterministic route preserves engine option order without demand"
         );
@@ -6661,7 +6760,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
         assert_eq!(
-            deterministic_choice(&state, P0, &config, &[], None),
+            deterministic_choice(&state, P0, &config, &issued_actions(&state, P0), None),
             Some(expected.clone()),
             "the direct deterministic route consumes the resolving-effect helper"
         );
@@ -6693,7 +6792,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
         assert_eq!(
-            deterministic_choice(&state, P0, &config, &[], None),
+            deterministic_choice(&state, P0, &config, &issued_actions(&state, P0), None),
             Some(expected.clone()),
             "the direct route keeps both colour demands funded"
         );
@@ -6766,21 +6865,21 @@ mod tests {
                 ManaType::Red,
                 ManaType::Green,
             ],
-            3,
+            2,
         );
-        let red_spell = add_spell_to_hand(&mut state, P0, "Triple Red Demand", 0);
+        let red_spell = add_spell_to_hand(&mut state, P0, "Double Red Demand", 0);
         state.objects.get_mut(&red_spell).unwrap().mana_cost = ManaCost::Cost {
-            shards: vec![ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
             generic: 0,
         };
         let expected = GameAction::ChooseManaColor {
-            choice: ManaChoice::Combination(vec![ManaType::Red; 3]),
+            choice: ManaChoice::Combination(vec![ManaType::Red; 2]),
             count: 1,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
         assert_eq!(
-            deterministic_choice(&state, P0, &config, &[], None),
+            deterministic_choice(&state, P0, &config, &issued_actions(&state, P0), None),
             Some(expected.clone()),
             "the direct route reads the complete prompt options"
         );
@@ -6788,6 +6887,88 @@ mod tests {
             score_candidates(&state, P0, &config),
             vec![(expected, 1.0)],
             "the scored route retains the full-prompt demand-saturating choice"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_mana_ranks_issued_products_when_the_combination_cap_excludes_its_preference(
+    ) {
+        let mut state = resolving_effect_any_combination_state(
+            vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+            4,
+        );
+        let green_spell = add_spell_to_hand(&mut state, P0, "Green Demand", 0);
+        state.objects.get_mut(&green_spell).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Green,
+                ManaCostShard::Green,
+                ManaCostShard::Green,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        let issued = issued_actions(&state, P0);
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+                ManaType::Green,
+                ManaType::Green,
+            ]),
+            count: 1,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        assert_eq!(
+            issued.len(),
+            64,
+            "the engine's finite AnyCombination domain must stay at its cap"
+        );
+        assert_eq!(
+            resolving_effect_mana_choice(&state, P0, &issued),
+            Some(expected.clone()),
+            "a preference outside the capped domain must select the best issued product"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &issued, None),
+            Some(expected.clone()),
+            "the deterministic route must return the exact supplied action"
+        );
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            vec![(expected, 1.0)],
+            "the scored route must use the same capped owner-issued domain"
+        );
+    }
+
+    #[test]
+    fn resolving_effect_mana_scores_only_for_the_supplied_semantic_owner() {
+        let mut state = non_affiliated_choose_mana_color_state(vec![ManaType::Red, ManaType::Blue]);
+        let WaitingFor::ChooseManaColor { player, .. } = &mut state.waiting_for else {
+            panic!("fixture must be a mana-color prompt");
+        };
+        *player = P1;
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let expected = GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        };
+
+        assert_eq!(
+            score_candidates(&state, P0, &config),
+            Vec::new(),
+            "a non-owner must not receive the first pending owner's candidates"
+        );
+        assert_eq!(
+            score_candidates(&state, P1, &config),
+            vec![(expected, 1.0)],
+            "the named owner must score the exact action its own contract issued"
         );
     }
 

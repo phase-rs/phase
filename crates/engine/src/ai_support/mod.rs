@@ -71,7 +71,11 @@ pub use swarm::{
 };
 #[cfg(feature = "test-support")]
 pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
-pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
+pub use targeted_exchange::{
+    root_may_yield_adverse_exchange, targeted_exchange_verdict, TargetedExchangeVerdict,
+};
+#[cfg(feature = "test-support")]
+pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///
@@ -5980,6 +5984,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:

@@ -1814,6 +1814,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
     }
@@ -2815,6 +2816,7 @@ mod tests {
                 source_name: "Hope Estheim".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -2838,6 +2840,7 @@ mod tests {
                 source_name: "Opponent Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

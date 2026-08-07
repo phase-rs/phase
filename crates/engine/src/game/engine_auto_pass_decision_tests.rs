@@ -1029,3 +1029,56 @@ fn loop_gate_probes_all_living_players_not_just_current_holder() {
              wrongly clear, proving the all-players probe is load-bearing"
     );
 }
+
+/// CR 508.1a: "The active player chooses which creatures that they control, IF
+/// ANY, will attack." When the candidate set is empty there is no choice to
+/// make — the empty declaration is the only legal one — so the engine must
+/// submit it rather than park on the prompt.
+///
+/// Regression: this arm previously auto-submitted ONLY when the player was in
+/// `AutoPassMode::UntilTurnBoundary`. A player with no auto-pass configured and
+/// no creatures therefore sat on a Declare Attackers prompt whose entire legal
+/// action set was a single no-op `DeclareAttackers { attacks: [], bands: [] }`,
+/// which had to be clicked through every combat. The `DeclareBlockers` arm has
+/// always carried the equivalent "nothing to choose" escape; this pins the
+/// attacker side to the same rule.
+#[test]
+fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
+    let waiting_for = WaitingFor::DeclareAttackers {
+        player: PlayerId(0),
+        valid_attacker_ids: Vec::new(),
+        valid_attack_targets: Vec::new(),
+        valid_attack_targets_by_attacker: Some(Default::default()),
+        attacker_constraints: Default::default(),
+    };
+    let mut state = GameState::new_two_player(42);
+    state.phase = Phase::DeclareAttackers;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    // Production sets combat before advancing into the declare step.
+    state.combat = Some(crate::game::combat::CombatState::default());
+    state.waiting_for = waiting_for.clone();
+
+    // The stalling configuration: no auto-pass mode for the declaring player.
+    assert!(
+        state.auto_pass.is_empty(),
+        "fixture must exercise the no-auto-pass case that stalled"
+    );
+
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for,
+        log_entries: Vec::new(),
+    };
+    let advanced = run_auto_pass_loop(&mut state, &mut result);
+
+    assert!(
+        advanced,
+        "CR 508.1a: a forced empty attack declaration must not park the game"
+    );
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::DeclareAttackers { .. }),
+        "CR 508.1a: the forced empty declaration must be submitted, not re-offered; got {:?}",
+        result.waiting_for
+    );
+}

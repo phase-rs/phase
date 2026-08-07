@@ -202,6 +202,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 24 — DerivedViews.unbounded_families carries the engine-owned per-seat family
+ *      collapse state behind each ∞ badge. A CAPABILITY bump, not a parse bump:
+ *      the field is serde-optional, but this client deleted its row-flag
+ *      OR-fold derivation, so a v23 server that omits the field would leave
+ *      this client rendering NO infinity badges — silently, with no parse error
+ *      to catch it. The handshake is the only place that pairing is refusable.
  * 23 — PayableResource::ManaGeneric changed from { per_x } to
  *      { base_cost: ManaCost } (#6410) — a GameState payload field type
  *      change, and base_cost intentionally carries no serde default (a
@@ -222,7 +228,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 23;
+export const PROTOCOL_VERSION = 24;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

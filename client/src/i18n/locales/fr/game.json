@@ -482,6 +482,11 @@
     "pendingCheaper": "Le prochain sort coûte {{amount}} de moins",
     "companion": "Compagnon",
     "unboundedTooltip": "{{resource}} illimité (∞)",
+    "unboundedScheduledTooltip": "{{resource}} illimité (∞) — réduction en attente ; un nombre fini sera choisi",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "{{resource}} illimité (∞) — réduction en attente ; cela peut rester illimité",
+    "unboundedMixedTooltip": "{{resource}} illimité (∞) — une partie de ce groupe a une réduction en attente ; une partie reste illimitée",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Mana illimité (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "points de vie",
@@ -625,6 +630,10 @@
     "cardBack": "Dos de carte",
     "organizeLabel": "Organiser la main",
     "reorderPausedHint": "La réorganisation par glisser-déposer est en pause tant que la main est triée ou filtrée."
+  },
+  "storm": {
+    "copies_one": "Déluge : {{count}} copie",
+    "copies_other": "Déluge : {{count}} copies"
   },
   "opponentHud": {
     "ally": "Allié",

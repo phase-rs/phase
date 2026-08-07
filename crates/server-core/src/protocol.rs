@@ -2257,8 +2257,29 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_23() {
-        assert_eq!(PROTOCOL_VERSION, 23);
+    fn protocol_version_is_24() {
+        assert_eq!(PROTOCOL_VERSION, 24);
+    }
+
+    /// The bump alone is inert — a version number nobody enforces prevents no
+    /// pairing. This is the assertion with teeth: full-game servers accept ONLY
+    /// the current protocol, so a v24 client can never complete a handshake
+    /// with a v23 server and silently render zero ∞ badges (the family channel
+    /// is `#[serde(default)]`, so that loss would raise no parse error).
+    ///
+    /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
+    /// this guards — and this test reds while `protocol_version_is_24` stays
+    /// green, which is why the two are separate assertions.
+    #[test]
+    fn full_game_floor_is_current_only_not_a_rollout_window() {
+        assert_eq!(
+            MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+            "full-game servers must refuse every stale client; a rollout window here \
+             re-admits the v23 pairing that drops the engine-owned family channel"
+        );
+        // The lobby floor is deliberately looser, and must NOT be tightened to
+        // match: lobby traffic carries matchmaking metadata only.
+        assert_eq!(LOBBY_MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION - 1);
     }
 
     #[test]

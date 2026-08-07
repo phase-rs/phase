@@ -4,6 +4,16 @@
       "charge"
     ]
   },
+  "unbounded_families": [
+    {
+      "family": "counters",
+      "player": 0,
+      "state": {
+        "data": "Committed",
+        "type": "Scheduled"
+      }
+    }
+  ],
   "unbounded_resources": [
     {
       "axis": {

@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! FIX-1 + FIX-2 + FIX-3 (CR 732.2a) acceptance — the Kilo, Apogee Mind + Freed from the Real +
 //! Relic of Legends + Pentad Prism proliferate loop, driven from the REAL 4-player playtest dump
 //! that failed to offer the ∞-charge shortcut.
@@ -19,12 +20,13 @@
 //! The `kilo_reinjected_pinless_history_suppresses_offer` test is the matched-pair proof that the
 //! migration is load-bearing (re-injecting the stale prefix flips the offer OFF).
 
+use engine::game::derived_views::{CollapseCertainty, FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
     GameState, LoopAction, LoopActionContext, LoopCollapseAxis, ManaChoice, PayCostKind,
-    PayableResource, PersistedGameState, WaitingFor,
+    PayableResource, PersistedGameState, PersistentAxisMaterialization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -436,17 +438,38 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
 
     // (3) THE PER-SURFACE COUNTER-PILL ROW, on a REAL production fixture. The accept registers an
     // observed-growth `DriveSequence` naming the charge-counter axis, but the engine DEFERS
-    // applying it to the CR 500.5 boundary — an engine deviation, pre-existing and deliberate. The
+    // applying it to the CR 500.5 boundary, while advancing to the proposal's ending point (CR 732.2c). The
     // real charge count is unchanged (asserted just above) and the ∞ mark is live, so the pill
     // stays ∞ throughout that window. Filter nothing: (2) above is unchanged and still passes.
     //
     // REVERT-PROBE (RP-1c, RUN): restore the `collapse_scheduled(..)` guard in `derive_views`'
     // counter-pill loop ⇒ THIS `assert_eq!` fails (`left: None`) while (2) above and the pile
     // and row channels stay green.
+    // PREMISE GUARD — the one deliberate exception to the WRITE-first ordering documented at the
+    // wire pin below (PART 1). This asserts the input FRAME, never `views`: if the stash shape is
+    // wrong the golden would be minted from the wrong frame, so it must abort BEFORE the write. It
+    // can never be the assertion a revert probe reds — `derive_views(&GameState, ..)` takes an
+    // IMMUTABLE borrow (cited by signature, not by line: this change moves `derived_views.rs`
+    // wholesale, so a line anchor into it goes stale on its own edit), so no change to it can move
+    // `pending_unbounded_materialization`.
+    assert!(
+        matches!(
+            state
+                .pending_unbounded_materialization
+                .get(&P0)
+                .map(Vec::as_slice),
+            Some([PersistentAxisMaterialization::DriveSequence { .. }])
+        ),
+        "premise: the observed kilo accept registers exactly ONE DriveSequence — the only stash \
+         shape that yields Scheduled(Committed); if this changes, the Committed witness below \
+         measures something else. got={:?}",
+        state.pending_unbounded_materialization.get(&P0)
+    );
+
     let views = derive_views(&state, None);
 
     // Cross-seam wire pin, PART 1 — compute + (optionally) REGENERATE. Provenance: every
-    // key/value below is ENGINE-EMITTED (`serde_json::to_value(&derive_views(..))`). The three ∞
+    // key/value below is ENGINE-EMITTED (`serde_json::to_value(&derive_views(..))`). The four ∞
     // keys are lifted BY NAME from the real serialized DerivedViews so unrelated derived-view churn
     // cannot move this golden, while the field names and value encodings — the part the TS mirror
     // must match — stay engine-authored.
@@ -455,6 +478,17 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
     // deliberately follows them: a revert probe that reds one of those assertions must still be
     // able to regenerate the client goldens with `UPDATE_WIRE_GOLDEN=1`, or the client-side half of
     // that probe (RP-1b, RP-2) is unreachable. An assert panic aborts the test.
+    //
+    // ONE DELIBERATE EXCEPTION, above the `derive_views` call: the stash-shape PREMISE guard. It
+    // asserts the INPUT FRAME, not this projection's output, and its purpose is exactly to stop a
+    // golden being minted from a wrong frame — so it must abort before the write, not after it. It
+    // cannot be the assertion a revert probe reds, because `derive_views` takes `&GameState` and no
+    // change to it can move `pending_unbounded_materialization`.
+    //
+    // THE RULE FOR NEW ASSERTIONS, IN EVERY GOLDEN EMITTER: anything that reads `views` goes BELOW
+    // the WRITE. Anything that checks the state `derive_views` is about to be handed goes above it.
+    // Where a pre-WRITE frame must be asserted, CAPTURE it into a local above and assert the local
+    // below (see combo_infinite_pile.rs's declined-wire emitter).
     //
     // DETERMINISM: `unbounded_counters` is a std `HashMap` (derived_views.rs), but
     // `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
@@ -465,6 +499,7 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
         "unbounded_pile",
         "unbounded_resources",
         "unbounded_counters",
+        "unbounded_families",
     ]
     .into_iter()
     .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
@@ -492,6 +527,20 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
         views.unbounded_counters.get(&PENTAD),
         Some(&vec![charge.clone()]),
         "the ∞ charge pill stays projected while the collapse is merely SCHEDULED"
+    );
+
+    assert!(
+        views.unbounded_families.iter().any(|f| f.player == P0
+            && f.family == UnboundedFamily::Counters
+            && f.state == FamilyCollapseState::Scheduled(CollapseCertainty::Committed)),
+        "the real kilo accept's single DriveSequence yields a Committed family on a REAL \
+         production dump — that is this witness's distinct property, NOT uniqueness: two other \
+         Committed witnesses exist on synthetic boards (combo_infinite_pile's grafted \
+         DriveSequence for Tokens, loop_shortcut_mana_engine's R4/agree Life), and neither is \
+         redundant with this one. This is the ∞→N matched positive the FE tests read out of \
+         unbounded-counter-wire.json; it sits AFTER the WRITE so a mutation that reds it can \
+         still regenerate the golden (M1-e(c), M2-d(b) depend on that). got={:?}",
+        views.unbounded_families
     );
 
     // Cross-seam wire pin, PART 2 — the drift COMPARE (see PART 1 for why it sits here).

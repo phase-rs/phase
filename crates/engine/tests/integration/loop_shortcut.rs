@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! PR-7 Phase 3 — interactive loop-shortcut protocol + APNAP response window.
 //!
 //! Covers the CR 732.2a/b/c live-detect bridge, `LoopDetectionMode::Interactive`, the
@@ -20,6 +21,7 @@ use engine::analysis::decision_template::{
 };
 use engine::analysis::loop_check::{LoopCertificate, ShortcutProposal, ShortcutResponse, WinKind};
 use engine::analysis::resource::{loop_states_equal_modulo_resources, BoardDelta, ResourceAxis};
+use engine::game::derived_views::{FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
@@ -562,6 +564,128 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
     );
 }
 
+/// SITE D (CR 732.2a) — the `UntilLethal` drive dispatch: a FOREIGN driving period in state must
+/// not divert an accepted Path-A grant into the object-growth drive.
+///
+/// **WHY THIS ROW EXISTS NOW AND DID NOT BEFORE.** Site D was reported row-less on the ground that
+/// no fixture reaches it with a foreign period. That was a statement about what boards ARRIVE
+/// carrying one, not about reachability: `migrate_transient_loop_sequence` clears the field at
+/// every load, so no dump-driven row can start from one, and the answer here is the same one the
+/// mint and accept rows use — inject into a board the engine itself drove to its offer.
+///
+/// **WHY THIS SCENARIO AND NOT A CAPTURE.** Site D is only reachable through a proposal whose count
+/// is `UntilLethal`, and `handle_declare_shortcut` rejects `UntilLethal` against any offer that
+/// narrowed its bound. Every tracked capture in this repo reaches the BOUNDED mint (asserted on the
+/// Dina capture by `the_user_captures_offer_is_reached_with_its_driving_period_cleared`), so the
+/// only route in is a Path-A offer — which is exactly what
+/// [`interactive_3p_optional_cascade_apnap_accept_win`] directly above raises. This row is that row
+/// plus one injected field, so any divergence attributes to the field alone.
+///
+/// **THE HAZARD.** Under a merely-non-empty test, `apply_until_lethal_shortcut` would take its
+/// object-growth branch and drive the FOREIGN seat's recorded period, measuring that seat's delta
+/// as if it were this proposal's. CR 732.2a binds a shortcut to the sequence its proposer can
+/// predictably take, and another seat's independent activation is not among them. Pre-existing and
+/// independent of the (1b) fix — Path A never read the sequence — but reachable, and fixed through
+/// the same authority.
+///
+/// **TWO-SIDED CONTROL** (both measured; each direction breaks a DIFFERENT row):
+/// * **DROP** the seat test (restore `!committed.last_loop_action_sequence.is_empty()`) ⇒ this row
+///   ends at `Priority { player: P0 }` instead of `GameOver { winner: Some(P0) }` — the drive
+///   fell into `until_lethal_fallback` — and the injected period is wiped to length 0 by that
+///   fallback's unconditional clear. BOTH assertions below flip.
+/// * **TRIVIALIZE** to a constant `true` (always drive the recorded period) ⇒
+///   `interactive_3p_optional_cascade_apnap_accept_win` above panics inside the engine at
+///   `seq[0]`, because an EMPTY sequence has no step to drive. So no constant implementation of
+///   this dispatch passes the pair.
+///
+/// ⚠ **A REALIZED NEGATIVE, recorded rather than hidden.** The complementary constant —
+/// `false`, i.e. always take the drain branch — was measured against the WHOLE integration suite
+/// at this tree (`cargo test -p phase-engine --test integration`, one unit = one libtest row) and
+/// **4564 rows passed, 0 failed**. Site D's own-period branch is therefore asserted by no row
+/// in this tree, which is a pre-existing coverage gap this change neither creates nor closes: the
+/// object-growth `UntilLethal` rows (`object_growth_advantage_untillethal_no_crown`) reach the
+/// same `Priority` handback down either branch, because `until_lethal_fallback` rolls the board
+/// back to `committed` and the two routes become observationally identical.
+#[test]
+fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        ..
+    } = wf.clone()
+    else {
+        panic!("REACH-GUARD: every assertion below needs the engine's own offer, got {wf:?}");
+    };
+    assert_eq!(
+        predicted_winner,
+        Some(P0),
+        "REACH-GUARD: site D is reachable only through a Path-A offer — a bounded one rejects \
+         `UntilLethal` at the declare seam and this row would measure that rejection instead"
+    );
+
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::UntilLethal,
+            template: None,
+        })
+        .expect("the proposer declares UntilLethal on the Path-A offer");
+
+    // THE INJECTION: an opponent's own recorded period, sitting in state at the moment the last
+    // acceptance hands the proposal to `apply_until_lethal_shortcut`.
+    let opp = runner
+        .state()
+        .players
+        .iter()
+        .map(|p| p.id)
+        .find(|p| *p != proposer)
+        .expect("REACH-GUARD: the foreign period needs a second seat to belong to");
+    let card_id = runner
+        .state()
+        .objects
+        .values()
+        .next()
+        .map(|o| o.card_id)
+        .expect("the scenario has objects");
+    runner.state_mut().last_loop_action_sequence = vec![LoopActionContext {
+        card_id,
+        controller: opp,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::NotUsed,
+        },
+        convoke: None,
+        pins: vec![],
+    }];
+    assert_ne!(
+        opp, proposer,
+        "REACH-GUARD: a period injected for the PROPOSER would be the legitimate object-growth \
+         route, and this row would assert the opposite of what it means to"
+    );
+
+    accept_all_opponents(&mut runner);
+
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "CR 732.2a SITE D: an opponent's recorded activation describes no sequence this proposer \
+         can take, so the accepted `UntilLethal` grant must still drive the DRAIN it was certified \
+         on. A `Priority` handback here is the defect: the drive took the object-growth branch and \
+         measured the wrong seat's period"
+    );
+    assert_eq!(
+        runner.state().last_loop_action_sequence.len(),
+        1,
+        "and the foreign period is still THERE — the crown was reached with it in state. Under the \
+         DROP mutant this reads 0, because `until_lethal_fallback` clears the field \
+         unconditionally, so a wrongly-routed drive also destroys the other seat's period"
+    );
+}
+
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player
 /// whose loop will win. P1 starts the proven P0-controlled drain by making P0 gain life on
 /// P1's turn, so the live bridge must offer P1 the choice while retaining P0 as the measured
@@ -901,7 +1025,7 @@ fn declare_and_respond_authorization() {
 
     // RIDER-2 — CR 732.2a decline authorization (fresh runner: the flow above consumed the
     // offer). `DeclineShortcut` is a normal protocol action dispatched via the
-    // `(waiting_for, action)` match; `check_actor_authorization` (engine.rs:225) runs BEFORE
+    // `(waiting_for, action)` match; `game/engine.rs`'s `check_actor_authorization` runs BEFORE
     // `apply_action` and keys on `WaitingFor::LoopShortcut.acting_player` == the proposer.
     // Unlike `Concede`/`Debug`, `DeclineShortcut` is NOT on any pre-match early-return
     // allowlist, so a wrong actor is rejected with the SPECIFIC `WrongPlayer` — proving the
@@ -2266,8 +2390,9 @@ const POISON_RIDER: &str = "Whenever you gain life, each opponent gets a poison 
 ///
 /// MEASURED reachability (this 2-trigger fixture does NOT reach the Path-B bridge): the two
 /// simultaneous triggers per lifegain event open OrderTriggers beats, and every non-
-/// `Priority{active_player}` beat CLEARS `loop_detect_ring` (engine.rs:1307). So the ring
-/// never accumulates, the `!ring.is_empty()` bridge gate (engine.rs:338) never passes, and
+/// `Priority{active_player}` beat CLEARS `loop_detect_ring` (`game/engine.rs`'s
+/// `pass_priority_once_with_pipeline` sample-or-clear arm). So the ring never accumulates, the
+/// `!ring.is_empty()` bridge gate in `reconcile_terminal_result` never passes, and
 /// `interactive_loop_bridge` is never entered (measured: 0 bridge invocations). The loop
 /// instead resolves via the CR 704.5c 10-poison SBA to GameOver{Some(P0)} (both opponents
 /// reach 10 poison and are eliminated). It therefore does NOT exercise the Path-B
@@ -2290,17 +2415,20 @@ fn setup_3p_poison_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
 
 /// Path-B DRAW-GATE behavioral test (two halves):
 ///   - CONTROL (`setup_3p_draw`, pure lifegain, no poison) is a POSITIVE test that the Path-B
-///     draw gate CERTIFIES a benign no-loss loop: it draws `GameOver{None}` via engine.rs:517
-///     (measured P0 life 22, cycle ~2; and neutering :517 makes this control STOP drawing —
-///     confirmed the draw originates AT that gate, not the strict :1507 detector).
+///     draw gate CERTIFIES a benign no-loss loop: it draws `GameOver{None}` via
+///     `interactive_loop_bridge`'s `has_no_loss_axis` draw arm — the one that pushes
+///     `GameEvent::GameOver { winner: None }` (measured P0 life 22, cycle ~2; and neutering that
+///     arm makes this control STOP drawing — confirmed the draw originates AT that gate, not at
+///     the stricter arm of the same fn, which additionally requires
+///     `classify_win_kind(..) == WinKind::Advantage` and emits no `GameOver` at all).
 ///   - VARIANT (`setup_3p_poison_draw`, IDENTICAL + a poison-rider creature) locks that a
 ///     poison-accruing loop is NOT wrongly drawn: it resolves via the CR 704.5c 10-poison SBA
 ///     to `GameOver{Some(P0)}` (measured P0 life 30, poisons [0,10,10], both opponents
 ///     eliminated).
 ///
 /// SCOPE (measured — do NOT overclaim): this does NOT isolate `has_no_loss_axis`'s Path-B
-/// conjunct. That conjunct IS load-bearing BY CONSTRUCTION (it is the SOLE loss-axis veto at
-/// :512-516, which has NO `== Advantage` backstop — a poison loop that reached the gate would
+/// conjunct. That conjunct IS load-bearing BY CONSTRUCTION (it is the SOLE loss-axis veto in that
+/// draw arm, which has NO `== Advantage` backstop — a poison loop that reached the gate would
 /// be wrongly drawn without it), but it is currently NOT runtime-discriminable, so there is NO
 /// claim here that deleting it flips the variant. MEASURED: deleting `has_no_loss_axis` from
 /// Path B leaves the variant terminal `GameOver{Some(P0)}` UNCHANGED — because the variant
@@ -2309,7 +2437,8 @@ fn setup_3p_poison_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
 /// drop removes the poison conjunct (card-build keeps only `GainLife`), so poison is 0 in the
 /// loop delta at the gate → it draws as a benign lifegain loop and never exercises
 /// has_no_loss_axis's poison veto. No constructible fixture carries poison>0 to the Path-B gate
-/// (the 2-trigger form clears `loop_detect_ring` on its OrderTriggers beats at engine.rs:1307;
+/// (the 2-trigger form clears `loop_detect_ring` on its OrderTriggers beats, in
+/// `pass_priority_once_with_pipeline`'s sample-or-clear arm;
 /// the single-compound-trigger form drops the poison at parse). So the Path-B veto is proven
 /// load-bearing IN CODE and its runtime discriminator is WAIVED pending the poison-drop parser
 /// fix.
@@ -2425,7 +2554,8 @@ fn setup_2p_optional_drain_poison(mode: LoopDetectionMode) -> (GameRunner, Objec
 ///   • the `"you gain N life and each opponent gets a poison counter"` compound DROPS the poison
 ///     conjunct at parse (keeps only `GainLife`), so poison never reaches the delta.
 /// Both are pre-existing sampler/parser limitations, independent of this change (see
-/// `interactive_recurring_poison_is_not_drawn` above, loop_shortcut.rs:1191-1239). The novel
+/// `interactive_recurring_poison_is_not_drawn` above — by symbol; the line range that used to
+/// follow it pointed at unrelated code even before this change moved it). The novel
 /// per-victim classify/faller logic is proven by the `loop_check.rs` unit tests
 /// (`live_winner_names_poison_faller`, `detects_poison_loop_as_poison_loss`, the refuse cases);
 /// this test adds the missing END-TO-END proof that the re-keyed axis reaches a live cert.
@@ -4229,7 +4359,7 @@ fn loop_shortcut_serializes_schema_under_data() {
 }
 
 /// T-concede-winner — the `predicted_winner` conjunct of the `apply_confirmed_shortcut` liveness
-/// guard (`engine.rs:864-878`). The latched PREDICTED WINNER (not the proposer) concedes DURING the
+/// guard (in `game/engine.rs`). The latched PREDICTED WINNER (not the proposer) concedes DURING the
 /// open CR 732.2b APNAP window. `GameAction::Concede` bypasses the `WaitingFor` dispatch, so the
 /// offer survives with a departed winner latched in `proposal.predicted_winner`. On the last living
 /// opponent's Accept, the guard must REFUSE to act on the stale proposal (CR 104.3a: the winner has
@@ -5015,7 +5145,7 @@ fn foreign_mana_ability_still_vetoes() {
 ///
 /// This is also the closure for the §I `ActivationRestriction` composition hazard at
 /// the offer level: the firewall never reads `activation_restrictions`
-/// (`ability_scan.rs:4238` destructures it as `_`), so a row keyed on that field would
+/// (`game/ability_scan.rs`'s `ability_definition_axes` destructures it as `_`), so a row keyed on that field would
 /// be dominated. This row instead asserts the property the revert-probes actually flip.
 ///
 /// REVERT-PROBE: widen X1's relief from the per-ability test to the whole object (skip
@@ -5684,7 +5814,8 @@ fn two_site_retention_survives_a_prompt_and_its_answer() {
 
     let pin = engine_live_opponents(&state, P0).first().copied();
 
-    // (i) the `:3457` sampler half: a forced pre-priority window observed with an
+    // (i) the `pass_priority_once_with_pipeline` sampler half (its `is_forced_cascade_window`
+    //     clear arm): a forced pre-priority window observed with an
     //     ALREADY-ACCUMULATED ring (>= 2 frames, so a single fresh sample cannot explain it).
     let mut prompt_ring: Option<usize> = None;
     // (ii) the `apply_action` half: the ring across the ANSWER to such a window, with the
@@ -7077,8 +7208,8 @@ fn phase_reachable_ledger_observer_whose_filter_matches_the_class_still_suppress
 
 // ===========================================================================
 // R6a — the ∞ badge stays up while a collapse is merely SCHEDULED (the engine defers APPLYING
-// an accepted shortcut's growth to the CR 500.5 boundary; that window is an engine deviation, not
-// a rules entitlement), and CR 732.2c bounds the boundary prompt by the count the table accepted.
+// an accepted shortcut's growth to the CR 500.5 boundary, while advancing to the proposal's
+// ending point per CR 732.2c), and CR 732.2c bounds the boundary prompt by the accepted count.
 // ===========================================================================
 
 /// Sprout Swarm in P0's hand in the `witherbloom_sprout_lumaret_simple_4p` capture.
@@ -7147,9 +7278,9 @@ fn r6a_drive_to_boundary(state: &mut GameState) {
 /// `unbounded_resources = {P0: [Life(0), TokensCreated]}` plus a non-empty ∞ pile, and
 /// registers a finite collapse. The COUNT is fixed at accept (`pending_materialization_count`,
 /// which bounds the boundary prompt per CR 732.2c); what this engine defers is APPLYING it, until
-/// the CR 500.5 boundary (`game::turns`). That deferral is an engine deviation — pre-existing,
-/// deliberate, and licensed by no CR. This test pins what the engine DOES during that window, not
-/// a claim that the rules put the game there: the marks and their enablers are still live, so the
+/// the CR 500.5 boundary (`game::turns`), while the game advances to the proposal's ending point
+/// (CR 732.2c; `types::game_state`'s `scheduled_collapse_axes` doc has the full reading). This test
+/// pins what the engine DOES during that window: the marks and their enablers are still live, so the
 /// projection KEEPS every `∞` surface. CR 732.2c bounds the collapse; it never licensed hiding a
 /// mark the store still carries, which is what the BASE gate used it for.
 ///
@@ -7314,6 +7445,47 @@ fn scheduled_collapse_still_renders_the_unbounded_badge() {
             "the viewer-FILTERED broadcast path must project the FULL ∞ pile membership \
              (viewer {viewer:?})"
         );
+
+        // NOTE ON WHAT COVERS "flagging must not FILTER rows": the `got_axes == expected_axes`
+        // assertion above is exact-set equality against every marked axis, so it already fails if
+        // the scheduled flag ever suppressed a row. A separate "a TokensCreated row exists" pin
+        // used to sit here and was strictly subsumed by it — no mutation could red the pin without
+        // first reding the equality — so it is gone rather than left as decoration. (Rows CAN be
+        // dropped, by `object_growth_backing`, for a TOKEN axis whose whole registered pile left
+        // the battlefield; this fixture keeps its backing intact, pinned by `expected_pile`.)
+        //
+        // R2 — the SCHEDULE survives the viewer-filtered broadcast path. Read off
+        // `unbounded_families`, the channel that replaced the per-row `scheduled` flag; the
+        // certainty CLASS is pinned elsewhere (B-1, W2, M2-a/M2-c), what matters here is that a
+        // scheduled family reaches every viewer.
+        let scheduled_families: Vec<UnboundedFamily> = views
+            .unbounded_families
+            .iter()
+            .filter(|f| matches!(f.state, FamilyCollapseState::Scheduled(_)))
+            .map(|f| f.family)
+            .collect();
+        assert!(
+            scheduled_families.contains(&UnboundedFamily::Life)
+                && scheduled_families.contains(&UnboundedFamily::Tokens),
+            "R2/filtered: the filtered broadcast path reports both scheduled families (viewer \
+             {viewer:?}), got {:?}",
+            views.unbounded_families
+        );
+        // R1 — the channel survives serialize→deserialize, and a POPULATED channel is EMITTED.
+        // `unbounded_families` is `skip_serializing_if = "Vec::is_empty"`, so the emission half is
+        // what catches a state that is computed correctly and then silently dropped on the wire.
+        let json = serde_json::to_string(&views).expect("serialize");
+        let back: engine::game::derived_views::DerivedViews =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.unbounded_families, views.unbounded_families,
+            "R1/roundtrip: the family collapse states survive serialize→deserialize (viewer \
+             {viewer:?})"
+        );
+        assert!(
+            json.contains("\"unbounded_families\"") && json.contains("\"Scheduled\""),
+            "R1/emitted: a populated family channel is EMITTED, not skipped (viewer {viewer:?})"
+        );
     }
 
     // (4) THE STORE IS UNTOUCHED — the projection read, it did not mutate.
@@ -7465,9 +7637,9 @@ fn stale_pile_member_is_omitted_from_the_wire_but_kept_in_the_store() {
 ///
 /// REVERT-PROBE (RP-4, RUN): hide rows matching
 /// `matches!(axis, ResourceAxis::TokensCreated | ResourceAxis::Counter(..) | ResourceAxis::Life(_))`
-/// — a *transcription* of `LoopCollapseAxis::from_resource_axis`'s three `Some` arms
-/// (`types/game_state.rs:11133/11136/11137`), inlined because that fn is a bare module-private
-/// `fn` (`:11131`) and `game::derived_views` is a sibling module, so calling it is
+/// — a *transcription* of the three `Some` arms of `LoopCollapseAxis::from_resource_axis`
+/// (`types/game_state.rs`), inlined because that fn is declared as a bare module-private
+/// `fn` and `game::derived_views` is a sibling module, so calling it is
 /// `error[E0624]: associated function from_resource_axis is private`. Do not widen its
 /// visibility. ⇒ BOTH arms FAIL, and arm 2 is the one that is unreachable by any stash-keyed
 /// probe, because the stash is already gone when it runs.
@@ -7507,9 +7679,57 @@ fn unregistered_axis_still_renders_its_infinity_badge() {
         "a merely-SCHEDULED collapse still projects both ∞ rows, got {scheduled_axes:?}"
     );
 
+    // R3 PRE-CLEAR positive control — without it the post-clear "every family Unscheduled" below
+    // is VACUOUS: a mutant that never reports a schedule at all satisfies the post-clear
+    // assertion, so the pair only discriminates because this arm proves a schedule CAN be reported
+    // on this same state.
+    {
+        let v = engine::game::derived_views::derive_views(&state, None);
+        let j = serde_json::to_string(&v).unwrap();
+        assert!(
+            v.unbounded_families
+                .iter()
+                .any(|f| matches!(f.state, FamilyCollapseState::Scheduled(_)))
+                && j.contains("\"Scheduled\""),
+            "R3/pre-clear: a registered materialization SCHEDULES a family AND emits it, got {:?}",
+            v.unbounded_families
+        );
+    }
+
     // ARM 2: drop the registrations, keep the marks — an ∞ axis that is collapsible-LABELLED but
     // has nothing scheduled to collapse it.
     state.pending_unbounded_materialization.clear();
+
+    // R3 — with nothing scheduled EVERY family is `Unscheduled`, which is deliberately NOT the
+    // same as "the channel disappears": the ∞ badges are still on screen, they just promise
+    // nothing. The rows must therefore still be there, and the `Scheduled` encoding must be gone
+    // from the wire entirely.
+    {
+        let v = engine::game::derived_views::derive_views(&state, None);
+        let j = serde_json::to_string(&v).unwrap();
+        assert!(
+            !v.unbounded_families.is_empty()
+                && v.unbounded_families
+                    .iter()
+                    .all(|f| f.state == FamilyCollapseState::Unscheduled),
+            "R3/post-clear: with nothing scheduled every family is Unscheduled — and the channel \
+             is still populated, so this is not vacuous; got {:?}",
+            v.unbounded_families
+        );
+        assert!(
+            !j.contains("\"Scheduled\""),
+            "R3/post-clear: no Scheduled state reaches the wire, got {j}"
+        );
+        let back: engine::game::derived_views::DerivedViews = serde_json::from_str(&j).unwrap();
+        assert_eq!(
+            back.unbounded_families, v.unbounded_families,
+            "R3/default: the Unscheduled channel round-trips unchanged"
+        );
+        assert!(
+            !back.unbounded_resources.is_empty(),
+            "R3/default reach: …and it still carries the rows, so the line above is not vacuous"
+        );
+    }
 
     let rows = engine::game::derived_views::derive_views(&state, None).unbounded_resources;
     let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
@@ -8494,14 +8714,14 @@ fn drive_scenario_to_bounded_offer(runner: &mut GameRunner, cap: usize) -> Optio
 /// `a_cycle_that_does_not_match_the_published_period_is_dropped`,
 /// `declared_count_above_the_offered_bound_is_handed_back`,
 /// `until_lethal_against_a_bounded_offer_is_rejected`,
-/// `a_nonempty_action_sequence_mints_no_bounded_offer`.
+/// `a_proposers_own_driving_period_mints_no_bounded_offer`.
 ///
 /// FIXTURE PROVENANCE of those eleven, RE-COUNTED in fix round 5 over the whole set rather
 /// than asserted of one row (an earlier revision annotated dina alone as "the real 4p dump",
 /// which reads as an exclusivity it does not have). SIX load the real `dina_conqueror_4p`
 /// 4-player capture from `tests/fixtures`, through the same gunzip → restore loader:
 /// `dina_untargeted_drain_4p_offers_at_three_live_opponents`,
-/// `a_nonempty_action_sequence_mints_no_bounded_offer`,
+/// `a_proposers_own_driving_period_mints_no_bounded_offer`,
 /// `declared_count_above_the_offered_bound_is_handed_back`,
 /// `until_lethal_against_a_bounded_offer_is_rejected`,
 /// `bounded_fixed_count_commits_exactly_n_periods` (which loops that dump AND two
@@ -8866,26 +9086,32 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
     }
 }
 
-/// PR-7 Phase 5b (G1) — the bounded offer must FORBID a non-empty `last_loop_action_sequence`.
+/// PR-7 Phase 5b (G1) — the bounded offer must FORBID a driving period of the PROPOSER'S OWN.
 ///
 /// PAIRED ARMS ON ONE CERTIFYING STATE, differing in exactly one field, asserting opposite
 /// outcomes — so no constant implementation passes.
 ///
+/// The retained name states arm ⓑ's contract: the bounded offer must not mint when the recorded
+/// period belongs to its proposer. Step (1b) is seat-relative: a non-empty sequence recorded by
+/// ANOTHER seat mints the offer, which is what
+/// [`a_foreign_driving_period_neither_refuses_nor_recertifies_a_bounded_offer`] directly below
+/// asserts.
+///
 /// WHY THE GUARD IS LOAD-BEARING (measured, not hypothetical): `materialize_fixed_shortcut`
-/// EARLY-RETURNS into `materialize_object_growth_shortcut` when the sequence is non-empty,
-/// and the bounded drain path begins strictly below that return. An offer minted with a
-/// non-empty sequence would be accepted and routed to the object-growth materializer,
-/// committing ZERO bounded cycles — the guard converts that silent misroute into an
-/// observable refusal. The two conjuncts are NOT disjoint in the tree: the bridge's own gate
-/// needs a non-empty STACK, and an on-stack `ActivateAbility` appends to the sequence once a
-/// mana activation has armed a period.
+/// EARLY-RETURNS into `materialize_object_growth_shortcut` when the recorded period is the
+/// accepting proposal's proposer's own, and the bounded drain path begins strictly below that
+/// return. An offer minted while THIS proposer's period is accumulating would be accepted and
+/// routed to the object-growth materializer, committing ZERO bounded cycles — the guard converts
+/// that silent misroute into an observable refusal. The two conjuncts are NOT disjoint in the
+/// tree: the bridge's own gate needs a non-empty STACK, and an on-stack `ActivateAbility` appends
+/// to the sequence once a mana activation has armed a period.
 ///
 /// REVERT-PROBE: delete step (1b) ⇒ arm ⓑ returns `Ok(..)` ⇒ FAILS. The refusal is asserted
-/// BY REASON (`DrivingSequenceNotEmpty`), not merely as "no offer": an assertion that only
+/// BY REASON (`ProposerHasDrivingPeriod`), not merely as "no offer": an assertion that only
 /// observed absence would keep passing if some EARLIER conjunct started refusing first, which
 /// is the domination trap.
 #[test]
-fn a_nonempty_action_sequence_mints_no_bounded_offer() {
+fn a_proposers_own_driving_period_mints_no_bounded_offer() {
     use engine::game::engine::{try_offer_bounded_cycle_shortcut, BoundedOfferRefusal};
     use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
 
@@ -8926,9 +9152,185 @@ fn a_nonempty_action_sequence_mints_no_bounded_offer() {
     }];
     assert_eq!(
         try_offer_bounded_cycle_shortcut(&state, false),
-        Err(BoundedOfferRefusal::DrivingSequenceNotEmpty),
+        Err(BoundedOfferRefusal::ProposerHasDrivingPeriod),
         "CR 732.2a: a bounded offer minted with a driving sequence would be routed to the \
          object-growth materializer and commit zero bounded cycles"
+    );
+}
+
+/// ITEM 2 (CR 732.2a) — a bounded offer is refused by the proposer's OWN driving period, and by
+/// NOBODY ELSE'S; and a foreign period is certification-NEUTRAL while it sits there.
+///
+/// THE BUG THIS ROW PINS. Step (1b) tested `!last_loop_action_sequence.is_empty()`, so a single
+/// opponent activation — a period this proposer can neither drive nor benefit from — refused their
+/// own certified bounded offer for the rest of the game. CR 732.2a defines a shortcut as "a
+/// sequence of game choices, for all players, that may be legally taken based on the current game
+/// state and the predictable results of the sequence of choices": another seat's independent
+/// activation describes no sequence THIS proposer can take, so it is no reason to refuse theirs.
+/// The routing signal was strictly coarser than the admission predicate of the consumer it routes
+/// to — `try_offer_object_growth_shortcut` already required every step to belong to the priority
+/// holder — so a foreign period could not produce an object-growth offer yet still refused the
+/// bounded one. Both now read `GameState::loop_period_controller`.
+///
+/// FIVE ARMS ON ONE CERTIFYING STATE, differing ONLY in `last_loop_action_sequence`:
+///
+/// | arm | sequence | expected |
+/// |---|---|---|
+/// | ⓐ | empty | `Ok` — REACH-GUARD, and the neutrality reference |
+/// | ⓑ | proposer's, any card | `Err(ProposerHasDrivingPeriod)` — must-not-flip |
+/// | ⓒ | opponent's, any card | `Ok` — **the fix** |
+/// | ⓓ | opponent's, Mortality Spear | `Ok` — card-identity independence |
+/// | ⓔ | proposer's, Mortality Spear | `Err(ProposerHasDrivingPeriod)` — must-not-flip |
+///
+/// Refusals are asserted BY REASON, never as bare absence: an assertion that only observed "no
+/// offer" would keep passing if some EARLIER conjunct started refusing first (the domination trap
+/// `BoundedOfferRefusal` exists for).
+///
+/// TWO-SIDED CONTROL ON (1b), PER ASSERTION — no constant implementation passes:
+/// * **DROP** the proposer comparison (restore `!is_empty()`) ⇒ ⓒ and ⓓ return
+///   `Err(ProposerHasDrivingPeriod)` ⇒ THOSE assertions fail, while ⓑ/ⓔ still pass.
+/// * **TRIVIALIZE** it constant-refuse (`loop_period_controller().is_some()`) ⇒ ⓒ/ⓓ fail as above.
+///   TRIVIALIZE it constant-admit (never refuse) ⇒ ⓑ and ⓔ return `Ok` ⇒ **those** assertions
+///   fail instead. Each direction flips a DIFFERENT named assertion.
+///
+/// CERTIFICATION NEUTRALITY (site E) is folded onto the same arms because it needs the same
+/// expensive drive, and reported through the metered seam so the certifying BASIS is observable
+/// rather than just `Ok`/`Err`. ⓒ and ⓓ must publish the same `PeriodCertification` and the same
+/// `per_cycle.frames_per_period` as ⓐ. ⓒ and ⓓ differ ONLY in the foreign step's `card_id`, so any
+/// basis difference between them can arise ONLY from `window_cast_card_ids` feeding gate (5)'s
+/// `scope.cast_card_ids` — that pair is itself the discriminator for which mechanism carries the
+/// change.
+/// * **DROP** the proposer test from `window_cast_card_ids` ⇒ ⓒ certifies `BoardCovered` while
+///   ⓐ/ⓓ certify `ResourceSignatureOnly` ⇒ the equality assertion FAILS. That is the harm in one
+///   line: an OPPONENT'S choice of which card to activate would select which soundness relief
+///   applies to THIS proposer's certification.
+/// * **TRIVIALIZE** it to `None` unconditionally ⇒ relief is stripped from the proposer-less 2-arg
+///   entry the object-growth detection covers use ⇒ `analysis::resource`'s X4-5 arm (1) fails.
+///   (That is why the scoping is `is_some_and`, not `is_some`.)
+#[test]
+fn a_foreign_driving_period_neither_refuses_nor_recertifies_a_bounded_offer() {
+    use engine::game::engine::{
+        try_offer_bounded_cycle_shortcut_metered, BoundedOfferRefusal, ProbeCap,
+    };
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/dina_conqueror_4p.json.gz"
+    )));
+    drive_to_bounded_offer(&mut state, 400)
+        .expect("the paired arms need a state that PROVABLY certifies; see the acceptance row");
+
+    // The offer beat's `waiting_for` IS the offer, so rewind that one field to the Priority beat
+    // the offer was raised at — the mint's own entry condition.
+    let (proposer, _, _) = bounded_offer_parts(&state);
+    state.waiting_for = WaitingFor::Priority { player: proposer };
+    let opp = *engine_live_opponents(&state, proposer)
+        .first()
+        .expect("REACH-GUARD: the foreign arms need a living opponent to attribute a period to");
+
+    // The X4 subject: a conditioned `ModifyCost`/`SelfRef` static sitting in a zone this window
+    // never casts from. Its gate-(5) relief is precisely what an unscoped cast-set read would let
+    // an opponent switch on. Looked up BY NAME so the row cannot silently degrade into ⓒ==ⓓ if the
+    // fixture's ids ever move.
+    let spear = state
+        .objects
+        .values()
+        .find(|o| o.name == "Mortality Spear")
+        .map(|o| o.card_id)
+        .expect("REACH-GUARD: dump-D ships Mortality Spear; ⓒ-vs-ⓓ is vacuous without it");
+    let any_card = state
+        .objects
+        .values()
+        .map(|o| o.card_id)
+        .find(|id| *id != spear)
+        .expect("REACH-GUARD: ⓒ and ⓓ must differ in card identity");
+
+    let step = |controller: PlayerId, card_id| LoopActionContext {
+        card_id,
+        controller,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::NotUsed,
+        },
+        convoke: None,
+        pins: vec![],
+    };
+    // One state, one field reassigned per arm — nothing else differs between arms.
+    let mint = |seq: Vec<LoopActionContext>| {
+        let mut probe = state.clone();
+        probe.last_loop_action_sequence = seq;
+        let (outcome, meter) =
+            try_offer_bounded_cycle_shortcut_metered(&probe, false, ProbeCap::Shipped);
+        let signature = outcome.as_ref().ok().map(|wf| match wf {
+            WaitingFor::LoopShortcut { certificate, .. } => {
+                certificate
+                    .per_cycle
+                    .as_ref()
+                    .expect(
+                        "a bounded offer publishes the per-period signature its bound was \
+                             divided by",
+                    )
+                    .frames_per_period
+            }
+            other => panic!("expected a bounded LoopShortcut offer, got {other:?}"),
+        });
+        (outcome, meter.certification, signature)
+    };
+
+    // ── ⓐ REACH-GUARD: the SAME state certifies with no sequence at all. Every arm below is
+    // vacuous without this, and it is also the reference ⓒ/ⓓ are compared against. ──
+    let (empty, empty_basis, empty_k) = mint(vec![]);
+    assert!(
+        empty.is_ok(),
+        "REACH-GUARD: ⓑ–ⓔ are vacuous unless this same state certifies with an empty \
+         sequence; got {empty:?}"
+    );
+    assert!(
+        empty_basis.is_some() && empty_k.is_some(),
+        "REACH-GUARD: the neutrality assertions compare a BASIS and a period length, so the \
+         control must publish both; got {empty_basis:?} / {empty_k:?}"
+    );
+
+    // ── ⓑ / ⓔ the proposer's OWN period still refuses, on either card. The load-bearing half of
+    // guard (1b) — the silent-misroute prevention — is untouched by the fix. ──
+    assert_eq!(
+        mint(vec![step(proposer, any_card)]).0,
+        Err(BoundedOfferRefusal::ProposerHasDrivingPeriod),
+        "ⓑ CR 732.2a: the proposer's OWN accumulating period would route an accepted proposal \
+         to the object-growth materializer and commit zero bounded cycles"
+    );
+    assert_eq!(
+        mint(vec![step(proposer, spear)]).0,
+        Err(BoundedOfferRefusal::ProposerHasDrivingPeriod),
+        "ⓔ the refusal is keyed on WHOSE period it is, not on which card the step names"
+    );
+
+    // ── ⓒ / ⓓ THE FIX: a foreign period neither refuses nor moves the certification. ──
+    let (c, c_basis, c_k) = mint(vec![step(opp, any_card)]);
+    assert!(
+        c.is_ok(),
+        "ⓒ CR 732.2a: an OPPONENT'S independent activation describes no sequence this proposer \
+         can take, so it must not refuse their own certified bounded offer; got {c:?}"
+    );
+    let (d, d_basis, d_k) = mint(vec![step(opp, spear)]);
+    assert!(
+        d.is_ok(),
+        "ⓓ the admission is keyed on WHOSE period it is, not on which card the foreign step \
+         names; got {d:?}"
+    );
+
+    assert_eq!(
+        (c_basis, c_k),
+        (empty_basis, empty_k),
+        "ⓒ vs ⓐ — CR 732.2a certification NEUTRALITY: a foreign period must leave the \
+         proposer's certification exactly where the empty-sequence control puts it"
+    );
+    assert_eq!(
+        (d_basis, d_k),
+        (empty_basis, empty_k),
+        "ⓓ vs ⓐ — and neutrality must not depend on WHICH card the opponent activated. ⓒ and ⓓ \
+         differ only in `card_id`, so a split here could come only from gate (5)'s \
+         `scope.cast_card_ids` — i.e. an opponent selecting this proposer's soundness relief"
     );
 }
 
@@ -9361,6 +9763,386 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
              identical outcomes are exactly the defect this round fixes"
         );
     }
+}
+
+/// ITEM 2 (CR 732.2a) — the ACCEPT side: a foreign driving period in state must not divert an
+/// accepted bounded grant into the object-growth materializer.
+///
+/// **WHY NO ROW HAS EVER STARTED FROM A BOARD CARRYING ONE.**
+/// `GameState::migrate_transient_loop_sequence` clears `last_loop_action_sequence` at every load
+/// whose `waiting_for` is not a shortcut window, so every dump-driven row in this file begins
+/// from a cleared field. The whole accept-side dispatch on that field is therefore untested — the
+/// blindness is in the FIXTURE PIPELINE, not in the rows. The answer is injection into a tracked
+/// fixture (as `a_proposers_own_driving_period_mints_no_bounded_offer` already does), not a new
+/// tracked dump.
+///
+/// **WHY THIS IS THE ACCEPT SEAM AND NOT THE MINT SEAM.** The mint arms establish that a foreign
+/// period no longer REFUSES the offer. That relaxation is only safe if the thing subsequently
+/// accepted still routes to the DRAIN materializer: `materialize_fixed_shortcut` early-returns
+/// into `materialize_object_growth_shortcut` on its routing test, and the bounded drain path
+/// begins strictly below that return. A mint-seam row cannot see which side of it the accept
+/// lands on.
+///
+/// **SITE F IS NOT ON THIS PATH, and that is asserted rather than assumed** — dina's bounded offer
+/// publishes an EMPTY point set, so `handle_declare_shortcut`'s
+/// `if !offer.schema.points.is_empty()` block is skipped whole and the `template: None`
+/// declaration this row makes never reaches the declare-seam arm. Site F's own row lives on the
+/// F4 fixture for exactly the complementary reason.
+///
+/// **THE PROPERTY**: the committed life delta is exactly `n ×` the published per-period delta —
+/// i.e. the drain materializer ran. Positive control on the same fixture and same helper:
+/// [`bounded_fixed_count_commits_exactly_n_periods`], whose reach-guards (non-zero δ, ≥ 2 seats
+/// moving, bound ≥ 3) are repeated here because without them `n × δ` is satisfied by a drive that
+/// committed nothing.
+///
+/// **TWO-SIDED CONTROL:**
+/// * **DROP** the proposer test at the materialize dispatch (restore `!is_empty()`) ⇒ the accept
+///   early-returns into `materialize_object_growth_shortcut` and commits ZERO ⇒ `n × δ` fails for
+///   every seat with a non-zero rate.
+/// * **TRIVIALIZE** it to always take the drain path ⇒ a genuine object-growth accept commits
+///   nothing, which the object-growth siblings of the positive control catch.
+#[test]
+fn an_accepted_bounded_grant_drains_even_with_a_foreign_period_in_state() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    const N: u32 = 3;
+
+    let mut state = restore_dump(&gunzip_dump(include_bytes!(
+        "../fixtures/dina_conqueror_4p.json.gz"
+    )));
+    drive_to_bounded_offer(&mut state, 400)
+        .expect("the bounded offer must fire; see the acceptance row");
+
+    let (proposer, _, schema) = bounded_offer_parts(&state);
+    assert!(
+        schema.points.is_empty(),
+        "REACH-GUARD / SCOPE: this row isolates the MATERIALIZE dispatch. A non-empty point set \
+         would drag `handle_declare_shortcut`'s declare-seam arm into the same measurement and \
+         the outcome would no longer attribute to one site; got {:?}",
+        schema.points
+    );
+    let opp = *engine_live_opponents(&state, proposer)
+        .first()
+        .expect("REACH-GUARD: the foreign period needs a living opponent to belong to");
+
+    // THE INJECTION the load migration hides from every dump-driven row: an opponent's own
+    // recorded period, sitting in state at the moment the grant is accepted.
+    state.last_loop_action_sequence = vec![LoopActionContext {
+        card_id: state
+            .objects
+            .values()
+            .next()
+            .map(|o| o.card_id)
+            .expect("the dump has objects"),
+        controller: opp,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::NotUsed,
+        },
+        convoke: None,
+        pins: vec![],
+    }];
+    assert_ne!(
+        opp, proposer,
+        "REACH-GUARD: a period injected for the PROPOSER would be the legitimate object-growth \
+         route, and this row would assert the opposite of what it means to"
+    );
+
+    let (committed, per_cycle, bound) = accept_bounded_fixed(&mut state, N);
+
+    // ── reach-guards: without these `n × δ` holds degenerately for a drive that did nothing ──
+    assert!(
+        per_cycle.delta != engine::analysis::resource::ResourceVector::default(),
+        "a zero-delta period makes `n × δ` zero for every `n`, so the equality below would hold \
+         for a drive that committed nothing — which is the exact failure mode this row exists to \
+         catch"
+    );
+    assert!(
+        per_cycle.delta.life.values().filter(|v| **v != 0).count() >= 2,
+        "fewer than two seats with a non-zero life term is a 2-player shape; got {:?}",
+        per_cycle.delta.life
+    );
+    assert!(
+        bound >= N,
+        "`n = {N}` must be WITHIN the offered bound, else the declaration is handed back and \
+         this row silently tests the rejection arm; bound = {bound}"
+    );
+
+    // ── THE PROPERTY: the DRAIN materializer ran, not the object-growth one ──
+    for (seat, delta) in &committed {
+        assert_eq!(
+            *delta,
+            i64::from(N) * per_cycle.delta.life.get(seat).copied().unwrap_or(0),
+            "CR 732.2a: with a FOREIGN period in state the accepted grant must still commit \
+             exactly `n` copies of the published per-period delta ({:?}). A zero here is the \
+             object-growth misroute: `materialize_fixed_shortcut` early-returned into \
+             `materialize_object_growth_shortcut`, which commits no bounded cycles at all. \
+             {seat:?} committed {committed:?}",
+            per_cycle.delta.life
+        );
+    }
+}
+
+/// ITEM 2 ROUND 2 (CR 732.2a) — the DECLINE seam: one seat's decline may discard only its OWN
+/// recorded period, never another seat's.
+///
+/// **A SHAPE THE PRE-FIX TREE COULD NOT EXPRESS, which is why no existing row can supply it.**
+/// While step (1b) refused on mere non-emptiness, no `WaitingFor::LoopShortcut` could coexist with
+/// a period belonging to anyone but its proposer — the object-growth producer mints only for the
+/// period's own controller, and the bounded producer minted only with the field empty. So
+/// `handle_decline_shortcut`'s unconditional `last_loop_action_sequence.clear()` was, by
+/// construction, only ever able to clear the decliner's own. The seat-relative (1b) makes the
+/// two-seat state reachable, and `DeclineShortcut` dispatches from ANY `LoopShortcut` — it is the
+/// AI's only action at a bounded offer — so an unconditional clear became one seat's decline
+/// wiping another seat's accumulating period, suppressing THAT seat's offer until it re-armed.
+///
+/// **THE TWO ARMS, on one real driven bounded offer, differing ONLY in the injected period's
+/// controller** — so no constant implementation passes:
+///
+/// | arm | injected period | assertion |
+/// |---|---|---|
+/// | FOREIGN | an opponent's | SURVIVES the decline (**the fix**) |
+/// | OWN | the proposer's | CLEARED by the decline (must-not-flip: the load-bearing Seam-2 suppressor) |
+///
+/// **TWO-SIDED CONTROL, PER ASSERTION — each direction flips a DIFFERENT named assertion:**
+/// * **DROP** the ownership test (restore the unconditional
+///   `state.last_loop_action_sequence.clear()`) ⇒ the FOREIGN arm's survival assertion FAILS,
+///   while OWN still passes.
+/// * **TRIVIALIZE** it to never clear (delete the clear, or gate it on
+///   `loop_period_controller().is_none()`) ⇒ the OWN arm's clear assertion FAILS, while FOREIGN
+///   still passes.
+///
+/// The decline is driven through the production `apply()` reducer, not by calling the handler, so
+/// the post-return reconcile runs too: the OWN arm therefore also proves the clear still suppresses
+/// re-offer within the same `apply()` (a re-nag would leave `waiting_for` on a `LoopShortcut`), and
+/// the FOREIGN arm proves leaving a foreign period in place does not resurrect one.
+#[test]
+fn declining_a_shortcut_discards_only_the_decliners_own_driving_period() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    // One real driven bounded offer, re-derived per arm so neither arm inherits the other's board.
+    let offer_state = || {
+        let mut state = restore_dump(&gunzip_dump(include_bytes!(
+            "../fixtures/dina_conqueror_4p.json.gz"
+        )));
+        drive_to_bounded_offer(&mut state, 400)
+            .expect("the bounded offer must fire; see the acceptance row");
+        state
+    };
+    let period_of = |controller: PlayerId, state: &GameState| {
+        vec![LoopActionContext {
+            card_id: state
+                .objects
+                .values()
+                .next()
+                .map(|o| o.card_id)
+                .expect("the dump has objects"),
+            controller,
+            action: LoopAction::Recast {
+                from_zone: engine::types::zones::Zone::Hand,
+                uses_buyback: BuybackUsage::NotUsed,
+            },
+            convoke: None,
+            pins: vec![],
+        }]
+    };
+
+    // ── FOREIGN: seat B's period is mid-accumulation when seat A declines ──
+    let mut state = offer_state();
+    let (proposer, _, _) = bounded_offer_parts(&state);
+    let opp = *engine_live_opponents(&state, proposer)
+        .first()
+        .expect("REACH-GUARD: the foreign period needs a living opponent to belong to");
+    assert_ne!(
+        opp, proposer,
+        "REACH-GUARD: a period injected for the PROPOSER would be the OWN arm, and this arm \
+         would assert the opposite of what it means to"
+    );
+    state.last_loop_action_sequence = period_of(opp, &state);
+    assert_eq!(
+        state.last_loop_action_sequence.len(),
+        1,
+        "REACH-GUARD: the arm is vacuous unless a period is actually accumulating when the \
+         decline lands — nothing survives an empty field"
+    );
+
+    apply(&mut state, proposer, GameAction::DeclineShortcut)
+        .expect("the proposer may always decline their own offer (CR 732.2a)");
+    assert_eq!(
+        state
+            .last_loop_action_sequence
+            .iter()
+            .map(|s| s.controller)
+            .collect::<Vec<_>>(),
+        vec![opp],
+        "CR 732.2a: {proposer:?} declining their own offer must leave {opp:?}'s accumulating \
+         period intact — a recorded period is evidence about the seat that recorded it, and \
+         discarding it here suppresses THAT seat's own offer until it re-arms"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "CR 732.2a: preserving {opp:?}'s foreign period must not re-offer {proposer:?}'s declined \
+         shortcut within the same `apply()`; got {:?}",
+        state.waiting_for
+    );
+
+    // ── OWN: the must-not-flip half. The Seam-2 suppressor is load-bearing for the decliner. ──
+    let mut state = offer_state();
+    let (proposer, _, _) = bounded_offer_parts(&state);
+    state.last_loop_action_sequence = period_of(proposer, &state);
+    assert_eq!(
+        state.last_loop_action_sequence.len(),
+        1,
+        "REACH-GUARD: the arm is vacuous unless a period is actually accumulating when the \
+         decline lands — an already-empty field is cleared by doing nothing"
+    );
+
+    apply(&mut state, proposer, GameAction::DeclineShortcut)
+        .expect("the proposer may always decline their own offer (CR 732.2a)");
+    assert!(
+        state.last_loop_action_sequence.is_empty(),
+        "CR 732.2a: the decliner's OWN period must still be discarded — without it the \
+         post-return reconcile re-fires `try_offer_object_growth_shortcut` inside this same \
+         `apply()` and re-nags the offer just declined. seq = {:?}",
+        state.last_loop_action_sequence
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "and the declined offer must not have been re-raised within the same `apply()`; got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 732.2a — the SECOND unconditional cross-seat clear in the teardown family:
+/// `until_lethal_fallback`. An aborted `UntilLethal` drive discards only the PROPOSER'S own period.
+///
+/// **WHY THIS ROW EXISTS NOW.** Round 2 found this site and refused it on a reachability argument
+/// that ended in "no fixture reaches it". That was a fact about the fixture corpus, not about the
+/// engine: `until_lethal_fallback` starts with `*state = committed`, restoring the PRE-DRIVE board
+/// — and since step (1b) went seat-relative, that board can carry another seat's period. MEASURED
+/// on the shipped tree before the guard landed: with a foreign period injected at the accept, the
+/// sprout-swarm `UntilLethal` drive aborts, the fallback runs, and the foreign seat's period comes
+/// back length 0. Same defect, same seam family, same one-line authority as
+/// [`declining_a_shortcut_discards_only_the_decliners_own_driving_period`] above.
+///
+/// **WHY THE OBJECT-GROWTH FIXTURE.** The fallback is reached only when the drive refuses to crown.
+/// `object_growth_advantage_untillethal_no_crown` is the tree's own proof that this board does
+/// exactly that (an inert Advantage token loop has no faller), so both arms below are the shipped
+/// abort path with one field changed — not a synthesized failure.
+///
+/// | arm | injected period | assertion |
+/// |---|---|---|
+/// | FOREIGN | an opponent's | SURVIVES the aborted drive (**the fix**) |
+/// | OWN | the proposer's | CLEARED by it (must-not-flip: the anti-livelock suppressor the doc names) |
+///
+/// **TWO-SIDED CONTROL, PER ASSERTION — each direction flips a DIFFERENT named assertion:**
+/// * **DROP** the ownership test (restore the unconditional `last_loop_action_sequence.clear()`)
+///   ⇒ the FOREIGN arm's survival assertion FAILS, while OWN still passes.
+/// * **TRIVIALIZE** it to never clear ⇒ the OWN arm's clear assertion FAILS, while FOREIGN passes.
+#[test]
+fn an_aborted_until_lethal_drive_discards_only_the_proposers_own_driving_period() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    // The shipped abort path, re-derived per arm: cast the recast, take the object-growth offer,
+    // declare `UntilLethal` (the AI's hardcoded shape), and let every opponent accept.
+    let offer_state = || {
+        let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
+        let _ = runner
+            .cast(sprout)
+            .accept_optional()
+            .convoke_with(&[fodder[0]])
+            .commit()
+            .resolve();
+        let WaitingFor::LoopShortcut { proposer, .. } = runner.state().waiting_for.clone() else {
+            panic!(
+                "REACH-GUARD: the object-growth cast must OFFER, got {:?}",
+                runner.state().waiting_for
+            )
+        };
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::UntilLethal,
+                template: None,
+            })
+            .expect("the proposer declares UntilLethal on its own object-growth offer");
+        (runner, proposer)
+    };
+    let period_of = |controller: PlayerId, runner: &GameRunner| {
+        vec![LoopActionContext {
+            card_id: runner
+                .state()
+                .objects
+                .values()
+                .next()
+                .map(|o| o.card_id)
+                .expect("the scenario has objects"),
+            controller,
+            action: LoopAction::Recast {
+                from_zone: engine::types::zones::Zone::Hand,
+                uses_buyback: BuybackUsage::NotUsed,
+            },
+            convoke: None,
+            pins: vec![],
+        }]
+    };
+
+    // ── FOREIGN: seat B's period is mid-accumulation when seat A's drive aborts ──
+    let (mut runner, proposer) = offer_state();
+    let opp = runner
+        .state()
+        .players
+        .iter()
+        .map(|p| p.id)
+        .find(|p| *p != proposer)
+        .expect("REACH-GUARD: the foreign period needs a second seat to belong to");
+    runner.state_mut().last_loop_action_sequence = period_of(opp, &runner);
+    accept_all_opponents(&mut runner);
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+        "REACH-GUARD: this row is about the FALLBACK, so the drive must refuse to crown — a \
+         crowned drive never reaches the clear and the assertion below would be vacuous; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .last_loop_action_sequence
+            .iter()
+            .map(|s| s.controller)
+            .collect::<Vec<_>>(),
+        vec![opp],
+        "CR 732.2a: {proposer:?}'s aborted drive must leave {opp:?}'s accumulating period intact. \
+         `until_lethal_fallback` rolls the board back to the pre-drive `committed` state, which \
+         carries that period, and an unconditional clear then destroys it as a side effect of \
+         somebody else's abort"
+    );
+
+    // ── OWN: the must-not-flip half. The clear is the anti-livelock suppressor for the proposer. ──
+    let (mut runner, proposer) = offer_state();
+    assert_eq!(
+        runner
+            .state()
+            .last_loop_action_sequence
+            .iter()
+            .map(|s| s.controller)
+            .collect::<Vec<_>>(),
+        vec![proposer],
+        "REACH-GUARD: the real recast must have armed the PROPOSER'S own period, else this arm \
+         tests an empty field that is cleared by doing nothing"
+    );
+    accept_all_opponents(&mut runner);
+    assert!(
+        runner.state().last_loop_action_sequence.is_empty(),
+        "CR 732.2a: the proposer's OWN period must still be discarded — without it the reconcile \
+         re-fires `try_offer_object_growth_shortcut` on the loop just abandoned and livelocks. \
+         seq = {:?}",
+        runner.state().last_loop_action_sequence
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "and the abandoned offer must not have been re-raised; got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 /// FIX ROUND 2 (MED-2) — the same `n × δ` property on a certification-basis **A** offer, at
