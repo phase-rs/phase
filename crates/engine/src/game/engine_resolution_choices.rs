@@ -1,5 +1,5 @@
 // engine-citation-gate: symbol anchors only
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::ability::{
     AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
@@ -4810,6 +4810,16 @@ pub(super) fn handle_resolution_choice(
                     count,
                     chosen.len()
                 )));
+            }
+
+            // CR 608.2d: A resolving player can't choose an illegal option.
+            // Choosing one eligible card more than once is not a legal
+            // selection of distinct cards for this effect.
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
             }
 
             for card_id in &chosen {
