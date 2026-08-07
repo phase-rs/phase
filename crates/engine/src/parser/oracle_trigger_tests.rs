@@ -26815,21 +26815,28 @@ fn u5_eq_zero_never_entails() {
     );
 }
 
-/// U6 (U-Not) — REVERT-FAILING: `Not { GE 1 }` ("it is not true that there
-/// are cards exiled with ~") must not derive — deliberately conservative per
-/// the review (`Not(EQ 0)` DOES entail nonempty, but no corpus card exercises
-/// the flip, so `Not` never derives until a discriminating card justifies
-/// it). The shipped helper recurses INTO `Not` positively and derives `Some`
-/// here.
+/// U6 (U-Not) — REVERT-FAILING polarity checks: `Not { EQ 0 }` entails a
+/// nonempty pool, while `Not { GE 1 }` ("it is not true that there are cards
+/// exiled with ~") does not. The helper must inspect the inverse fixed-count
+/// comparison, not recurse into the negated child as if it were positive.
 #[test]
-fn u6_not_never_entails() {
-    let condition = TriggerCondition::Not {
+fn u6_not_comparisons_respect_polarity() {
+    let nonempty = TriggerCondition::Not {
+        condition: Box::new(cards_exiled_by_source_cmp(Comparator::EQ, 0)),
+    };
+    assert_eq!(
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(nonempty)),
+        Some(TargetFilter::ExiledBySource),
+        "Not{EQ 0} must entail a nonempty pool"
+    );
+
+    let may_be_empty = TriggerCondition::Not {
         condition: Box::new(cards_exiled_by_source_cmp(Comparator::GE, 1)),
     };
     assert_eq!(
-        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(condition)),
+        trigger_plural_object_pronoun_ref_for_intervening_if(&Some(may_be_empty)),
         None,
-        "Not{{GE 1}} must NOT entail — polarity is deliberately conservative"
+        "Not{GE 1} must NOT entail a nonempty pool"
     );
 }
 

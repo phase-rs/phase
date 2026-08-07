@@ -9164,7 +9164,7 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     None
 }
 
-/// CR 603.4 + CR 406.6 + CR 607.2a + CR 608.2k: an intervening-if introduces the
+/// CR 603.4 + CR 406.6 + CR 607.2a: an intervening-if introduces the
 /// source's linked-exile pool as the plural-anaphor antecedent ONLY when the
 /// condition semantically ENTAILS a nonempty pool — a gate that can hold with
 /// zero linked cards ("if there are no cards exiled with ~", EQ 0) must not hand
@@ -9172,10 +9172,9 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
 /// cardinalities, >= 0), canonical orientation only (pool ref on lhs, Fixed rhs):
 ///   GE n (n>=1) | GT n (n>=0) | EQ n (n>=1) | NE 0  -> entails
 ///   LE / LT / EQ 0 / NE n>=1 / non-Fixed rhs        -> never entails
-/// Polarity: `Not { .. }` never derives (deliberately conservative per review —
-/// Not(EQ 0) does entail nonempty, but no corpus card exercises it; add the
-/// flip only with a discriminating card). `And` entails if ANY conjunct does;
-/// `Or` entails only if it is non-empty AND ALL branches do.
+/// The `Not(EQ 0)` form derives because its inverse excludes zero. `And` entails
+/// if ANY conjunct does; `Or` entails only if it is non-empty AND ALL branches
+/// do.
 fn trigger_plural_object_pronoun_ref_for_intervening_if(
     if_condition: &Option<TriggerCondition>,
 ) -> Option<TargetFilter> {
@@ -9205,7 +9204,21 @@ fn trigger_plural_object_pronoun_ref_for_intervening_if(
             TriggerCondition::Or { conditions } => {
                 !conditions.is_empty() && conditions.iter().all(entails_nonempty_linked_exile_pool)
             }
-            TriggerCondition::Not { .. } => false,
+            TriggerCondition::Not { condition } => match condition.as_ref() {
+                TriggerCondition::QuantityComparison {
+                    lhs,
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                } => {
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource
+                        }
+                    ) && matches!((comparator, value), (Comparator::EQ, 0))
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
