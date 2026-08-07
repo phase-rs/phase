@@ -7859,6 +7859,7 @@ fn visit_persisted_live_zone_changed_records(
         "pending_trigger_order",
         "consumed_before_priority_trigger_events",
         "pending_attack_trigger_events",
+        "pending_player_scope_sacrifice_choice",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -22822,6 +22823,20 @@ mod tests {
         state
             .stack_trigger_event_batches
             .insert(ObjectId(9_003), vec![event.clone()]);
+        state.pending_player_scope_sacrifice_choice = Some(PendingPlayerScopeSacrificeChoice {
+            ability: state
+                .pending_trigger
+                .as_ref()
+                .expect("fixture has pending trigger")
+                .ability
+                .clone(),
+            remaining_players: Vec::new(),
+            selections: Vec::new(),
+            completion: PendingPlayerScopeSacrificeCompletion {
+                deferred_events: vec![event.clone()],
+                ..PendingPlayerScopeSacrificeCompletion::default()
+            },
+        });
         let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut state
             .stack
             .back_mut()
@@ -22838,6 +22853,20 @@ mod tests {
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("all serialized carrier records reconcile")
             .into_game_state();
+        let GameEvent::ZoneChanged { record, .. } = &restored
+            .pending_player_scope_sacrifice_choice
+            .as_ref()
+            .expect("paused sacrifice carrier survives restoration")
+            .completion
+            .deferred_events[0]
+        else {
+            panic!("paused sacrifice carrier retains a ZoneChanged event");
+        };
+        assert_eq!(
+            (record.recorded_turn_number, record.turn_zone_change_index),
+            (19, 0),
+            "paused sacrifice deferred event is reconciled to its live ledger occurrence"
+        );
 
         let mut restored_wire = serde_json::to_value(PersistedGameState::Raw(Box::new(restored)))
             .expect("restored fixture serializes");
@@ -22862,7 +22891,7 @@ mod tests {
             Ok(())
         })
         .expect("carrier traversal succeeds");
-        assert!(keys.len() >= 8, "fixture reaches each selected carrier");
+        assert!(keys.len() >= 9, "fixture reaches each selected carrier");
         assert!(keys.iter().all(|key| *key == (19, 0)));
     }
 
