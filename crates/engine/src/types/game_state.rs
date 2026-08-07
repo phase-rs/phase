@@ -23065,7 +23065,6 @@ mod tests {
             },
             "pending_each_player_copy_chosen": { "trigger_event": event },
         });
-        let state = state.as_object_mut().expect("fixture has a state object");
         let legacy_event_roots = [
             "pending_continuation",
             "pending_choose_zone_trigger_context",
@@ -23076,8 +23075,10 @@ mod tests {
             "pending_each_player_copy_chosen",
         ];
 
-        reconcile_persisted_zone_change_occurrences(state, &legacy_event_roots)
+        reconcile_persisted_zone_change_occurrences(&mut state, &legacy_event_roots)
             .expect("every v1 frame event carrier reconciles its ZoneChanged record");
+
+        let state = state.as_object_mut().expect("fixture has a state object");
 
         for root in legacy_event_roots {
             let mut keys = Vec::new();
