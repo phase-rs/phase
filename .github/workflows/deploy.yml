@@ -340,6 +340,18 @@ jobs:
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
+      - name: Derive MTGJSON cache key
+        # Re-derived in this job rather than plumbed out of `preview-inputs`:
+        # `steps.` references cannot cross a job boundary, and a dangling one
+        # does not fail — it expands to the empty string, which would freeze the
+        # locale-map key at a constant and serve the same maps forever.
+        #
+        # Re-running is safe and stays single-authority: the action probes
+        # MTGJSON's published version, so both jobs derive the same suffix from
+        # the same source rather than forking the formula.
+        id: mtgjson-key
+        uses: ./.github/actions/mtgjson-cache-key
+
       - name: Restore locale card-art maps
         # Caches the OUTPUT (five small JSON maps), not the ~169 MB AllSetFiles
         # input the generator downloads to build them. Folding that input into
