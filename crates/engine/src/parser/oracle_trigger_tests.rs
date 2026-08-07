@@ -7303,37 +7303,30 @@ fn trigger_evelyn_exiles_each_library_with_collection_counter_and_permission() {
     ));
 }
 
+/// Every "this <noun> enters" self-reference lowers to the same battlefield-ETB
+/// `ChangesZone` on `SelfRef`, whatever the permanent-type noun and whatever the
+/// trailing effect is. The noun must not leak into the trigger shape.
 #[test]
-fn trigger_aura_enters() {
-    let def = parse_trigger_line(
-        "When this Aura enters, tap target creature an opponent controls.",
-        "Glaring Aegis",
-    );
-    assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.destination, Some(Zone::Battlefield));
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-}
-
-#[test]
-fn trigger_equipment_enters() {
-    let def = parse_trigger_line(
-        "When this Equipment enters, attach it to target creature you control.",
-        "Shining Armor",
-    );
-    assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.destination, Some(Zone::Battlefield));
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-}
-
-#[test]
-fn trigger_vehicle_enters() {
-    let def = parse_trigger_line(
-        "When this Vehicle enters, create a 1/1 white Pilot creature token.",
-        "Some Vehicle",
-    );
-    assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.destination, Some(Zone::Battlefield));
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+fn trigger_self_etb_noun_variants() {
+    for (card, text) in [
+        (
+            "Glaring Aegis",
+            "When this Aura enters, tap target creature an opponent controls.",
+        ),
+        (
+            "Shining Armor",
+            "When this Equipment enters, attach it to target creature you control.",
+        ),
+        (
+            "Some Vehicle",
+            "When this Vehicle enters, create a 1/1 white Pilot creature token.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, card);
+        assert_eq!(def.mode, TriggerMode::ChangesZone, "{card}");
+        assert_eq!(def.destination, Some(Zone::Battlefield), "{card}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{card}");
+    }
 }
 
 #[test]
@@ -9514,14 +9507,24 @@ fn extract_if_control_creature_count() {
 
 // --- Equipment / Aura subject filter tests ---
 
+/// Both attached-subject nouns ("equipped"/"enchanted" creature) resolve to the
+/// same source-relative `AttachedTo` subject on an Attacks trigger.
 #[test]
-fn trigger_equipped_creature_attacks() {
-    let def = parse_trigger_line(
-        "Whenever equipped creature attacks, put a +1/+1 counter on it.",
-        "Blackblade Reforged",
-    );
-    assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+fn trigger_attached_creature_attacks() {
+    for (card, text) in [
+        (
+            "Blackblade Reforged",
+            "Whenever equipped creature attacks, put a +1/+1 counter on it.",
+        ),
+        (
+            "Curiosity",
+            "Whenever enchanted creature attacks, draw a card.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, card);
+        assert_eq!(def.mode, TriggerMode::Attacks, "{card}");
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo), "{card}");
+    }
 }
 
 #[test]
@@ -9536,16 +9539,28 @@ fn trigger_equipped_creature_deals_combat_damage() {
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
 }
 
+/// Both attached-subject nouns lower "dies" to battlefield → graveyard on the
+/// source-relative `AttachedTo` subject. Contrast `trigger_an_enchanted_creature_
+/// dies_hateful_eidolon` below, where the indefinite article makes it NON-source-
+/// relative and the subject becomes a typed creature with `EnchantedBy`.
 #[test]
-fn trigger_equipped_creature_dies() {
-    let def = parse_trigger_line(
-        "Whenever equipped creature dies, you gain 2 life.",
-        "Strider Harness",
-    );
-    assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.origin, Some(Zone::Battlefield));
-    assert_eq!(def.destination, Some(Zone::Graveyard));
-    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+fn trigger_attached_creature_dies() {
+    for (card, text) in [
+        (
+            "Strider Harness",
+            "Whenever equipped creature dies, you gain 2 life.",
+        ),
+        (
+            "Angelic Destiny",
+            "Whenever enchanted creature dies, return ~ to its owner's hand.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, card);
+        assert_eq!(def.mode, TriggerMode::ChangesZone, "{card}");
+        assert_eq!(def.origin, Some(Zone::Battlefield), "{card}");
+        assert_eq!(def.destination, Some(Zone::Graveyard), "{card}");
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo), "{card}");
+    }
 }
 
 #[test]
@@ -9570,28 +9585,6 @@ fn trigger_heirloom_blade_reveal_until_shares_creature_type() {
             ..
         } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
     )));
-}
-
-#[test]
-fn trigger_enchanted_creature_attacks() {
-    let def = parse_trigger_line(
-        "Whenever enchanted creature attacks, draw a card.",
-        "Curiosity",
-    );
-    assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
-}
-
-#[test]
-fn trigger_enchanted_creature_dies() {
-    let def = parse_trigger_line(
-        "Whenever enchanted creature dies, return ~ to its owner's hand.",
-        "Angelic Destiny",
-    );
-    assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.origin, Some(Zone::Battlefield));
-    assert_eq!(def.destination, Some(Zone::Graveyard));
-    assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
 }
 
 // CR 303.4 + CR 603.10a: "Whenever an enchanted creature dies" with the
