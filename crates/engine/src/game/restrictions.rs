@@ -605,13 +605,14 @@ pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
 /// Returns the per-turn zone-change index assigned to this record.
 pub fn record_zone_change(
     state: &mut crate::types::game_state::GameState,
-    mut record: crate::types::game_state::ZoneChangeRecord,
+    record: &mut crate::types::game_state::ZoneChangeRecord,
 ) -> usize {
     let object_id = record.object_id;
     let to_zone = record.to_zone;
     let turn_zone_change_index = state.zone_changes_this_turn.len();
+    record.recorded_turn_number = state.turn_number;
     record.turn_zone_change_index = turn_zone_change_index;
-    state.zone_changes_this_turn.push_back(record);
+    state.zone_changes_this_turn.push_back(record.clone());
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);

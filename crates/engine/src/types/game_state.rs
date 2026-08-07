@@ -1504,6 +1504,11 @@ pub struct ZoneChangeRecord {
     /// within the same turn for batched trigger replay guards (issue #3866).
     #[serde(default)]
     pub turn_zone_change_index: usize,
+    /// Turn in which this zone-change record was written. Together with
+    /// `turn_zone_change_index`, this identifies a per-turn ledger entry even
+    /// after deferred trigger work crosses a turn boundary.
+    #[serde(default)]
+    pub recorded_turn_number: u32,
     /// CR 701.60b + CR 608.2c: Suspected status as of the zone change. Suspected
     /// is a battlefield-only status reset on any zone change, so a cost-paid
     /// look-back ("the sacrificed creature was suspected" — Agency Coroner)
@@ -1703,6 +1708,7 @@ impl ZoneChangeRecord {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             is_suspected: false,
         }
     }
@@ -14405,13 +14411,13 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
     pub zone_changes_this_turn: im::Vector<ZoneChangeRecord>,
     /// CR 603.2c: Batched zone-change triggers already collected for
-    /// `(definition_ref, turn_zone_change_index)`. Prevents a second
+    /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
     /// stacking duplicate batched triggers (issue #3866) without suppressing a
     /// later distinct leave by the same object in the same turn.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub batched_zone_change_trigger_fired: HashSet<(TriggerDefinitionRef, usize)>,
+    pub batched_zone_change_trigger_fired: HashSet<(TriggerDefinitionRef, u32, usize)>,
     /// CR 403.3: Battlefield entry snapshots this turn, enabling data-driven ETB queries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
@@ -22145,6 +22151,50 @@ mod tests {
             .stack_trigger_firings
             .insert(ObjectId(9_003), TriggerFiring::Ordinary);
         state
+    }
+
+    #[test]
+    fn deferred_zone_change_event_roundtrips_and_defaults_its_recorded_turn() {
+        let mut state = normal_trigger_firing_fixture();
+        let event = GameEvent::ZoneChanged {
+            object_id: ObjectId(9_004),
+            from: Some(Zone::Library),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                recorded_turn_number: 19,
+                turn_zone_change_index: 3,
+                ..ZoneChangeRecord::test_minimal(
+                    ObjectId(9_004),
+                    Some(Zone::Library),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        state.deferred_triggers[0].pending.trigger_event = Some(event.clone());
+        state.deferred_triggers[0].trigger_events = vec![event];
+
+        let wire = serde_json::to_value(&state).expect("deferred-event fixture serializes");
+        let restored: GameState = serde_json::from_value(wire.clone())
+            .expect("nested deferred zone-change event round-trips");
+        let GameEvent::ZoneChanged { record, .. } =
+            &restored.deferred_triggers[0].trigger_events[0]
+        else {
+            panic!("deferred fixture retains its zone-change event");
+        };
+        assert_eq!(record.recorded_turn_number, 19);
+
+        let mut legacy_wire = wire;
+        legacy_wire["deferred_triggers"][0]["trigger_events"][0]["ZoneChanged"]["record"]
+            .as_object_mut()
+            .expect("nested record is an object")
+            .remove("recorded_turn_number");
+        let legacy: GameState = serde_json::from_value(legacy_wire)
+            .expect("legacy nested record without a turn defaults safely");
+        let GameEvent::ZoneChanged { record, .. } = &legacy.deferred_triggers[0].trigger_events[0]
+        else {
+            panic!("legacy deferred fixture retains its zone-change event");
+        };
+        assert_eq!(record.recorded_turn_number, 0);
     }
 
     fn trigger_continuation_fixture() -> GameState {
