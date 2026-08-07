@@ -14814,7 +14814,7 @@ declare_game_state! {
     /// Players with an enduring story. Once gained, it persists for the game.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub enduring_story: HashSet<PlayerId>,
+    pub enduring_story: Box<HashSet<PlayerId>>,
 
     /// CR 702.50a-b: Active Epic effects — one per resolved Epic spell. Each
     /// entry is a rest-of-game record: its controller can't cast spells
@@ -18873,7 +18873,7 @@ impl GameState {
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
-            enduring_story: HashSet::new(),
+            enduring_story: Box::default(),
             epic_effects: Vec::new(),
             restrictions: Vec::new(),
             pending_damage_replacements: Vec::new(),
