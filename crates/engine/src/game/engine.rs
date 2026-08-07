@@ -5911,13 +5911,20 @@ pub(super) fn settle_resolving_stack_entry_before_trigger_selection(state: &mut 
     settle_finished_resolving_stack_entry(state);
 }
 
+/// CR 608.2c + CR 608.2m: An object that has left the stack keeps resolving
+/// until it has finished following its instructions in the order written, so
+/// its carrier may settle only once every continuation and typed resolution
+/// frame that resolution owns has drained.
+///
+/// This predicate answers exactly one question — *has the resolution
+/// finished?* It deliberately does not also test whether the carrier is
+/// well-formed. A readiness gate that folds in a structural invariant reads a
+/// malformed carrier as "not finished", which disables the very sweep that
+/// exists to clear it. Carrier/firing parity is a separate question, answered
+/// by `resolving_carrier_parity_is_coherent` and reported on the settle path
+/// rather than gating it.
 fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
     state.resolving_stack_entry.is_some()
-        && state.resolving_trigger_firing.is_some()
-            == state
-                .resolving_stack_entry
-                .as_ref()
-                .is_some_and(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
         && state.active_ability_continuation().is_none()
         && state.active_spell_resolution().is_none()
         && state.pending_cast.is_none()
@@ -5925,11 +5932,49 @@ fn resolving_stack_entry_can_settle(state: &GameState) -> bool {
         && triggers::resolution_completion_can_settle(state)
 }
 
+/// CR 113.3c + CR 603.7: A triggered ability is a distinct kind of stack
+/// object from a spell or an activated ability (CR 113.3c), and only that kind
+/// owns a CR 603.7 firing classification. This tests the carrier *kind* half of
+/// that pairing.
+fn resolving_carrier_is_triggered(state: &GameState) -> bool {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .is_some_and(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+}
+
+/// CR 603.7: Answers only whether the resolving carrier and its firing
+/// classification are paired coherently. This is a well-formedness diagnostic,
+/// never a readiness input — see `resolving_stack_entry_can_settle`.
+fn resolving_carrier_parity_is_coherent(state: &GameState) -> bool {
+    state.resolving_trigger_firing.is_some() == resolving_carrier_is_triggered(state)
+}
+
 fn settle_finished_resolving_stack_entry(state: &mut GameState) {
     debug_assert!(
         resolving_stack_entry_can_settle(state),
         "only a fully completed resolution carrier may settle"
     );
+    // CR 603.7: `debug_assert!` is compiled out of the shipped build, so an
+    // incoherent pairing is reported here instead. Settle anyway: the
+    // resolution this carrier owns has finished either way, and withholding the
+    // sweep would only leave the carrier behind.
+    //
+    // Reach: this is visible in the server-hosted native build, which installs a
+    // subscriber (`phase-server/src/logging.rs`). `engine-wasm` installs none
+    // (see its own note at `engine-wasm/src/lib.rs`, "unlike server-core, which
+    // has `tracing`"), so in a single-player browser game the warn is currently
+    // emitted into a void. Reporting is still correct at this seam — the engine
+    // owns the diagnostic — but do not read this as closing the observability
+    // gap for WASM clients; that needs a subscriber on the client side.
+    if !resolving_carrier_parity_is_coherent(state) {
+        tracing::warn!(
+            "settling a resolving carrier with an incoherent trigger-firing pairing: \
+             carrier_is_triggered={}, firing_present={}",
+            resolving_carrier_is_triggered(state),
+            state.resolving_trigger_firing.is_some()
+        );
+    }
     super::stack::finish_resolving_stack_entry(
         state,
         super::lifecycle::DelayedTerminalDisposition::Resolved,
@@ -15605,6 +15650,12 @@ mod stage2_injector_tests {
                 //     at all, both re-read and sha256-confirmed in place. (`engine.rs`'s entry
                 //     has since moved to `:11619` — see the item-2 note on that entry below;
                 //     `scoped_library_search.rs:452` still has not moved.)
+                //   Valakut #7047 fix round: `:9458 ⇒ :9442`, −16, and only that
+                //     effects/mod.rs entry moved relative to current main. The
+                //     `QuantityExpr::any_ref` relocation replaces the 16-line traversal match
+                //     with a delegation; it sits above this producer and below the first two.
+                //     The merge tree therefore retains main's first two coordinates
+                //     (`:6177`/`:6254`) and shifts this one by −16 to `:9442`.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -15619,7 +15670,7 @@ mod stage2_injector_tests {
                 // and is offered as a follow-up rather than taken unannounced mid-review.
                 "game/effects/mod.rs:6177".to_string(),
                 "game/effects/mod.rs:6254".to_string(),
-                "game/effects/mod.rs:9458".to_string(),
+                "game/effects/mod.rs:9442".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -15799,7 +15850,42 @@ mod stage2_injector_tests {
                 // caught late: the round that introduced it shipped while GitHub Actions was in
                 // a major outage, so CI could not answer, and a comment-only diff reads as
                 // incapable of moving a line pin right up until it does.
-                "game/engine.rs:11783".to_string(),
+                //
+                // SETTLE-GATE LAYER SEPARATION (rebased onto `ea8771200`): `:11783 ⇒ :11828`.
+                // Pure line movement, LOCAL (so the CI-vs-local diagnosis above does not
+                // apply), from four hunks in `resolving_stack_entry_can_settle` /
+                // `settle_finished_resolving_stack_entry` — none of which mints a prompt, and
+                // none of which is even reachable from a prompt path: the readiness doc comment
+                // (+12), the well-formedness conjunct lifted OUT of the readiness gate (-5),
+                // the extracted `resolving_carrier_is_triggered` /
+                // `resolving_carrier_parity_is_coherent` predicates (+16), and the settle-path
+                // `tracing::warn!` (+12). Those sum to +35, then review follow-ups added +10
+                // more above the producer (+2 widening the carrier-kind CR annotation to
+                // `CR 113.3c + CR 603.7`, +8 qualifying the warn's reach — `engine-wasm`
+                // installs no `tracing` subscriber, so that channel is native-only), giving
+                // +45. Every other hunk in this change — the inline
+                // `resolving_carrier_settle_tests` module appended at the end of the file, and
+                // THIS drift entry — sits BELOW this producer and therefore cannot move it,
+                // which is why the sum is +45 and not the whole-file net. (Those two are
+                // deliberately left un-quantified here: a self-counting entry restates itself
+                // every edit.)
+                //
+                // The hunk sizes are quoted WITHOUT `@@` coordinates on purpose: this entry was
+                // rebased, so the coordinates from the pre-rebase base would name lines that no
+                // longer exist. The sizes survive a rebase; the coordinates do not.
+                //
+                // LOCATED BY CONTENT, as this log requires — and the `+45` above is a
+                // PREDICTION that was checked, not the source of this coordinate: `:11828`
+                // hashes to sha256 `8a544e878d3e77fb…5cc7d63`, the same prefix carried for this
+                // producer since `a6d1a0e62`, and it is the UNIQUE line in the file with that
+                // hash (whole-file scan). Still inside
+                // `begin_pending_trigger_target_selection`.
+                //
+                // SET PRESERVATION: the other four entries live in `game/effects/` and
+                // `scoped_library_search.rs`, neither of which this change touches, and the
+                // test module it adds contains no line matching the needle — total still 37,
+                // partition still 5/7/25.
+                "game/engine.rs:11828".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
@@ -18199,5 +18285,194 @@ mod bounded_offer_conjunct_tests {
              `engine::entry_publishes_pin_slots` used to do, each with a DIFFERENT omission. \
              Found {outside:#?}"
         );
+    }
+}
+
+/// Separation of the settle gate's two questions: *has this resolution
+/// finished?* (readiness, `resolving_stack_entry_can_settle`) and *is the
+/// carrier well-formed?* (`resolving_carrier_parity_is_coherent`).
+///
+/// These live inline because `resolving_trigger_firing` is `pub(crate)` and
+/// both settle wrappers are `pub(super)`, so no external test crate can reach
+/// the surface under test.
+#[cfg(test)]
+mod resolving_carrier_settle_tests {
+    use super::{
+        resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
+        settle_resolving_stack_entry_after_continuation_resume,
+    };
+    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::game_state::{
+        GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+    };
+    use crate::types::identifiers::{ObjectId, TriggerFiring};
+    use crate::types::player::PlayerId;
+
+    const SOURCE: ObjectId = ObjectId(60);
+
+    fn trivial_ability() -> Box<ResolvedAbility> {
+        Box::new(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![],
+            SOURCE,
+            PlayerId(0),
+        ))
+    }
+
+    fn carrier(kind: StackEntryKind) -> StackEntry {
+        StackEntry {
+            id: ObjectId(500),
+            source_id: SOURCE,
+            controller: PlayerId(0),
+            kind,
+        }
+    }
+
+    fn triggered_kind() -> StackEntryKind {
+        StackEntryKind::TriggeredAbility {
+            source_id: SOURCE,
+            ability: trivial_ability(),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: "Test Trigger".to_string(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }
+    }
+
+    fn activated_kind() -> StackEntryKind {
+        StackEntryKind::ActivatedAbility {
+            source_id: SOURCE,
+            ability: trivial_ability(),
+        }
+    }
+
+    /// A state at a priority boundary with every resolution hold clear.
+    fn settled_priority_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state
+    }
+
+    /// Test 1 (discriminating). A triggered carrier whose firing classification
+    /// is absent is malformed, but its resolution is nonetheless finished. The
+    /// sweep must be able to do its job on that input; while the readiness gate
+    /// also tested well-formedness, this input read as "not finished" and the
+    /// wrapper no-opped.
+    #[test]
+    fn a_triggered_carrier_missing_its_firing_still_settles_at_the_priority_boundary() {
+        let mut state = settled_priority_state();
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = None;
+
+        // Fixture guard: this is the desynchronized shape, not a well-formed one.
+        assert!(
+            !resolving_carrier_parity_is_coherent(&state),
+            "fixture must actually be the incoherent pairing under test"
+        );
+
+        settle_resolving_stack_entry_after_continuation_resume(&mut state);
+
+        assert!(
+            state.resolving_stack_entry.is_none(),
+            "a finished resolution's carrier must settle even when its firing \
+             classification is absent"
+        );
+        assert!(
+            state.resolving_trigger_firing.is_none(),
+            "settling clears both halves of the carrier"
+        );
+    }
+
+    /// Test 2 (non-vacuity). Removing the well-formedness conjunct must not
+    /// have weakened readiness: a carrier whose resolution is still suspended
+    /// stays put, for the well-formed and malformed pairing alike.
+    ///
+    /// Scope of the pin, stated precisely: `park_ability_continuation` also
+    /// pushes onto `resolution_stack`, which `resolution_completion_can_settle`
+    /// rejects independently. So this fixture falsifies TWO readiness conjuncts
+    /// at once and does not hold either one down on its own — deleting only the
+    /// `active_ability_continuation()` conjunct would leave it green. It pins
+    /// what the change needs pinned (readiness survived, and A1 did not make
+    /// settling unconditional); it is not a single-conjunct probe, and the name
+    /// says "suspended" rather than naming a conjunct for that reason.
+    #[test]
+    fn a_suspended_resolution_still_blocks_settling_for_either_pairing() {
+        for firing in [Some(TriggerFiring::Ordinary), None] {
+            let mut state = settled_priority_state();
+            state.resolving_stack_entry = Some(carrier(triggered_kind()));
+            state.resolving_trigger_firing = firing;
+            let pending = PendingContinuation::new(trivial_ability(), &state);
+            state.park_ability_continuation(pending);
+
+            // Probe guard: the suspension the fixture claims is actually installed.
+            assert!(
+                state.active_ability_continuation().is_some(),
+                "fixture must actually park a live continuation ({firing:?})"
+            );
+            assert!(
+                !resolving_stack_entry_can_settle(&state),
+                "a suspended resolution is not finished ({firing:?})"
+            );
+
+            settle_resolving_stack_entry_after_continuation_resume(&mut state);
+
+            assert!(
+                state.resolving_stack_entry.is_some(),
+                "an unfinished resolution's carrier must survive the sweep ({firing:?})"
+            );
+        }
+    }
+
+    /// Test 3 (non-vacuity). The leading conjunct is intact: with no carrier
+    /// there is nothing to settle, even if a stray firing classification is
+    /// present.
+    #[test]
+    fn no_carrier_means_nothing_to_settle() {
+        let mut state = settled_priority_state();
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(
+            !resolving_stack_entry_can_settle(&state),
+            "an absent carrier is not a settleable one"
+        );
+
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        assert!(
+            !resolving_stack_entry_can_settle(&state),
+            "a stray firing classification does not conjure a carrier to settle"
+        );
+    }
+
+    /// Test 4. Direct coverage of the extracted well-formedness predicate
+    /// across every carrier/firing pairing.
+    #[test]
+    fn parity_predicate_classifies_every_carrier_pairing() {
+        let cases = [
+            (Some(triggered_kind()), Some(TriggerFiring::Ordinary), true),
+            (Some(triggered_kind()), None, false),
+            (Some(activated_kind()), None, true),
+            (Some(activated_kind()), Some(TriggerFiring::Ordinary), false),
+            (None, None, true),
+            (None, Some(TriggerFiring::Ordinary), false),
+        ];
+
+        for (kind, firing, expected) in cases {
+            let mut state = settled_priority_state();
+            let described = format!("{kind:?} paired with {firing:?}");
+            state.resolving_stack_entry = kind.map(carrier);
+            state.resolving_trigger_firing = firing;
+
+            assert_eq!(
+                resolving_carrier_parity_is_coherent(&state),
+                expected,
+                "{described}"
+            );
+        }
     }
 }

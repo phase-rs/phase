@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { getCardPrintings } from "../../services/scryfall.ts";
+import { useLocaleArt } from "../../hooks/useCardImage.ts";
+import { getCardPrintings, resolvePrintingImageUrl } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
@@ -27,6 +28,15 @@ export function PrintingPickerModal({
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
   const [query, setQuery] = useState("");
+
+  // Tile URLs come from `resolvePrintingImageUrl` during render, which reads the
+  // installed locale-art map. Without this the picker would render whatever
+  // vocabulary happened to be loaded when it mounted: open it while the map is
+  // still in flight and every tile shows English art with no re-render when the
+  // map lands. The hook loads the active language's map and ticks this
+  // component when it arrives; the tile URLs are recomputed inline, so a
+  // re-render is all that is needed to pick up the swap.
+  useLocaleArt();
 
   const currentOverride = usePreferencesStore((s) => s.artOverrides[oracleId]);
   const setArtOverride = usePreferencesStore((s) => s.setArtOverride);
@@ -132,7 +142,12 @@ export function PrintingPickerModal({
           <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
             {visiblePrintings.map((printing) => {
               const isSelected = currentOverride?.scryfallId === printing.id;
-              const imgUrl = printing.faces[0]?.normal;
+              // Go through the shared resolver rather than reading the face URL
+              // directly: it applies the active locale's art, so the picker
+              // previews each printing in the same language the board renders.
+              // It also maps Scryfall's "image coming soon" placeholder to null,
+              // which this tile already renders as a proper "no image" cell.
+              const imgUrl = resolvePrintingImageUrl(printing, 0, "normal");
               const isBorderless = printing.border_color === "borderless";
               const isExtended = printing.frame_effects.includes("extendedart");
 

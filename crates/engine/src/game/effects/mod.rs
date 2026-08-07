@@ -7511,31 +7511,15 @@ fn effect_consumes_event_context_amount(effect: &Effect) -> bool {
     consumes
 }
 
-/// Walks every `QuantityRef` reachable through `quantity`'s composition forms
-/// and reports whether any satisfies `pred`. Single traversal authority for the
-/// resolution-local back-reference predicates, so a new `QuantityExpr`
-/// composition form is threaded in exactly one place instead of once per
-/// predicate.
+/// Delegates to `QuantityExpr::any_ref` (`types/ability.rs`) — the single
+/// traversal authority, relocated there so the parser layer can consult it
+/// too without reaching into game internals. Kept as a thin free-function
+/// wrapper here since this module's call sites (below) predate the move.
 fn quantity_expr_any_ref(
     quantity: &QuantityExpr,
     pred: &mut dyn FnMut(&QuantityRef) -> bool,
 ) -> bool {
-    match quantity {
-        QuantityExpr::Ref { qty } => pred(qty),
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_any_ref(inner, pred),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(|expr| quantity_expr_any_ref(expr, pred))
-        }
-        QuantityExpr::UpTo { max } => quantity_expr_any_ref(max, pred),
-        QuantityExpr::Power { exponent, .. } => quantity_expr_any_ref(exponent, pred),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_any_ref(left, pred) || quantity_expr_any_ref(right, pred)
-        }
-        QuantityExpr::Fixed { .. } => false,
-    }
+    quantity.any_ref(pred)
 }
 
 fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
