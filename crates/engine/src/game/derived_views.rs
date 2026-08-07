@@ -3408,6 +3408,7 @@ mod tests {
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
+                recorded_turn_number: 0,
                 is_suspected: false,
             }),
         };

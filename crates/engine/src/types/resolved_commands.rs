@@ -899,6 +899,8 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     DestinationPositionMismatch { expected: usize, found: usize },
     #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
     TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change recorded-turn mismatch: expected {expected}, found {found}")]
+    RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
     #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]

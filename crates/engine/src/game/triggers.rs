@@ -493,7 +493,7 @@ enum TriggerCollectionOperation {
     },
     RecordBatchedZoneChanges {
         definition_ref: TriggerDefinitionRef,
-        turn_zone_change_indices: Vec<usize>,
+        turn_zone_change_keys: Vec<(u32, usize)>,
     },
     AllocateTimestamp,
     RecordCombatDamageCastingPermission {
@@ -562,11 +562,13 @@ impl TriggerCollectionSession {
         let Some(definition_ref) = matched.definition_ref.clone() else {
             return;
         };
-        let turn_zone_change_indices = matched
+        let turn_zone_change_keys = matched
             .trigger_events
             .iter()
             .filter_map(|event| match event {
-                GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+                GameEvent::ZoneChanged { record, .. } => {
+                    Some((record.recorded_turn_number, record.turn_zone_change_index))
+                }
                 _ => None,
             })
             .collect();
@@ -574,7 +576,7 @@ impl TriggerCollectionSession {
             state,
             TriggerCollectionOperation::RecordBatchedZoneChanges {
                 definition_ref,
-                turn_zone_change_indices,
+                turn_zone_change_keys,
             },
         );
     }
@@ -674,12 +676,14 @@ impl TriggerCollectionSession {
             }
             TriggerCollectionOperation::RecordBatchedZoneChanges {
                 definition_ref,
-                turn_zone_change_indices,
+                turn_zone_change_keys,
             } => {
-                for turn_zone_change_index in turn_zone_change_indices {
-                    state
-                        .batched_zone_change_trigger_fired
-                        .insert((definition_ref.clone(), turn_zone_change_index));
+                for (recorded_turn_number, turn_zone_change_index) in turn_zone_change_keys {
+                    state.batched_zone_change_trigger_fired.insert((
+                        definition_ref.clone(),
+                        recorded_turn_number,
+                        turn_zone_change_index,
+                    ));
                 }
                 None
             }
@@ -1691,17 +1695,19 @@ fn batched_zone_change_already_collected(
         .iter()
         .filter_map(|event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
-                Some(record.turn_zone_change_index)
+                Some((record.recorded_turn_number, record.turn_zone_change_index))
             } else {
                 None
             }
         })
         .peekable();
     zone_changes.peek().is_some()
-        && zone_changes.all(|turn_zone_change_index| {
-            state
-                .batched_zone_change_trigger_fired
-                .contains(&(definition_ref.clone(), turn_zone_change_index))
+        && zone_changes.all(|(recorded_turn_number, turn_zone_change_index)| {
+            state.batched_zone_change_trigger_fired.contains(&(
+                definition_ref.clone(),
+                recorded_turn_number,
+                turn_zone_change_index,
+            ))
         })
 }
 
@@ -1715,9 +1721,11 @@ fn record_batched_zone_change_collected(
     };
     for event in trigger_events {
         if let GameEvent::ZoneChanged { record, .. } = event {
-            state
-                .batched_zone_change_trigger_fired
-                .insert((definition_ref.clone(), record.turn_zone_change_index));
+            state.batched_zone_change_trigger_fired.insert((
+                definition_ref.clone(),
+                record.recorded_turn_number,
+                record.turn_zone_change_index,
+            ));
         }
     }
 }

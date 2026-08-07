@@ -824,6 +824,7 @@ pub fn resolve_and_apply_zone_change(
     zone_change_record.entered_incarnation =
         (to == Zone::Battlefield).then_some(resulting_incarnation);
     zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    zone_change_record.recorded_turn_number = state.turn_number;
 
     let command = ResolvedZoneChangeCommand {
         object: occurrence,
@@ -888,6 +889,14 @@ pub fn apply_resolved_zone_change(
             },
         );
     }
+    if command.zone_change_record.recorded_turn_number != state.turn_number {
+        return Err(
+            ResolvedZoneChangeReplayInvariantError::RecordedTurnMismatch {
+                expected: command.zone_change_record.recorded_turn_number,
+                found: state.turn_number,
+            },
+        );
+    }
 
     let destination_position = destination_position_after_removal(
         state,
@@ -941,8 +950,9 @@ pub fn apply_resolved_zone_change(
         state.adopt_replayed_timestamp(entry_timestamp);
     }
 
+    let mut zone_change_record = command.zone_change_record.clone();
     let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, command.zone_change_record.clone());
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     if turn_zone_change_index != command.turn_zone_change_index {
         return Err(
             ResolvedZoneChangeReplayInvariantError::TurnRecordIndexMismatch {
@@ -1347,9 +1357,7 @@ pub fn move_to_zone(
     }
 
     if !transition_recorded {
-        let turn_zone_change_index =
-            super::restrictions::record_zone_change(state, zone_change_record.clone());
-        zone_change_record.turn_zone_change_index = turn_zone_change_index;
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     }
 
     if let Some(old_target) = unattached_from {
@@ -1426,7 +1434,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
         .objects
         .get(&object_id)
         .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
-    record.turn_zone_change_index = super::restrictions::record_zone_change(state, record.clone());
+    super::restrictions::record_zone_change(state, &mut record);
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: None,
@@ -1825,9 +1833,7 @@ pub fn move_to_library_at_index(
         record_resolution_source_relatch(state, object_id, pre, new);
     }
 
-    let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, zone_change_record.clone());
-    zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    super::restrictions::record_zone_change(state, &mut zone_change_record);
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {

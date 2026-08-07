@@ -583,6 +583,7 @@ fn refresh_meld_entry_records(
         realized.entered_incarnation = old.entered_incarnation;
         realized.attached_to = old.attached_to;
         realized.turn_zone_change_index = old.turn_zone_change_index;
+        realized.recorded_turn_number = old.recorded_turn_number;
         realized.combat_status = combat_status;
         realized.sync_trigger_source_context();
         *record = realized;
