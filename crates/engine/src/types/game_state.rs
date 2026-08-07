@@ -14492,7 +14492,7 @@ declare_game_state! {
     /// time; an empty stack is omitted from raw live-state snapshots until the
     /// first migrated family parks work.
     #[serde(default, skip_serializing_if = "ResolutionStack::is_empty")]
-    pub resolution_stack: ResolutionStack,
+    pub resolution_stack: Box<ResolutionStack>,
 
     /// Borrowed execution-local view of the active continuation's captured
     /// Aura host. The authoritative value remains inside
@@ -17911,7 +17911,7 @@ impl GameState {
         &mut self,
         command: &ResolvedFrameTransitionCommand,
     ) -> Result<(), ResolvedFrameTransitionReplayInvariantError> {
-        let mut resolution_stack = self.resolution_stack.clone();
+        let mut resolution_stack = (*self.resolution_stack).clone();
         match &command.transition {
             ResolvedFrameTransition::Push { frame } => resolution_stack.push_inner(frame.clone()),
             ResolvedFrameTransition::InsertParentOfActive { frame } => {
@@ -17925,7 +17925,7 @@ impl GameState {
             }
         }
         resolution_stack.validate(&self.waiting_for)?;
-        self.resolution_stack = resolution_stack;
+        self.resolution_stack = Box::new(resolution_stack);
         Ok(())
     }
 
@@ -18832,7 +18832,7 @@ impl GameState {
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
             public_revealed_cards: HashSet::new(),
-            resolution_stack: ResolutionStack::default(),
+            resolution_stack: Box::default(),
             resolving_continuation_attach_host: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
@@ -22326,7 +22326,7 @@ mod tests {
             .active_ability_continuation()
             .expect("fixture parks a trigger continuation")
             .clone();
-        state.resolution_stack = ResolutionStack::default();
+        state.resolution_stack = Box::default();
         let mut v1 = serde_json::to_value(state).expect("v1 fixture serializes");
         v1["resolution_state_version"] = serde_json::Value::from(1);
         v1["pending_continuation"] =
@@ -22495,7 +22495,7 @@ mod tests {
             .active_ability_continuation()
             .expect("fixture parks the trigger continuation")
             .clone();
-        state.resolution_stack = ResolutionStack::default();
+        state.resolution_stack = Box::default();
         let mut wire = serde_json::to_value(state).expect("v1 fixture serializes");
         wire["resolution_state_version"] = serde_json::Value::from(1);
         wire["pending_continuation"] =

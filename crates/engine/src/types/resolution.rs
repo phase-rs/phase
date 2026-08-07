@@ -3660,7 +3660,7 @@ fn project_frames_into_legacy_state(
 }
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
-    state.resolution_stack = ResolutionStack::default();
+    state.resolution_stack = Box::default();
 }
 
 fn legacy_resolution_wire_field(object: &Map<String, Value>) -> Option<&str> {
