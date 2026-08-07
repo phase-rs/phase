@@ -1193,7 +1193,7 @@ fn build_populated_state(reverse: bool) -> GameState {
         token_creator_order.reverse();
     }
     state.players_who_created_token_this_turn = token_creator_order.into_iter().collect();
-    state.enduring_story = player_order.iter().copied().collect();
+    state.enduring_story = Box::new(player_order.iter().copied().collect());
     state.ring_level = player_order
         .into_iter()
         .map(|player| (player, player.0 + 1))

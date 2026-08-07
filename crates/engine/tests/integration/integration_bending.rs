@@ -1865,6 +1865,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         enter_transformed: false,
         face_down_profile: None,
         enter_as_copy: None,
+        discard_frame: None,
         applied: std::collections::HashSet::new(),
     };
 
@@ -1941,6 +1942,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         enter_transformed: false,
         face_down_profile: None,
         enter_as_copy: None,
+        discard_frame: None,
         applied: std::collections::HashSet::new(),
     };
 

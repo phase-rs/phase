@@ -11871,6 +11871,7 @@ mod tests {
                 effect_kind: EffectKind::DiscardCard,
                 up_to: false,
                 unless_filter: None,
+                discard_frame: None,
             }
         });
         push("EffectZoneChoice", &|state| {
