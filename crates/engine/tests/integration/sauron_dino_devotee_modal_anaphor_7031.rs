@@ -34,12 +34,14 @@ use engine::game::combat::AttackTarget;
 use engine::game::derived::derive_display_state;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::move_to_zone;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const SAURON_ORACLE: &str = "Flying\nWhenever Sauron enters or attacks, choose one —\n• Cure Cancer — You gain 3 life.\n• Turn People into Dinosaurs — Put a saurian counter on another target creature. It's a green Dinosaur with base power and toughness 5/5 for as long as it has a saurian counter on it.";
 
@@ -65,6 +67,8 @@ fn saurian_counters(runner: &GameRunner, id: ObjectId) -> u32 {
         .copied()
         .unwrap_or(0)
 }
+
+const DISCIPLE_OF_PERDITION_ORACLE: &str = "When this creature dies, choose one. If you have exactly 13 life, you may choose both instead.\n• You draw a card and you lose 1 life.\n• Exile target opponent's graveyard. That player loses 1 life.";
 
 /// Drive Sauron's attack trigger to resolution: order triggers, select
 /// `modes`, answer the target prompt with `target` (if the chosen mode has
@@ -312,5 +316,98 @@ fn sauron_mode_two_illegal_without_another_creature() {
         runner.state().players[0].life - p0_life_before,
         3,
         "the legal mode must still resolve"
+    );
+}
+
+/// Disciple's second mode must carry the selected opponent from its graveyard
+/// target into the following "That player loses 1 life" instruction.
+///
+/// CR 608.2c: the mode's instructions are followed in written order, so the
+/// targeted opponent is the nearest antecedent for "That player".
+/// CR 700.4 + CR 603.6c: moving Disciple from the battlefield to a graveyard
+/// fires its dies trigger.
+#[test]
+fn disciple_mode_two_life_loss_binds_to_targeted_opponent() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let disciple = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Disciple of Perdition",
+            1,
+            1,
+            DISCIPLE_OF_PERDITION_ORACLE,
+        )
+        .id();
+    let graveyard_card = scenario
+        .add_creature_to_graveyard(P1, "Foe Bear", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+    let p0_life_before = runner.state().players[0].life;
+    let p1_life_before = runner.state().players[1].life;
+
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), disciple, Zone::Graveyard, &mut events);
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+
+    let mut chose_mode = false;
+    for _ in 0..100 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .or_else(|_| runner.act(GameAction::OrderTriggers { order: vec![] }))
+                    .expect("order Disciple's dies trigger");
+            }
+            WaitingFor::AbilityModeChoice { .. } => {
+                runner
+                    .act(GameAction::SelectModes { indices: vec![1] })
+                    .expect("select Disciple's graveyard-exile mode");
+                chose_mode = true;
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("target the opponent's graveyard");
+            }
+            WaitingFor::Priority { .. } => {
+                if chose_mode && runner.state().stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority while resolving Disciple's trigger");
+            }
+            other => panic!(
+                "unexpected WaitingFor while resolving Disciple's dies trigger: {}",
+                other.variant_name()
+            ),
+        }
+    }
+
+    assert!(
+        chose_mode,
+        "Disciple's dies trigger must reach its mode choice"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "Disciple's selected mode must resolve within the step budget"
+    );
+    assert_eq!(
+        runner.state().objects[&graveyard_card].zone,
+        Zone::Exile,
+        "mode 2 must exile the targeted opponent's graveyard"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        p0_life_before,
+        "the trigger controller must not lose life"
+    );
+    assert_eq!(
+        runner.state().players[1].life,
+        p1_life_before - 1,
+        "the targeted opponent must lose exactly 1 life"
     );
 }

@@ -1256,8 +1256,9 @@ fn modal_marker_ir(
 /// Trigger-established facts that outrank the subject are unaffected: the
 /// DamageDone player scope is re-seeded per mode by
 /// `modal_relative_player_scope_for_trigger`, and `object_pronoun_ref` pins
-/// (CR 603.4 intervening-if zone pins, spell-cast object pins) still serve
-/// bare pronouns whenever no mode-internal referent precedes them.
+/// (including a specific untargeted object a trigger condition introduced;
+/// CR 608.2k) still serve bare pronouns whenever no mode-internal referent
+/// precedes them.
 /// Restores the filtering the retired pre-IR path applied via
 /// `derive_modal_subject` (#6811 ported the context threading but dropped the
 /// filter; issue #7031 — plus the silent "that player" → TriggeringPlayer
