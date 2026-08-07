@@ -3752,7 +3752,7 @@ fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
 }
 
 #[test]
-fn batched_zone_change_replay_guard_tracks_all_three_record_keys() {
+fn batched_zone_change_replay_guard_keeps_old_turn_markers_distinct_from_new_index_zero() {
     let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
     let (definition, definition_ref) = {
         let object = state.objects.get_mut(&observer).unwrap();
@@ -3761,28 +3761,57 @@ fn batched_zone_change_replay_guard_tracks_all_three_record_keys() {
         let definition_ref = object.trigger_definition_ref(&object.trigger_definitions[0]);
         (definition, definition_ref)
     };
-    let events = vec![
-        recorded_zone_change_event(&mut state, ObjectId(7)),
-        recorded_zone_change_event(&mut state, ObjectId(8)),
-        recorded_zone_change_event(&mut state, ObjectId(9)),
-    ];
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
 
     assert!(batched_zone_change_replay_guard_applies(
         &definition,
-        &events
+        std::slice::from_ref(&old_event)
     ));
-    record_batched_zone_change_collected(&mut state, Some(&definition_ref), &events);
+    record_batched_zone_change_collected(
+        &mut state,
+        Some(&definition_ref),
+        std::slice::from_ref(&old_event),
+    );
     assert!(
-        batched_zone_change_already_collected(&state, Some(&definition_ref), &events),
-        "all three recorded zone changes must be recognized as one collected batch"
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "the same-turn marker must suppress the event it recorded"
     );
 
-    state
-        .batched_zone_change_trigger_fired
-        .remove(&(definition_ref.clone(), state.turn_number, 1));
+    let GameEvent::ZoneChanged { record, .. } = &old_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    let old_key = (
+        definition_ref.clone(),
+        record.recorded_turn_number,
+        record.turn_zone_change_index,
+    );
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    state.batched_zone_change_trigger_fired.insert(old_key);
     assert!(
-        !batched_zone_change_already_collected(&state, Some(&definition_ref), &events),
-        "a batch with one unrecorded occurrence must not be treated as fully collected"
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "a retained marker must still suppress its old-turn event after the boundary"
+    );
+
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert!(
+        !batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&new_event),
+        ),
+        "a new-turn index-0 event must not alias the retained old-turn marker"
     );
 }
 
