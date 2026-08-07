@@ -1635,6 +1635,8 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 702.195b: The enduring story is a player designation effects and
+        // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
         // CR 903.3 / CR 903.3d: owner-scoped ("your commander") vs any-owner ("a
         // commander") control. Delegates to the single `game::commander` authority —

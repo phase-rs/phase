@@ -25,6 +25,16 @@ pub(crate) enum DiscardOutcome {
     NeedsReplacementChoice(PlayerId),
 }
 
+/// Retires a Recruit-owned discard frame after its discard event was prevented.
+fn retire_discard_frame(
+    state: &mut GameState,
+    frame_id: crate::types::identifiers::DiscardFrameId,
+) {
+    if let Some(frame) = state.resolution_stack.take_active_discard().flatten() {
+        debug_assert_eq!(frame.id, frame_id);
+    }
+}
+
 /// CR 701.9a: To discard a card, move it from its owner's hand to their graveyard.
 /// CR 614.6: A `Moved` replacement ("if a card would be put into a graveyard,
 /// exile it instead" — Rest in Peace / Leyline of the Void) watches the
@@ -87,12 +97,7 @@ pub(crate) fn complete_discard_to_graveyard(
             // (CR 701.9c: a card put elsewhere instead is still discarded —
             // the Execute arm above and the madness path both record + emit).
             if let Some(frame_id) = discard_frame {
-                let retired = state
-                    .resolution_stack
-                    .take_active_discard()
-                    .expect("prevented Recruit discard frame must be active")
-                    .expect("prevented Recruit discard frame must exist");
-                assert_eq!(retired.id, frame_id);
+                retire_discard_frame(state, frame_id);
             }
             return DiscardOutcome::Complete;
         }
@@ -364,12 +369,7 @@ pub fn resolve(
                 }
                 ReplacementResult::Prevented => {
                     if let Some(frame_id) = discard_frame {
-                        let retired = state
-                            .resolution_stack
-                            .take_active_discard()
-                            .expect("prevented Recruit discard frame must be active")
-                            .expect("prevented Recruit discard frame must exist");
-                        assert_eq!(retired.id, frame_id);
+                        retire_discard_frame(state, frame_id);
                     }
                 }
                 ReplacementResult::NeedsChoice(player) => {

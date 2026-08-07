@@ -1825,6 +1825,7 @@ fn evaluate_condition_with_context(
         StaticCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
+        // CR 702.195b: True when the controller has the enduring story designation.
         StaticCondition::HasEnduringStory => eval_has_enduring_story(state, controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state
             .players

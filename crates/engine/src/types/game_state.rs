@@ -14811,7 +14811,8 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub city_blessing: HashSet<PlayerId>,
 
-    /// Players with an enduring story. Once gained, it persists for the game.
+    /// CR 702.195a-b: Players with an enduring story designation. Once gained,
+    /// it persists for the rest of the game.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub enduring_story: Box<HashSet<PlayerId>>,

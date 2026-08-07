@@ -266,6 +266,8 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 702.131b: A player controlling an Ascend permanent with ten or more
             // permanents gets the city's blessing for the rest of the game.
             check_city_blessing(state, events, &mut any_performed, &battlefield_snapshot);
+            // CR 702.195a: A player with a Storied permanent and three historic
+            // permanents gets an enduring story for the rest of the game.
             check_enduring_story(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
@@ -365,6 +367,8 @@ fn check_city_blessing(
     }
 }
 
+/// CR 702.195a: Storied grants an enduring story when its controller also controls
+/// three or more artifacts, Sagas, and/or legendary permanents.
 fn check_enduring_story(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

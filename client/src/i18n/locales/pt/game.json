@@ -442,7 +442,7 @@
     "cityBlessing": "Bênção da Cidade",
     "cityBlessingTooltip": "Bênção da Cidade — controla dez ou mais permanentes (Ascender)",
     "enduringStory": "História duradoura",
-    "enduringStoryTooltip": "História duradoura — obtida por um permanente Storied e três permanentes históricos",
+    "enduringStoryTooltip": "História duradoura — obtida ao controlar um permanente com Storied e três ou mais artefatos, permanentes lendários e/ou sagas; dura pelo resto do jogo",
     "dungeonAriaLabel": "Aventurando-se em {{name}}, sala {{room}}",
     "dungeonTooltip": "Aventurando-se em {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",

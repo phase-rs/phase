@@ -5443,17 +5443,15 @@ mod tests {
             "the recovered allocator must not reuse an abandoned discard frame id"
         );
 
-        let mut duplicate_state = GameState::new_two_player(141);
-        let _duplicate_id = duplicate_state.resolution_stack.begin_discard(None);
-        let duplicate = duplicate_state
-            .resolution_stack
+        let mut duplicate_frames = ResolutionStack::default();
+        let _duplicate_id = duplicate_frames.begin_discard(None);
+        let duplicate = duplicate_frames
             .active_discard()
             .expect("new discard frame exists")
             .clone();
-        duplicate_state.resolution_stack.push_discard(duplicate);
+        duplicate_frames.push_discard(duplicate);
         let duplicate_wire =
-            serde_json::to_value(ResolutionStateWire::from_game_state(duplicate_state))
-                .expect("malformed duplicate fixture serializes for reader validation");
+            v2_fixture_with_frames(GameState::new_two_player(141), duplicate_frames);
         assert!(
             serde_json::from_value::<ResolutionStateWire>(duplicate_wire).is_err(),
             "a wire payload with duplicate discard frame ids must be rejected"

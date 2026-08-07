@@ -442,7 +442,7 @@
     "cityBlessing": "Błogosławieństwo miasta",
     "cityBlessingTooltip": "Błogosławieństwo miasta — kontroluje dziesięć lub więcej trwałych (Ascend)",
     "enduringStory": "Trwała historia",
-    "enduringStoryTooltip": "Trwała historia — zdobyta dzięki permanentowi Storied i trzem historycznym permanentom",
+    "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
     "dungeonAriaLabel": "Wyprawa w {{name}}, pokój {{room}}",
     "dungeonTooltip": "Wyprawa w {{name}} — pokój {{room}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",

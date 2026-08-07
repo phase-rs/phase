@@ -442,7 +442,7 @@
     "cityBlessing": "Bénédiction de la cité",
     "cityBlessingTooltip": "Bénédiction de la cité — contrôle dix permanents ou plus (Ascension)",
     "enduringStory": "Histoire durable",
-    "enduringStoryTooltip": "Histoire durable — obtenue grâce à un permanent Storied et trois permanents historiques",
+    "enduringStoryTooltip": "Histoire durable — obtenue en contrôlant un permanent avec Storied et au moins trois artefacts, permanents légendaires et/ou sagas ; dure pour le reste de la partie",
     "dungeonAriaLabel": "Aventure dans {{name}}, salle {{room}}",
     "dungeonTooltip": "Aventure dans {{name}} — salle {{room}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",

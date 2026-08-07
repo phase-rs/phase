@@ -7731,7 +7731,7 @@ pub enum StaticCondition {
     NoMonarch,
     /// CR 702.131a: True when the controller has the city's blessing (Ascend).
     HasCityBlessing,
-    /// True when the controller has an enduring story.
+    /// CR 702.195b: True when the controller has the enduring story designation.
     HasEnduringStory,
     /// CR 309.7: True when the controller has completed at least one dungeon.
     /// Used by "as long as you've completed a dungeon" statics (Nadaar, etc.).
@@ -8193,7 +8193,7 @@ pub enum ParsedCondition {
     },
     /// CR 702.131a: True when the activating player has the city's blessing.
     HasCityBlessing,
-    /// True when the activating player has an enduring story.
+    /// CR 702.195b: True when the activating player has the enduring story designation.
     HasEnduringStory,
     /// CR 102.1: "The active player is the player whose turn it is." True when
     /// the scoped player is the active player — gates a casting/restriction
@@ -18998,7 +18998,7 @@ pub enum AbilityCondition {
     /// CR 702.131c: "if you have the city's blessing" is true when the ability
     /// controller has the city's blessing designation.
     HasCityBlessing,
-    /// True when the ability controller has an enduring story.
+    /// CR 702.195b: True when the ability controller has the enduring story designation.
     HasEnduringStory,
     /// CR 701.9a + CR 608.2c: True when the card discarded by the directly
     /// preceding discard instruction matches `filter`. The resolver reads the
@@ -19982,7 +19982,7 @@ pub enum TriggerCondition {
     },
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
-    /// "if you have an enduring story".
+    /// CR 702.195b: "if you have an enduring story" checks the player designation.
     HasEnduringStory,
     /// CR 309.7: True when the controller has completed a dungeon.
     /// `specific: None` matches "have you completed any dungeon"; `specific: Some(d)`

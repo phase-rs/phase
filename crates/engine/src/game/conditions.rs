@@ -176,6 +176,7 @@ pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) ->
     state.city_blessing.contains(&controller)
 }
 
+/// CR 702.195b: True when the given player has the enduring story designation.
 pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
     state.enduring_story.contains(&controller)
 }

@@ -666,6 +666,8 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
         GameEvent::MonarchChanged { .. } => push(TriggerEventKey::MonarchOrInitiative),
+        // CR 702.195b-c: Enduring story is a designation, not an inherent trigger
+        // event; continuous effects reapply before trigger conditions are checked.
         GameEvent::CityBlessingGained { .. } | GameEvent::EnduringStoryGained { .. } => {}
         // CR 103.1: setup determination, not a CR 706 die-roll trigger source.
         GameEvent::StartingPlayerContest { .. } => {}

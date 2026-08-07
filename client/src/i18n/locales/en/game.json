@@ -481,7 +481,7 @@
     "cityBlessing": "City's Blessing",
     "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
     "enduringStory": "Enduring Story",
-    "enduringStoryTooltip": "Enduring Story — gained by a Storied permanent and three historic permanents",
+    "enduringStoryTooltip": "Enduring Story — gained by controlling a Storied permanent and three or more artifacts, legendary permanents, and/or Sagas; lasts for the rest of the game",
     "dungeonAriaLabel": "Venturing in {{name}}, room {{room}}",
     "dungeonTooltip": "Venturing in {{name}} — room {{room}}",
     "poisonAriaLabel_one": "{{count}} poison counter",

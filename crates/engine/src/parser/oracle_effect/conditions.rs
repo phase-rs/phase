@@ -4531,6 +4531,7 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsInitiative => Some(AbilityCondition::IsInitiative),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
+        // CR 702.195b: The enduring story designation is available to effects.
         StaticCondition::HasEnduringStory => Some(AbilityCondition::HasEnduringStory),
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {

@@ -1248,6 +1248,7 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasCityBlessing,
             tag("you have the city's blessing"),
         ),
+        // CR 702.195a-b: Storied grants the enduring story player designation.
         value(
             StaticCondition::HasEnduringStory,
             tag("you have an enduring story"),
