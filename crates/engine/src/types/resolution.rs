@@ -618,6 +618,32 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the exact active continuation's discard parent when that parent
+    /// immediately precedes it. This is deliberately positional rather than a
+    /// stack search: terminal zone delivery may record provenance only for the
+    /// discard operation that owns the active Recruit continuation.
+    pub fn active_discard_parent_of_active_ability_continuation_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut DiscardFrame> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if discard.id == discard_id => {}
+            _ => return None,
+        }
+        match self.frames.get_mut(discard_index) {
+            Some(ResolutionFrame::Discard(discard)) => Some(discard),
+            Some(_) | None => unreachable!("checked direct discard must retain its frame kind"),
+        }
+    }
+
     /// Identifies the exact discard parent of the active continuation without
     /// exposing any non-adjacent frame.
     pub fn active_ability_continuation_discard_parent_id(&self) -> Option<DiscardFrameId> {
@@ -3863,6 +3889,53 @@ mod tests {
             pending: PendingContinuation::new(Box::new(resolved_draw(source_id)), &state),
             choose_zone_trigger_context: None,
         })
+    }
+
+    #[test]
+    fn active_discard_parent_of_active_ability_continuation_is_direct_and_id_bound() {
+        let mut direct = ResolutionStack::default();
+        let direct_id = direct.begin_discard(None);
+        direct.push_inner(continuation_frame(1));
+        direct
+            .active_discard_parent_of_active_ability_continuation_mut(direct_id)
+            .expect("the direct discard parent is mutable")
+            .source_id = Some(ObjectId(1));
+        assert_eq!(
+            match &direct.frames[0] {
+                ResolutionFrame::Discard(frame) => frame.source_id,
+                other => panic!("expected discard parent, got {other:?}"),
+            },
+            Some(ObjectId(1)),
+            "the helper mutates the direct discard parent"
+        );
+
+        let mut mismatched = ResolutionStack::default();
+        let wrong_id = mismatched.begin_discard(None);
+        let matching_id = mismatched.begin_discard(None);
+        mismatched.push_inner(continuation_frame(2));
+        assert!(
+            mismatched
+                .active_discard_parent_of_active_ability_continuation_mut(wrong_id)
+                .is_none(),
+            "a sibling discard ID must not bind to the active continuation"
+        );
+        assert!(
+            mismatched
+                .active_discard_parent_of_active_ability_continuation_mut(matching_id)
+                .is_some(),
+            "the immediate discard parent remains available by its exact ID"
+        );
+
+        let mut buried = ResolutionStack::default();
+        let buried_id = buried.begin_discard(None);
+        buried.push_inner(continuation_frame(3));
+        buried.push_inner(change_zone_frame(3));
+        assert!(
+            buried
+                .active_discard_parent_of_active_ability_continuation_mut(buried_id)
+                .is_none(),
+            "a discard below an active child must not be recovered by a stack search"
+        );
     }
 
     fn change_zone_frame(group_seed: u64) -> ResolutionFrame {
