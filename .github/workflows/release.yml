@@ -314,6 +314,11 @@ jobs:
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
+      # Separate from the Scryfall step: this reads MTGJSON set files, not the
+      # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
+      - name: Generate locale card-art maps
+        run: ./scripts/gen-scryfall-locale-images.sh
+
       - name: Save Scryfall bulk data
         # data/scryfall is complete once the four generators have run. Banking
         # it here keeps a later failure from re-hitting the Scryfall API on the

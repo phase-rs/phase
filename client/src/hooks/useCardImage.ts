@@ -9,6 +9,8 @@ import {
   getCardPrintings,
   isCardImageFlipLayoutSync,
   isCardImageRotatedSync,
+  isLocaleArtReady,
+  loadLocaleArt,
   pickOldestPrinting,
   resolveFaceIndexSync,
   resolveOracleIdSync,
@@ -105,6 +107,37 @@ registerStrategyCacheClearFn(() => {
   printingsNegativeCache.clear();
   strategyNoWinnerCache.clear();
 });
+
+/**
+ * Locales whose card-art map is currently being fetched. Same anti-spin-loop
+ * discipline as `strategyInflight`: without it, every render before the map
+ * lands would start another fetch.
+ *
+ * A failed fetch cannot loop either — `loadLocaleArt` swallows errors and
+ * resolves an empty map, which still installs, so `isLocaleArtReady` flips true
+ * and every card simply keeps its English art.
+ */
+const localeArtInflight = new Set<string>();
+
+/**
+ * Fetch the active locale's card-art map, then invalidate every mounted tile.
+ *
+ * The dispatch deliberately carries no `detail`: unlike a printings fetch (which
+ * concerns one oracleId), a language change re-resolves the URL of every card on
+ * screen, and the listener treats a detail-less event as a global invalidation.
+ */
+function loadLocaleArtInBackground(lang: string): void {
+  if (isLocaleArtReady(lang) || localeArtInflight.has(lang)) return;
+  localeArtInflight.add(lang);
+  loadLocaleArt(lang)
+    .then(() => {
+      localeArtInflight.delete(lang);
+      artCacheEvents.dispatchEvent(new Event("update"));
+    })
+    .catch(() => {
+      localeArtInflight.delete(lang);
+    });
+}
 
 function applyChainEntry(
   entry: ArtChainEntry,
@@ -241,6 +274,12 @@ function imageRequestKey(
   tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
+  // `imageRequestCache` stores the FINAL resolved URL, which differs per
+  // language once localized art is applied — so the art locale belongs in the
+  // key. The printing-selection caches (`strategyCacheMap`, `printingsCacheMap`)
+  // stay language-neutral on purpose: which printing wins is a function of the
+  // user's art preferences, not of their language.
+  artLocaleKey: string,
 ): string {
   return [
     oracleId || cardName,
@@ -253,6 +292,7 @@ function imageRequestKey(
     filterSubtypes,
     String(filterHasAbilities),
     tokenImageRefKey,
+    artLocaleKey,
   ].join("|");
 }
 
@@ -370,6 +410,21 @@ export function useCardImage(
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
   const artChain = usePreferencesStore((s) => s.artChain);
+  // Card art follows the UI language: the printing the user chose is kept, and
+  // only its image is swapped for the same printing in their language. Cards
+  // with no localized sibling keep their English art.
+  const language = usePreferencesStore((s) => s.language);
+  loadLocaleArtInBackground(language);
+  /**
+   * Cache-key component for the resolved image URL. It encodes the *art
+   * vocabulary* a URL was produced with, not merely the language: before the
+   * locale map arrives every card legitimately resolves to English art, and
+   * caching that under a bare `"de"` key would pin it there forever — the
+   * background load dispatches an invalidation, but `requestKey` would be
+   * unchanged, so the resolution effect would never re-run. Distinguishing
+   * pending from ready makes the map's arrival a genuine key change.
+   */
+  const artLocaleKey = isLocaleArtReady(language) ? language : `${language}:pending`;
 
   const [src, setSrc] = useState<string | null>(null);
   const [isRotated, setIsRotated] = useState(false);
@@ -456,6 +511,7 @@ export function useCardImage(
     tokenImageRefKey,
     oracleId,
     faceName,
+    artLocaleKey,
   );
 
   useEffect(() => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { getCardPrintings } from "../../services/scryfall.ts";
+import { getCardPrintings, resolvePrintingImageUrl } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
@@ -132,7 +132,12 @@ export function PrintingPickerModal({
           <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
             {visiblePrintings.map((printing) => {
               const isSelected = currentOverride?.scryfallId === printing.id;
-              const imgUrl = printing.faces[0]?.normal;
+              // Go through the shared resolver rather than reading the face URL
+              // directly: it applies the active locale's art, so the picker
+              // previews each printing in the same language the board renders.
+              // It also maps Scryfall's "image coming soon" placeholder to null,
+              // which this tile already renders as a proper "no image" cell.
+              const imgUrl = resolvePrintingImageUrl(printing, 0, "normal");
               const isBorderless = printing.border_color === "borderless";
               const isExtended = printing.frame_effects.includes("extendedart");
 
