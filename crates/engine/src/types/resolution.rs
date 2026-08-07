@@ -2687,6 +2687,12 @@ impl ResolutionStateWire {
                         "pending_continuation",
                         "pending_choose_zone_trigger_context",
                         "pending_optional_trigger_event",
+                        // These v1 frame payloads retain ZoneChanged events in
+                        // their logical-owner, delivery, or trigger context.
+                        "pending_change_zone_iteration",
+                        "pending_batch_deliveries",
+                        "pending_mill_deliveries",
+                        "pending_each_player_copy_chosen",
                     ],
                 )?;
                 let object = value

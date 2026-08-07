@@ -23029,6 +23029,90 @@ mod tests {
     }
 
     #[test]
+    fn persisted_zone_change_traverses_all_v1_frame_event_carriers() {
+        let record = persisted_zone_change_record(ObjectId(9_155), 19, 0);
+        let mut event = serde_json::to_value(persisted_zone_change_event(record.clone()))
+            .expect("fixture event serializes");
+        let event_record = event["data"]["record"]
+            .as_object_mut()
+            .expect("fixture ZoneChanged event has a record");
+        event_record.remove("recorded_turn_number");
+        event_record.remove("turn_zone_change_index");
+
+        // The v1 reader passes these legacy roots to the live-carrier visitor.
+        // Their nested shapes cover the logical owner, paused/deferred delivery,
+        // mill alias, and per-player trigger-context families respectively.
+        let mut state = serde_json::json!({
+            "turn_number": 19,
+            "zone_changes_this_turn": [serde_json::to_value(record).expect("ledger record serializes")],
+            "pending_continuation": {
+                "trigger_context": { "event": event.clone() }
+            },
+            "pending_choose_zone_trigger_context": { "event": event.clone() },
+            "pending_optional_trigger_event": event.clone(),
+            "pending_change_zone_iteration": {
+                "logical_zone_change_group": {
+                    "all_origin_occurrences": [{ "event": event.clone() }]
+                }
+            },
+            "pending_batch_deliveries": {
+                "paused_current": { "delivery_events": [event.clone()] },
+                "deferred_events": [event.clone()]
+            },
+            "pending_mill_deliveries": {
+                "paused_current": { "delivery_events": [event.clone()] },
+                "deferred_events": [event.clone()]
+            },
+            "pending_each_player_copy_chosen": { "trigger_event": event },
+        });
+        let state = state.as_object_mut().expect("fixture has a state object");
+        let legacy_event_roots = [
+            "pending_continuation",
+            "pending_choose_zone_trigger_context",
+            "pending_optional_trigger_event",
+            "pending_change_zone_iteration",
+            "pending_batch_deliveries",
+            "pending_mill_deliveries",
+            "pending_each_player_copy_chosen",
+        ];
+
+        reconcile_persisted_zone_change_occurrences(state, &legacy_event_roots)
+            .expect("every v1 frame event carrier reconciles its ZoneChanged record");
+
+        for root in legacy_event_roots {
+            let mut keys = Vec::new();
+            visit_persisted_zone_changed_records_in_value(
+                state.get_mut(root).expect("fixture contains legacy root"),
+                &mut |record| {
+                    let record = record
+                        .as_object()
+                        .expect("serialized event record is an object");
+                    keys.push((
+                        record
+                            .get("recorded_turn_number")
+                            .and_then(json_u32)
+                            .expect("legacy event receives a recorded turn"),
+                        record
+                            .get("turn_zone_change_index")
+                            .and_then(json_usize)
+                            .expect("legacy event receives an occurrence index"),
+                    ));
+                    Ok(())
+                },
+            )
+            .expect("legacy carrier traversal succeeds");
+            assert!(
+                !keys.is_empty(),
+                "fixture for {root} contains a serialized ZoneChanged event"
+            );
+            assert!(
+                keys.iter().all(|key| *key == (19, 0)),
+                "every event retained by {root} is reconciled to the live ledger occurrence"
+            );
+        }
+    }
+
+    #[test]
     fn persisted_zone_change_ignores_historical_journal_events_but_rejects_live_events() {
         let mut state = normal_trigger_firing_fixture();
         state.turn_number = 19;
