@@ -7847,9 +7847,9 @@ fn visit_persisted_live_zone_changed_records(
     state: &mut serde_json::Map<String, serde_json::Value>,
     visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
-    // The resolution-stack and legacy roots contain all paused delivery and
-    // continuation event contexts. Keep this list at GameState's live-carrier
-    // boundary: recursively visiting the whole state would also rewrite
+    // The resolution stack contains paused delivery and continuation event
+    // contexts. Keep this list at GameState's live-carrier boundary:
+    // recursively visiting the whole state would also rewrite
     // `resolved_rules_journal` snapshots.
     const LIVE_EVENT_CARRIER_FIELDS: &[&str] = &[
         "deferred_entry_events",
@@ -7870,11 +7870,6 @@ fn visit_persisted_live_zone_changed_records(
         "pending_cost_move_resume",
         "pending_deferred_life_cost_resume",
         "pending_discard_for_cost",
-        // V1 persisted active-frame fields are normalized by ResolutionStateWire
-        // after this migration runs, so their event contexts remain live here.
-        "pending_continuation",
-        "pending_choose_zone_trigger_context",
-        "pending_optional_trigger_event",
     ];
 
     for field in LIVE_EVENT_CARRIER_FIELDS {
