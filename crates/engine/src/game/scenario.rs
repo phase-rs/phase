@@ -1318,9 +1318,20 @@ impl GameRunner {
         if matches!(&action, GameAction::DeclareAttackers { .. })
             && self.state.phase == Phase::BeginCombat
             && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+            && self.state.stack.is_empty()
         {
-            apply_as_current(&mut self.state, GameAction::PassPriority)?;
-            apply_as_current(&mut self.state, GameAction::PassPriority)?;
+            let mut pass_events = Vec::new();
+            while self.state.phase == Phase::BeginCombat
+                && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+                && self.state.stack.is_empty()
+            {
+                pass_events
+                    .extend(apply_as_current(&mut self.state, GameAction::PassPriority)?.events);
+            }
+            let mut result = apply_as_current(&mut self.state, action)?;
+            pass_events.append(&mut result.events);
+            result.events = pass_events;
+            return Ok(result);
         }
         apply_as_current(&mut self.state, action)
     }
