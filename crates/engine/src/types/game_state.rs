@@ -23467,7 +23467,7 @@ mod tests {
         state.zone_changes_this_turn.push_back(record);
         state.current_trigger_event = Some(event.clone());
         state.current_trigger_events = vec![event];
-        state.resolution_stack = ResolutionStack::default();
+        state.resolution_stack = Box::default();
         let continuation = PendingContinuation::new(
             state
                 .pending_trigger
