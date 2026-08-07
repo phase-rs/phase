@@ -8238,48 +8238,28 @@ mod tests {
     }
 
     #[test]
-    fn changes_zone_origin_zones_matches_library_source() {
-        // CR 603.10a: Laelia-style — source can be library OR graveyard.
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
+    fn changes_zone_origin_zones_matches_each_listed_source() {
+        // CR 603.10a: Laelia-style — source can be library OR graveyard. Every zone in
+        // `origin_zones` must match; `match_changes_zone` treats the list as a
+        // set-membership constraint (`OriginConstraint::OneOf`).
+        for origin in [Zone::Library, Zone::Graveyard] {
+            let state = setup();
+            let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
+            trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
+            trigger.destination = Some(Zone::Exile);
 
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Library,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
-    }
-
-    #[test]
-    fn changes_zone_origin_zones_matches_graveyard_source() {
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
-
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Graveyard,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+            let event =
+                zone_changed_event(ObjectId(5), origin, Zone::Exile, Vec::new(), Vec::new());
+            assert!(
+                match_changes_zone(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "listed origin {origin:?} → Exile must match"
+            );
+        }
     }
 
     #[test]

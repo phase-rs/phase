@@ -18340,28 +18340,6 @@ mod sorcery_speed_invariant_tests {
     use crate::types::ability::ActivationRestriction;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    /// Walk every sub_ability in the chain.
-    fn walk_chain<F: FnMut(&AbilityDefinition)>(def: &AbilityDefinition, mut visit: F) {
-        let mut cur: Option<&AbilityDefinition> = Some(def);
-        while let Some(d) = cur {
-            visit(d);
-            cur = d.sub_ability.as_deref();
-        }
-    }
-
-    fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
-        walk_chain(def, |d| {
-            if d.is_sorcery_speed() {
-                assert!(
-                    d.activation_restrictions
-                        .contains(&ActivationRestriction::AsSorcery),
-                    "{context}: ability is sorcery-speed but \
-                     activation_restrictions is missing AsSorcery"
-                );
-            }
-        });
-    }
-
     /// CR 702.6a: Swiftfoot Boots — "Equip {1}" synthesizes an activated ability
     /// that MUST be gated at sorcery speed. Regression test for the confirmed
     /// bug where equip abilities were activatable at instant speed because
@@ -18759,51 +18737,6 @@ mod sorcery_speed_invariant_tests {
             .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
             .count();
         assert_eq!(count, 1, "AsSorcery must not be duplicated");
-    }
-
-    /// CR 602.5d: Corpus-wide smoke test — run the synthesis pipeline against
-    /// every keyword variant that has synthesis coverage and walk each ability's
-    /// sub_ability chain, confirming every sorcery-speed ability carries
-    /// `AsSorcery`. Now that `is_sorcery_speed()` is defined as
-    /// `contains(AsSorcery)`, this is structurally guaranteed; the test remains
-    /// as broad synthesis coverage.
-    #[test]
-    fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
-        fn mana() -> ManaCost {
-            ManaCost::Cost {
-                shards: vec![],
-                generic: 1,
-            }
-        }
-
-        type SynthCase = (&'static str, fn() -> CardFace);
-        let cases: &[SynthCase] = &[
-            ("Equip {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Equip(mana()));
-                synthesize_equip(&mut f);
-                f
-            }),
-            ("Level Up {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::LevelUp(mana()));
-                synthesize_level_up(&mut f);
-                f
-            }),
-            ("Scavenge {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Scavenge(mana()));
-                synthesize_scavenge(&mut f);
-                f
-            }),
-        ];
-
-        for (name, build) in cases {
-            let face = build();
-            for def in face.abilities.iter() {
-                assert_sorcery_invariant(def, name);
-            }
-        }
     }
 }
 

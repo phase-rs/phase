@@ -3061,21 +3061,6 @@ mod tests {
     }
 
     #[test]
-    fn sunken_ruins_pattern_parses_as_combinations() {
-        // CR 605.3b: Shadowmoor/Eventide filter land shape.
-        let options = extract_combinations("Add {U}{U}, {U}{B}, or {B}{B}")
-            .expect("should parse filter-land pattern");
-        assert_eq!(
-            options,
-            vec![
-                vec![ManaColor::Blue, ManaColor::Blue],
-                vec![ManaColor::Blue, ManaColor::Black],
-                vec![ManaColor::Black, ManaColor::Black],
-            ]
-        );
-    }
-
-    #[test]
     fn all_ten_filter_land_color_pairs_parse() {
         // Exhaustively cover the Shadowmoor/Eventide cycle.
         let pairs: &[(&str, ManaColor, ManaColor)] = &[
@@ -4385,42 +4370,35 @@ mod tests {
         );
     }
 
-    // CR 702.6a: Ronin, Shadow Stalker — plural "equip abilities" in the
-    // activation tail maps to `Any([SpellType("Equipment"), ActivateTagged(Equip)])`.
-    // Keyword-precise: only equip-tagged abilities qualify, not arbitrary
-    // activated abilities on Equipment permanents.
+    // CR 702.6a: both the plural and singular equip-activation tails map to the same
+    // `Any([SpellType("Equipment"), ActivateTagged(Equip)])`. Keyword-precise: only
+    // equip-tagged abilities qualify, not arbitrary activated abilities on Equipment
+    // permanents. Each row differs in BOTH halves (spell count and ability count), so
+    // both full input strings are retained.
     #[test]
-    fn mana_spend_restriction_equip_abilities_plural() {
-        let (restriction, grants) = parse_mana_spend_restriction(
-            "spend this mana only to cast equipment spells or activate equip abilities",
-        )
-        .expect("equip abilities plural must parse");
-        assert_eq!(
-            restriction,
-            vec![ManaSpendRestriction::Any(vec![
-                ManaSpendRestriction::SpellType("Equipment".to_string()),
-                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
-            ])]
-        );
-        assert!(grants.is_empty());
-    }
-
-    // CR 702.6a: Freya Crescent — singular "an equip ability" in the activation
-    // tail maps to the same `Any([SpellType("Equipment"), ActivateTagged(Equip)])`.
-    #[test]
-    fn mana_spend_restriction_equip_ability_singular() {
-        let (restriction, grants) = parse_mana_spend_restriction(
-            "spend this mana only to cast an equipment spell or activate an equip ability",
-        )
-        .expect("equip ability singular must parse");
-        assert_eq!(
-            restriction,
-            vec![ManaSpendRestriction::Any(vec![
-                ManaSpendRestriction::SpellType("Equipment".to_string()),
-                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
-            ])]
-        );
-        assert!(grants.is_empty());
+    fn mana_spend_restriction_equip_abilities_plural_and_singular() {
+        for (card, text) in [
+            (
+                "Ronin, Shadow Stalker",
+                "spend this mana only to cast equipment spells or activate equip abilities",
+            ),
+            (
+                "Freya Crescent",
+                "spend this mana only to cast an equipment spell or activate an equip ability",
+            ),
+        ] {
+            let (restriction, grants) = parse_mana_spend_restriction(text)
+                .unwrap_or_else(|| panic!("{card}: {text:?} must parse"));
+            assert_eq!(
+                restriction,
+                vec![ManaSpendRestriction::Any(vec![
+                    ManaSpendRestriction::SpellType("Equipment".to_string()),
+                    ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
+                ])],
+                "{card}: wrong restriction for {text:?}"
+            );
+            assert!(grants.is_empty(), "{card}: {text:?} must grant nothing");
+        }
     }
 
     // CR 105.2a + CR 106.6: The Great Henge-style compound rider is an AND,

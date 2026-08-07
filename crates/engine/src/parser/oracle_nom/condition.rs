@@ -18266,36 +18266,19 @@ mod tests {
     /// directly into the test surface.
     struct AggregateProperty(crate::types::ability::ObjectProperty);
 
-    /// CR 208.1 + CR 107.3e: Betor's first tier — "if creatures you control
-    /// have total toughness 10 or greater" must parse to a Sum-Toughness
-    /// QuantityComparison so the trigger-level intervening-if hoist works.
+    /// CR 208.1 + CR 107.3e: Betor's three tiers — "if creatures you control have
+    /// total toughness N or greater" must parse to a Sum-Toughness
+    /// QuantityComparison at every threshold, so the trigger-level intervening-if
+    /// hoist works for each tier.
     #[test]
-    fn test_creatures_you_control_have_total_toughness_ge() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 10 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            10,
-        );
-    }
-
-    /// CR 208.1: Betor's second tier — same shape with threshold 20.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_20() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 20 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            20,
-        );
-    }
-
-    /// CR 208.1: Betor's third tier — same shape with threshold 40.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_40() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 40 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            40,
-        );
+    fn test_creatures_you_control_have_total_toughness_ge_tiers() {
+        for threshold in [10, 20, 40] {
+            assert_total_property_ge(
+                &format!("creatures you control have total toughness {threshold} or greater"),
+                AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+                threshold,
+            );
+        }
     }
 
     /// CR 208.1: Building-block coverage — total power must parse via the same
