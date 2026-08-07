@@ -208,6 +208,8 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 /// a clone for.
 fn effect_offers_choice(e: &Effect) -> bool {
     match e {
+        // Engine-set from the activation-payment snapshot, never a player prompt.
+        Effect::NoteManaSpent => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -547,6 +549,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
+        noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         force_block_attacker: _, // exact force-block referent, no choice
@@ -1718,6 +1721,11 @@ mod tests {
                  is rejecting chain SHAPE rather than chain CONTENT"
             );
         }
+    }
+
+    #[test]
+    fn noted_mana_spent_never_offers_a_resolution_choice() {
+        assert!(!effect_offers_choice(&Effect::NoteManaSpent));
     }
 
     /// STRUCTURAL INVARIANT: `game/ability_scan.rs` holds NO `GameState`.
