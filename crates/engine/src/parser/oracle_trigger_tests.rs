@@ -26820,7 +26820,7 @@ fn u6_not_comparisons_respect_polarity() {
     assert_eq!(
         trigger_plural_object_pronoun_ref_for_intervening_if(&Some(nonempty)),
         Some(TargetFilter::ExiledBySource),
-        "Not{EQ 0} must entail a nonempty pool"
+        "Not{{EQ 0}} must entail a nonempty pool"
     );
 
     let may_be_empty = TriggerCondition::Not {
@@ -26829,7 +26829,7 @@ fn u6_not_comparisons_respect_polarity() {
     assert_eq!(
         trigger_plural_object_pronoun_ref_for_intervening_if(&Some(may_be_empty)),
         None,
-        "Not{GE 1} must NOT entail a nonempty pool"
+        "Not{{GE 1}} must NOT entail a nonempty pool"
     );
 }
 
