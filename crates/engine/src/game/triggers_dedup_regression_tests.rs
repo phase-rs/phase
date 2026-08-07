@@ -3823,12 +3823,13 @@ fn owner_collected_filter_never_drops_non_zone_change_events() {
 /// event, sibling to `record`), by `entered_incarnation` (battlefield
 /// destinations only), and by
 /// `trigger_source_context.identity.reference.incarnation` (only where the path
-/// bumps the incarnation) — with the within-library reposition family the
-/// exception in which only the index survives. Those links are pinned by
+/// bumps the incarnation). Within-library reorders are excluded entirely: they
+/// emit neither a `ZoneChanged` event nor a ledger row, as pinned by
+/// `within_library_reposition_does_not_create_a_zone_change` (in `game/zones.rs`).
+/// The occurrence-separation links are pinned by
 /// `occurrence_exact_witness_consumes_the_occurrence_its_witness_names` (U5,
-/// below), by `within_library_repositions_are_separated_only_by_the_occurrence_index`
-/// (in `game/zones.rs`), and by `parked_delivery_records_carry_distinct_occurrence_indices`
-/// (in `tests/integration/search_delivery_observer_dedup.rs`).
+/// below) and by `parked_delivery_records_carry_distinct_occurrence_indices` (in
+/// `tests/integration/search_delivery_observer_dedup.rs`).
 #[test]
 fn owner_collected_filter_counts_contexts_not_occurrences() {
     let mut state = setup();
@@ -3871,13 +3872,11 @@ fn owner_collected_filter_counts_contexts_not_occurrences() {
 /// `trigger_source_context` and `entered_incarnation` as `None`, and both events
 /// here share one `ObjectId`, so the index is the SOLE difference.
 ///
-/// A production analogue of this shape DOES exist — a within-library reposition
-/// (CR 400.7 zero-bump branch, `zones.rs:1809-1812`) neutralizes the same three
-/// fields — see `within_library_repositions_are_separated_only_by_the_occurrence_index`
-/// in `zones.rs`. That row IS red under a `turn_zone_change_index`-excluding
-/// `PartialEq`, but it pins the zones EMIT link; a production fixture for the
-/// FILTER-AUTHORITY link pinned here is CONSTRUCTIBLE but is deliberately NOT
-/// built: the only known route depends on a duplicate-id
+/// There is no production analogue with these same three fields neutralized:
+/// a within-library reorder emits neither a `ZoneChanged` event nor a ledger row
+/// (see `within_library_reposition_does_not_create_a_zone_change` in `zones.rs`).
+/// A production fixture for the FILTER-AUTHORITY link pinned here is
+/// CONSTRUCTIBLE but deliberately NOT built: the only known route depends on a duplicate-id
 /// `SelectCards` payload that the `EffectZoneChoice` arm fails to reject, and
 /// every sibling validator rejects such a payload with an error. So once that
 /// gap is closed the action is REJECTED, the row fails to construct, and it goes

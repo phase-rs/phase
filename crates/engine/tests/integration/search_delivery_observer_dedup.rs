@@ -656,11 +656,12 @@ fn fetch_with_no_legal_target_parks_nothing() {
 //        -> deliver_replaced_zone_change -> zones::move_to_zone (ordinary arm)
 //        -> resolve_and_apply_zone_change (zones.rs:826)
 //        -> zones.rs:1199 -> emit at zones.rs:1362.
-//      A regression at the other three production emit sites — zones.rs:1430
-//      (`from: None` entries), zones.rs:1829 (library insert; covered instead by
-//      `within_library_repositions_are_separated_only_by_the_occurrence_index`
-//      in game/zones.rs), or merge.rs:689 (CR 730.3c split) — is NEVER EXECUTED
-//      by this fixture and will NOT turn it red.
+//      A regression at the other two production emit sites — zones.rs:1430
+//      (`from: None` entries) or merge.rs:689 (CR 730.3c split) — is NEVER
+//      EXECUTED by this fixture and will NOT turn it red. A within-library reorder
+//      is not an emit site: it creates neither a `ZoneChanged` event nor a ledger
+//      row, as covered by `within_library_reposition_does_not_create_a_zone_change`
+//      in game/zones.rs.
 //
 //      WHY IT IS NONETHELESS LOAD-BEARING: the `TurnRecordIndexMismatch` guard
 //      at zones.rs:946-953 validates the COMMAND's `turn_zone_change_index`

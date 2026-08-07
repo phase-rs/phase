@@ -8410,12 +8410,12 @@ pub(crate) fn filter_consumed_trigger_events(
 /// ONE occurrence emitted twice — precisely what this filter should drop — and
 /// two DISTINCT occurrences are never byte-identical, because
 /// `ZoneChangeRecord::turn_zone_change_index` participates in `GameEvent`
-/// equality and is unique per occurrence within a turn. All FOUR production
+/// equality and is unique per occurrence within a turn. All THREE production
 /// sites that construct a `ZoneChanged` into an event buffer ship the index
 /// `restrictions::record_zone_change` assigned: `move_to_zone`'s tail,
-/// `record_and_emit_entry_from_no_zone`, the library-insert path
-/// `move_to_library_at_index`, and `merge.rs`'s CR 730.3c component split. That
-/// recorder is the SOLE grower of `state.zone_changes_this_turn` (it reads
+/// `record_and_emit_entry_from_no_zone`, and `merge.rs`'s CR 730.3c component
+/// split. A within-library reorder emits neither a `ZoneChanged` event nor a
+/// ledger row. The recorder is the SOLE grower of `state.zone_changes_this_turn` (it reads
 /// `len()`, stamps, then pushes) and the ledger never shrinks mid-turn, so two
 /// distinct occurrences in one turn carry distinct indices and the `position()`
 /// match below cannot cross-consume them.
@@ -8433,18 +8433,7 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     snapshots of one object taken at different incarnations. Inert on any
 ///     path that does not bump the incarnation.
 ///
-/// EXCEPTION — THE WITHIN-ZONE REPOSITION FAMILY. For `move_to_library_at_index`
-/// with `from == Zone::Library` (the CR 400.7 zero-bump branch at
-/// `zones.rs:1809-1812`, emit at `zones.rs:1829`; CR 701.20b — revealing a card
-/// does not move it) all THREE additional separators are dead at once and
-/// `turn_zone_change_index` is the SOLE discriminator. Those events are
-/// reachable as witnesses here — library-destination `ChangesZoneAll` observers
-/// exist in the card pool and `zone_change_clause_matches`
-/// (`trigger_matchers.rs:1091-1130`) has no same-zone guard — AND inside a
-/// `park_search_observer_triggers` slice, via the tutor-to-top class
-/// (`SearchLibrary` -> `Shuffle` -> `PutAtLibraryPosition{Top}`).
-///
-/// SCOPE: LIVE PLAY. Four residuals remain open, are filed as issues, and are
+/// SCOPE: LIVE PLAY. Three residuals remain open, are filed as issues, and are
 /// NOT closed by this filter:
 ///   * R1 — the index is PER-TURN. `zone_changes_this_turn` is cleared at
 ///     `turns.rs:1253`, while `start_next_turn` does NOT clear
@@ -8453,22 +8442,11 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     drain-at-priority (`drain_deferred_trigger_queue_unchecked`), by the
 ///     CR 724 end-the-turn / end-the-combat-phase EFFECTS, and by elimination
 ///     — NOT by the turn boundary.
-///     For the within-zone reposition family the two incarnation
-///     fields add NO cross-turn protection, because they were never advanced.
 ///   * R2 — deserialized states bypass the recorder.
 ///     `PersistedGameState::into_game_state` (`types/game_state.rs:9024`)
 ///     reconstructs `ZoneChanged` straight into live buffers with
 ///     `#[serde(default)]` indices, so a restored state can carry index `0` on
 ///     distinct occurrences. Pre-existing and out of scope here.
-///   * R3 — `zone_change_clause_matches` (`trigger_matchers.rs:1091-1130`) has
-///     no same-zone guard, so a library-destination `ChangesZoneAll` observer
-///     fires on a within-library reposition, which CR 400.7 / CR 701.20b say is
-///     not a zone change. The record is ALSO written to the ledger
-///     unconditionally (`zones.rs:1818-1819`), so
-///     `QuantityRef::ZoneChangeCountThisTurn` / `ZoneChangeAggregateThisTurn`
-///     (`game/quantity.rs:4125-4165`) over-count and the ledger-subscript
-///     consumers (`types/ability.rs:23726`, `:23841`) see phantom rows. Gating
-///     the matcher alone would NOT fix those.
 ///   * R4 — the `EffectZoneChoice` `SelectCards` arm
 ///     (`engine_resolution_choices.rs:4493-4540`) validates length, membership
 ///     and current zone but NOT uniqueness, unlike its FIVE sibling arms:
@@ -8495,15 +8473,14 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     the R4 validation gap, and when R4 is fixed the action would be REJECTED,
 ///     so such a row would fail to construct and go RED — coupling it to a
 ///     validation gap rather than to the invariant.
-///   * `within_library_repositions_are_separated_only_by_the_occurrence_index`
-///     (`game/zones.rs`) pins the exception family at the library-insert emit
-///     site with the real mover: zero bump, `entered_incarnation` `None` on
-///     both, identical `trigger_source_context`, consecutive indices.
+///   * `within_library_reposition_does_not_create_a_zone_change`
+///     (`game/zones.rs`) pins the separate contract: a within-library reorder
+///     emits neither an event nor a ledger row.
 ///   * `parked_delivery_records_carry_distinct_occurrence_indices`
 ///     (`tests/integration/search_delivery_observer_dedup.rs`) pins the
 ///     allocator->event fidelity link in production on ONE emit path only
 ///     (`zone_pipeline` -> `move_to_zone` ordinary arm -> `zones.rs:1362`). It
-///     is a sentinel, not a census over the four emit sites.
+///     is a sentinel, not a census over the three emit sites.
 ///
 /// KNOWN UNCLOSED GUARD GAP, deliberately out of scope here:
 /// `apply_resolved_zone_change` compares the recorder's return value against
