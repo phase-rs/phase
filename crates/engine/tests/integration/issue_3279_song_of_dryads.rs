@@ -95,6 +95,7 @@ fn issue_3279_song_of_dryads_strips_enchanted_permanent_abilities() {
     );
 
     runner.pass_both_players();
+    runner.pass_both_players();
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert!(
         !matches!(
