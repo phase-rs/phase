@@ -778,18 +778,19 @@ pub(crate) fn move_object_with_terminal(
     // requested index and the tail's auto-shuffle is suppressed (CR 701.24a: a
     // placement is not a shuffle).
     //
-    // Phase E tranche 2: 11 raw library-position callers still bypass this consult
-    // by calling `zones::move_to_library_position` / `move_to_library_at_index`
-    // directly instead of routing through `move_object`'s placement arm. They are:
-    //   - engine_resolution_choices.rs (×5)
-    //   - reveal_until.rs:~400 (`shuffle_to_bottom`)
-    //   - drawn_this_turn_choice.rs:~114
-    //   - discover.rs:~103 (put-back of unhit cards)
-    //   - put_on_top.rs:~153 / ~158
-    //   - cascade.rs:~154 (bottom-in-random-order)
-    // Migrating each onto this arm is a guaranteed no-op today (zero pool
-    // `Moved` defs target the library) but pins the redirect consult for the
-    // future. Re-verify the census before lifting:
+    // Phase E tranche 2: six production raw library-position callers still bypass
+    // this consult by calling `zones::move_to_library_position` /
+    // `move_to_library_at_index` directly instead of routing through
+    // `move_object`'s placement arm. They are:
+    //   - engine_resolution_choices.rs: clash return (~2989)
+    //   - engine_resolution_choices.rs: EffectZoneChoice bottom placement (~7260)
+    //   - engine_resolution_choices.rs: EffectZoneChoice top/Nth placement (~7272)
+    //   - engine_resolution_choices.rs: EffectZoneChoice mixed-source reorder (~7333)
+    //   - zone_pipeline.rs: exempt library-placement delivery (~821)
+    //   - zone_pipeline.rs: replacement delivery placement (~2353)
+    // Migrating each onto this arm is a production no-op today (the only
+    // `Moved` definition targeting the library is test-only) but pins the
+    // redirect consult for the future. Re-verify the census before lifting:
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
