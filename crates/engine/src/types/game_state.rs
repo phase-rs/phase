@@ -7669,12 +7669,22 @@ fn reconcile_persisted_zone_change_occurrences(
     // restore can expose stale fixture/cache rows only after the wire projects
     // into GameState; discard them before assigning the current occurrence
     // namespace. Live deferred events keep their own recorded turn separately.
-    ledger.retain(|record| {
-        record
+    // Retain the old positions so current-turn replay keys can follow their
+    // ledger row through this compaction.
+    let mut old_to_current_index = HashMap::new();
+    let mut current_ledger = Vec::with_capacity(ledger.len());
+    for (old_index, record) in std::mem::take(ledger).into_iter().enumerate() {
+        let stale = record
             .get("recorded_turn_number")
             .and_then(json_u32)
-            .is_none_or(|recorded_turn| recorded_turn == 0 || recorded_turn >= turn_number)
-    });
+            .is_some_and(|recorded_turn| recorded_turn != 0 && recorded_turn < turn_number);
+        if stale {
+            continue;
+        }
+        old_to_current_index.insert(old_index, current_ledger.len());
+        current_ledger.push(record);
+    }
+    *ledger = current_ledger;
 
     let mut occurrences = Vec::with_capacity(ledger.len());
     for (index, record) in ledger.iter_mut().enumerate() {
@@ -7706,11 +7716,48 @@ fn reconcile_persisted_zone_change_occurrences(
         });
     }
 
+    reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
+
     let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
     visit_persisted_live_zone_changed_records(state, &mut |record| {
         reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
     })?;
 
+    Ok(())
+}
+
+/// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
+/// position. Compacting stale rows changes that position, so current-turn keys
+/// must follow their exact row before typed replay-key validation runs.
+fn reindex_persisted_batched_zone_change_trigger_keys(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    current_turn: u32,
+    old_to_current_index: &HashMap<usize, usize>,
+) -> Result<(), String> {
+    let Some(entries) = state.get_mut("batched_zone_change_trigger_fired") else {
+        return Ok(());
+    };
+    let entries = entries
+        .as_array_mut()
+        .ok_or_else(|| "batched_zone_change_trigger_fired must be an array".to_string())?;
+    for entry in entries {
+        let tuple = entry.as_array_mut().ok_or_else(|| {
+            "batched_zone_change_trigger_fired entries must be tuple arrays".to_string()
+        })?;
+        let [_, recorded_turn, index] = tuple.as_mut_slice() else {
+            return Err(
+                "batched_zone_change_trigger_fired entries must have three fields".to_string(),
+            );
+        };
+        if json_u32(recorded_turn) == Some(current_turn) {
+            let old_index = json_usize(index).ok_or_else(|| {
+                "batched_zone_change_trigger_fired occurrence index must be an integer".to_string()
+            })?;
+            if let Some(new_index) = old_to_current_index.get(&old_index) {
+                *index = serde_json::Value::from(*new_index);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -22762,10 +22809,15 @@ mod tests {
         let mut state = normal_trigger_firing_fixture();
         state.turn_number = 19;
         let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
-        let current = persisted_zone_change_record(ObjectId(9_127), 19, 9);
+        let current = persisted_zone_change_record(ObjectId(9_127), 19, 1);
         state.zone_changes_this_turn.push_back(stale);
         state.zone_changes_this_turn.push_back(current.clone());
         state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
+        state.batched_zone_change_trigger_fired.insert((
+            printed_trigger_ref(1),
+            state.turn_number,
+            1,
+        ));
 
         let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
             .expect("fixture serializes");
@@ -22784,6 +22836,11 @@ mod tests {
             "the retained current-turn ledger row receives the current namespace"
         );
         assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(19, 0)]);
+        assert!(restored.batched_zone_change_trigger_fired.contains(&(
+            printed_trigger_ref(1),
+            19,
+            0
+        )));
     }
 
     #[test]
