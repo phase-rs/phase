@@ -635,6 +635,24 @@ impl ResolutionStack {
         }
     }
 
+    pub fn active_ability_continuation_discard_parent_result(
+        &self,
+        discard_id: DiscardFrameId,
+    ) -> Option<crate::types::ability::DiscardedCardResult> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(frame)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if frame.id == discard_id => frame.results.first().cloned(),
+            _ => None,
+        }
+    }
+
     /// Consume the active ability-continuation frame.
     pub fn take_active_ability_continuation(
         &mut self,

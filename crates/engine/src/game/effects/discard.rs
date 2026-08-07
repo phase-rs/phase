@@ -126,6 +126,28 @@ pub(crate) fn complete_discard_to_graveyard(
 /// Hands the terminal result of a Recruit discard to its directly contingent
 /// continuation. This is called only after terminal zone delivery: a
 /// replacement choice may keep the operation parked until that point.
+pub(crate) fn hand_off_recruit_discard_result(
+    state: &mut GameState,
+    frame_id: crate::types::identifiers::DiscardFrameId,
+) -> bool {
+    let result = state
+        .resolution_stack
+        .active_ability_continuation_discard_parent_result(frame_id);
+    let Some(continuation) = state
+        .resolution_stack
+        .active_ability_continuation_with_discard_parent_mut(frame_id)
+    else {
+        return false;
+    };
+    if let Some(result) = result {
+        continuation
+            .pending
+            .chain
+            .set_direct_discard_result_for_immediate_node(result);
+    }
+    true
+}
+
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(

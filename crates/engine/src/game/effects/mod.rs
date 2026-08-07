@@ -789,10 +789,12 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 discard.id, discard_id,
                 "direct Recruit parent id must remain adjacent"
             );
-            frame
-                .pending
-                .chain
-                .set_direct_discard_result_for_immediate_node(discard.results.into_iter().next());
+            if let Some(result) = discard.results.into_iter().next() {
+                frame
+                    .pending
+                    .chain
+                    .set_direct_discard_result_for_immediate_node(result);
+            }
         }
         let cont = frame.pending;
         let PendingContinuation {
