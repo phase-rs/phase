@@ -1519,7 +1519,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // preceding projection/redaction passes decide whether an object's identity
     // remains available; UI code consumes this result rather than recreating
     // those rules from reveal/private-look bookkeeping.
-    for object in filtered.objects.values_mut() {
+    for (_, object) in filtered.objects.iter_mut() {
         object.display_visible_to_viewer = object.name != HIDDEN_CARD_NAME;
     }
 
