@@ -4,6 +4,7 @@ mod ad_nauseam_repeat;
 mod adamant_enters_with_leading_if_gate;
 mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
+mod ai_decision_contract;
 mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
