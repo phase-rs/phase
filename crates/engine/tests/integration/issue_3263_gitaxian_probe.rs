@@ -25,6 +25,7 @@ fn gitaxian_probe_paid_life_keeps_target_hand_known_after_opponent_land_play() {
         .add_spell_to_hand_from_oracle(P0, "Gitaxian Probe", true, GITAXIAN_PROBE)
         .id();
     let secret = scenario.add_creature_to_hand(P1, "Probe Secret", 2, 2).id();
+    let land = scenario.add_land_to_hand(P1, "Forest").id();
     let mut runner = scenario.build();
     create_object(
         runner.state_mut(),
@@ -33,21 +34,6 @@ fn gitaxian_probe_paid_life_keeps_target_hand_known_after_opponent_land_play() {
         "Probe Draw".to_string(),
         Zone::Library,
     );
-    let land = create_object(
-        runner.state_mut(),
-        CardId(901),
-        P1,
-        "Forest".to_string(),
-        Zone::Hand,
-    );
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&land)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(engine::types::card_type::CoreType::Land);
     runner
         .state_mut()
         .objects
