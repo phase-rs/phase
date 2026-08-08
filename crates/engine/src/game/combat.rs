@@ -4302,7 +4302,11 @@ fn best_declaration(
         }
     }
 
-    best
+    let best = best?;
+    if forced_pair.is_some_and(|pair| !best.0.contains(&pair)) {
+        return None;
+    }
+    Some(best)
 }
 
 /// Replace `best` with `decl` when `decl` is strictly better under the
@@ -6455,6 +6459,38 @@ mod tests {
             ),
             None,
             "a forced companion-dependent pair cannot degrade to the empty declaration"
+        );
+    }
+
+    #[test]
+    fn forced_must_be_sole_pair_cannot_use_an_unforced_dp_witness() {
+        let state = setup();
+        let target = AttackTarget::Player(PlayerId(1));
+        let constraints = mk_constraints(
+            vec![(1, vec![target]), (2, vec![target]), (3, vec![target])],
+            vec![
+                AttackRequirement::MustAttackGeneric {
+                    creature: ObjectId(2),
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: ObjectId(3),
+                },
+            ],
+            None,
+            vec![],
+            vec![],
+            vec![1],
+        );
+
+        assert_eq!(
+            best_declaration(
+                &constraints,
+                &state,
+                AttackTargetUniverse::HardLegal,
+                Some((ObjectId(1), target)),
+            ),
+            None,
+            "the higher-scoring two-attacker DP witness excludes the forced sole attacker and must not create false support"
         );
     }
 
