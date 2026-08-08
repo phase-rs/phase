@@ -4203,7 +4203,7 @@ pub enum FilterProp {
     /// `QuantityRef::ConvokedCreatureCount` (both read `convoked_creatures`).
     /// Used by "a creature that convoked this spell" (Everything Comes to Dust).
     ConvokedSource,
-    /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
+    /// CR 310.9 + CR 310.9e: Matches battles whose protector satisfies
     /// `controller` relative to the ability source ("each battle they protect").
     ProtectorMatches {
         controller: ControllerRef,
@@ -4560,7 +4560,7 @@ pub enum FilterProp {
     DistinctFrom {
         reference: Box<TargetFilter>,
     },
-    /// CR 604.3: Matches objects whose current zone is any of the listed zones (OR semantics).
+    /// CR 400.1: Matches objects whose current zone is any of the listed zones (OR semantics).
     /// Used for zone-based restrictions like "cards in graveyards and libraries".
     InAnyZone {
         zones: Vec<Zone>,
@@ -6090,7 +6090,7 @@ pub enum QuantityRef {
     /// source set. Covers zone cards, linked-exile cards, and matching objects
     /// without proliferating card-type-count siblings.
     DistinctCardTypes { source: CardTypeSetSource },
-    /// CR 205.3 + CR 604.3: Count distinct subtype *values* across a
+    /// CR 205.3: Count distinct subtype *values* across a
     /// parameterized source set (Subgoyf — "the number of different subtypes
     /// other than creature types among cards in all graveyards"). The subtype
     /// peer of [`QuantityRef::DistinctCardTypes`] (CR 205.2, card types): it
@@ -6120,7 +6120,7 @@ pub enum QuantityRef {
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
     ExiledCardPower { index: u32 },
-    /// CR 604.3: Count cards in a zone matching optional type filters.
+    /// CR 400.1: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
     ZoneCardCount {
@@ -7156,7 +7156,7 @@ pub enum QuantityExpr {
         divisor: u32,
         rounding: RoundingMode,
     },
-    /// CR 604.3: Base expression plus a fixed integer offset.
+    /// Base expression plus a fixed integer offset.
     /// "N plus the number of X" / "that number plus N" patterns.
     Offset {
         inner: Box<QuantityExpr>,
@@ -14907,7 +14907,7 @@ impl TargetFilter {
         }
     }
 
-    /// CR 400.3 + CR 701.23: Returns the union of explicit zone constraints in this filter.
+    /// CR 400.1: Returns the union of explicit zone constraints in this filter.
     /// Preserves the multi-zone semantics of `FilterProp::InAnyZone` (e.g.
     /// "search ... graveyard, hand, and library") that `extract_in_zone` collapses
     /// to a single zone. Falls back to the single `InZone` when only that variant
