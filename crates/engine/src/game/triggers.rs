@@ -8333,6 +8333,19 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     new_events
 }
 
+/// CR 603.2 + CR 603.3b + CR 603.7c: Collect delayed triggers from an event
+/// batch into the same deferred queue as ordinary triggers. Cost-payment
+/// transactions use this before claiming their events, so a one-shot delayed
+/// trigger caused by a cost is ordered with the other triggers from that cost.
+pub(crate) fn collect_delayed_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
+    let (pending, consumed_events) =
+        collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
+    state.deferred_triggers.extend(pending);
+    state
+        .consumed_before_priority_trigger_events
+        .extend(consumed_events);
+}
+
 pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize) -> usize {
     let event = &events[event_index];
     events[..event_index]

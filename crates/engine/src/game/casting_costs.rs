@@ -5500,6 +5500,12 @@ pub(super) fn push_ability_entry(
         let mut deferred_contexts = std::mem::take(&mut state.deferred_triggers);
         collection.commit_into(state, &mut deferred_contexts);
         state.deferred_triggers = deferred_contexts;
+        // CR 602.2b + CR 603.3b + CR 603.7c: Cost-payment events are claimed
+        // below because the activation transaction owns their trigger batch.
+        // Collect delayed triggers before that claim too; otherwise a one-shot
+        // delayed trigger such as Earthbend's dies-or-exiled return is hidden
+        // from the later priority scan and never reaches the stack.
+        super::triggers::collect_delayed_triggers_into_deferred(state, events);
         state
             .consumed_before_priority_trigger_events
             .extend(events.iter().enumerate().map(|(index, event)| {
