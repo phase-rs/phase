@@ -1834,6 +1834,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
     let mut state = decode_restored_game_state(json_str)?;
+    rehydrate_restored_state_from_card_db(&mut state)?;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
     // come NEXT rather than replaying from origin. The engine owns this logic
@@ -1841,7 +1842,6 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     // and reproduce the previous rewind-to-origin behavior.
     state.rehydrate_rng();
     state.debug_mode = true;
-    rehydrate_restored_state_from_card_db(&mut state)?;
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
@@ -1895,6 +1895,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     }
 
     let mut state = decode_restored_game_state(json_str)?;
+    rehydrate_restored_state_from_card_db(&mut state)?;
 
     // Deliberately re-roll a fresh seed on multiplayer host resume so continued
     // play diverges from any pre-save sequence (mirrors server-core). This is a
@@ -1907,7 +1908,6 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
     state.rng_word_pos = 0;
 
-    rehydrate_restored_state_from_card_db(&mut state)?;
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
 
