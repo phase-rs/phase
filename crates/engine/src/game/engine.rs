@@ -5575,7 +5575,7 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
                 .iter()
                 .map(|player| player.id)
                 .collect::<Vec<_>>();
-            state.remember_card_identities(audience, card_ids);
+            state.remember_card_identities(audience, &unpublished);
         }
     }
 }
