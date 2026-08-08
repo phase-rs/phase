@@ -555,7 +555,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await flushPromises();
     expect(supportsAiDecisionDiagnostics(adapter)).toBe(false);
     guest.simulateClose();
-    await flushPromises();
+    await vi.waitFor(() => expect(supportsAiDecisionDiagnostics(adapter)).toBe(true));
 
     expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledOnce();
     expect(supportsAiDecisionDiagnostics(adapter)).toBe(true);
