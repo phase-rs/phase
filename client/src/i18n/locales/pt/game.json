@@ -441,6 +441,8 @@
     "initiativeTooltip": "Tem a Iniciativa — aventura-se na Subcidade no início da manutenção",
     "cityBlessing": "Bênção da Cidade",
     "cityBlessingTooltip": "Bênção da Cidade — controla dez ou mais permanentes (Ascender)",
+    "enduringStory": "História duradoura",
+    "enduringStoryTooltip": "História duradoura — obtida ao controlar um permanente com Storied e três ou mais artefatos, permanentes lendários e/ou sagas; dura pelo resto do jogo",
     "dungeonAriaLabel": "Aventurando-se em {{name}}, sala {{room}}",
     "dungeonTooltip": "Aventurando-se em {{name}} — sala {{room}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
@@ -2249,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Mostrar decisões da IA",
+    "aiDecisionUnavailable": "Os diagnósticos de decisão da IA não estão disponíveis para este jogo."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisão da IA",
+    "rankedSubtitle": "Amostra softmax na temperatura {{temperature}}.",
+    "directSubtitle": "Selecionada por uma política direta de IA.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MELHOR",
+    "chosen": "ESCOLHIDA",
+    "legendTop": "Mais bem classificada",
+    "legendChosen": "Escolhida",
+    "collapse": "Recolher detalhes da decisão da IA",
+    "expand": "Expandir detalhes da decisão da IA",
+    "close": "Fechar sobreposição da decisão da IA"
   },
   "status": {
     "yourPriority": "Your priority",

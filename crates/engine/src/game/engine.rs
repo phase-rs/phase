@@ -6779,7 +6779,7 @@ fn apply_action(
 
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
-    let mut skip_deferred_trigger_drain = false;
+    let skip_deferred_trigger_drain = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -10413,13 +10413,6 @@ fn apply_action(
                     waiting_for,
                 ) => {
                     triggers_processed_inline = true;
-                    waiting_for
-                }
-                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithParkedObservers(
-                    waiting_for,
-                ) => {
-                    triggers_processed_inline = true;
-                    skip_deferred_trigger_drain = true;
                     waiting_for
                 }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
@@ -15681,9 +15674,11 @@ mod stage2_injector_tests {
                 // because that is what makes a NEW mint a counted event; a function +
                 // content-hash anchor would end the drift class while keeping that property,
                 // and is offered as a follow-up rather than taken unannounced mid-review.
-                "game/effects/mod.rs:6177".to_string(),
-                "game/effects/mod.rs:6254".to_string(),
-                "game/effects/mod.rs:9442".to_string(),
+                // #6812 noted-mana support inserts two lines above all three producers:
+                // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
+                "game/effects/mod.rs:6212".to_string(),
+                "game/effects/mod.rs:6289".to_string(),
+                "game/effects/mod.rs:9477".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -15898,7 +15893,12 @@ mod stage2_injector_tests {
                 // `scoped_library_search.rs`, neither of which this change touches, and the
                 // test module it adds contains no line matching the needle — total still 37,
                 // partition still 5/7/25.
-                "game/engine.rs:11841".to_string(),
+                // Search-observer dispatch: `:11828 ⇒ :11821`, −7. Removing the retired
+                // `WaitingForWithParkedObservers` match arm is the only hunk above this
+                // producer; it changes trigger-drain timing but does not add a prompt.
+                // The Ward continuation port independently inserts +13 lines above the same
+                // producer, so the combined tree is `:11828 - 7 + 13 = :11834`.
+                "game/engine.rs:11834".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

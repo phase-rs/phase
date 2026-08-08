@@ -441,6 +441,8 @@
     "initiativeTooltip": "Ha l'Iniziativa — si avventura nella Città Bassa all'inizio del mantenimento",
     "cityBlessing": "Benedizione della Città",
     "cityBlessingTooltip": "Benedizione della Città — controlla dieci o più permanenti (Ascendere)",
+    "enduringStory": "Storia duratura",
+    "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
     "dungeonAriaLabel": "Avventura in {{name}}, stanza {{room}}",
     "dungeonTooltip": "Avventura in {{name}} — stanza {{room}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
@@ -2249,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Mostra decisioni IA",
+    "aiDecisionUnavailable": "La diagnostica delle decisioni IA non è disponibile per questa partita."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisione IA",
+    "rankedSubtitle": "Campione softmax alla temperatura {{temperature}}.",
+    "directSubtitle": "Selezionata da una politica IA diretta.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MIGLIORE",
+    "chosen": "SCELTA",
+    "legendTop": "Più alta in classifica",
+    "legendChosen": "Scelta",
+    "collapse": "Comprimi i dettagli della decisione IA",
+    "expand": "Espandi i dettagli della decisione IA",
+    "close": "Chiudi la finestra della decisione IA"
   },
   "status": {
     "yourPriority": "Your priority",

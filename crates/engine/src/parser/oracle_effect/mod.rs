@@ -27665,6 +27665,7 @@ fn mana_production_with_count(
             contribution: *contribution,
             fixed_alternative: *fixed_alternative,
         }),
+        ManaProduction::NotedType { .. } => Some(ManaProduction::NotedType { count }),
         ManaProduction::OpponentLandColors { .. } => {
             Some(ManaProduction::OpponentLandColors { count })
         }

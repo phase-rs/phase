@@ -402,8 +402,22 @@ pub fn resolve(
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             tracked_set_cast_candidates(state, ability, target_filter)
         }
+        // CR 400.7 + CR 603.7c: a delayed cast-from-zone whose pinned referent
+        // became a new object casts nothing. This `_` arm is THE single read
+        // through which a pinned referent flows into this resolver.
+        //
+        // The plan pre-flagged this file as a possible STOP because of its three
+        // `scoped_ability.targets = …` assignments (`:112`, `:444`, `:517`) and
+        // `fallback.targets = ability.targets.clone()` (`:257`). Re-read at the
+        // source, none of those is a read of the pinned referent: all three
+        // `scoped_ability` sites WRITE a freshly-derived id list onto a throwaway
+        // clone purely to scope a `FilterContext`, and their inputs
+        // (`deduped`, `candidate_ids`, `target_ids`) are already downstream of
+        // this arm. `:257` is chain-context propagation onto a declined-optional
+        // fallback ability, not a target resolution. So the flat substitution
+        // does apply here, at exactly one site.
         _ => ability
-            .targets
+            .live_object_targets(state)
             .iter()
             .filter_map(|t| {
                 if let TargetRef::Object(id) = t {
@@ -414,6 +428,27 @@ pub fn resolve(
             })
             .collect(),
     };
+
+    // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it cast
+    // nothing. EARLY RETURN IS MANDATORY, and its placement immediately below
+    // the read is load-bearing: EVERY branch between here and the end of this
+    // function keys on `target_ids.is_empty()` and re-binds to a DIFFERENT set
+    // of objects — the linked-exile scan (`:432`), the `last_revealed` library
+    // scan (`:467`), and the `SelfRef` source fallback (`:570`). Letting the
+    // substitution above empty the list without returning would hand the cast to
+    // one of those pools instead of doing nothing.
+    //
+    // Mirrors the existing "No targets resolved — nothing to cast" exit below,
+    // including its `EffectKind::CastFromZone` literal, so both no-op paths emit
+    // the same event.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora) inject the legal
     // looked-at library cards as targets at the chain seam

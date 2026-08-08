@@ -19940,6 +19940,14 @@ fn bridge_city_blessing() {
 }
 
 #[test]
+fn bridge_enduring_story() {
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::HasEnduringStory),
+        Some(TriggerCondition::HasEnduringStory),
+    );
+}
+
+#[test]
 fn bridge_source_is_tapped() {
     assert_eq!(
         static_condition_to_trigger_condition(&StaticCondition::SourceIsTapped),

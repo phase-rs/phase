@@ -1452,6 +1452,20 @@ fn scan_mana_production_type(
                 },
                 alt((tag("mana of the chosen color"), tag("mana of that color"))),
             ),
+            // CR 106.1b: "mana of ~'s last noted type" (Jeweled Amulet: "Add
+            // one mana of this artifact's last noted type" — `~` normalized
+            // from "this artifact" upstream). Engine-set (`Effect::
+            // NoteManaSpent`), not player-prompted, so this is a separate
+            // variant from `ChosenColor` above rather than a shared phrase.
+            value(
+                ManaProduction::NotedType {
+                    count: count.clone(),
+                },
+                alt((
+                    tag("mana of ~'s last noted type"),
+                    tag("mana of ~’s last noted type"),
+                )),
+            ),
         ))
         .parse(input)
     })

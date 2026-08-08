@@ -441,6 +441,8 @@
     "initiativeTooltip": "Détient l'Initiative — s'aventure dans la Ville souterraine au début de l'entretien",
     "cityBlessing": "Bénédiction de la cité",
     "cityBlessingTooltip": "Bénédiction de la cité — contrôle dix permanents ou plus (Ascension)",
+    "enduringStory": "Histoire durable",
+    "enduringStoryTooltip": "Histoire durable — obtenue en contrôlant un permanent avec Storied et au moins trois artefacts, permanents légendaires et/ou sagas ; dure pour le reste de la partie",
     "dungeonAriaLabel": "Aventure dans {{name}}, salle {{room}}",
     "dungeonTooltip": "Aventure dans {{name}} — salle {{room}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
@@ -2249,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Afficher les décisions de l’IA",
+    "aiDecisionUnavailable": "Les diagnostics de décision de l’IA ne sont pas disponibles pour cette partie."
+  },
+  "aiDecisionOverlay": {
+    "title": "Décision de l’IA",
+    "rankedSubtitle": "Échantillon softmax à la température {{temperature}}.",
+    "directSubtitle": "Choisie par une politique d’IA directe.",
+    "metrics": "S {{score}} · P {{weight}}",
+    "top": "MEILLEUR",
+    "chosen": "CHOISIE",
+    "legendTop": "Mieux classée",
+    "legendChosen": "Choisie",
+    "collapse": "Réduire les détails de la décision de l’IA",
+    "expand": "Développer les détails de la décision de l’IA",
+    "close": "Fermer la fenêtre de décision de l’IA"
   },
   "status": {
     "yourPriority": "Your priority",

@@ -441,6 +441,8 @@
     "initiativeTooltip": "Hat die Initiative — wagt sich zu Beginn der Versorgung in die Unterstadt vor",
     "cityBlessing": "Segen der Stadt",
     "cityBlessingTooltip": "Segen der Stadt — kontrolliert zehn oder mehr bleibende Karten (Aufstieg)",
+    "enduringStory": "Bleibende Geschichte",
+    "enduringStoryTooltip": "Bleibende Geschichte — erhalten, wenn du eine Storied bleibende Karte und drei oder mehr Artefakte, legendäre bleibende Karten und/oder Sagen kontrollierst; bleibt für den Rest der Partie bestehen",
     "dungeonAriaLabel": "Wagt sich in {{name}} vor, Raum {{room}}",
     "dungeonTooltip": "Wagt sich in {{name}} vor — Raum {{room}}",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
@@ -2249,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "KI-Entscheidungen anzeigen",
+    "aiDecisionUnavailable": "KI-Entscheidungsdiagnosen sind für dieses Spiel nicht verfügbar."
+  },
+  "aiDecisionOverlay": {
+    "title": "KI-Entscheidung",
+    "rankedSubtitle": "Softmax-Stichprobe bei Temperatur {{temperature}}.",
+    "directSubtitle": "Von einer direkten KI-Strategie ausgewählt.",
+    "metrics": "S {{score}} · G {{weight}}",
+    "top": "BESTE",
+    "chosen": "GEWÄHLT",
+    "legendTop": "Bestplatziert",
+    "legendChosen": "Gewählt",
+    "collapse": "Details der KI-Entscheidung einklappen",
+    "expand": "Details der KI-Entscheidung ausklappen",
+    "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
     "yourPriority": "Your priority",

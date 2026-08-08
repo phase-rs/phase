@@ -173,6 +173,7 @@ pub enum KeywordKind {
     Exploit,
     Explore,
     Ascend,
+    Storied,
     StartYourEngines,
     Dredge,
     Modular,
@@ -637,6 +638,7 @@ pub enum Keyword {
     Exploit,
     Explore,
     Ascend,
+    Storied,
     /// CR 702.179: Grants the player a speed value via SBA and enables the inherent speed trigger.
     StartYourEngines,
     Dredge(u32),
@@ -1241,6 +1243,7 @@ impl Keyword {
             | Keyword::Evolve
             | Keyword::Extort
             | Keyword::Ascend
+            | Keyword::Storied
             | Keyword::StartYourEngines
             | Keyword::Modular(_)
             | Keyword::Renown(_)
@@ -1449,6 +1452,7 @@ impl Keyword {
             Keyword::Exploit => KeywordKind::Exploit,
             Keyword::Explore => KeywordKind::Explore,
             Keyword::Ascend => KeywordKind::Ascend,
+            Keyword::Storied => KeywordKind::Storied,
             Keyword::StartYourEngines => KeywordKind::StartYourEngines,
             Keyword::Dredge(_) => KeywordKind::Dredge,
             Keyword::Modular(_) => KeywordKind::Modular,
@@ -2680,6 +2684,7 @@ impl FromStr for Keyword {
             "exploit" => Ok(Keyword::Exploit),
             "explore" => Ok(Keyword::Explore),
             "ascend" => Ok(Keyword::Ascend),
+            "storied" => Ok(Keyword::Storied),
             "startyourengines" => Ok(Keyword::StartYourEngines),
             "startyourengines!" => Ok(Keyword::StartYourEngines),
             "soulbond" => Ok(Keyword::Soulbond),
@@ -3054,6 +3059,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Exploit" => Ok(Keyword::Exploit),
         "Explore" => Ok(Keyword::Explore),
         "Ascend" => Ok(Keyword::Ascend),
+        "Storied" => Ok(Keyword::Storied),
         "StartYourEngines" => Ok(Keyword::StartYourEngines),
         "Soulbond" => Ok(Keyword::Soulbond),
         "Banding" => Ok(Keyword::Banding),
@@ -4714,6 +4720,7 @@ mod tests {
             "Exploit",
             "Explore",
             "Ascend",
+            "Storied",
             "Soulbond",
             "Partner",
             "Banding",

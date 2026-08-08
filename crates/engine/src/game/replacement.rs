@@ -1659,7 +1659,10 @@ fn discard_applier(
 ) -> ApplyResult {
     match event {
         ProposedEvent::Discard {
-            object_id, applied, ..
+            object_id,
+            discard_frame,
+            applied,
+            ..
         } => ApplyResult::Modified(ProposedEvent::ZoneChange {
             object_id,
             from: Zone::Hand,
@@ -1672,6 +1675,7 @@ fn discard_applier(
             enter_transformed: false,
             face_down_profile: None,
             enter_as_copy: None,
+            discard_frame,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -10359,6 +10363,7 @@ mod tests {
                 object_id: ObjectId(10),
                 source_id: None,
                 caused_by_effect: false,
+                discard_frame: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -10817,6 +10822,7 @@ mod tests {
                     object_id: ObjectId(1),
                     source_id: None,
                     caused_by_effect: false,
+                    discard_frame: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::Discard],
@@ -11143,6 +11149,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -13361,6 +13368,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -14461,6 +14469,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -17612,6 +17621,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            discard_frame: None,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -17657,6 +17667,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            discard_frame: None,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);

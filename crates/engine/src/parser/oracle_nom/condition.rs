@@ -1248,6 +1248,11 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasCityBlessing,
             tag("you have the city's blessing"),
         ),
+        // CR 702.195a-b: Storied grants the enduring story player designation.
+        value(
+            StaticCondition::HasEnduringStory,
+            tag("you have an enduring story"),
+        ),
         // CR 702.178a / CR 702.179f: Speed conditions.
         value(
             StaticCondition::HasMaxSpeed,
@@ -13958,6 +13963,13 @@ mod tests {
         let (rest, c) = parse_inner_condition("you have the city's blessing").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::HasCityBlessing);
+    }
+
+    #[test]
+    fn test_enduring_story() {
+        let (rest, condition) = parse_inner_condition("you have an enduring story").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::HasEnduringStory);
     }
 
     #[test]

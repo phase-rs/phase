@@ -1648,6 +1648,7 @@ pub(super) fn handle_ward_discard_choice(
             chosen[0],
             player,
             Some(pending_effect.source_id),
+            None,
             std::collections::HashSet::new(),
             events,
         )

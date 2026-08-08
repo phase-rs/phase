@@ -261,7 +261,7 @@ describe("PermanentCard", () => {
 
   it("renders the engine-authored temporary can't-be-blocked badge with its public source", () => {
     const gameState = makeState();
-    gameState.derived = { temporary_cant_be_blocked: { 1: 2 } };
+    gameState.derived = { cant_be_blocked: [1], temporary_cant_be_blocked: { 1: 2 } };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();
@@ -275,10 +275,20 @@ describe("PermanentCard", () => {
     );
   });
 
+  it("renders the engine-authored permanent can't-be-blocked badge without temporary attribution", () => {
+    const gameState = makeState();
+    gameState.derived = { cant_be_blocked: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Can't be blocked")).toBeInTheDocument();
+  });
+
   it("renders the engine-authored temporary can't-be-blocked badge on a face-down recipient without source attribution", () => {
     const gameState = makeState();
     gameState.objects[1].face_down = true;
-    gameState.derived = { temporary_cant_be_blocked: { 1: null } };
+    gameState.derived = { cant_be_blocked: [1], temporary_cant_be_blocked: { 1: null } };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();

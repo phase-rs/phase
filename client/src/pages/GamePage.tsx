@@ -18,8 +18,9 @@ import type {
   MatchConfig,
   ObjectId,
   SerializedAbilityCost,
+  AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsMatchConcede } from "../adapter/types";
+import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -131,6 +132,7 @@ import {
   type SettingsTabId,
 } from "../components/settings/PreferencesModal.tsx";
 import { DebugPanel } from "../components/chrome/DebugPanel.tsx";
+import { AiDecisionOverlay } from "../components/chrome/AiDecisionOverlay.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { TakebackRequestDialog } from "../components/multiplayer/TakebackRequestDialog.tsx";
@@ -954,6 +956,26 @@ function GamePageContent({
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
+  // GamePage owns the only local diagnostic subscription. Adapter events remain
+  // gameplay-only so no receipt can enter P2P/server state or wire traffic.
+  useEffect(() => {
+    setAiDecisionReceipt(null);
+    if (!supportsAiDecisionDiagnostics(adapter)) {
+      return;
+    }
+    adapter.setAiDecisionDiagnosticsEnabled(aiDecisionCaptureEnabled);
+    if (!aiDecisionCaptureEnabled) {
+      return;
+    }
+    const unsubscribe = adapter.subscribeAiDecisionDiagnostics(setAiDecisionReceipt);
+    return () => {
+      unsubscribe();
+      adapter.setAiDecisionDiagnosticsEnabled(false);
+    };
+  }, [adapter, aiDecisionCaptureEnabled]);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1758,7 +1780,14 @@ function GamePageContent({
       </AnimatePresence>
 
       {/* Overlay layers */}
-      <DebugPanel />
+      <DebugPanel
+        aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
+      />
+      <AiDecisionOverlay
+        receipt={aiDecisionReceipt}
+        visible={aiDecisionCaptureEnabled}
+        onClose={() => setAiDecisionCaptureEnabled(false)}
+      />
       <ResolutionProgressOverlay />
 
       {preferencesOpen && (

@@ -441,6 +441,8 @@
     "initiativeTooltip": "Ma Inicjatywę — wyprawia się do Podmiasta na początku utrzymania",
     "cityBlessing": "Błogosławieństwo miasta",
     "cityBlessingTooltip": "Błogosławieństwo miasta — kontroluje dziesięć lub więcej trwałych (Ascend)",
+    "enduringStory": "Trwała historia",
+    "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
     "dungeonAriaLabel": "Wyprawa w {{name}}, pokój {{room}}",
     "dungeonTooltip": "Wyprawa w {{name}} — pokój {{room}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
@@ -2249,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Pokaż decyzje SI",
+    "aiDecisionUnavailable": "Diagnostyka decyzji SI jest niedostępna w tej grze."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decyzja SI",
+    "rankedSubtitle": "Próbka softmax przy temperaturze {{temperature}}.",
+    "directSubtitle": "Wybrano przez bezpośrednią strategię SI.",
+    "metrics": "W {{score}} · Waga {{weight}}",
+    "top": "NAJLEPSZA",
+    "chosen": "WYBRANA",
+    "legendTop": "Najwyżej oceniona",
+    "legendChosen": "Wybrana",
+    "collapse": "Zwiń szczegóły decyzji SI",
+    "expand": "Rozwiń szczegóły decyzji SI",
+    "close": "Zamknij nakładkę decyzji SI"
   },
   "status": {
     "yourPriority": "Your priority",

@@ -2426,6 +2426,7 @@ export type GameEvent =
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
+  | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
@@ -2843,6 +2844,9 @@ export interface DerivedViews {
   */
   temporary_cant_be_blocked?: Record<string, ObjectId | null>;
 
+  /** Engine-classified recipients of an applicable bare CantBeBlocked static. */
+  cant_be_blocked?: ObjectId[];
+
   /**
    * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
    * renders these directly rather than deciding which combat relations are
@@ -3115,6 +3119,7 @@ export interface GameState {
   initiative?: PlayerId | null;
   monarch?: PlayerId | null;
   city_blessing?: PlayerId[];
+  enduring_story?: PlayerId[];
   ring_level?: Record<string, number>;
   ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
@@ -3620,6 +3625,42 @@ export interface AiActionProposal {
   semanticOwner: PlayerId;
   actor: PlayerId;
   action: GameAction;
+}
+
+/** Local-only explanation bound to an opaque AI proposal token. */
+export interface AiDecisionDiagnosticReceipt {
+  semanticOwner: PlayerId;
+  authorizedActor: PlayerId;
+  selectedAction: GameAction;
+  status: "ranked" | "direct";
+  selectionExplanation: string;
+  samplingTemperature: number | null;
+  candidates: AiDecisionDiagnosticCandidate[];
+}
+
+export interface AiDecisionDiagnosticCandidate {
+  action: GameAction;
+  objectName: string | null;
+  details: { label: string; value: string }[];
+  rank: number | null;
+  isTopRanked: boolean;
+  isSelected: boolean;
+  score: number | null;
+  weight: number | null;
+  probability: number | null;
+}
+
+export interface AiDecisionDiagnosticsCapability {
+  setAiDecisionDiagnosticsEnabled(enabled: boolean): void;
+  subscribeAiDecisionDiagnostics(listener: (receipt: AiDecisionDiagnosticReceipt) => void): () => void;
+}
+
+export function supportsAiDecisionDiagnostics(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & AiDecisionDiagnosticsCapability {
+  return adapter != null
+    && "setAiDecisionDiagnosticsEnabled" in adapter
+    && "subscribeAiDecisionDiagnostics" in adapter;
 }
 
 /** Result of the engine-owned game-scoped AI worker card-data build. */

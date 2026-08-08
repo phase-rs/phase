@@ -1946,6 +1946,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,

@@ -561,6 +561,7 @@ fn project_mana_production(p: &ManaProduction) -> (Vec<(usize, i64)>, AxisMagnit
             (vec![(slot, a)], mag)
         }
         ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count, .. }
         | ManaProduction::OpponentLandColors { count, .. }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
         | ManaProduction::AnyInCommandersColorIdentity { count, .. }
@@ -969,6 +970,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
         | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }

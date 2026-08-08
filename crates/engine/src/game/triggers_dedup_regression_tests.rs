@@ -3713,6 +3713,118 @@ fn zone_change_count(events: &[GameEvent]) -> usize {
         .count()
 }
 
+fn recorded_zone_change_event(state: &mut GameState, object_id: ObjectId) -> GameEvent {
+    let mut event = zone_change_event(object_id);
+    let GameEvent::ZoneChanged { record, .. } = &mut event else {
+        unreachable!("zone_change_event always returns ZoneChanged");
+    };
+    crate::game::restrictions::record_zone_change(state, record);
+    event
+}
+
+#[test]
+fn deferred_zone_change_witness_does_not_alias_the_next_turns_ledger_index() {
+    let mut state = setup();
+    let old_turn = state.turn_number;
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    state
+        .deferred_triggers
+        .push(queued_context_for(old_event.clone()));
+
+    assert!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&old_event),
+            0,
+            &[]
+        )
+        .is_empty(),
+        "the same-turn queued witness must suppress its own occurrence"
+    );
+
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert_eq!(
+        filter_already_collected_trigger_events_from(
+            &state,
+            std::slice::from_ref(&new_event),
+            0,
+            &[],
+        ),
+        vec![new_event],
+        "a deferred witness from turn {old_turn} must not consume index 0 from turn {}",
+        state.turn_number
+    );
+}
+
+#[test]
+fn batched_zone_change_replay_guard_keeps_old_turn_markers_distinct_from_new_index_zero() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    let (definition, definition_ref) = {
+        let object = state.objects.get_mut(&observer).unwrap();
+        object.trigger_definitions[0].definition.batched = true;
+        let definition = object.trigger_definitions[0].definition.clone();
+        let definition_ref = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        (definition, definition_ref)
+    };
+    let old_event = recorded_zone_change_event(&mut state, ObjectId(7));
+
+    assert!(batched_zone_change_replay_guard_applies(
+        &definition,
+        std::slice::from_ref(&old_event)
+    ));
+    record_batched_zone_change_collected(
+        &mut state,
+        Some(&definition_ref),
+        std::slice::from_ref(&old_event),
+    );
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "the same-turn marker must suppress the event it recorded"
+    );
+
+    let GameEvent::ZoneChanged { record, .. } = &old_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    let old_key = (
+        definition_ref.clone(),
+        record.recorded_turn_number,
+        record.turn_zone_change_index,
+    );
+    crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+    state.batched_zone_change_trigger_fired.insert(old_key);
+    assert!(
+        batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&old_event),
+        ),
+        "a retained marker must still suppress its old-turn event after the boundary"
+    );
+
+    let new_event = recorded_zone_change_event(&mut state, ObjectId(7));
+    let GameEvent::ZoneChanged { record, .. } = &new_event else {
+        unreachable!("recorded helper always returns ZoneChanged");
+    };
+    assert_eq!(record.turn_zone_change_index, 0);
+    assert!(
+        !batched_zone_change_already_collected(
+            &state,
+            Some(&definition_ref),
+            std::slice::from_ref(&new_event),
+        ),
+        "a new-turn index-0 event must not alias the retained old-turn marker"
+    );
+}
+
 /// U1 — the queued witness is COUNT-LIMITED, not set membership.
 ///
 /// Two byte-identical `ZoneChanged` in the slice against ONE queued context

@@ -6346,6 +6346,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }

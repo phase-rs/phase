@@ -253,6 +253,57 @@ fn until_end_of_turn_finishes_at_configured_phase_stop() {
     assert!(is_finish(&priority_auto_pass_decision(&state, PlayerId(0))));
 }
 
+/// CR 507.2 + CR 117.3c: A beginning-of-combat phase stop interrupts an
+/// `UntilTurnBoundary` shortcut at a usable priority window. The non-mana
+/// activation proves this is a real priority window, not merely a rendered
+/// phase marker.
+#[test]
+fn begin_combat_phase_stop_interrupts_auto_pass_with_usable_priority() {
+    let mut state = priority_state();
+    let artifact = add_non_mana_activated_artifact(&mut state, PlayerId(0));
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![stop(Phase::BeginCombat, PhaseStopScope::OwnTurn)],
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let at_begin_combat = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(matches!(
+        at_begin_combat.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "the explicit stop must interrupt the standing auto-pass session"
+    );
+
+    let activated = apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: artifact,
+            ability_index: 0,
+        },
+    )
+    .expect("a non-mana activated ability is legal in the stopped BeginCombat window");
+    assert_eq!(state.stack.len(), 1);
+    assert!(matches!(
+        activated.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
 /// V8: the per-window interrupt logic is boundary-agnostic. A
 /// `MyNextTurnStart` session must Pass/Finish in exactly the same windows as
 /// the `EndOfCurrentTurn` sessions above (empty stack → Pass, opponent stack →

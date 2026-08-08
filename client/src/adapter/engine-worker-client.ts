@@ -6,6 +6,7 @@
  */
 import type {
   AiActionProposal,
+  AiDecisionDiagnosticReceipt,
   AiProposalSubmission,
   BatchResolveResult,
   FormatConfig,
@@ -303,6 +304,16 @@ export class EngineWorkerClient {
     );
   }
 
+  async getAiActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
   /** This worker-side endpoint scores only; it cannot mint a proposal. */
   async getAiScoredCandidates(
     difficulty: string,
@@ -324,6 +335,18 @@ export class EngineWorkerClient {
   ): Promise<AiActionProposal | null> {
     return this.request<AiActionProposal | null>(
       { type: "getAiActionProposalFromScores", scoresJson, difficulty, playerId, seed },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async getAiActionProposalFromScoresWithDiagnostics(
+    scoresJson: string,
+    difficulty: string,
+    playerId: number,
+    seed: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalFromScoresWithDiagnostics", scoresJson, difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
     );
   }

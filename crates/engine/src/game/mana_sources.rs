@@ -1608,6 +1608,20 @@ pub fn display_land_mana_pips(
                     }
                 }
             },
+            // CR 106.1b + CR 106.5: Engine-set noted type (Jeweled Amulet class).
+            // Unreachable in practice today — no printed land has this
+            // mechanic — but display the noted type when present, mirroring
+            // `ChoiceAmongExiledColors`'s "compute, push if non-empty" shape.
+            ManaProduction::NotedType { .. } => {
+                if let Some(mana_type) = super::effects::mana::noted_mana_type_for(state, object_id)
+                {
+                    if let Some(color) = mana_type_to_color(mana_type) {
+                        push(&mut pips, ManaPip::Color(color));
+                    } else {
+                        push(&mut pips, ManaPip::Colorless);
+                    }
+                }
+            }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -2929,6 +2943,13 @@ fn mana_options_from_production(
         ManaProduction::ChosenColor {
             fixed_alternative, ..
         } => chosen_color_mana_type_options(state, object_id, *fixed_alternative),
+        // CR 106.1b + CR 106.5: Engine-set noted type (Jeweled Amulet class).
+        // Unreachable in practice today — no printed land has this mechanic.
+        ManaProduction::NotedType { .. } => {
+            super::effects::mana::noted_mana_type_for(state, object_id)
+                .into_iter()
+                .collect()
+        }
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)

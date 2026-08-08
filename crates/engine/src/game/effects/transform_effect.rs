@@ -36,6 +36,30 @@ pub fn resolve(
         }
     }
 
+    // CR 400.7 + CR 603.7c: a delayed transform whose pinned referent became a
+    // new object transforms nothing. Identical shape to `flip_permanent.rs`, and
+    // guarded the same way for the same reason: PLACEMENT ABOVE the `as_slice()`
+    // match is load-bearing, and the match keeps reading the RAW
+    // `ability.targets`.
+    //
+    // A `live_object_targets` substitution inside that match would REBIND rather
+    // than no-op — an emptied list takes the `[]` arm, which resolves to
+    // `ability.source_id` and would transform the ability's own source. "No
+    // target declared" (the printed self-transform shape) and "the declared
+    // referent went stale" must not collapse into the same arm.
+    //
+    // Scoped to `EffectScope::Single` by construction: the `All` branch returned
+    // above into `resolve_all`, which is a non-targeting battlefield sweep and
+    // carries no `ability.targets` referent to pin.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Transform,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 701.27c: If a spell or ability instructs a player to transform a permanent
     // that isn't represented by a double-faced card, nothing happens.
     let object_id = match ability.targets.as_slice() {

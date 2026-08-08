@@ -14,6 +14,7 @@ import {
   ConditionBadge,
   CounterBadge,
   DungeonBadge,
+  EnduringStoryBadge,
   InitiativeBadge,
   MonarchBadge,
   PendingSpellBadge,
@@ -188,6 +189,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+            {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
             {designations.activeDungeon ? (
               <DungeonBadge
                 dungeonName={designations.activeDungeon}

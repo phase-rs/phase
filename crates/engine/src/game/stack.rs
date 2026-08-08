@@ -2994,6 +2994,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_source,
         trigger_definition_ref,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3023,6 +3024,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3084,6 +3086,13 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        // Issue #6504: a batched ability must not carry a per-activation
+        // noted-mana-payment snapshot either — two sibling copies of a
+        // "note the type of mana spent..." ability can carry DIFFERENT
+        // payments (that's the whole point of threading it per-activation
+        // rather than through a shared mutable latch), so they are never
+        // safe to merge into one batched resolution.
+        && noted_mana_payment.is_none()
         // CR 117.1 (issue #4948): a batched triggered ability must not carry
         // per-instance cost-paid-object state either — mirrors the
         // `cost_paid_object` gate above. Always empty for triggered
@@ -3197,6 +3206,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3226,6 +3236,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3278,6 +3289,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        && noted_mana_payment.is_none()
         && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
@@ -3385,6 +3397,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3414,6 +3427,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         starting_with,
         chosen_x,
         cost_paid_object,
+        noted_mana_payment,
         cost_paid_object_ids,
         effect_context_object,
         amassed_army_object,
@@ -3466,6 +3480,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && starting_with.is_none()
         && chosen_x.is_none()
         && cost_paid_object.is_none()
+        && noted_mana_payment.is_none()
         && cost_paid_object_ids.is_empty()
         && effect_context_object.is_none()
         && amassed_army_object.is_none()
@@ -3919,6 +3934,7 @@ fn zone_change_record_from_spec(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        recorded_turn_number: 0,
         // A freshly created token is never suspected (CR 701.60b).
         is_suspected: false,
     }
@@ -4020,6 +4036,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: a_force_block_attacker,
+        target_incarnations: a_target_incarnations,
         controller: a_controller,
         original_controller: _,
         scoped_player: a_scoped_player,
@@ -4049,6 +4066,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         starting_with: a_starting_with,
         chosen_x: a_chosen_x,
         cost_paid_object: a_cost_paid_object,
+        noted_mana_payment: a_noted_mana_payment,
         cost_paid_object_ids: a_cost_paid_object_ids,
         effect_context_object: a_effect_context_object,
         amassed_army_object: a_amassed_army_object,
@@ -4073,6 +4091,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: b_force_block_attacker,
+        target_incarnations: b_target_incarnations,
         controller: b_controller,
         original_controller: _,
         scoped_player: b_scoped_player,
@@ -4102,6 +4121,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         starting_with: b_starting_with,
         chosen_x: b_chosen_x,
         cost_paid_object: b_cost_paid_object,
+        noted_mana_payment: b_noted_mana_payment,
         cost_paid_object_ids: b_cost_paid_object_ids,
         effect_context_object: b_effect_context_object,
         amassed_army_object: b_amassed_army_object,
@@ -4122,6 +4142,11 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     a_effect == b_effect
         && a_targets == b_targets
         && a_force_block_attacker == b_force_block_attacker
+        // CR 400.7 + CR 603.7c: two otherwise-identical abilities pinned to
+        // DIFFERENT incarnations are not the same ability. Participating here
+        // keeps this manual comparison in agreement with the type's derived
+        // `PartialEq`; disagreeing with the derive would be the actual defect.
+        && a_target_incarnations == b_target_incarnations
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -4161,6 +4186,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_starting_with == b_starting_with
         && a_chosen_x == b_chosen_x
         && a_cost_paid_object == b_cost_paid_object
+        && a_noted_mana_payment == b_noted_mana_payment
         && a_cost_paid_object_ids == b_cost_paid_object_ids
         && a_effect_context_object == b_effect_context_object
         && a_amassed_army_object == b_amassed_army_object

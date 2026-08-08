@@ -78,6 +78,7 @@ jobs:
       draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,6 +121,11 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
+
+      # Pin the R2 client. Bare `npx wrangler` follows npm's latest tag, which
+      # can briefly point at a version whose tarball is not available yet.
+      - name: Install pinned Wrangler
+        run: npm install --global "wrangler@$WRANGLER_VERSION"
 
       - name: Set cache keys
         id: cache-keys
@@ -408,7 +414,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
         run: |
-          npx wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
+          wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
             --file client/src/wasm/engine_wasm_bg.wasm \
             --remote \
             --content-type application/wasm \
@@ -463,12 +469,12 @@ jobs:
           # Content-addressed card-data: immutable, year-long cache. The hash is
           # over the uncompressed file, so the URL stays a valid content key.
           brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
-          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Native/server manifests must pin draft pools to immutable content,
           # while the mutable draft-pools.json remains in the shared-file loop.
           brotli -q 9 -c client/public/draft-pools.json > "$BRDIR/draft-pools.br"
-          npx wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -477,7 +483,7 @@ jobs:
               exit 1
             fi
             brotli -q 9 -c "client/public/$f" > "$BRDIR/$f.br"
-            npx wrangler r2 object put "phase-rs-data/$f" --file "$BRDIR/$f.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=60, must-revalidate"
+            wrangler r2 object put "phase-rs-data/$f" --file "$BRDIR/$f.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=60, must-revalidate"
           done < <(jq -r '.[]' data-files.json)
 
       - name: Verify R2 uploads landed
@@ -920,6 +926,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
+      WRANGLER_VERSION: "4.113.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -934,6 +941,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install pinned Wrangler
+        run: npm install --global "wrangler@$WRANGLER_VERSION"
 
       - name: Sign slim server artifacts and publish release data manifest
         # Sign in this Ubuntu finisher so all three OS binaries use one trusted
@@ -1000,8 +1010,8 @@ jobs:
             }' > "$manifest"
           sign "$manifest"
 
-          npx wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
-          npx wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
       - name: Download shell updater migration bridge
         id: shell-updater-bridge

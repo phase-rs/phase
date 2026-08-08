@@ -52413,3 +52413,205 @@ fn chain_continuation_each_of_head_keeps_its_announced_count() {
          announce exactly two targets on its own sub-ability"
     );
 }
+
+/// SHAPE — Borg Queen, Perfection Manifest's `assimilate` keyword action lowers
+/// to the shipped reanimate-then-retype chain: a `ChangeZone` that moves the
+/// targeted opponent-graveyard creature card to the battlefield under the
+/// instruction's controller with a +1/+1 counter (CR 110.2a + CR 122.1), plus a
+/// `Duration::Permanent` `GenericEffect` continuation carrying ONE
+/// `StaticDefinition` whose four layer-4 modifications (CR 613.1d) implement
+/// CR 205.1b's "[creature type or types] artifact creature" semantics.
+///
+/// Driven through `parse_oracle_text` on the VERBATIM printed Oracle text
+/// (reminder text included, MTGJSON keyword hint included) — the same entry the
+/// card-data pipeline uses — not a direct call to the private production.
+#[test]
+fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
+    const BORG_QUEEN: &str = "Artifact creatures you control get +2/+0.\n\
+         When Borg Queen enters, assimilate target creature card from an opponent's graveyard. \
+         (Put it onto the battlefield under your control with a +1/+1 counter. It's a Borg \
+         artifact creature and loses all other creature types.)";
+
+    let parsed = parse_oracle_text(
+        BORG_QUEEN,
+        "Borg Queen, Perfection Manifest",
+        &["Assimilate".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Borg".to_string(), "Noble".to_string()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("the ETB trigger must be extracted");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("the ETB trigger must carry an execute body");
+
+    // (1) POSITIVE REACH-GUARD (mandatory): zero `Effect::Unimplemented` in the
+    // whole chain. Every negative assertion below is non-vacuous only because
+    // this passes — at BASE_SHA the execute IS an `Unimplemented { name:
+    // "assimilate" }`, so this is also the revert-failing assertion.
+    assert!(
+        !ability_chain_has_unimplemented(execute),
+        "the assimilate trigger must lower with no residual Unimplemented node: {execute:#?}"
+    );
+
+    // (2) CR 110.2a + CR 115.2: the move itself. `origin` is None — the graveyard
+    // constraint travels on the target filter, matching Ashen Powder / Puppeteer
+    // Clique / Macabre Mockery, the shipped cards with this exact target phrase.
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        enters_under,
+        target,
+        enter_with_counters,
+        up_to,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "assimilate must lower to a ChangeZone head, got {:#?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *origin, None,
+        "CR 115.2: origin stays None for the \"from an opponent's graveyard\" phrase"
+    );
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "CR 110.2a: the assimilated permanent enters under the instruction's controller"
+    );
+    assert!(!*up_to, "assimilate is mandatory, not an \"up to\" move");
+
+    // (3) CR 122.1 + CR 614.1c: exactly one +1/+1 counter, placed as part of the
+    // entry event rather than by a later PutCounter step.
+    assert_eq!(
+        *enter_with_counters,
+        vec![(
+            crate::types::counter::CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 1 }
+        )],
+        "the entry counter must be exactly one +1/+1 counter"
+    );
+
+    // (4) CR 108.3 + CR 109.4 + CR 115.2: the target shape is ASSERTED, not
+    // constructed, so a future `parse_zone_suffix` change is caught here rather
+    // than silently forked. A graveyard card has no controller (CR 109.4), so the
+    // opponent restriction rides as OWNERSHIP (CR 108.3).
+    let TargetFilter::Typed(typed) = target else {
+        panic!("the assimilate target must be a Typed filter, got {target:#?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::Creature],
+        "\"target creature card\" must yield exactly the Creature type filter"
+    );
+    assert_eq!(
+        typed.controller, None,
+        "CR 109.4: a graveyard card has no controller, so the filter-level controller stays None"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::Opponent
+        }),
+        "CR 108.3: \"an opponent's graveyard\" must restrict by OWNERSHIP, got {:#?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "CR 115.2: the graveyard zone must ride on the target filter, got {:#?}",
+        typed.properties
+    );
+
+    // (5) The continuation step. CR 613.1d: all four modifications are layer 4,
+    // so LIST ORDER decides the outcome and they must ride ONE StaticDefinition —
+    // splitting them would order by CR 613.7 timestamp instead and the subtype
+    // wipe could erase Borg. This one assertion pins both invariants.
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("assimilate must chain the type override as a direct child");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target: sub_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!(
+            "the override step must be a GenericEffect, got {:#?}",
+            sub.effect
+        );
+    };
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "CR 613.1d: all four layer-4 modifications must ride ONE StaticDefinition"
+    );
+    let retype = &static_abilities[0];
+    assert_eq!(
+        retype.affected,
+        Some(TargetFilter::ParentTarget),
+        "CR 611.2c: the override must bind to the parent's chosen target"
+    );
+    assert_eq!(
+        *sub_target,
+        Some(TargetFilter::ParentTarget),
+        "the GenericEffect target must be the parent target so the TCE freezes to the moved object"
+    );
+    assert_eq!(
+        retype.modifications,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Borg".to_string(),
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ],
+        "CR 205.1a + CR 205.1b: wipe the creature-type set FIRST, then add Borg, \
+         then the additive card types — written order is load-bearing"
+    );
+
+    // (6) CR 611.2a: no stated duration on a keyword-action definition means
+    // "until the end of the game". This is a SHAPE assertion and does NOT
+    // substitute for runtime semantics — the runtime guard against the
+    // `effect.rs` `unwrap_or(UntilEndOfTurn)` fallback is
+    // `tests/integration/borg_queen_assimilate.rs`'s cleanup-survival test.
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "CR 611.2a: the type override must be explicitly Permanent"
+    );
+    assert_eq!(
+        sub.duration,
+        Some(Duration::Permanent),
+        "CR 611.2a: the AbilityDefinition duration must also be Permanent"
+    );
+
+    // (7) NEGATIVE, paired with (1): CR 205.1b retains prior card types, so a
+    // set-replacement `SetCardTypes` is rules-WRONG here; and the card says
+    // nothing about color, so no `AddColor` may appear (contrast Rise from the
+    // Grave, which does emit one).
+    assert!(
+        !retype.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetCardTypes { .. } | ContinuousModification::AddColor { .. }
+        )),
+        "CR 205.1b: no SetCardTypes (card types are RETAINED) and no AddColor: {:#?}",
+        retype.modifications
+    );
+}

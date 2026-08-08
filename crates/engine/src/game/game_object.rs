@@ -21,7 +21,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
@@ -1186,6 +1186,25 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+
+    /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
+    /// object's own activated-ability mana cost, stamped by
+    /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
+    /// activation-time payment. PURELY A BRIDGE: `push_ability_entry` (the
+    /// single authority where an activated ability reaches the stack)
+    /// synchronously drains this field — via `std::mem::take` — into that
+    /// specific activation's own `ResolvedAbility::noted_mana_payment`
+    /// (paired with the source's live incarnation at that same moment)
+    /// immediately after cost payment completes, before any later activation
+    /// of this permanent could occur. Nothing reads this field at resolution
+    /// time; `Effect::NoteManaSpent` reads the per-activation snapshot
+    /// instead, so a permanent untapped and reactivated with a different
+    /// payment while an earlier activation still sits unresolved on the
+    /// stack cannot corrupt what that earlier instance observed. Always
+    /// empty except transiently between the payment stamp and the very next
+    /// `push_ability_entry` call for the same source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_to_activate: Vec<ManaType>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1345,6 +1364,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // Activation-cost-payment latch — same omission class as
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
+        // synchronously by `push_ability_entry` into the resolving
+        // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
+        mana_spent_to_activate: _,
     } = o;
 }
 
@@ -1981,6 +2005,7 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             // CR 701.60b: Snapshot suspected status at the moment of the move,
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
@@ -2211,6 +2236,7 @@ impl GameObject {
             phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+            mana_spent_to_activate: Vec::new(),
         }
     }
 
@@ -2654,6 +2680,16 @@ impl GameObject {
     pub fn chosen_color(&self) -> Option<ManaColor> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Color(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
+    /// resolution on this permanent's own ability ("this artifact's last noted
+    /// type" — Jeweled Amulet). Read by `ManaProduction::NotedType`.
+    pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),
             _ => None,
         })
     }

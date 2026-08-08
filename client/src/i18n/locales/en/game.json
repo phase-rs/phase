@@ -480,6 +480,8 @@
     "initiativeTooltip": "Has the Initiative — ventures into Undercity at start of upkeep",
     "cityBlessing": "City's Blessing",
     "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
+    "enduringStory": "Enduring Story",
+    "enduringStoryTooltip": "Enduring Story — gained by controlling a Storied permanent and three or more artifacts, legendary permanents, and/or Sagas; lasts for the rest of the game",
     "dungeonAriaLabel": "Venturing in {{name}}, room {{room}}",
     "dungeonTooltip": "Venturing in {{name}} — room {{room}}",
     "poisonAriaLabel_one": "{{count}} poison counter",
@@ -2255,6 +2257,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Show AI decisions",
+    "aiDecisionUnavailable": "AI decision diagnostics are unavailable for this game."
+  },
+  "aiDecisionOverlay": {
+    "title": "AI decision",
+    "rankedSubtitle": "Softmax sample at temperature {{temperature}}.",
+    "directSubtitle": "Selected by a direct AI policy.",
+    "metrics": "S {{score}} · W {{weight}}",
+    "top": "TOP",
+    "chosen": "CHOSEN",
+    "legendTop": "Top ranked",
+    "legendChosen": "Chosen",
+    "collapse": "Collapse AI decision details",
+    "expand": "Expand AI decision details",
+    "close": "Close AI decision overlay"
   },
   "status": {
     "yourPriority": "Your priority",

@@ -22,6 +22,33 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 400.7 + CR 603.7c: a delayed copy whose pinned referent became a new
+    // object copies nothing. The trigger DID fire and DID resolve (CR 603.7b) —
+    // it simply affected nothing — so the game log, event observers and the
+    // chain machinery must see an EffectResolved, exactly as the sibling
+    // `stack_entry_cant_be_copied` guard below does.
+    //
+    // PLACEMENT IS LOAD-BEARING: this MUST sit ABOVE the `ok_or_else(..)?`
+    // below. Returning `None` from `copy_source_entry` instead converts a
+    // deliberate no-op into `EffectError::MissingParam` and emits NO
+    // EffectResolved, because the `?` short-circuits before any events.push.
+    // The guard belongs at a function that can say "resolved, did nothing", not
+    // one that can only say "absent".
+    //
+    // Inert for every non-pinned caller: `pinned_object_targets_all_stale`
+    // requires a non-empty `target_incarnations`, which only a pinned delayed
+    // ParentTarget trigger has. Measured: all 14 in-class CopySpell pairs carry
+    // `target: ParentTarget`, so Saruman (ExiledBySource) and Isochron Scepter
+    // (TrackedSet) can never satisfy it and their branches run untouched.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 707.10 / CR 702.153a (Casualty): resolve which stack entry to copy.
     // The helper handles explicit object targets (Twincast / Gogo), SelfRef
     // (Casualty triggers whose intermediate stack pushes would make stack.last()
@@ -170,10 +197,16 @@ pub fn resolve(
             ..
         }
     ) {
-        if let Some(member) = ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        }) {
+        // CR 400.7 + CR 603.7c: sits below the all-stale guard above, so this
+        // substitution handles the PARTIAL-stale case the guard does not.
+        if let Some(member) = ability
+            .live_object_targets(state)
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+        {
             if let Some(copy_ability) = state.stack.back_mut().and_then(|e| e.ability_mut()) {
                 rewrite_copy_spell_object_targets(copy_ability, member);
             }
@@ -560,10 +593,17 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
             return copy_source_from_tracked_set(state, ability, target);
         }
     }
-    let target_id = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Object(id) => Some(*id),
-        TargetRef::Player(_) => None,
-    });
+    // CR 400.7 + CR 603.7c: covers the partial-stale case, and is defence in
+    // depth for any future caller of `copy_source_entry` that does not pass
+    // through the guarded `resolve`.
+    let target_id =
+        ability
+            .live_object_targets(state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            });
     if let Some(target_id) = target_id {
         return state
             .stack
@@ -827,9 +867,20 @@ pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, sourc
     }
 }
 
+/// CR 707.10 + CR 707.10b: Normalize a copied activated/triggered ability.
+/// The copy keeps the original ability's source (unlike a spell copy, which
+/// sources itself), so this only re-stamps `source_id` uniformly through the
+/// chain — but it must ALSO clear `noted_mana_payment` (issue #6504):
+/// CR 707.10 says a copy of an activated ability is not itself activated, so
+/// it never paid a mana cost. A naive struct clone otherwise carries the
+/// ORIGINAL activation's payment snapshot along for the ride, and
+/// `Effect::NoteManaSpent` resolving on the copy (Jeweled Amulet's first
+/// ability copied via Rings of Brighthearth or similar) would falsely note
+/// mana colors the copy never paid.
 fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
     let source_id = ability.source_id;
     set_resolved_source_recursive(ability, source_id);
+    ability.clear_noted_mana_payment_recursive();
 }
 
 /// CR 707.10d: Replace every object target on a copied spell with `new_target`.

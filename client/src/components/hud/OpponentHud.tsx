@@ -18,7 +18,7 @@ import { getOpponentIds, isOneOnOne, resolveFocusedOpponent } from "../../viewmo
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -305,6 +305,7 @@ export function OpponentHud({
               {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
               {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
               {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
+              {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge /> : null}
               {opponentDesignations.activeDungeon ? (
                 <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
               ) : null}
@@ -761,6 +762,7 @@ function OpponentTab({
       {designations.isMonarch ? <MonarchBadge /> : null}
       {designations.hasInitiative ? <InitiativeBadge /> : null}
       {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+      {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
       {designations.activeDungeon ? (
         <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
       ) : null}

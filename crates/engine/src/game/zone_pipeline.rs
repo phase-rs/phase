@@ -2158,6 +2158,7 @@ pub(crate) fn deliver_replaced_zone_change(
         controller_override: ctrl_override,
         face_down_profile,
         enter_as_copy,
+        discard_frame,
         applied,
         ..
     } = event
@@ -2170,6 +2171,19 @@ pub(crate) fn deliver_replaced_zone_change(
         } else {
             ZoneDeliveryExileTracking::None
         };
+        // CR 701.9a + CR 400.7: Capture the card while it is still in hand.
+        // The discard frame, not a current-zone lookup, owns the eventual
+        // contingent condition's facts through redirects and replacement pauses.
+        let discard_lki = discard_frame.and_then(|_| {
+            (from == Zone::Hand)
+                .then(|| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .map(|object| object.snapshot_for_mana_spent())
+                })
+                .flatten()
+        });
 
         let merged_permanent_leave = from == Zone::Battlefield
             && state
@@ -2381,6 +2395,48 @@ pub(crate) fn deliver_replaced_zone_change(
                 .objects
                 .get(&object_id)
                 .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        // CR 701.9a + CR 614.1: The inner move has now completed with its
+        // final replacement-selected destination. Append one operation-owned
+        // result exactly once; a prevented move never reaches this delivery.
+        if let (Some(frame_id), Some(lki), Some(final_zone)) = (
+            discard_frame,
+            discard_lki,
+            state.objects.get(&object_id).map(|object| object.zone),
+        ) {
+            if final_zone != Zone::Hand {
+                let (recorded, source_id) = {
+                    let frame = state
+                        .resolution_stack
+                        .active_discard_parent_of_active_ability_continuation_mut(frame_id)
+                        .expect(
+                            "discard provenance must name the active continuation's discard parent",
+                        );
+                    let recorded = frame.results.is_empty();
+                    let source_id = frame.source_id;
+                    if recorded {
+                        frame
+                            .results
+                            .push(crate::types::ability::DiscardedCardResult {
+                                object_id,
+                                lki: lki.clone(),
+                                final_zone,
+                            });
+                    }
+                    (recorded, source_id)
+                };
+                if recorded {
+                    crate::game::restrictions::record_discard(state, lki.owner);
+                    if final_zone == Zone::Graveyard {
+                        crate::game::restrictions::record_card_discarded(state, object_id);
+                    }
+                    events.push(GameEvent::Discarded {
+                        player_id: lki.owner,
+                        object_id,
+                        source_id,
+                    });
+                }
+            }
+        }
         // Roll back the face-down preflight flag when the entry was rejected, so a
         // blocked manifest/morph leaves the card unchanged in its origin zone
         // rather than stranded face down (corrupting hidden state for a move that

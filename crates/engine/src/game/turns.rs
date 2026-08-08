@@ -1145,6 +1145,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
     // CR 500.1: Reset per-turn spell cast counters.
     state.spells_cast_this_turn = 0;
+    // CR 700.13: crimes are a per-turn player record.
+    for player in &mut state.players {
+        player.crimes_committed_this_turn = 0;
+    }
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.triggers_fired_this_turn_per_opponent.clear();
@@ -2609,9 +2613,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///
 /// Returns `(fired, ordering_prompt)`:
 /// * `fired` is `true` if any triggers were placed on the stack, are pending
-///   target selection, or are awaiting CR 603.3b ordering. The combat arms
-///   (BeginCombat / EndCombat) use this to decide whether to set up / tear down
-///   combat and grant a priority window.
+///   target selection, or are awaiting CR 603.3b ordering.
 /// * `ordering_prompt` is `Some(...)` when the phase must pause before priority:
 ///   - `WaitingFor::OrderTriggers { .. }` when 2+ simultaneous triggers controlled
 ///     by the same player fired and that player must order them (CR 603.3b), or
@@ -2858,37 +2860,25 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             });
         }
         Phase::BeginCombat => {
-            // CR 507.1: "At the beginning of combat" triggers fire here.
-            // Process triggers regardless of attackers — CR 507.1 says the step
-            // happens unconditionally; trigger conditions (e.g., ControlCount)
-            // are checked by the trigger system, not by skipping the step.
+            // CR 507.1 + CR 507.2: The beginning-of-combat step always occurs, then
+            // the active player receives priority. Set combat state before
+            // processing triggers so it is available to every resulting prompt
+            // and to abilities that later resolve from that trigger batch.
+            state.combat = Some(crate::game::combat::CombatState::default());
             let event_snapshot = events.clone();
-            let (triggers_fired, ordering_prompt) =
-                process_phase_triggers(state, &event_snapshot, events);
-            if triggers_fired {
-                state.combat = Some(crate::game::combat::CombatState::default());
-                // CR 603.3b: surface a same-controller ordering prompt before
-                // priority; combat state is set first so it exists when the
-                // ordered begin-combat triggers later resolve.
-                if let Some(prompt) = ordering_prompt {
-                    return AutoAdvanceStep::waiting(prompt);
-                }
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
+            let (_, ordering_prompt) = process_phase_triggers(state, &event_snapshot, events);
+            // CR 603.3b: preserve a same-controller ordering prompt before
+            // priority; combat state already exists when the ordered
+            // beginning-of-combat triggers later resolve.
+            if let Some(prompt) = ordering_prompt {
+                return AutoAdvanceStep::waiting(prompt);
             }
-            if combat::has_potential_attackers(state) {
-                state.combat = Some(crate::game::combat::CombatState::default());
-                let _ = advance_phase_once(state, events);
-                // Continue to DeclareAttackers
-            } else {
-                // CR 508.8: No attackers possible and no begin-combat
-                // triggers — skip declare attackers through end of combat.
-                // Don't return: continue the loop so the PostCombatMain
-                // match arm runs process_phase_triggers (survival, etc.).
-                state.combat = None;
-                enter_phase(state, Phase::PostCombatMain, events);
-            }
+            // CR 507.2 + CR 117.3a: priority belongs semantically to the
+            // active player. `finish_enter_phase` separately records the
+            // authorized submitter for controlled-turn windows.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::DeclareAttackers => {
             // CR 508.1: Active player declares attackers as a turn-based action.
@@ -3040,9 +3030,12 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply;
     use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::phase::{PhaseStop, PhaseStopScope};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
     use std::sync::Arc;
@@ -7474,15 +7467,46 @@ mod tests {
     }
 
     #[test]
-    fn auto_advance_skips_combat_phases() {
+    fn empty_combat_reaches_post_combat_main_after_priority_and_declaration() {
         let mut state = setup();
         state.phase = Phase::BeginCombat;
+        state.phase_stops.insert(
+            PlayerId(0),
+            vec![PhaseStop {
+                phase: Phase::DeclareAttackers,
+                scope: PhaseStopScope::OwnTurn,
+            }],
+        );
 
         let mut events = Vec::new();
         let waiting = auto_advance(&mut state, &mut events);
 
-        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.phase, Phase::BeginCombat);
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
+
+        state.waiting_for = waiting;
+        for _ in 0..4 {
+            if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
+                break;
+            }
+            let actor = state.priority_player;
+            apply(&mut state, actor, GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
     }
 
     #[test]
@@ -8864,6 +8888,15 @@ mod tests {
 
         enter_phase(&mut state, Phase::BeginCombat, &mut events);
         assert_eq!(turn_control::turn_decision_maker(&state), controller);
+        assert_eq!(
+            state.priority_player, controller,
+            "the controlled active player's authorized submitter holds priority"
+        );
+        let waiting_for = auto_advance(&mut state, &mut events);
+        assert!(matches!(
+            waiting_for,
+            WaitingFor::Priority { player } if player == owner
+        ));
         assert_eq!(
             turn_control::authorized_submitter_for_player(&state, owner),
             controller,

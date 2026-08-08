@@ -1,5 +1,7 @@
 use crate::game::combat::CombatParticipation;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectIncarnationRef;
@@ -20,11 +22,64 @@ pub fn resolve(
         } => {
             vec![ability.source_id]
         }
+        // CR 400.7 + CR 603.7c: a delayed combat-removal whose pinned referent
+        // became a new object removes nothing. This read is RAW — the file
+        // makes no `resolved_targets` call, so the targeting chokepoint never
+        // sees this pin.
+        //
+        // Slot carve-out applies: the list is passed straight into
+        // `effect_object_targets`, which indexes `ParentTargetSlot`
+        // positionally. Population is 0 today (`melee`'s filter is a bare
+        // `ParentTarget`), but this is the standing 22-call-site constraint,
+        // not a card-specific judgement.
         Effect::RemoveFromCombat { target } => {
-            super::effect_object_targets(target, &ability.targets)
+            let live_targets = ability.live_object_targets(state);
+            let pool: &[TargetRef] = if matches!(target, TargetFilter::ParentTargetSlot { .. }) {
+                &ability.targets
+            } else {
+                &live_targets
+            };
+            super::effect_object_targets(target, pool)
         }
         _ => return Ok(()),
     };
+
+    // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it
+    // affected nothing. PLACEMENT IS LOAD-BEARING — this MUST sit ABOVE the
+    // source rebind below. Letting the substitution empty the list instead
+    // falls into `vec![ability.source_id]`, which re-binds the effect to the
+    // ability's OWN source instead of doing nothing.
+    //
+    // NOTE this file has no existing pushing early return to mirror — its only
+    // other early return (`_ => return Ok(())` above) deliberately pushes
+    // nothing. The shape mirrored here is `change_zone.rs` / `sacrifice.rs`.
+    // `EffectKind::RemoveFromCombat` (not `EffectKind::from(&ability.effect)`)
+    // matches this file's own convention at the unconditional push below.
+    //
+    // SCOPED TO THE NON-`SelfRef` ARM. A `SelfRef` removal's subject is the
+    // source itself, never the snapshot referent, so a stale pin on some other
+    // object in `ability.targets` must not cancel it. Without this guard the
+    // predicate and the subject it suppresses are decoupled — the same
+    // collapse of "no target declared" into "declared referent went stale"
+    // that `flip_permanent.rs` and `transform_effect.rs` preserve their raw
+    // `as_slice()` match to avoid. Unreachable today (the in-class population
+    // is `melee`, whose filter is a bare `ParentTarget`, so no `SelfRef` node
+    // co-occurs with a pin), but the coupling is what makes it correct rather
+    // than the population.
+    let subject_is_self_ref = matches!(
+        &ability.effect,
+        Effect::RemoveFromCombat {
+            target: TargetFilter::SelfRef
+        }
+    );
+    if !subject_is_self_ref && ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RemoveFromCombat,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // If no explicit targets, apply to source (e.g., "remove it from combat"
     // where "it" refers to the ability source).

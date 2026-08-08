@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WasmAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
-import type { EngineAdapter, SubmitResult } from "../types";
+import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  EngineAdapter,
+  SubmitResult,
+} from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
@@ -34,6 +39,10 @@ const mockWorkerClient = {
   submitAction: vi
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  getAiActionProposal: vi.fn(),
+  getAiActionProposalWithDiagnostics: vi.fn(),
+  submitAiActionProposal: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
     phase: "Untap",
@@ -59,6 +68,83 @@ describe("WasmAdapter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     adapter = new WasmAdapter();
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(null);
+    mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.submitAiActionProposal.mockResolvedValue({
+      status: "stale",
+      reason: "test",
+    });
+  });
+
+  describe("AI decision diagnostics", () => {
+    const proposal: AiActionProposal = {
+      token: "diagnostic-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: { type: "PassPriority" },
+      status: "direct",
+      selectionExplanation: "A direct AI policy selected this action; no scored distribution was used.",
+      samplingTemperature: null,
+      candidates: [{
+        action: { type: "PassPriority" },
+        objectName: null,
+        details: [],
+        rank: null,
+        isTopRanked: false,
+        isSelected: true,
+        score: null,
+        weight: null,
+        probability: null,
+      }],
+    };
+
+    it("uses the legacy proposal endpoint while capture is disabled", async () => {
+      mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+      await adapter.initialize();
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledWith("Medium", 0);
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+    });
+
+    it("publishes only after apply and retains a rejected proposal for retry", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal
+        .mockResolvedValueOnce({ status: "rejected", reason: "retry" })
+        .mockResolvedValueOnce({ status: "applied", result: { events: [], log_entries: [] } });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "rejected" });
+      expect(listener).not.toHaveBeenCalled();
+
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "applied" });
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith(receipt);
+    });
+
+    it("suppresses stale proposal receipts", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal.mockResolvedValue({ status: "stale", reason: "old" });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await adapter.getAiActionProposal("Medium", 0);
+      await adapter.submitAiActionProposal(proposal);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
   });
 
   it("implements EngineAdapter interface", () => {

@@ -2418,6 +2418,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Exploit => "exploit".to_string(),
         Keyword::Explore => "explore".to_string(),
         Keyword::Ascend => "ascend".to_string(),
+        Keyword::Storied => "storied".to_string(),
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
@@ -2761,7 +2762,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 96] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -2853,6 +2854,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
     "spree",
     "casualty",
     "bargain",
+    "storied",
     "demonstrate",
     "strive",
     "exploit",
@@ -3291,6 +3293,45 @@ mod tests {
             "Shardless Agent must have Keyword::Cascade extracted, got {:?}",
             shardless.extracted_keywords
         );
+    }
+
+    #[test]
+    fn parse_oracle_text_extracts_storied_without_mtgjson_keyword_metadata() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        for (name, text, types, subtypes) in [
+            (
+                "Balin, Loremaster",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nWhenever Balin or another Dwarf you control enters, you may discard your hand. Draw X cards, where X is the number of cards discarded this way. If you have an enduring story, Balin deals X damage to each opponent.",
+                &["Creature"],
+                &["Dwarf", "Wizard"],
+            ),
+            (
+                "Ori, Keeper of Songs",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, Ori gets +1/+0 and has vigilance.",
+                &["Creature"],
+                &["Dwarf", "Bard"],
+            ),
+        ] {
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &[],
+                &types.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                &subtypes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            );
+
+            assert!(
+                parsed.extracted_keywords.contains(&Keyword::Storied),
+                "{name} must extract Storied when MTGJSON keyword metadata is absent: {:?}",
+                parsed.extracted_keywords
+            );
+            assert!(
+                parsed.abilities.is_empty(),
+                "{name} must not retain Storied as an unimplemented ability: {:?}",
+                parsed.abilities
+            );
+        }
     }
 
     #[test]
@@ -5678,6 +5719,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "bargain",
             valid_line: "Bargain",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "storied",
+            valid_line: "Storied",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::ai_support::{
+    is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
+    TargetedExchangeVerdict,
+};
 use engine::game::combat::AttackTarget;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -203,33 +206,23 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
         // `search::fallback_action`, which emits CancelCast when the scored
         // pool is empty.
         GameAction::CancelCast => GateDecision::Reject,
-        // CR 106.3 + CR 608.2d: A flexible source's color is mechanical during a
-        // pending cast, not a policy judgment. Enumerating one candidate per
-        // (source, color) row lets the scorer pick an arbitrary color and tap a
-        // U/R dual for {R} against a {2}{U} spell, stranding the blue pip in a
-        // ManaPayment dead-end with no untapped source left to repair it.
-        // Rejecting only the stranding rows leaves at least the demanded-color
-        // row of that same source in the pool, so the choice of WHICH source to
-        // tap stays strategic. Mirrors the `ChooseManaColor` pre-emption in
-        // `search::choose_action_with_session`, which fixes the prompt-shaped
-        // expression of this same choice.
-        GameAction::TapLandForMana { selection } => {
-            if crate::mana_colors::tap_strands_demanded_color(
-                ctx.state,
-                ctx.ai_player,
-                selection.source.object_id,
-                selection.mana_type,
-            ) {
-                GateDecision::Reject
-            } else {
-                GateDecision::Allow
-            }
-        }
         _ => GateDecision::Allow,
     }
 }
 
 fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
+    // CR 601.2c + CR 608.2c: Target-sourced self-damage and fight exchanges are
+    // evaluated from reducer-issued, fully-bound target paths before scoring.
+    // `Indeterminate` stays fail-open: this is a proof-backed veto only.
+    if is_targeted_exchange_root(&ctx.candidate.action)
+        && matches!(
+            targeted_exchange_verdict(ctx.state, ctx.candidate),
+            TargetedExchangeVerdict::Reject
+        )
+    {
+        return GateDecision::Reject;
+    }
+
     // CR 608.2c: Reject abilities whose source-type condition is known to fail.
     // E.g. Figure of Fable's "{1}{G/W}{G/W}: If this creature is a Scout, ..." when
     // the source is not currently a Scout. The ability is legal to activate but wastes mana.

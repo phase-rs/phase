@@ -109,6 +109,21 @@ export function CityBlessingBadge() {
   );
 }
 
+export function EnduringStoryBadge() {
+  const { t } = useTranslation("game");
+  return (
+    <BadgeTip text={t("badges.enduringStoryTooltip")}>
+      <span
+        role="img"
+        aria-label={t("badges.enduringStory")}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-indigo-500 ring-indigo-200/80 shadow-[0_0_14px_rgba(99,102,241,0.55)]"
+      >
+        <span aria-hidden className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">📖</span>
+      </span>
+    </BadgeTip>
+  );
+}
+
 interface DungeonBadgeProps {
   dungeonName: DungeonId;
   roomIndex: number;

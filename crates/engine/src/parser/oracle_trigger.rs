@@ -539,6 +539,8 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::IsMonarch
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
         | AbilityCondition::IsRingBearer
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -2328,6 +2330,7 @@ fn lift_mana_production_quantities_to_triggering_source(produced: &mut ManaProdu
         | ManaProduction::AnyOneColor { count, .. }
         | ManaProduction::AnyCombination { count, .. }
         | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
@@ -4523,6 +4526,8 @@ pub(crate) fn static_condition_to_trigger_condition(
         StaticCondition::NoMonarch => Some(TriggerCondition::NoMonarch),
         // CR 702.131a: City's Blessing bridges directly.
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
+        // CR 702.195b: Enduring story bridges as a player designation.
+        StaticCondition::HasEnduringStory => Some(TriggerCondition::HasEnduringStory),
         // CR 110.5b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
         StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),

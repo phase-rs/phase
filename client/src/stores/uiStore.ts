@@ -222,6 +222,8 @@ interface UiStoreState {
    *  local state so entry points (Sandbox Tools nudge/button) can open the
    *  panel straight to "actions" instead of the default "console" log view. */
   debugPanelTab: "console" | "actions";
+  /** Local, non-persistent capture control for AI decision diagnostics. */
+  aiDecisionCaptureEnabled: boolean;
   debugInteractionMode: boolean;
   /** Whether the quick floating Click Mode control is pinned on-screen. The
    *  mode itself stays in `debugInteractionMode`; this only controls access to
@@ -309,6 +311,7 @@ interface UiStoreActions {
   setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
+  setAiDecisionCaptureEnabled: (enabled: boolean) => void;
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
   openSandboxTools: () => void;
   toggleDebugInteractionMode: () => void;
@@ -367,6 +370,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
+  aiDecisionCaptureEnabled: false,
   debugInteractionMode: false,
   debugClickModeButtonVisible: false,
   debugContextMenu: null,
@@ -675,6 +679,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
+  setAiDecisionCaptureEnabled: (enabled) => set({ aiDecisionCaptureEnabled: enabled }),
   openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),
   toggleDebugInteractionMode: () => set((state) => ({
     debugInteractionMode: !state.debugInteractionMode,

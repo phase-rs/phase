@@ -666,7 +666,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::DungeonOrClassOrCase);
         }
         GameEvent::MonarchChanged { .. } => push(TriggerEventKey::MonarchOrInitiative),
-        GameEvent::CityBlessingGained { .. } => {}
+        // CR 702.195b-c: Enduring story is a designation, not an inherent trigger
+        // event; continuous effects reapply before trigger conditions are checked.
+        GameEvent::CityBlessingGained { .. } | GameEvent::EnduringStoryGained { .. } => {}
         // CR 103.1: setup determination, not a CR 706 die-roll trigger source.
         GameEvent::StartingPlayerContest { .. } => {}
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
@@ -900,6 +902,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
+        | EffectKind::NoteManaSpent
         | EffectKind::ChooseObjectsIntoTrackedSet
         // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
         // counter placement fires `GameEvent::CounterAdded`, so no matcher

@@ -44,8 +44,8 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
 use super::conditions::{
-    counter_condition_matches_lki, eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
-    eval_no_monarch, eval_source_is_attacking,
+    counter_condition_matches_lki, eval_has_city_blessing, eval_has_enduring_story,
+    eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_is_attacking,
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
@@ -500,7 +500,7 @@ enum TriggerCollectionOperation {
     },
     RecordBatchedZoneChanges {
         definition_ref: TriggerDefinitionRef,
-        turn_zone_change_indices: Vec<usize>,
+        turn_zone_change_keys: Vec<(u32, usize)>,
     },
     AllocateTimestamp,
     RecordCombatDamageCastingPermission {
@@ -569,11 +569,13 @@ impl TriggerCollectionSession {
         let Some(definition_ref) = matched.definition_ref.clone() else {
             return;
         };
-        let turn_zone_change_indices = matched
+        let turn_zone_change_keys = matched
             .trigger_events
             .iter()
             .filter_map(|event| match event {
-                GameEvent::ZoneChanged { record, .. } => Some(record.turn_zone_change_index),
+                GameEvent::ZoneChanged { record, .. } => {
+                    Some((record.recorded_turn_number, record.turn_zone_change_index))
+                }
                 _ => None,
             })
             .collect();
@@ -581,7 +583,7 @@ impl TriggerCollectionSession {
             state,
             TriggerCollectionOperation::RecordBatchedZoneChanges {
                 definition_ref,
-                turn_zone_change_indices,
+                turn_zone_change_keys,
             },
         );
     }
@@ -681,12 +683,14 @@ impl TriggerCollectionSession {
             }
             TriggerCollectionOperation::RecordBatchedZoneChanges {
                 definition_ref,
-                turn_zone_change_indices,
+                turn_zone_change_keys,
             } => {
-                for turn_zone_change_index in turn_zone_change_indices {
-                    state
-                        .batched_zone_change_trigger_fired
-                        .insert((definition_ref.clone(), turn_zone_change_index));
+                for (recorded_turn_number, turn_zone_change_index) in turn_zone_change_keys {
+                    state.batched_zone_change_trigger_fired.insert((
+                        definition_ref.clone(),
+                        recorded_turn_number,
+                        turn_zone_change_index,
+                    ));
                 }
                 None
             }
@@ -1698,17 +1702,19 @@ fn batched_zone_change_already_collected(
         .iter()
         .filter_map(|event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
-                Some(record.turn_zone_change_index)
+                Some((record.recorded_turn_number, record.turn_zone_change_index))
             } else {
                 None
             }
         })
         .peekable();
     zone_changes.peek().is_some()
-        && zone_changes.all(|turn_zone_change_index| {
-            state
-                .batched_zone_change_trigger_fired
-                .contains(&(definition_ref.clone(), turn_zone_change_index))
+        && zone_changes.all(|(recorded_turn_number, turn_zone_change_index)| {
+            state.batched_zone_change_trigger_fired.contains(&(
+                definition_ref.clone(),
+                recorded_turn_number,
+                turn_zone_change_index,
+            ))
         })
 }
 
@@ -1722,9 +1728,11 @@ fn record_batched_zone_change_collected(
     };
     for event in trigger_events {
         if let GameEvent::ZoneChanged { record, .. } = event {
-            state
-                .batched_zone_change_trigger_fired
-                .insert((definition_ref.clone(), record.turn_zone_change_index));
+            state.batched_zone_change_trigger_fired.insert((
+                definition_ref.clone(),
+                record.recorded_turn_number,
+                record.turn_zone_change_index,
+            ));
         }
     }
 }
@@ -6912,6 +6920,11 @@ fn push_pending_trigger_to_stack_with_firing(
         .as_ref()
         .map(|source| source.source_read(state).lki().name)
         .unwrap_or_default();
+    let crime_candidate = super::casting::targets_commit_crime(
+        state,
+        &super::ability_utils::flatten_targets_in_chain(&ability),
+        controller,
+    );
     let entry = StackEntry {
         id: entry_id,
         source_id,
@@ -6929,6 +6942,7 @@ fn push_pending_trigger_to_stack_with_firing(
         },
     };
     stack::push_triggered_to_stack(state, entry, firing, events);
+    super::casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
     entry_id
 }
 
@@ -8504,7 +8518,7 @@ pub(crate) fn filter_consumed_trigger_events(
 /// NOT need this — a blanket `ZoneChanged` drop is equivalent there, and that is
 /// what `engine_resolution_choices::batch_or_drain_observer_triggers`
 /// (owner-bounded slice + `zone_changes_are_logically_owned`) and the resumed
-/// `ChangeZone` drain in `effects/mod.rs` do. `park_search_observer_triggers`'
+/// `ChangeZone` drain in `effects/mod.rs` do. `collect_search_observer_triggers`'
 /// slice spans a whole continuation drain and can hold zone changes no owner
 /// allocated a group for, so it must consult this instead.
 ///
@@ -10368,6 +10382,8 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
+        // CR 702.195b: True when the controller has the enduring story designation.
+        TriggerCondition::HasEnduringStory => eval_has_enduring_story(state, controller),
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
         // wraps via `Not { Box::new(SourceIsTapped) }`. No battlefield zone guard
         // (trigger conditions; zone already constrained by functioning-abilities path).
@@ -31288,6 +31304,7 @@ pub mod tests {
             | Keyword::Exploit
             | Keyword::Explore
             | Keyword::Ascend
+            | Keyword::Storied
             | Keyword::StartYourEngines
             | Keyword::Dredge(_)
             | Keyword::Modular(_)

@@ -67,7 +67,7 @@ const BLOODTHIRSTY_CONQUEROR: &str =
 /// HEAD `dc67bd130` on the UNMODIFIED reconcile body. See the module docs.
 /// `subject: None` was appended to each `EffectResolved` when that field was added to the
 /// event — it is `None` on every path this test drives, so the stream is otherwise unchanged.
-const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 0 }, expected_zone: Hand }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: None, played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 1 }, expected_zone: Stack }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: None, played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, GameOver { winner: Some(PlayerId(0)) }]"#;
+const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 0 }, expected_zone: Hand }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: None, played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, recorded_turn_number: 2, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 1 }, expected_zone: Stack }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: None, played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, recorded_turn_number: 2, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, GameOver { winner: Some(PlayerId(0)) }]"#;
 
 fn life(runner: &GameRunner, p: PlayerId) -> i32 {
     runner
@@ -5295,13 +5295,14 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         "migrated fixture must decode through the PRODUCTION decoder"
     );
 
-    // R8 — THE ROUTING IS STATE-NEUTRAL. The six loaders stopped decoding a bare
-    // `GameState` and wrapping it in `PersistedGameState::Raw`, and started decoding AS
+    // R8 — THE ROUTING CANONICALIZES PERSISTED PROVENANCE. The six loaders stopped decoding
+    // a bare `GameState` and wrapping it in `PersistedGameState::Raw`, and started decoding AS
     // `PersistedGameState`: a different type, a different `Deserialize`, and a different
     // conversion (`decode_persisted_resolution_state`, which injects
     // `resolution_state_version` and decodes the resolution state as `ResolutionStateWire`).
-    // That is a real change to how six fixtures restore, and the two arms above cannot
-    // witness it — they assert only that a decode succeeds or fails.
+    // The persistence boundary assigns the current-turn occurrence namespace to the old
+    // ledger and matching live stack events; direct-current raw decode deliberately does not.
+    // Every other serialized surface must remain unchanged.
     //
     // `GameState` has no `PartialEq`, so compare its serialized forms recursively.
     // Hash-backed owners now serialize canonically at their field boundaries; arrays are
@@ -5365,22 +5366,89 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         "state",
         &mut diffs,
     );
+    assert_eq!(
+        diffs,
+        vec![
+            "state.stack (different elements)".to_string(),
+            "state.zone_changes_this_turn (different elements)".to_string(),
+        ],
+        "the production restore changes only the persisted zone-change provenance surfaces"
+    );
+
+    let stack_zone_change_keys = |state: &GameState| {
+        state
+            .stack
+            .iter()
+            .filter_map(|entry| {
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                    ..
+                } = &entry.kind
+                else {
+                    return None;
+                };
+                Some((record.recorded_turn_number, record.turn_zone_change_index))
+            })
+            .collect::<Vec<_>>()
+    };
+    let legacy_stack_keys = stack_zone_change_keys(&legacy_restored);
+    let routed_stack_keys = stack_zone_change_keys(&routed_restored);
     assert!(
-        diffs.is_empty(),
-        "routing the six dump loaders through the production decoder must restore the SAME \
-         state they restored before; differing paths: {diffs:?}"
+        !legacy_stack_keys.is_empty(),
+        "reach-guard: the fixture has live stack ZoneChanged trigger contexts"
+    );
+    assert!(
+        legacy_restored
+            .zone_changes_this_turn
+            .iter()
+            .all(|record| record.recorded_turn_number == 0)
+            && legacy_stack_keys.iter().all(|(turn, _)| *turn == 0),
+        "direct-current raw decode retains the historical zero provenance defaults"
+    );
+    assert_eq!(
+        routed_restored
+            .zone_changes_this_turn
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (
+                record.recorded_turn_number,
+                record.turn_zone_change_index,
+                index
+            ))
+            .collect::<Vec<_>>(),
+        (0..routed_restored.zone_changes_this_turn.len())
+            .map(|index| (routed_restored.turn_number, index, index))
+            .collect::<Vec<_>>(),
+        "production restore stamps each retained ledger row in its current-turn namespace"
+    );
+    assert!(
+        routed_stack_keys
+            .iter()
+            .all(|(turn, _)| *turn == routed_restored.turn_number),
+        "production restore stamps every matching live stack event with the current turn"
+    );
+    assert_eq!(
+        routed_stack_keys
+            .iter()
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>(),
+        legacy_stack_keys
+            .iter()
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>(),
+        "production restore preserves each stack event's ledger occurrence identity"
     );
 
     // The perturbation IS that assertion's reach-guard: without it, a comparison that
     // compared a value to itself — or explained every difference away as set order — would
     // pass on any two states at all. Perturb ONE scalar; the comparison must SEE it, and
     // must name the field it saw.
-    let mut perturbed = legacy_restored;
+    let mut perturbed = legacy_restored.clone();
     perturbed.turn_number += 1;
     let mut perturbed_diffs = Vec::new();
     differences(
         &serialized(&perturbed),
-        &routed_value,
+        &serialized(&legacy_restored),
         "state",
         &mut perturbed_diffs,
     );
@@ -5388,7 +5456,7 @@ fn migrated_dump_decodes_through_both_decoders_and_unmigrated_through_neither() 
         perturbed_diffs,
         vec!["state.turn_number".to_string()],
         "the comparison must see a one-scalar difference AND name it; if it cannot, the \
-         equality above proves nothing"
+         canonicalization-surface comparison above proves nothing"
     );
 
     // NEGATIVE (the anti-vacuity control): strip the field back out and both must reject.
@@ -6135,8 +6203,8 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
     // exact count is reported (not just `> 0`) so a change in how far the detector has
     // to drive to re-derive the crown surfaces as a diff rather than passing silently.
     assert_eq!(
-        beats, 6,
-        "the `c decline` arm re-derives the crown after a measured 6 driven beats — a 0 here \
+        beats, 8,
+        "the `c decline` arm re-derives the crown after a measured 8 driven beats — a 0 here \
          would mean the row read the dump's saved offer back instead of re-deriving one, \
          which is what makes both revert-probes above live"
     );
@@ -9534,7 +9602,7 @@ fn bloodloop_state(players: u8) -> GameState {
 /// commit CHANGED; pinning it is what stops a later change from moving it silently.
 #[test]
 fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
-    for (players, expected_beat, expected_turn) in [(2u8, 29usize, 4u32), (3, 58, 5), (4, 97, 6)] {
+    for (players, expected_beat, expected_turn) in [(2u8, 33usize, 4u32), (3, 67, 5), (4, 113, 6)] {
         let mut state = bloodloop_state(players);
         let beat = drive_to_bounded_offer(&mut state, 400).unwrap_or_else(|| {
             panic!(
