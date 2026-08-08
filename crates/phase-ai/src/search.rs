@@ -4184,9 +4184,10 @@ pub fn select_safe_action_index_from_scores(
         .filter(|index| !is_pact_payment_cast(state, &scored[*index].0))
 }
 
-/// Internal softmax primitive for the canonical chooser and phase-AI tests.
-/// It intentionally has no game-state context, so it must not cross the
-/// crate boundary where a Pact result could lose its durable receipt route.
+/// Test-only softmax wrapper that returns the selected action rather than its
+/// index. Production selection keeps the index so diagnostics can identify
+/// duplicate rows without comparing actions.
+#[cfg(test)]
 pub(crate) fn softmax_select_pairs(
     scored: &[(GameAction, f64)],
     temperature: f64,
