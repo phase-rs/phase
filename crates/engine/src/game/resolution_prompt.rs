@@ -553,6 +553,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         force_block_attacker: _, // exact force-block referent, no choice
+        target_incarnations: _, // CR 400.7 referent pins, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)

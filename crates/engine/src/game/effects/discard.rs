@@ -204,6 +204,29 @@ pub fn resolve(
         _ => (1, false, None, TargetFilter::Any, false),
     };
 
+    // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
+    // became a new object discards nothing, and the trigger still resolves.
+    //
+    // EARLY RETURN IS MANDATORY HERE — substitution alone would be a live bug,
+    // not a redundancy. Emptying `specific_targets` below falls through the
+    // `!specific_targets.is_empty()` gate into the GENERIC hand-choice/random
+    // path, which picks some OTHER card out of the player's hand. That is a
+    // fallback re-binding the effect to a different object, so the decision rule
+    // requires the guard rather than the substitution.
+    //
+    // Deliberately placed above the `specific_targets` computation so it fires
+    // before either gate is evaluated. `EffectKind::from(&ability.effect)`
+    // (not a literal) because this resolver serves BOTH `DiscardCard` and
+    // `Discard`, which the Tier C census counts as distinct effect types.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // Check if targets specify specific cards to discard. Parent chain
     // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
     // damage recipient) — those must not short-circuit the hand-choice path.
@@ -213,8 +236,12 @@ pub fn resolve(
     // discard targets. Once the bounce moves them to hand they must not bypass the
     // interactive DiscardChoice path via this fast path — only a *declared* targeted
     // discard (Oracle uses "target") may consume `ability.targets` here.
-    let specific_targets: Vec<_> = ability
-        .targets
+    // Partially-stale case: the all-stale case already returned above, so this
+    // substitution only ever drops individual dead referents from a list that
+    // still has at least one live member — it cannot empty the list and so
+    // cannot reach the generic-path fallback the guard above protects.
+    let live_targets = ability.live_object_targets(state);
+    let specific_targets: Vec<_> = live_targets
         .iter()
         .filter_map(|t| {
             let TargetRef::Object(obj_id) = t else {

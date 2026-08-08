@@ -166,6 +166,18 @@ impl ObjectIncarnationRef {
             incarnation: obj.incarnation,
         }
     }
+
+    /// CR 400.7: True when this pinned reference still names the live object it
+    /// was captured from. An object that changed zones became a new object and
+    /// bumped its incarnation (`GameObject::bump_incarnation`), so a stale pin
+    /// matches nothing even though the engine reuses the `ObjectId` as storage
+    /// identity.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        state
+            .objects
+            .get(&self.object_id)
+            .is_some_and(|object| Self::from_object(object) == *self)
+    }
 }
 
 /// Private serde shim mirroring `PhaseStopCompat` (`types/phase.rs`): new writes

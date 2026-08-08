@@ -2994,6 +2994,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_source,
         trigger_definition_ref,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3205,6 +3206,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3395,6 +3397,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
+        target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -4033,6 +4036,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: a_force_block_attacker,
+        target_incarnations: a_target_incarnations,
         controller: a_controller,
         original_controller: _,
         scoped_player: a_scoped_player,
@@ -4087,6 +4091,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         trigger_source: _,
         trigger_definition_ref: _,
         force_block_attacker: b_force_block_attacker,
+        target_incarnations: b_target_incarnations,
         controller: b_controller,
         original_controller: _,
         scoped_player: b_scoped_player,
@@ -4137,6 +4142,11 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     a_effect == b_effect
         && a_targets == b_targets
         && a_force_block_attacker == b_force_block_attacker
+        // CR 400.7 + CR 603.7c: two otherwise-identical abilities pinned to
+        // DIFFERENT incarnations are not the same ability. Participating here
+        // keeps this manual comparison in agreement with the type's derived
+        // `PartialEq`; disagreeing with the derive would be the actual defect.
+        && a_target_incarnations == b_target_incarnations
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind

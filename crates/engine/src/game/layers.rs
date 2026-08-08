@@ -5992,11 +5992,7 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
     // CR 400.7: a recipient that has changed zones is a new object, so a
     // continuous effect tied to its prior incarnation cannot keep applying.
     if let Some(recipient) = tce.affected_recipient {
-        if !state
-            .objects
-            .get(&recipient.object_id)
-            .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
-        {
+        if !recipient.is_current(state) {
             return false;
         }
     }

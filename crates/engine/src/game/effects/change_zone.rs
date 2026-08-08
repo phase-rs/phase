@@ -543,6 +543,27 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 400.7 + CR 603.7c: a delayed ability whose pinned referent became a
+        // new object affects nothing. Return before the untargeted zone-scan
+        // below, which must not rediscover a same-id return — the same reason
+        // the SelfRef guard above exists. `filter.rs`'s never-match arm makes
+        // that scan inert for ParentTarget today; this guard does not rely on
+        // that distant `_ => false` arm.
+        //
+        // Emits EffectResolved first, exactly as the three sibling guards in
+        // this block do (CR 115.6 optional targeting, CR 400.7 SelfRef,
+        // CR 701.23b fail-to-find): the trigger DID fire and DID resolve
+        // (CR 603.7b) — it simply affected nothing, and the game log / event
+        // observers / chain machinery must see that.
+        if ability.pinned_object_targets_all_stale(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+
         // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
         // The parser emits `origin=Library, target=Any` for the put-step of a
         // chain where an earlier interactive step selects the card from the
