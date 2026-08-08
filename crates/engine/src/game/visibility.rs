@@ -79,13 +79,14 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
-    filtered.viewer_known_card_ids = state
+    filtered.product_knowledge_state.viewer_known_card_ids = state
         .objects
         .keys()
         .copied()
         .filter(|&id| state.viewer_knows_card_identity(viewer, id))
         .collect();
     filtered
+        .product_knowledge_state
         .viewer_known_card_ids
         .sort_unstable_by_key(|id| id.0);
     // Analysis provenance is meaningful only to the clone executing a preview;
@@ -112,8 +113,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // effect is applied below before hidden cards are redacted; viewers receive
     // identities they learned, not the audience facts or library epochs behind
     // that decision.
-    filtered.product_knowledge.clear();
-    filtered.library_knowledge_epochs.clear();
+    filtered.product_knowledge_state.facts.clear();
+    filtered.product_knowledge_state.library_epochs.clear();
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
@@ -3205,9 +3206,12 @@ mod tests {
 
         let viewer = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(viewer.objects[&card].name, "Known Hand Card");
-        assert_eq!(viewer.viewer_known_card_ids, vec![card]);
-        assert!(viewer.product_knowledge.is_empty());
-        assert!(viewer.library_knowledge_epochs.is_empty());
+        assert_eq!(
+            viewer.product_knowledge_state.viewer_known_card_ids,
+            vec![card]
+        );
+        assert!(viewer.product_knowledge_state.facts.is_empty());
+        assert!(viewer.product_knowledge_state.library_epochs.is_empty());
 
         let other = filter_state_for_viewer(&state, PlayerId(2));
         assert_eq!(other.objects[&card].name, HIDDEN_CARD_NAME);
