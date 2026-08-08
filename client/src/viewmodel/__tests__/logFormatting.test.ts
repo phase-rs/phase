@@ -55,7 +55,7 @@ describe("game log presentation", () => {
       entry("Essential", { seq: 6, turn: 1 }),
     ]);
     expect(rows).toHaveLength(4);
-    expect(rows[0]).toMatchObject({ type: "divider", divider: { turn: 1, phase: "Upkeep" } });
+    expect(rows[0]).toMatchObject({ type: "divider", divider: { seq: 2, turn: 1, phase: "Upkeep" } });
     expect(rows.filter((row) => row.type === "divider")).toHaveLength(1);
   });
 
@@ -75,8 +75,8 @@ describe("game log presentation", () => {
 
     expect(timelineRows([firstBoundary, secondBoundary])).toEqual([]);
     expect(timelineRows([firstBoundary, secondBoundary], true)).toEqual([
-      { type: "divider", divider: { turn: 1, phase: "Upkeep", boundary: "Turn" } },
-      { type: "divider", divider: { turn: 2, phase: "Draw", boundary: "Turn" } },
+      { type: "divider", divider: { seq: 1, turn: 1, phase: "Upkeep", boundary: "Turn" } },
+      { type: "divider", divider: { seq: 2, turn: 2, phase: "Draw", boundary: "Turn" } },
     ]);
     expect(timelineRows([{ ...firstBoundary, turn: 0 }], true)).toEqual([]);
   });

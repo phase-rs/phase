@@ -7,7 +7,12 @@ import { useDraggableWidget } from "../../hooks/useDraggableWidget.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { filterLogByView, timelineRows, type LogView } from "../../viewmodel/logFormatting.ts";
+import {
+  filterLogByView,
+  timelineRowSeq,
+  timelineRows,
+  type LogView,
+} from "../../viewmodel/logFormatting.ts";
 import {
   exportLogEntriesJson,
   filterLogEntries,
@@ -108,7 +113,7 @@ export function GameLogPanel() {
     }),
     [categoryFilter, searchQuery, showHiddenInformation, turnFilter, view],
   );
-  const lastVisibleLogSeqRef = useRef(filteredEntries[filteredEntries.length - 1]?.seq);
+  const lastVisibleLogSeqRef = useRef(rows[rows.length - 1] && timelineRowSeq(rows[rows.length - 1]));
   const lastFilterSignatureRef = useRef(filterSignature);
 
   const seededRef = useRef(false);
@@ -123,7 +128,7 @@ export function GameLogPanel() {
   }, [isGameOver, setLogPanelOpen]);
 
   useEffect(() => {
-    const nextLogSeq = filteredEntries[filteredEntries.length - 1]?.seq;
+    const nextLogSeq = rows[rows.length - 1] && timelineRowSeq(rows[rows.length - 1]);
     const previousLogSeq = lastVisibleLogSeqRef.current;
     lastVisibleLogSeqRef.current = nextLogSeq;
     const filtersChanged = lastFilterSignatureRef.current !== filterSignature;
@@ -139,7 +144,7 @@ export function GameLogPanel() {
       return;
     }
     if (nextLogSeq === previousLogSeq) return;
-    const newEntries = filteredEntries.filter((entry) => entry.seq > previousLogSeq).length;
+    const newEntries = rows.filter((row) => timelineRowSeq(row) > previousLogSeq).length;
     if (newEntries === 0) return;
     const element = scrollRef.current;
     if (element && nearBottomRef.current) {
@@ -149,7 +154,7 @@ export function GameLogPanel() {
       return;
     }
     setUnreadCount((count) => count + newEntries);
-  }, [filterSignature, filteredEntries, gameSessionGeneration]);
+  }, [filterSignature, gameSessionGeneration, rows]);
 
   useEffect(() => () => {
     if (copyResetRef.current) clearTimeout(copyResetRef.current);
@@ -308,7 +313,7 @@ export function GameLogPanel() {
           </div>
 
           <div ref={scrollRef} role="region" tabIndex={0} aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
-            {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row, index) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObject={inspectObject} /> : <div key={`divider-${index}`} className="my-2 border-y border-gray-700 py-1 text-center text-[9px] font-semibold uppercase tracking-wide text-gray-500">{row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
+            {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObject={inspectObject} /> : <div key={`divider-${row.divider.seq}`} className="my-2 border-y border-gray-700 py-1 text-center text-[9px] font-semibold uppercase tracking-wide text-gray-500">{row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
           </div>
           {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>

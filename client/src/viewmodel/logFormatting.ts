@@ -10,6 +10,7 @@ import type {
 export type LogView = "timeline" | "details" | "diagnostics";
 
 export interface LogDivider {
+  seq: number;
   turn: number;
   phase: GameLogEntry["phase"];
   boundary: Exclude<LogBoundary, "None">;
@@ -18,6 +19,10 @@ export interface LogDivider {
 export type LogTimelineRow =
   | { type: "entry"; entry: GameLogEntry }
   | { type: "divider"; divider: LogDivider };
+
+export function timelineRowSeq(row: LogTimelineRow): number {
+  return row.type === "entry" ? row.entry.seq : row.divider.seq;
+}
 
 const LEGACY_PRESENTATION: LogPresentation = {
   importance: "Detail",
@@ -86,6 +91,7 @@ export function timelineRows(
         rows.push({ type: "divider", divider: pending });
       }
       pending = {
+        seq: entry.seq,
         turn: entry.turn,
         phase: entry.phase,
         boundary: presentation.boundary,

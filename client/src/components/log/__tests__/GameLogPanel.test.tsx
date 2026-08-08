@@ -144,6 +144,28 @@ describe("GameLogPanel", () => {
     expect(screen.queryByRole("button", { name: /jump to latest/i })).not.toBeInTheDocument();
   });
 
+  it("does not report an unread count for a trailing boundary without a rendered row", () => {
+    render(<GameLogPanel />);
+
+    const log = entriesRegion();
+    setScrollMetrics(log, { clientHeight: 100, scrollHeight: 400, scrollTop: 0 });
+    fireEvent.scroll(log);
+    act(() => {
+      useGameStore.setState({
+        logHistory: [
+          entry(0, "Initial event"),
+          entry(1, "Phase changed", {
+            category: "Turn",
+            phase: "Upkeep",
+            presentation: { importance: "Context", tone: "Neutral", boundary: "Phase", visibility: "Public" },
+          }),
+        ],
+      });
+    });
+
+    expect(screen.queryByRole("button", { name: /jump to latest/i })).not.toBeInTheDocument();
+  });
+
   it("keeps the scroll position while changing views or filters and exposes active filters", async () => {
     const user = userEvent.setup();
     useGameStore.setState({
