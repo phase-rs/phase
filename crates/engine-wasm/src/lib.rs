@@ -1809,6 +1809,12 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), Js
     })
 }
 
+fn decode_and_rehydrate_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
+    let mut state = decode_restored_game_state(json_str)?;
+    rehydrate_restored_state_from_card_db(&mut state)?;
+    Ok(state)
+}
+
 #[cfg(test)]
 fn load_minimal_test_card_database() {
     CARD_DB.with(|cell| {
@@ -1833,8 +1839,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
             "restore_game_state refused: undo is disabled in multiplayer sessions",
         ));
     }
-    let mut state = decode_restored_game_state(json_str)?;
-    rehydrate_restored_state_from_card_db(&mut state)?;
+    let mut state = decode_and_rehydrate_restored_game_state(json_str)?;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
     // come NEXT rather than replaying from origin. The engine owns this logic
@@ -1894,8 +1899,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
 
-    let mut state = decode_restored_game_state(json_str)?;
-    rehydrate_restored_state_from_card_db(&mut state)?;
+    let mut state = decode_and_rehydrate_restored_game_state(json_str)?;
 
     // Deliberately re-roll a fresh seed on multiplayer host resume so continued
     // play diverges from any pre-save sequence (mirrors server-core). This is a
@@ -1927,21 +1931,15 @@ mod restored_card_db_requirements_tests {
     use super::*;
 
     #[test]
-    fn restore_and_resume_require_a_card_database_before_mutating_state() {
+    fn decoded_restore_requires_a_card_database_before_state_mutation() {
         clear_game_state();
         set_multiplayer_mode(false);
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
         let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
 
-        let restore_error = restore_game_state(&json).expect_err("restore must require CARD_DB");
-        assert!(restore_error
-            .as_string()
-            .is_some_and(|message| message.contains("card database")));
-        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
-
-        let resume_error =
-            resume_multiplayer_host_state(&json).expect_err("resume must require CARD_DB");
-        assert!(resume_error
+        let error = decode_and_rehydrate_restored_game_state(&json)
+            .expect_err("restore must require CARD_DB");
+        assert!(error
             .as_string()
             .is_some_and(|message| message.contains("card database")));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));

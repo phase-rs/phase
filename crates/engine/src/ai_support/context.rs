@@ -39,15 +39,14 @@ impl AiDecisionContract {
             state_revision: state.state_revision,
             // The engine's candidate enumerator is the authoritative finite
             // domain for this prompt. Combat and search continuations remain
-            // reducer-owned, but target prompts and in-flight casts must cross
-            // their next reducer boundary before they are issued: a target can
-            // determine the final mana cost. Submission still performs the
-            // public action-boundary apply after exact-membership and owner
-            // checks.
+            // reducer-owned. A target choice crosses the reducer only when the
+            // pending spell's mana obligation can still change with its final
+            // target set. Submission still performs the public action-boundary
+            // apply after exact-membership and owner checks.
             candidates: {
                 let mut candidates =
                     candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None);
-                if requires_reducer_validated_contract(state) {
+                if target_selection_requires_reducer_validation(state) {
                     candidates = FilterPipeline::default_pipeline().apply(state, candidates);
                 }
                 candidates.sort_by(|left, right| left.action.cmp_stable(&right.action));
@@ -103,13 +102,21 @@ impl AiDecisionContract {
     }
 }
 
-fn requires_reducer_validated_contract(state: &GameState) -> bool {
-    matches!(
-        state.waiting_for,
-        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
-    ) || state.waiting_for.has_pending_cast()
-        || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
-            && state.pending_cast.is_some())
+pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {
+    let WaitingFor::TargetSelection {
+        player,
+        pending_cast,
+        ..
+    } = &state.waiting_for
+    else {
+        return false;
+    };
+
+    !crate::game::casting::pending_mana_obligation_is_stable_before_targets(
+        state,
+        *player,
+        pending_cast,
+    )
 }
 
 fn candidate_action_matches(issued: &GameAction, submitted: &GameAction) -> bool {

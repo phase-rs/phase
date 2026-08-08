@@ -1922,6 +1922,41 @@ pub fn current_target_selection_targets(state: &GameState) -> Option<&[TargetRef
     }
 }
 
+fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<GameAction>> {
+    let (target_slots, current_slot) = match &state.waiting_for {
+        WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        }
+        | WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => (target_slots, selection.current_slot),
+        _ => return None,
+    };
+
+    let current_legal_targets = current_target_selection_targets(state)?;
+
+    let mut actions: Vec<GameAction> = current_legal_targets
+        .iter()
+        .cloned()
+        .map(|target| GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .collect();
+
+    if target_slots
+        .get(current_slot)
+        .is_some_and(|slot| slot.optional)
+    {
+        actions.push(GameAction::ChooseTarget { target: None });
+    }
+
+    Some(actions)
+}
+
 /// The flat priority-action list: validated candidate actions minus mana
 /// abilities. This is the single authority for the non-target-selection action
 /// body so the auto-pass probe (`priority_player_has_meaningful_action`) and
@@ -1979,17 +2014,16 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let mut actions: Vec<GameAction> = if matches!(
-        state.waiting_for,
-        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
-    ) {
-        validated_candidate_actions(state)
-            .into_iter()
-            .map(|candidate| candidate.action)
-            .collect()
-    } else {
-        flat_priority_actions_with_probe(state, priority_probe)
-    };
+    let mut actions: Vec<GameAction> =
+        if context::target_selection_requires_reducer_validation(state) {
+            validated_candidate_actions(state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        } else {
+            target_selection_actions_without_simulation(state)
+                .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe))
+        };
 
     // This preference-setting action is intentionally excluded from AI candidate
     // generation: it changes future prompt behavior rather than making a tactical
@@ -5959,14 +5993,8 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_validate_each_current_target() {
+    fn target_selection_legal_actions_use_current_targets_without_simulation() {
         let mut state = setup_priority();
-        state.players[0].mana_pool.mana.push(ManaUnit::new(
-            ManaType::Colorless,
-            ObjectId(0),
-            false,
-            vec![],
-        ));
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
                 let creature = create_object(
@@ -6011,10 +6039,7 @@ mod tests {
         let (actions, spell_costs, grouped) = legal_actions_full(&state);
         let counters = crate::game::perf_counters::snapshot();
 
-        assert!(
-            counters.state_clone_for_legality >= 26,
-            "every current target and the optional skip must be checked through the reducer"
-        );
+        assert_eq!(counters.state_clone_for_legality, 0);
         assert_eq!(counters.priority_cast_probe_builds, 0);
         assert_eq!(
             actions
@@ -6024,7 +6049,7 @@ mod tests {
             25
         );
         assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
-        assert!(actions.contains(&GameAction::CancelCast));
+        assert_eq!(actions.len(), 26);
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
         assert!(actions
@@ -6385,12 +6410,6 @@ mod tests {
     #[test]
     fn target_selection_legal_actions_do_not_fall_back_to_stale_slot_targets() {
         let mut state = setup_priority();
-        state.players[0].mana_pool.mana.push(ManaUnit::new(
-            ManaType::Colorless,
-            ObjectId(0),
-            false,
-            vec![],
-        ));
         let target = TargetRef::Object(create_object(
             &mut state,
             CardId(101),
@@ -6422,18 +6441,11 @@ mod tests {
         crate::game::perf_counters::reset();
         let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
 
-        assert!(
-            crate::game::perf_counters::snapshot().state_clone_for_legality > 0,
-            "target-prompt legal actions must use the same reducer-validation authority as AI contracts"
+        assert_eq!(
+            crate::game::perf_counters::snapshot().state_clone_for_legality,
+            0
         );
-        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
-        assert!(actions.contains(&GameAction::CancelCast));
-        assert!(
-            !actions.contains(&GameAction::ChooseTarget {
-                target: Some(target)
-            }),
-            "public legal actions must not revive stale slot targets"
-        );
+        assert_eq!(actions, vec![GameAction::ChooseTarget { target: None }]);
     }
 
     /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous

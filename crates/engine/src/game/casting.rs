@@ -14624,7 +14624,7 @@ pub(super) fn spell_tap_payment_mode_for(
 /// CR 601.2c + CR 601.2f: Target selection may precede locking the final
 /// mana obligation. Return true only when none of the production cost axes can
 /// still change the amount or the sources available before payment.
-pub(super) fn pending_mana_obligation_is_stable_before_targets(
+pub(crate) fn pending_mana_obligation_is_stable_before_targets(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
