@@ -15075,10 +15075,12 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub revealed_cards: HashSet<ObjectId>,
     /// Cards that have been publicly revealed at least once. Unlike
-    /// `revealed_cards`, this is not cleared at the next action boundary.
+    /// `revealed_cards`, this is not cleared at the next action boundary. This
+    /// sparse, long-lived disclosure set is boxed to preserve the `GameState`
+    /// stack budget.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
-    pub public_revealed_cards: HashSet<ObjectId>,
+    pub public_revealed_cards: Box<HashSet<ObjectId>>,
     /// Durable card identities learned by a particular audience. Product
     /// knowledge affects only viewer projection and AI determinization; it is
     /// never consulted by rules execution, legality, or prompts.
@@ -19438,7 +19440,7 @@ impl GameState {
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
             revealed_cards: HashSet::new(),
-            public_revealed_cards: HashSet::new(),
+            public_revealed_cards: Box::default(),
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
             resolving_continuation_attach_host: None,
