@@ -6286,7 +6286,7 @@ impl GameState {
                 viewer,
                 owner,
                 zone,
-                identity: identity.clone(),
+                identity,
                 library_epoch,
             });
             for fact in viewer_facts {
