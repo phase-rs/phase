@@ -5469,6 +5469,7 @@ fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
 /// - `SharedNoun`: "a X, Y, ..., or Z counter" — one leading article and one
 ///   trailing "counter" shared across a list of bare keyword adjectives;
 ///   synthesized as "a <item> counter".
+#[derive(Clone, Copy)]
 enum ChoiceListShape {
     Distributed,
     FromAmong,
@@ -5559,6 +5560,45 @@ fn classify_counter_choice_list(input: &str) -> Option<(ChoiceListShape, Vec<&st
     valid.then_some((shape, items))
 }
 
+/// Recover the original-case list items after a lowercased list has already
+/// been classified and validated. This is deliberately a structural mirror of
+/// the accepted grammar: counter-choice recognition and validation remain on
+/// `TextPair::lower`, while original text is retained only for branch display
+/// text and the existing branch reparse path.
+fn original_counter_choice_list_items(
+    shape: ChoiceListShape,
+    choices: TextPair<'_>,
+) -> Option<Vec<&str>> {
+    match shape {
+        ChoiceListShape::Distributed => split_choice_list_items(choices.original),
+        ChoiceListShape::FromAmong => {
+            // allow-noncombinator: mirrors an already-classified lowercase prefix on paired original text.
+            let after_preamble = choices.strip_prefix("a counter from among ")?;
+            split_choice_list_items(after_preamble.original)
+        }
+        ChoiceListShape::SharedNoun => {
+            let mut original_items = split_choice_list_items(choices.original)?;
+            let lower_items = split_choice_list_items(choices.lower)?;
+            if original_items.len() != lower_items.len() || original_items.len() < 2 {
+                return None;
+            }
+
+            let first = TextPair::new(original_items[0], lower_items[0])
+                // allow-noncombinator: mirrors an already-classified lowercase article on paired original text.
+                .strip_prefix("a ")?
+                .original;
+            let last_index = original_items.len() - 1;
+            let last = TextPair::new(original_items[last_index], lower_items[last_index])
+                // allow-noncombinator: mirrors an already-classified lowercase counter suffix on paired original text.
+                .strip_suffix(" counter")?
+                .original;
+            original_items[0] = first;
+            original_items[last_index] = last;
+            Some(original_items)
+        }
+    }
+}
+
 /// CR 122.1 + CR 608.2d: Context-free classifier for a disjunctive
 /// counter-choice list. Given the choices payload (the text BETWEEN
 /// "your choice of " and " on TARGET"), recognize which of the three list
@@ -5588,7 +5628,8 @@ fn classify_counter_choice_list(input: &str) -> Option<(ChoiceListShape, Vec<&st
 pub(crate) fn classify_and_parse_counter_choice_list(
     choices_text: &str,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
-    let (shape, choice_items) = classify_counter_choice_list(choices_text)?;
+    let lower = choices_text.to_lowercase();
+    let (shape, choice_items) = classify_counter_choice_list(&lower)?;
 
     let mut entries: Vec<(CounterType, QuantityExpr)> = Vec::with_capacity(choice_items.len());
     for item in &choice_items {
@@ -5647,12 +5688,16 @@ fn try_parse_put_counter_choice(
     // only when every distributed item is a complete counter noun phrase, so
     // noun-phrase disjunctions like "put a creature or a land into play" never
     // misclassify as a counter choice.
-    let after_choice_original = if let Some(((), rest)) = nom_on_lower(tp.original, tp.lower, |i| {
-        value((), tag("put your choice of ")).parse(i)
-    }) {
-        rest
+    let (explicit_choice, after_choice_original) = if let Some(((), rest)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            value((), tag("put your choice of ")).parse(i)
+        }) {
+        (true, rest)
     } else {
-        nom_on_lower(tp.original, tp.lower, |i| value((), tag("put ")).parse(i))?.1
+        (
+            false,
+            nom_on_lower(tp.original, tp.lower, |i| value((), tag("put ")).parse(i))?.1,
+        )
     };
 
     let consumed = tp.original.len() - after_choice_original.len();
@@ -5660,10 +5705,15 @@ fn try_parse_put_counter_choice(
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
 
     // The shared classifier validates FromAmong, SharedNoun, and Distributed
-    // lists before branch reparsing. In particular, a bare distributed list is
-    // accepted only when every item is a complete counter noun phrase.
-    let choices_text = choices_tp.original;
-    let (shape, choice_items) = classify_counter_choice_list(choices_text)?;
+    // lists before branch reparsing. The unmarked bare form retains its
+    // established shared-noun admission and adds only a full counter-noun
+    // Distributed list (Dwarven Armorer's form); `from among` remains reserved
+    // for the explicit choice grammar.
+    let (shape, _) = classify_counter_choice_list(choices_tp.lower)?;
+    if !explicit_choice && matches!(shape, ChoiceListShape::FromAmong) {
+        return None;
+    }
+    let choice_items = original_counter_choice_list_items(shape, choices_tp)?;
 
     let target_text = target_tp.original.trim().trim_end_matches('.');
     if target_text.is_empty() {

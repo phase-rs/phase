@@ -40392,6 +40392,39 @@ fn dwarven_armorer_bare_distributed_counter_choice_preserves_cost_and_branches()
 }
 
 #[test]
+fn mixed_case_counter_choice_validates_lowercase_and_keeps_branch_descriptions() {
+    let ability = parse_effect_chain(
+        "Put a +0/+1 Counter or a +1/+0 Counter on Target Creature.",
+        AbilityKind::Spell,
+    );
+
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("mixed-case counter choice must retain its shared target");
+    let Effect::ChooseOneOf { branches, .. } = &*choice.effect else {
+        panic!("expected mixed-case ChooseOneOf, got {:?}", choice.effect);
+    };
+    assert_eq!(branches.len(), 2);
+    assert_eq!(
+        branches[0].description.as_deref(),
+        Some("put a +0/+1 Counter"),
+        "original case belongs to generated branch display text, not classification"
+    );
+    assert!(matches!(
+        &*branches[1].effect,
+        Effect::PutCounter {
+            counter_type: CounterType::PowerToughness {
+                power: 1,
+                toughness: 0
+            },
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn choose_one_of_detects_from_among_counter_choice() {
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -40588,6 +40621,11 @@ fn classify_counter_choice_list_all_three_shapes() {
             ),
         ]
     );
+
+    let mixed_case =
+        classify_and_parse_counter_choice_list("A +1/+1 Counter OR Two Charge Counters")
+            .expect("counter-list grammar and validation must run on lowercased text");
+    assert_eq!(mixed_case, with_count);
 }
 
 #[test]
@@ -40638,6 +40676,18 @@ fn bare_distributed_counter_choice_rejects_non_counter_noun_disjunction() {
 
 #[test]
 fn shared_noun_counter_choice_rejects_non_counter_list() {
+    let valid = parse_effect_chain(
+        "Put your choice of a flying or haste counter on target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*valid.effect, Effect::TargetOnly { .. })
+            && valid.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2)
+            }),
+        "positive reach guard: a shared-noun counter list must reach ChooseOneOf: {valid:?}"
+    );
+
     // "a red or blue creature" is a noun-phrase disjunction, not a counter
     // choice — the per-item strict-counter-type guard must reject it so the
     // shared-noun arm does not produce a ChooseOneOf-of-PutCounter shape.
