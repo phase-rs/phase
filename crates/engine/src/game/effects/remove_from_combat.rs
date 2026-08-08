@@ -55,7 +55,24 @@ pub fn resolve(
     // nothing. The shape mirrored here is `change_zone.rs` / `sacrifice.rs`.
     // `EffectKind::RemoveFromCombat` (not `EffectKind::from(&ability.effect)`)
     // matches this file's own convention at the unconditional push below.
-    if ability.pinned_object_targets_all_stale(state) {
+    //
+    // SCOPED TO THE NON-`SelfRef` ARM. A `SelfRef` removal's subject is the
+    // source itself, never the snapshot referent, so a stale pin on some other
+    // object in `ability.targets` must not cancel it. Without this guard the
+    // predicate and the subject it suppresses are decoupled — the same
+    // collapse of "no target declared" into "declared referent went stale"
+    // that `flip_permanent.rs` and `transform_effect.rs` preserve their raw
+    // `as_slice()` match to avoid. Unreachable today (the in-class population
+    // is `melee`, whose filter is a bare `ParentTarget`, so no `SelfRef` node
+    // co-occurs with a pin), but the coupling is what makes it correct rather
+    // than the population.
+    let subject_is_self_ref = matches!(
+        &ability.effect,
+        Effect::RemoveFromCombat {
+            target: TargetFilter::SelfRef
+        }
+    );
+    if !subject_is_self_ref && ability.pinned_object_targets_all_stale(state) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RemoveFromCombat,
             source_id: ability.source_id,

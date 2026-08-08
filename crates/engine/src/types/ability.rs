@@ -23742,6 +23742,17 @@ impl ResolvedAbility {
         // bump advances a pinned referent's epoch on every zone change. A
         // pinned delayed trigger riding on a zone-cycling loop would otherwise
         // carry a growing epoch into loop equality and never confirm a draw.
+        //
+        // CR 603.3b: the same stripping is correct for the other caller,
+        // `normalize_ability_identity`, which decides whether two triggered
+        // abilities are genuinely indistinguishable for auto-ordering — a
+        // per-instance referent epoch is exactly the object identity that
+        // comparison must ignore. Both callers operate on clones, so no
+        // production pin is ever cleared. This is deliberately the opposite of
+        // `inert_trigger_abilities_eq_ignoring_provenance` (`game/stack.rs`),
+        // which DOES compare `target_incarnations`: there the question is
+        // whether two abilities would resolve identically, and two pins at
+        // different epochs would not. Same field, different questions.
         self.target_incarnations.clear();
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();

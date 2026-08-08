@@ -205,7 +205,11 @@ pub fn resolve(
     // CR 400.7 + CR 603.7c: a delayed sacrifice whose pinned referent became a
     // new object affects nothing. Return before the empty-pool fallback below,
     // which resolves a player scope and would make the controller sacrifice a
-    // DIFFERENT permanent (`resolve_sacrifice_scope`, CR 701.17a).
+    // DIFFERENT permanent (`resolve_sacrifice_scope`, CR 701.21a: "To sacrifice
+    // a permanent, its controller moves it from the battlefield directly to its
+    // owner's graveyard"). Note this file elsewhere cites CR 701.17a for
+    // sacrifice; 701.17a is mill (CR 701.21 is Sacrifice). That pre-existing
+    // cluster is left alone here so the correction lands as one auditable pass.
     //
     // Emits EffectResolved first, matching the shipped CR 400.7 SelfRef guard
     // above, which this guard is the direct extension of.
