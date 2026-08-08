@@ -52617,7 +52617,7 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
     );
 }
 
-/// 3c. Parser fail-closed: an `assimilate` phrasing whose target is NOT a
+/// Parser fail-closed: an `assimilate` phrasing whose target is NOT a
 /// graveyard card is a shape this production does not model, so it must keep
 /// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
 /// than be silently lowered into a reanimation. `name` is `"assimilate"` because

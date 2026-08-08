@@ -17,8 +17,10 @@
 //!
 //! These are RUNTIME tests: they cast through `GameRunner::cast(..).resolve()`
 //! and read back EFFECTIVE post-`evaluate_layers` characteristics. The AST-shape
-//! coverage lives in `parser/oracle_effect/tests.rs`
-//! (`borg_queen_assimilate_lowers_to_reanimate_then_retype_chain`).
+//! coverage lives in `parser/oracle_effect/tests.rs` — both the positive
+//! lowering (`borg_queen_assimilate_lowers_to_reanimate_then_retype_chain`) and
+//! the fail-closed negative
+//! (`assimilate_without_a_graveyard_target_stays_unimplemented`).
 //!
 //! FOOT-GUN, load-bearing in every test here: `layers.rs`'s
 //! `RemoveAllSubtypes { SubtypeSet::Creature }` arm retains any subtype NOT in
