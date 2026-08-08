@@ -7,7 +7,10 @@ import { groupByName } from "../viewmodel/battlefieldProps";
  * (the engine is the sole authority on target legality, CR 508.1a–d).
  *
  * Used for the single-target confirmation path (2-player / one common target):
- * each selected attacker is paired with its sole engine-provided legal target.
+ * each selected attacker is paired with its sole engine-provided selectable
+ * target. Returns `null` when the authoritative support map cannot pair every
+ * selected attacker, so callers can keep the declaration unsubmitted rather
+ * than silently omitting an attacker.
  * For multi-target declarations the {@link AttackTargetPicker} builds the pairs
  * from explicit per-attacker choices instead.
  */
@@ -15,11 +18,14 @@ export function buildAttacks(
   attackerIds: ObjectId[],
   byAttacker: Record<string, AttackTarget[]> | undefined,
   aggregate: AttackTarget[],
-): [ObjectId, AttackTarget][] {
-  return attackerIds.flatMap((id): [ObjectId, AttackTarget][] => {
+): [ObjectId, AttackTarget][] | null {
+  const attacks: [ObjectId, AttackTarget][] = [];
+  for (const id of attackerIds) {
     const target = attackTargetsForAttacker(id, byAttacker, aggregate)[0];
-    return target ? [[id, target]] : [];
-  });
+    if (!target) return null;
+    attacks.push([id, target]);
+  }
+  return attacks;
 }
 
 /** Stable key for an AttackTarget (`"Player-1"`, `"Planeswalker-42"`). */
