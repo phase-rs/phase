@@ -728,9 +728,9 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "draft-core"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -740,14 +740,14 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
- "engine",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "serde",
@@ -811,38 +811,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine"
-version = "0.37.0"
-dependencies = [
- "assert_matches",
- "engine",
- "flate2",
- "im",
- "indexmap 2.14.0",
- "insta",
- "nom",
- "petgraph",
- "pretty_assertions",
- "proptest",
- "rand 0.9.4",
- "rand_chacha 0.9.0",
- "rustc-hash",
- "serde",
- "serde_json",
- "smallvec",
- "strum",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
- "web-time",
-]
-
-[[package]]
 name = "engine-inventory-gen"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -855,13 +825,13 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "console_error_panic_hook",
- "engine",
  "getrandom 0.3.4",
  "js-sys",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "seat-reducer",
@@ -907,7 +877,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "clap",
  "reqwest",
@@ -1680,6 +1650,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1704,9 +1683,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
- "engine",
+ "phase-engine",
  "serde",
  "serde_json",
  "tracing",
@@ -1741,12 +1720,25 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "manabrew-compat"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
- "engine",
+ "manabrew-protocol",
+ "phase-engine",
  "pretty_assertions",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "manabrew-protocol"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899b03250b480a4449ea5ec7b7690ed55d537b943216e4600621b6caef2d8980"
+dependencies = [
+ "serde",
+ "serde_json",
+ "strum_macros 0.28.0",
+ "ts-rs 10.1.0",
 ]
 
 [[package]]
@@ -1802,6 +1794,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1836,10 +1837,10 @@ dependencies = [
 
 [[package]]
 name = "mtgish-import"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "anyhow",
- "engine",
+ "phase-engine",
  "serde",
  "serde_json",
  "serde_with",
@@ -2064,33 +2065,68 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
- "engine",
+ "flate2",
+ "mimalloc",
+ "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
  "rayon",
  "serde",
  "serde_json",
+ "strum",
  "tracing",
  "tracing-subscriber",
  "web-time",
 ]
 
 [[package]]
+name = "phase-engine"
+version = "0.48.0"
+dependencies = [
+ "assert_matches",
+ "flate2",
+ "im",
+ "indexmap 2.14.0",
+ "insta",
+ "nom",
+ "petgraph",
+ "phase-engine",
+ "pretty_assertions",
+ "proptest",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallvec",
+ "strum",
+ "syn 2.0.117",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs 12.0.1",
+ "web-time",
+]
+
+[[package]]
 name = "phase-server"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "axum",
  "clap",
  "draft-core",
- "engine",
  "futures-util",
  "http",
  "lobby-broker",
  "minisign-verify",
  "ngrok",
  "phase-ai",
+ "phase-engine",
  "rand 0.9.4",
  "reqwest",
  "rusqlite",
@@ -2799,10 +2835,10 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
- "engine",
  "phase-ai",
+ "phase-engine",
  "serde",
  "serde_json",
 ]
@@ -2988,12 +3024,12 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.37.0"
+version = "0.48.0"
 dependencies = [
  "draft-core",
- "engine",
  "lobby-broker",
  "phase-ai",
+ "phase-engine",
  "proptest",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
@@ -3187,7 +3223,7 @@ version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.27.2",
 ]
 
 [[package]]
@@ -3195,6 +3231,18 @@ name = "strum_macros"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3700,12 +3748,35 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ts-rs"
+version = "10.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e640d9b0964e9d39df633548591090ab92f7a4567bc31d3891af23471a3365c6"
+dependencies = [
+ "lazy_static",
+ "thiserror 2.0.18",
+ "ts-rs-macros 10.1.0",
+]
+
+[[package]]
+name = "ts-rs"
 version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
  "thiserror 2.0.18",
- "ts-rs-macros",
+ "ts-rs-macros 12.0.1",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "10.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9d8656589772eeec2cf7a8264d9cda40fb28b9bc53118ceb9e8c07f8f38730"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "termcolor",
 ]
 
 [[package]]

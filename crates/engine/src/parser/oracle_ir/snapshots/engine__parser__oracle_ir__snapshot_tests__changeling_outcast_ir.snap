@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Changeling (This card is every creature type.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Changeling",
             "description": "Changeling"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Changeling",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },

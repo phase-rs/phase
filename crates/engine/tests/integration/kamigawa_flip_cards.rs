@@ -49,6 +49,7 @@ fn kenzo_alternative_face() -> BackFaceData {
         power: Some(3),
         toughness: Some(4),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],
@@ -107,6 +108,7 @@ fn tok_tok_alternative_face() -> BackFaceData {
         power: Some(2),
         toughness: Some(2),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],
@@ -203,6 +205,7 @@ fn resolve_trigger_body(
                 source_name: source_name.to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         },
         &mut vec![],

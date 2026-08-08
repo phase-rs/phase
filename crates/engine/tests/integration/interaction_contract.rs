@@ -1,36 +1,44 @@
+use std::sync::Arc;
+
 use engine::analysis::decision_template::{
     DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
 };
 use engine::game::engine::apply;
 use engine::game::interaction::{
-    bind_interaction_authority, derive_viewer_interaction, preview_interaction, submit_interaction,
+    bind_interaction_authority, derive_viewer_interaction, preview_interaction,
+    resolve_interaction_response, submit_interaction,
 };
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
+use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CounterCostSelection,
-    Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, ChosenAttribute,
+    CounterCostSelection, Effect, ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility,
+    SacrificeCost, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::card::CardFace;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
     MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
-    TurnBoundary, WaitingFor,
+    PlayerDeckPool, TurnBoundary, WaitingFor,
 };
-use engine::types::identifiers::CardId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::interaction::{
-    InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    AmountAssignment, InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaRestriction,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
-    InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
-    InteractionShortcutResponseCode, InteractionSubmission, PreviewRequestId,
-    MAX_INTERACTION_LIST_LEN,
+    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
+    InteractionShortcutPointKind, InteractionShortcutResponseCode, InteractionSubmission,
+    PreviewRequestId, MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::match_config::MatchPhase;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -194,7 +202,8 @@ fn priority_cast_exposes_auto_and_manual_and_opaque_manual_submission_starts_pay
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::CastSpell
+                        code: InteractionActionCode::CastSpell,
+                        ..
                     }
                 )
             }) && choice.surfaces.iter().any(|surface| {
@@ -284,6 +293,40 @@ fn bottom_card_opportunities_use_and_only_materialize_select_responses() {
 }
 
 #[test]
+fn resolving_a_response_materializes_the_advertised_action_under_the_same_authorization() {
+    let mut state = GameState::new_two_player(42);
+    bind(&mut state, "resolve-seam");
+    let witness = progress_witness(&state, P0);
+
+    // Authorization parity with `submit_interaction` is the entire risk of a
+    // non-mutating sibling: without the actor check it would become a way to
+    // materialize — and therefore to read — a decision belonging to another
+    // seat. Nothing here asserts that the state is unchanged, because
+    // `resolve_interaction_response` takes `&GameState`: non-mutation is a
+    // borrow-checker guarantee, and a test of it would pass for reasons that
+    // have nothing to do with this function.
+    let unauthorized = resolve_interaction_response(&state, P1, &witness)
+        .expect_err("resolving authorizes against the actor, not merely the interaction id");
+    assert_eq!(unauthorized.code, InteractionReasonCode::NotAuthorized);
+
+    let action = resolve_interaction_response(&state, P0, &witness)
+        .expect("the advertised progress witness resolves to the action it denotes");
+    assert_eq!(action, GameAction::PassPriority);
+
+    // The same witness really is submittable, so the resolution above concerns a
+    // live decision rather than one the engine would have refused anyway.
+    // Equivalence between the two paths needs no assertion: `submit_interaction`
+    // delegates here, so they cannot disagree.
+    let applied = submit_interaction(&mut state, P0, witness)
+        .expect("the witness the projection advertised is submittable");
+    assert_eq!(
+        applied.action,
+        GameAction::PassPriority,
+        "the post-success transaction exposes the exact engine-materialized action for replay"
+    );
+}
+
+#[test]
 fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "priority");
@@ -349,6 +392,69 @@ fn priority_projection_previews_submits_and_rejects_stale_or_unauthorized_ids() 
     )
     .expect_err("an accepted submission consumes its opaque capability");
     assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn attachment_fans_are_per_interaction_filtered_and_direct() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Fan Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Fan Attachment", 1, 1).id();
+    let unrelated = scenario.add_creature(P0, "Fan Unrelated", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        engine::game::effects::attach::attach_to(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.objects.get_mut(&unrelated).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment, unrelated],
+            max: 1,
+        };
+        bind(state, "attachment-fan");
+    }
+
+    let view = viewer_interaction(runner.state(), P0);
+    assert!(
+        !view.opportunities.is_empty(),
+        "reach guard: the selected attachment has a live opportunity"
+    );
+    assert_eq!(view.attachment_fans.len(), 1);
+    let fan = view
+        .attachment_fans
+        .get(&host.0)
+        .expect("the engine keys the fan by its visible host object");
+    assert_eq!(fan.host_id, host.0);
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, attachment.0);
+    let submission = fan.children[0].submission.clone();
+    submit_interaction(runner.state_mut(), P0, submission).expect(
+        "the engine-authored fan submission resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&attachment].tapped,
+        "the published attachment submission applies its selected untap"
+    );
+
+    let mut mismatched_filtered = filter_state_for_viewer(runner.state(), P0);
+    mismatched_filtered
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    let mismatched = derive_viewer_interaction(runner.state(), &mismatched_filtered, P0);
+    assert!(
+        mismatched.attachment_fans.is_empty(),
+        "a stale host back-link must not expose an attachment fan from authoritative state"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "non-authorized viewers receive no attachment sidecar before any opportunity derivation"
+    );
 }
 
 #[test]
@@ -510,7 +616,8 @@ fn exact_priority_choices_distinguish_two_engine_authored_card_objects() {
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::PlayLand
+                        code: InteractionActionCode::PlayLand,
+                        ..
                     }
                 )
             })
@@ -835,6 +942,7 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
         surface,
         InteractionPresentationSurface::Action {
             code: InteractionActionCode::CancelCast,
+            ..
         }
     )));
     let descriptions: std::collections::HashSet<_> = choices
@@ -994,7 +1102,8 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
             matches!(
                 surface,
                 InteractionPresentationSurface::Action {
-                    code: InteractionActionCode::ChooseZoneOpponentChooser
+                    code: InteractionActionCode::ChooseZoneOpponentChooser,
+                    ..
                 }
             )
         })
@@ -1066,6 +1175,230 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
 }
 
 #[test]
+fn tap_land_for_mana_projects_live_castle_output_per_unit_and_rejects_stale_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let castle = scenario
+        .add_land_from_oracle(
+            P0,
+            "Castle Garenbrig",
+            "{T}: Add {G}.\n{T}: Add {G}{G}{G}{G}{G}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    bind(runner.state_mut(), "live-castle-mana-output");
+
+    let view = priority_view(runner.state());
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    let castle_choices: Vec<_> = choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &castle.0.to_string()
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        castle_choices.len(),
+        2,
+        "Castle exposes both mana abilities"
+    );
+
+    let (one_green, six_green) = castle_choices
+        .iter()
+        .map(|choice| {
+            let produced: Vec<_> = choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        restrictions,
+                        ..
+                    } => Some((symbols, restrictions)),
+                    _ => None,
+                })
+                .collect();
+            (choice.id.clone(), produced)
+        })
+        .fold(
+            (None, None),
+            |(one, six), (choice_id, produced)| match produced.len() {
+                1 => (Some(choice_id), six),
+                6 => (one, Some((choice_id, produced))),
+                count => panic!("unexpected Castle mana output count: {count}"),
+            },
+        );
+    let one_green = one_green.expect("the unrestricted one-green ability is projected");
+    let (six_green, six_output) = six_green.expect("the restricted six-green ability is projected");
+    assert!(six_output.iter().all(|(symbols, restrictions)| {
+        *symbols == &vec!["G".to_string()]
+            && *restrictions
+                == &vec![InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Creature".to_string(),
+                    ability: InteractionManaAbilityActivationScope::OfSpellType,
+                }]
+    }));
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Choose {
+                choice_id: one_green,
+            },
+        },
+    )
+    .expect("the sibling one-green option is a legal activation");
+    let stale = submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::Choose {
+                choice_id: six_green,
+            },
+        },
+    )
+    .expect_err("the six-green choice is stale after its sibling tapped the land");
+    assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
+}
+
+#[test]
+fn tap_land_for_mana_projects_resolved_and_missing_chosen_color_restrictions() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oracle = "As this land enters, choose a color.\n{T}: Add {C}. Spend this mana only to cast monocolored spells of the chosen color.";
+    let red_source = scenario
+        .add_land_from_oracle(P0, "Red Chosen Color Contract", oracle)
+        .id();
+    let blue_source = scenario
+        .add_land_from_oracle(P0, "Blue Chosen Color Contract", oracle)
+        .id();
+    let missing_choice_source = scenario
+        .add_land_from_oracle(P0, "Missing Chosen Color Contract", oracle)
+        .id();
+    let mut runner = scenario.build();
+    for (source, color) in [(red_source, ManaColor::Red), (blue_source, ManaColor::Blue)] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("chosen-color source exists")
+            .chosen_attributes
+            .push(ChosenAttribute::Color(color));
+    }
+
+    let projected_restrictions = |state: &mut GameState, source: ObjectId, binding: &str| {
+        bind(state, binding);
+        let view = priority_view(state);
+        let InteractionOpportunityResponse::ExactChoices { choices } =
+            &view.opportunities[0].response
+        else {
+            panic!("priority is projected as exact choices");
+        };
+        choices
+            .iter()
+            .find(|choice| {
+                choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Action {
+                            code: InteractionActionCode::TapLandForMana,
+                            ..
+                        }
+                    )
+                }) && choice.surfaces.iter().any(|surface| {
+                    matches!(
+                        surface,
+                        InteractionPresentationSurface::Object {
+                            role: InteractionRoleCode::Source,
+                            reference,
+                            ..
+                        } if reference == &source.0.to_string()
+                    )
+                })
+            })
+            .and_then(|choice| {
+                choice.surfaces.iter().find_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        restrictions,
+                        ..
+                    } => Some(restrictions.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the chosen-color mana source projects one produced mana unit")
+    };
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), red_source, "red-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Red,
+            },
+        ],
+        "the viewer contract preserves the red source's resolved restriction"
+    );
+
+    assert_eq!(
+        projected_restrictions(runner.state_mut(), blue_source, "blue-chosen-color-output"),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: InteractionManaColor::Blue,
+            },
+        ],
+        "each source projects its own chosen color rather than another source's choice"
+    );
+
+    assert_eq!(
+        projected_restrictions(
+            runner.state_mut(),
+            missing_choice_source,
+            "missing-chosen-color-output"
+        ),
+        vec![
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: engine::types::interaction::InteractionManaComparator::Equal,
+                count: 1,
+            },
+            InteractionManaRestriction::Impossible,
+        ],
+        "a missing choice remains visibly fail-closed instead of appearing unrestricted"
+    );
+}
+
+#[test]
 fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rotates_it() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1109,7 +1442,7 @@ fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rot
 }
 
 #[test]
-fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
+fn preference_action_does_not_advance_auto_pass_or_rotate_capability() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "preference-auto-pass");
     let initial = state.active_interaction_slots[0].interaction_id.clone();
@@ -1125,15 +1458,15 @@ fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
         P0,
         GameAction::SetPhaseStops { stops: Vec::new() },
     )
-    .expect("the preference update triggers the configured auto-pass loop");
+    .expect("the actor-scoped preference update is legal");
     assert!(matches!(
         state.waiting_for,
-        WaitingFor::Priority { player: P1 }
+        WaitingFor::Priority { player: P0 }
     ));
     assert!(state
         .active_interaction_slots
         .iter()
-        .all(|slot| slot.interaction_id != initial));
+        .any(|slot| slot.interaction_id == initial));
 }
 
 #[test]
@@ -1994,6 +2327,135 @@ fn trigger_sequence_materializes_arbitrary_permutations_larger_than_four() {
     );
 }
 
+/// NEW-1 — a published CR 732.2a offer carrying `max_iterations: 0` is REJECTED, not
+/// clamped. `elimination_bounds` returns `0` to mean "no legal repetition exists and the
+/// caller must not offer" (CR 704.5a), so repairing it to `1` would render a
+/// one-iteration offer whose single iteration eliminates a player mid-proposal.
+///
+/// LATENT, NOT LIVE: no in-tree producer can emit `0` here — `build_shortcut_schema`'s two
+/// call sites both pass `MAX_SHORTCUT_CYCLES`, the per-viewer projection copies an existing
+/// value, and both `Default` and the `#[serde(default)]` resolve to the cap. Hand-assigning
+/// `max_iterations: 0` IS the loaded/persisted-authority seat, which is exactly the shape a
+/// restored dump can carry. This row is therefore a latent-hole guard, not a live-bug
+/// reproduction.
+///
+/// REVERT-PROBE, and note the FAILURE MODE: delete
+/// `if schema.max_iterations == 0 { return Err(..) }` ⇒ post-edit `max` is
+/// `0u32.min(1000) == 0`, so `suggested.clamp(1, 0)` trips `Ord::clamp`'s
+/// `assert!(min <= max)` and **PANICS** (`min > max. min = 1, max = 0`). That assert is a
+/// PLAIN assert, so it survives release — the guard is load-bearing against an engine
+/// panic on a malformed restored dump, not merely against a bad offer. The probe flips RED
+/// by panic, not by a value mismatch.
+#[test]
+fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
+    let shortcut_state = |max_iterations: u32| {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: Some(P0),
+            certificate: engine::analysis::loop_check::LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+                iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
+                max_iterations,
+                ..Default::default()
+            },
+        };
+        bind(&mut state, "loop-zero-bound");
+        state
+    };
+
+    // ── PAIRED CONTROL, first: the byte-identical schema at the DEFAULT bound projects a
+    //    shortcut schema. Without this the rejection below could be the whole window being
+    //    unsupported for an unrelated reason.
+    let control = shortcut_state(ShortcutDecisionSchema::default().max_iterations);
+    let control_view = priority_view(&control);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { .. },
+        ..
+    } = &control_view.opportunities[0].response
+    else {
+        panic!(
+            "control: the same window at the default bound must project a shortcut schema, \
+             else this row's rejection is not attributable to `max_iterations`"
+        );
+    };
+
+    // ── SUBJECT: the only variable is `max_iterations: 0`.
+    let subject = shortcut_state(0);
+    assert_eq!(
+        priority_view(&subject).availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::InvalidAuthorityState,
+        },
+        "CR 704.5a: `max_iterations == 0` means NO legal repetition exists, so the offer is \
+         an authority violation to reject — not a number to clamp back up to 1"
+    );
+}
+
+/// CR-12 — the picker's ceiling is the offer's OWN narrowed CR 732.2a bound, never the
+/// raw global safety limit. Before this row the file only ever asserted the default bound,
+/// so a projection that ignored `max_iterations` entirely would have stayed green.
+///
+/// Disclosed: an over-bound `suggested` is CLAMPED, not rejected. That is correct —
+/// `suggested` is a hint, `max_iterations` is the authority.
+///
+/// REVERT-PROBE: change `let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES)` back to
+/// `MAX_SHORTCUT_CYCLES` ⇒ `max` becomes the global cap ⇒ this assertion FAILS.
+#[test]
+fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
+        },
+        schema: engine::analysis::decision_template::ShortcutDecisionSchema {
+            // A NARROWED bound, i.e. what `elimination_bounds` produces on a real board.
+            iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
+            max_iterations: 3,
+            ..Default::default()
+        },
+    };
+    bind(&mut state, "loop-narrowed-bound");
+
+    // Reach-guard: the narrowed bound really is BELOW the global cap, else `min(..)` and
+    // the global cap coincide and the row cannot discriminate.
+    assert!(
+        3 < ShortcutDecisionSchema::default().max_iterations,
+        "reach-guard: the narrowed bound must be strictly below the global cap"
+    );
+
+    let view = priority_view(&state);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("loop shortcut uses a shortcut schema");
+    };
+    assert_eq!(
+        *count,
+        InteractionShortcutCountSpec::Fixed {
+            min: 1,
+            max: 3,
+            suggested: 3,
+        },
+        "CR 732.2a: the picker's ceiling is the offer's own narrowed bound (3), and an \
+         over-bound `suggested` (9) is clamped down to it rather than rejected"
+    );
+}
+
 #[test]
 fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
     let mut state = GameState::new_two_player(42);
@@ -2005,11 +2467,12 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: engine::analysis::decision_template::ShortcutDecisionSchema {
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(2),
-            points: Vec::new(),
-            convoke_tappable_count: 0,
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
+            ..Default::default()
         },
     };
     bind(&mut state, "loop-count");
@@ -2059,9 +2522,12 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             win_kind: engine::analysis::loop_check::WinKind::Advantage,
             mandatory: false,
             residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
             iteration_count: IterationCount::Fixed(2),
+            // No narrowed CR 732.2a bound — `Default` carries the global cap.
+            max_iterations: ShortcutDecisionSchema::default().max_iterations,
             points: vec![
                 DecisionPoint {
                     slot: slot(0),
@@ -2382,4 +2848,714 @@ fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
                 } => choices.iter().all(|choice| choice.id.as_str().len() <= 256),
             }
     }));
+}
+
+fn sideboard_deck_entry(name: &str, count: u32) -> DeckEntry {
+    DeckEntry {
+        card: CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        },
+        count,
+    }
+}
+
+/// A Standard match between games with a registered 60/15 pool. `Aaa` sorts
+/// before `Bbb`, so the projection's candidate indices are stable.
+fn between_games_sideboard_state() -> GameState {
+    let mut state = GameState::new_two_player(11);
+    state.match_phase = MatchPhase::BetweenGames;
+    state.game_number = 2;
+    state.deck_pools = vec![PlayerDeckPool {
+        player: P0,
+        registered_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        registered_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        current_main: Arc::new(vec![sideboard_deck_entry("Aaa", 60)]),
+        current_sideboard: Arc::new(vec![sideboard_deck_entry("Bbb", 15)]),
+        ..Default::default()
+    }];
+    // The projection recomputes its bounds from `deck_pools` + `format_config`
+    // via the same authority `handle_submit_sideboard` uses, so these published
+    // copies are the client's display hint, not the gate.
+    state.waiting_for = WaitingFor::BetweenGamesSideboard {
+        player: P0,
+        game_number: 2,
+        score: Default::default(),
+        min_main_deck_size: 60,
+        max_sideboard_size: Some(15),
+    };
+    state
+}
+
+fn deck_partition_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> (
+    &engine::types::interaction::InteractionOpportunity,
+    u32,
+    u32,
+) {
+    let opportunity = view
+        .opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::DeckPartition { .. },
+                    ..
+                }
+            )
+        })
+        .expect("a between-games seat is offered a deck-partition schema");
+    let InteractionOpportunityResponse::Schema {
+        spec:
+            InteractionResponseSpec::DeckPartition {
+                min_main_total,
+                max_main_total,
+                ..
+            },
+        ..
+    } = &opportunity.response
+    else {
+        unreachable!("filtered for DeckPartition above");
+    };
+    (opportunity, *min_main_total, *max_main_total)
+}
+
+fn partition_choice_ids(
+    opportunity: &engine::types::interaction::InteractionOpportunity,
+) -> Vec<InteractionChoiceId> {
+    let InteractionOpportunityResponse::Schema { candidates, .. } = &opportunity.response else {
+        unreachable!("deck partition is a schema response");
+    };
+    candidates.iter().map(|choice| choice.id.clone()).collect()
+}
+
+/// CR 100.2a + CR 100.4a + CR 100.5: `deck_size` is a *minimum* and non-Commander
+/// decks have no maximum, so the between-games schema must publish the interval
+/// the engine will accept — `[minimum, whole pool]` — not one exact size. A
+/// player who registered 60/15 may legally present anything from 60 up to all
+/// 75 cards; the sideboard cap is what pins the floor at 60.
+///
+/// This drives `HumanResponseModel::SideboardPartition` end-to-end (schema →
+/// submission → applied state) rather than calling `handle_submit_sideboard`
+/// directly, because the interaction layer carries its own copy of the gate.
+#[test]
+fn deck_partition_schema_publishes_an_interval_not_an_exact_deck_size() {
+    let mut state = between_games_sideboard_state();
+    bind(&mut state, "sideboard-interval");
+
+    let view = viewer_interaction(&state, P0);
+    let (opportunity, min_main_total, max_main_total) = deck_partition_opportunity(&view);
+    assert_eq!(
+        (min_main_total, max_main_total),
+        (60, 75),
+        "60-card minimum, and the whole 75-card pool may go to the main deck"
+    );
+    // No exact aggregate exists for a range, so `total` must stay absent.
+    assert!(opportunity
+        .surfaces
+        .contains(&InteractionPresentationSurface::Amount {
+            min: 60,
+            max: 75,
+            total: None,
+        }));
+
+    let choice_ids = partition_choice_ids(opportunity);
+    let interaction_id = opportunity.interaction_id.clone();
+
+    // 59 main cards would leave a 16-card sideboard: below the floor.
+    let too_small = preview_interaction(
+        &state,
+        P0,
+        &InteractionPreviewRequest {
+            request_id: PreviewRequestId("sideboard-too-small".to_string()),
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::DeckPartition {
+                main: vec![AmountAssignment {
+                    choice_id: choice_ids[0].clone(),
+                    amount: 59,
+                }],
+            },
+        },
+    );
+    assert_eq!(
+        too_small.status,
+        InteractionPreviewStatus::Rejected {
+            reason: InteractionReasonCode::ConstraintUnsatisfied,
+        }
+    );
+
+    // 61/14 — siding one card in without siding one out. This is the exact
+    // shape the old exact-total contract rejected.
+    submit_interaction(
+        &mut state,
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::DeckPartition {
+                main: vec![
+                    AmountAssignment {
+                        choice_id: choice_ids[0].clone(),
+                        amount: 60,
+                    },
+                    AmountAssignment {
+                        choice_id: choice_ids[1].clone(),
+                        amount: 1,
+                    },
+                ],
+            },
+        },
+    )
+    .expect("a 61-card main deck is legal when the sideboard still fits under 15");
+
+    let pool = &state.deck_pools[0];
+    assert_eq!(
+        pool.current_main
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        61
+    );
+    assert_eq!(
+        pool.current_sideboard
+            .iter()
+            .map(|entry| entry.count)
+            .sum::<u32>(),
+        14
+    );
+}
+
+/// The interaction contract omits a debug-capability gate at the transport
+/// (`SessionManager::handle_interaction`) on the grounds that candidate
+/// enumeration never produces one. This converts that "cannot happen" into
+/// something that fails the day it starts happening.
+///
+/// It asserts on the **client-visible** publication — `derive_viewer_interaction`
+/// -> `opportunity_for_slot` -> `actor_candidates` -> `ai_support`'s validated
+/// candidate set — rather than on an internal helper, so it covers what a
+/// remote seat could actually submit.
+///
+/// The sandbox capability is armed *fully* and deliberately: the claim is not
+/// that debug actions are unreachable because sandbox mode is off, it is that
+/// enumeration ignores the flag even when it is on. All three of
+/// `allow_debug_actions`, `debug_mode`, and `debug_permitted` are set because
+/// `apply`'s own gate requires the latter two together — arming only one would
+/// leave the capability half-granted and the test could pass for the wrong
+/// reason.
+#[test]
+fn published_interaction_choices_never_offer_a_debug_action_in_a_sandbox_game() {
+    let mut state = GameState::new_two_player(42);
+    state.format_config.allow_debug_actions = true;
+    state.debug_mode = true;
+    state.debug_permitted.insert(P0);
+    bind(&mut state, "sandbox-debug-enumeration");
+
+    let view = priority_view(&state);
+
+    // Reach guard (1): a `ViewerInteraction` with `can_submit: false`, or a
+    // terminal `waiting_for`, publishes no opportunities at all and would
+    // satisfy the negative below vacuously.
+    assert!(
+        !view.opportunities.is_empty(),
+        "the fixture must publish something for the negative assertion to bite"
+    );
+
+    // Reach guard (3): the capability is genuinely in force at assertion time.
+    assert!(
+        state.format_config.allow_debug_actions
+            && state.debug_mode
+            && state.debug_permitted.contains(&P0),
+        "the sandbox capability must be armed, or this asserts nothing"
+    );
+
+    // Reach guard (2): `WaitingFor::Priority` maps to
+    // `HumanResponseModel::ExactCandidates`, which is the `actor_candidates`
+    // branch — the enumerator whose output this test is about.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the enumerating branch is selected by the waiting_for shape, got {:?}",
+        state.waiting_for
+    );
+
+    let mut saw_choices = false;
+    for opportunity in &view.opportunities {
+        let InteractionOpportunityResponse::ExactChoices { choices } = &opportunity.response else {
+            continue;
+        };
+        saw_choices |= !choices.is_empty();
+        for choice in choices {
+            for surface in &choice.surfaces {
+                if let InteractionPresentationSurface::Action { code, .. } = surface {
+                    assert!(
+                        !matches!(
+                            code,
+                            InteractionActionCode::Debug
+                                | InteractionActionCode::GrantDebugPermission
+                                | InteractionActionCode::RevokeDebugPermission
+                        ),
+                        "candidate enumeration published a debug action ({code:?}); \
+                         `SessionManager::handle_interaction`'s missing debug gate is \
+                         no longer safe"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_choices,
+        "an ExactChoices opportunity with real choices is what proves the \
+         actor_candidates path ran"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6944: a flexible-mana land rendered an unlabelled "Tap for mana".
+//
+// `TapLandForMana` candidates are minted from `ManaSourceOption::semantic_selection`
+// (one *concrete* row per producible color) and executed via
+// `live_land_mana_option_for_selection`. The label projection resolved them
+// through the *manual* authority (`live_mana_source_option_for_selection`)
+// instead, whose `manual_selection_for_option` deliberately collapses a flexible
+// source to `Colorless` + `DeferredColorChoice`. The concrete row therefore never
+// matched, the resolver returned `Err`, and the projection silently emitted no
+// `ProducedMana` surface at all.
+//
+// Every test below asserts a *non-empty* produced-mana label for a flexible
+// source, which is exactly the surface that was missing before the fix.
+// ---------------------------------------------------------------------------
+
+/// Produced-mana symbols projected for each `TapLandForMana` candidate whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_land_mana_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Flatten per-candidate labels into one sorted symbol list, asserting that no
+/// candidate was left unlabelled. The unlabelled case is the #6944 regression.
+fn sorted_labelled_symbols(labels: &[Vec<String>], context: &str) -> Vec<String> {
+    assert!(
+        !labels.is_empty(),
+        "{context}: expected at least one TapLandForMana candidate"
+    );
+    assert!(
+        labels.iter().all(|units| !units.is_empty()),
+        "{context}: every mana candidate must carry a produced-mana label, got {labels:?}"
+    );
+    let mut symbols: Vec<String> = labels.iter().flatten().cloned().collect();
+    symbols.sort();
+    symbols
+}
+
+#[test]
+fn tap_land_for_mana_labels_each_color_of_an_any_one_color_land() {
+    // ManaProduction::AnyOneColor — the card from issue #6944.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let city = scenario
+        .add_land_from_oracle(
+            P0,
+            "City of Brass",
+            "Whenever this land becomes tapped, it deals 1 damage to you.\n{T}: Add one mana of any color.",
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), city, "city-of-brass-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "City of Brass"),
+        ["B", "G", "R", "U", "W"],
+        "each concrete color row must project its own color, not an unlabelled tap"
+    );
+    assert!(
+        labels.iter().all(|units| units.len() == 1),
+        "'Add one mana of any color' produces exactly one unit per row: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_granted_flexible_mana_ability() {
+    // ManaProduction::AnyOneColor { count: 2 } reached through a `GrantAbility`
+    // static — the second card named in issue #6944. The label must carry both
+    // produced units and the granted spend restriction.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Resonating Lute",
+        "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.",
+    );
+    // An explicitly-printed mana ability, not `add_basic_land`: a basic land's
+    // production is subtype-inferred by `land_mana_options`, and that fallback is
+    // deliberately suppressed once any explicit `Effect::Mana` ability exists —
+    // which the grant itself supplies. Printing the ability keeps this test about
+    // the label projection rather than the basic-land fallback.
+    let forest = scenario
+        .add_land_from_oracle(P0, "Forest", "{T}: Add {G}.")
+        .id();
+    let mut runner = scenario.build();
+    // `GameScenario::build` does not run a layer pass, so the `GrantAbility`
+    // static has not yet been applied to the land's ability list.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let labels = projected_land_mana_labels(runner.state_mut(), forest, "resonating-lute-grant");
+    let symbols = sorted_labelled_symbols(&labels, "Resonating Lute granted ability");
+    let granted: Vec<&Vec<String>> = labels.iter().filter(|units| units.len() == 2).collect();
+    assert_eq!(
+        granted.len(),
+        5,
+        "the granted 'two mana of any one color' ability exposes one two-unit row \
+         per color: {labels:?}"
+    );
+    assert!(
+        granted
+            .iter()
+            .all(|units| units[0] == units[1] && symbols.contains(&units[0])),
+        "'any one color' produces two units of the SAME chosen color: {granted:?}"
+    );
+    assert!(
+        labels.iter().any(|units| units == &vec!["G".to_string()]),
+        "the Forest's own printed mana ability is still labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_type_produceable_by_land() {
+    // ManaProduction::AnyTypeProduceableBy.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pool = scenario
+        .add_land_from_oracle(
+            P0,
+            "Reflecting Pool",
+            "{T}: Add one mana of any type that a land you control could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pool, "reflecting-pool-mana-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Reflecting Pool"),
+        ["G"],
+        "the surveyed Forest's type is the only produceable type"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_opponent_land_colors_land() {
+    // ManaProduction::OpponentLandColors.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orchard = scenario
+        .add_land_from_oracle(
+            P0,
+            "Exotic Orchard",
+            "{T}: Add one mana of any color that a land an opponent controls could produce.",
+        )
+        .id();
+    scenario.add_basic_land(P1, ManaColor::Blue);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), orchard, "exotic-orchard-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Exotic Orchard"),
+        ["U"],
+        "the opponent's Island is the only surveyed color"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_commander_color_identity_land() {
+    // ManaProduction::AnyInCommandersColorIdentity.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tower = scenario
+        .add_land_from_oracle(
+            P0,
+            "Command Tower",
+            "{T}: Add one mana of any color in your commander's color identity.",
+        )
+        .id();
+    let commander = scenario
+        .add_creature(P0, "Mono-Red Commander", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_commander(commander);
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), tower, "command-tower-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Command Tower"),
+        ["R"],
+        "the label follows the commander's color identity"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
+    // ManaProduction::AnyOneColorAmongPermanents.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plaza = scenario
+        .add_land_from_oracle(
+            P0,
+            "Plaza of Heroes",
+            "{T}: Add {C}.\n{T}: Add one mana of any color. Spend this mana only to cast a legendary spell.\n{T}: Add one mana of any color among legendary permanents you control.\n{3}, {T}, Exile this land: Target legendary creature gains hexproof and indestructible until end of turn.",
+        )
+        .id();
+    scenario
+        .add_creature(P0, "Legendary Red Bear", 2, 2)
+        .as_legendary()
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        });
+    let mut runner = scenario.build();
+
+    let labels = projected_land_mana_labels(runner.state_mut(), plaza, "plaza-of-heroes-label");
+    let symbols = sorted_labelled_symbols(&labels, "Plaza of Heroes");
+    assert!(
+        symbols.contains(&"R".to_string()),
+        "the among-legendary-permanents ability projects the legend's color: {labels:?}"
+    );
+    assert!(
+        symbols.contains(&"C".to_string()),
+        "the sibling colorless ability stays labelled: {labels:?}"
+    );
+}
+
+#[test]
+fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
+    // ManaProduction::ChoiceAmongExiledColors.
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pit = scenario
+        .add_land_from_oracle(
+            P0,
+            "Pit of Offerings",
+            "{T}: Add {C}.\n{T}: Add one mana of any of the exiled cards' colors.",
+        )
+        .id();
+    let exiled = scenario.add_real_card(P0, "Lightning Bolt", Zone::Exile, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: pit,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    let labels = projected_land_mana_labels(runner.state_mut(), pit, "pit-of-offerings-label");
+    assert_eq!(
+        sorted_labelled_symbols(&labels, "Pit of Offerings"),
+        ["C", "R"],
+        "the exiled red card's color is labelled alongside the colorless sibling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sibling coverage: `ActivateManaSource`.
+//
+// The two mana surfaces now share `push_produced_mana_surfaces`, each passing
+// its own reducer's resolver. The tests above pin the `TapLandForMana` arm; this
+// one pins the `ActivateManaSource` arm so the shared helper cannot be changed
+// to satisfy one caller while silently dropping the other's labels.
+//
+// `ActivateManaSource` is only ever projected from the
+// `WaitingFor::ManaSourceSelection` arm of `direct_choice_projection` — no
+// priority arm mints it — so the fixture must drive the real cast pipeline into
+// that window. `CastPaymentMode::AutoExceptSacrificialMana` does exactly that:
+// the automatic planner refuses to spend an irreversible sacrifice row without
+// explicit consent and hands the choice back as `ManaSourceSelection`.
+// ---------------------------------------------------------------------------
+
+fn sacrificial_mana_source(produced: ManaProduction) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
+}
+
+/// Produced-mana symbols projected for the `ActivateManaSource` candidates whose
+/// source is `source` — one inner `Vec` per candidate, one entry per produced
+/// mana unit. An unlabelled candidate surfaces as an empty inner `Vec`.
+fn projected_mana_source_labels(
+    state: &mut GameState,
+    source: ObjectId,
+    binding: &str,
+) -> Vec<Vec<String>> {
+    bind(state, binding);
+    let view = viewer_interaction(state, P0);
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("the mana-source prompt is projected as exact choices");
+    };
+    choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::ActivateManaSource,
+                        ..
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &source.0.to_string()
+                )
+            })
+        })
+        .map(|choice| {
+            choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        ..
+                    } => symbols.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn activate_mana_source_labels_fixed_and_flexible_sacrificial_sources() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Mana Source Label Witness", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    // Both rows must be sacrifice-only: a non-sacrificial row on either source
+    // would let the automatic planner pay without ever opening the prompt.
+    let fixed = scenario
+        .add_creature(P0, "Fixed Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let flexible = scenario
+        .add_creature(P0, "Flexible Output Witness", 1, 1)
+        .with_ability_definition(sacrificial_mana_source(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 2 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        }))
+        .id();
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::AutoExceptSacrificialMana,
+        })
+        .expect("the production cast path should stop for sacrificial-mana consent");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaSourceSelection { .. }
+        ),
+        "ActivateManaSource is projected only from this window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let fixed_labels = projected_mana_source_labels(runner.state_mut(), fixed, "fixed-mana-source");
+    assert_eq!(
+        fixed_labels,
+        vec![vec!["B".to_string()]],
+        "a fixed sacrificial source projects its one concrete produced unit"
+    );
+
+    let flexible_labels =
+        projected_mana_source_labels(runner.state_mut(), flexible, "flexible-mana-source");
+    assert_eq!(
+        flexible_labels,
+        vec![vec!["R".to_string(), "R".to_string()]],
+        "a flexible source is offered as ONE deferred-color candidate whose label \
+         still carries both produced units; `manual_selection_for_option` collapses \
+         it to Colorless + DeferredColorChoice, so resolving it through the land \
+         authority (the #6944 bug) would drop this label entirely"
+    );
 }

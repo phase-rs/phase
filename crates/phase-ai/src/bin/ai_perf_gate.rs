@@ -19,8 +19,15 @@
 //! child (emit one sample), repro-report (margin gate over saved runs), and
 //! parent gate (spawn K children, median, compare).
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -30,9 +37,17 @@ use phase_ai::duel_suite::perf::{
     repro_margin_report, run_perf_suite, PerfReport, PERF_ACTION_CAP, PERF_BASE_SEED,
     PERF_SAMPLE_COUNT,
 };
+use phase_ai::duel_suite::{find_matchup, resolve_deck_ref};
 
 const DEFAULT_BASELINE: &str = "crates/phase-ai/baselines/perf-baseline.json";
 const DEFAULT_CURRENT: &str = "target/ai-perf-gate-current.json";
+
+/// `run_perf_suite`'s AI search recurses deeper than the platform default
+/// thread stack on Windows (confirmed: every child overflows immediately
+/// after game start under this crate's release profile). Same root cause and
+/// fix as `ai_commander.rs`'s `GAME_THREAD_STACK_SIZE` / `duel_suite::run`'s
+/// identical spawn — this binary just never got the fix applied.
+const PERF_THREAD_STACK_SIZE: usize = 32 << 20;
 
 struct Args {
     data_root: PathBuf,
@@ -62,9 +77,22 @@ fn main() {
 
     // Branch 1 — child: load the DB, emit ONE single-trajectory sample to the
     // file, exit. Emits NOTHING on stdout (GAP 4) so the parent's stdout stays a
-    // clean table; diagnostics go to stderr only.
+    // clean table; diagnostics go to stderr only. Runs on a large-stack thread
+    // (see `PERF_THREAD_STACK_SIZE`) since the AI search recurses past the
+    // platform default; an unhandled panic there would otherwise unwind only
+    // the spawned thread and exit 0 silently, so a join failure is mapped to
+    // exit 101 (mirrors `ai_commander.rs`'s identical convention).
     if let Some(sample_path) = &args.emit_sample {
-        run_child_sample(&args.data_root, sample_path);
+        let data_root = args.data_root.clone();
+        let sample_path = sample_path.clone();
+        let handle = std::thread::Builder::new()
+            .name("ai-perf-gate-sample".to_string())
+            .stack_size(PERF_THREAD_STACK_SIZE)
+            .spawn(move || run_child_sample(&data_root, &sample_path))
+            .expect("failed to spawn perf-sample thread");
+        if handle.join().is_err() {
+            std::process::exit(101);
+        }
         return;
     }
 
@@ -188,16 +216,7 @@ fn run_parent_gate(args: &Args) {
     let mut current = median_report(&samples);
     // Stamp provenance the parent can compute without loading the DB.
     current.git_sha = command_output("git", &["rev-parse", "--short=12", "HEAD"]);
-    let db_path = args.data_root.join("card-data.json");
-    current.card_data_hash = command_output(
-        "git",
-        &[
-            "hash-object",
-            db_path
-                .to_str()
-                .expect("card-data path must be valid UTF-8"),
-        ],
-    );
+    current.card_data_hash = gate_card_data_hash(&args.data_root);
 
     eprintln!(
         "perf suite: seed={} action_cap={} sample_count={} scenarios={:?} wall_clock={}ms",
@@ -321,6 +340,119 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Provenance hash over ONLY the `card-data.json` entries this gate's scenarios
+/// actually consume.
+///
+/// This was previously `git hash-object data/card-data.json` — the whole file,
+/// ~35.6k cards. The three scenarios in [`default_scenarios`] draw from
+/// committed, frozen decks (inline builders plus pinned snapshots) naming ~46.
+/// `card-data.json` is a DERIVED artifact of both MTGJSON and the Oracle parser,
+/// so every unrelated set release *and every parser change* moved the stamp.
+/// `PerfCompareReport::card_data_changed` was therefore true on nearly every
+/// run, which made it useless for the one judgement it exists to support:
+/// telling a genuine cost-per-node regression (hashes equal) apart from a
+/// card-data-driven trajectory shift (hashes differ).
+///
+/// Measured over five local card-data vintages spanning 2026-07-25..2026-08-04,
+/// one pair differing only by an Oracle-parser change and not by MTGJSON: five
+/// distinct whole-file hashes, exactly ONE distinct gate-subset hash.
+///
+/// Still a `git hash-object` blob SHA, so the field's format and meaning are
+/// unchanged and no hashing dependency enters this crate. Re-serializing is
+/// canonical: this workspace leaves serde_json's `preserve_order` off, so object
+/// keys serialize sorted (documented at `engine/src/bin/set_check.rs`), and the
+/// `BTreeMap`s below fix the order of everything above them. A card a deck names
+/// but `card-data.json` lacks is simply absent from the subset — which still
+/// moves the hash, since the key set shrinks.
+///
+/// Returns `None` on any failure, matching [`command_output`]'s convention:
+/// `card_data_changed()` then reports false rather than inventing a delta. Every
+/// failure path announces itself on stderr — an unstamped run must not read as a
+/// clean one.
+fn gate_card_data_hash(data_root: &Path) -> Option<String> {
+    // DB-free by construction: `resolve_deck_ref` expands inline builders and
+    // pinned snapshots without a `CardDatabase`, preserving this branch's
+    // documented never-loads-the-DB property.
+    let mut names = BTreeSet::new();
+    for id in default_scenarios() {
+        let Some(matchup) = find_matchup(id) else {
+            eprintln!("provenance: scenario {id:?} does not resolve — card-data hash unstamped");
+            return None;
+        };
+        for deck in [&matchup.p0, &matchup.p1] {
+            match resolve_deck_ref(deck) {
+                // The engine keys `card-data.json` by Rust `to_lowercase()`.
+                Ok(cards) => names.extend(cards.into_iter().map(|c| c.to_lowercase())),
+                Err(err) => {
+                    eprintln!(
+                        "provenance: deck {deck:?} failed to resolve ({err}) — card-data hash unstamped"
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+
+    let db_path = data_root.join("card-data.json");
+    let db: BTreeMap<String, serde_json::Value> = match std::fs::read_to_string(&db_path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))
+    {
+        Ok(db) => db,
+        Err(err) => {
+            eprintln!(
+                "provenance: could not read {} ({err}) — card-data hash unstamped",
+                db_path.display()
+            );
+            return None;
+        }
+    };
+    let subset: BTreeMap<&str, &serde_json::Value> = names
+        .iter()
+        .filter_map(|name| db.get(name).map(|entry| (name.as_str(), entry)))
+        .collect();
+
+    // `git hash-object` needs a path, so the canonical subset goes through a
+    // temp file. Removed on every exit path, including the failures below.
+    let tmp = std::env::temp_dir().join(format!("ai-perf-gate-cards-{}.json", std::process::id()));
+    let hash = match File::create(&tmp)
+        .map_err(|e| e.to_string())
+        .and_then(|file| {
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &subset).map_err(|e| e.to_string())?;
+            // `BufWriter` discards errors from its drop-time flush, so a failed
+            // final write would leave a TRUNCATED subset that `git hash-object`
+            // still hashes — yielding a well-formed provenance stamp for content
+            // that was never written. Flush explicitly and fail closed instead.
+            writer.flush().map_err(|e| e.to_string())
+        }) {
+        Ok(()) => match tmp.to_str() {
+            Some(path) => command_output("git", &["hash-object", path]),
+            None => {
+                eprintln!("provenance: temp path is not valid UTF-8 — card-data hash unstamped");
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!(
+                "provenance: could not write the card subset ({err}) — card-data hash unstamped"
+            );
+            None
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+
+    if hash.is_some() {
+        eprintln!(
+            "provenance: card-data hash covers {} of {} deck-named cards from scenarios {:?}",
+            subset.len(),
+            names.len(),
+            default_scenarios()
+        );
+    }
+    hash
 }
 
 fn write_report(report: &PerfReport, path: &Path) -> Result<(), std::io::Error> {

@@ -18,7 +18,7 @@ use super::archenemy::{
     abandon, active_schemes, check_scheme_abandon_sba, is_scheme_object, set_in_motion, top_scheme,
 };
 use super::engine::apply_as_current;
-use super::triggers::{DeferredTrigger, PendingTrigger, PendingTriggerDispatchOrigin};
+use super::triggers::{PendingTrigger, PendingTriggerContext};
 use crate::database::synthesis::synthesize_archenemy;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, StaticDefinition,
@@ -411,6 +411,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     let mut events = Vec::new();
@@ -472,7 +473,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
         source_id: scheme_id,
         controller: arch,
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
@@ -480,7 +481,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
             vec![],
             scheme_id,
             arch,
-        ),
+        )),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,
@@ -491,12 +492,11 @@ fn deferred_scheme_trigger_blocks_abandon() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
-    state.deferred_triggers.push(DeferredTrigger {
-        pending,
-        trigger_events: vec![],
-        dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-    });
+    state
+        .deferred_triggers
+        .push(PendingTriggerContext::single(pending));
     assert!(
         state
             .deferred_triggers

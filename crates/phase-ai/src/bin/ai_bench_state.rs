@@ -2,6 +2,12 @@
 //!
 //! Usage: `cargo run --release --bin ai-bench-state -- <path> [--difficulty medium] [--iters N] [--assert-under-ms N]`
 
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs;
 use std::time::Instant;
 

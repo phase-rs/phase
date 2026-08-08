@@ -1,0 +1,100 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": "Graveyard",
+        "destination": "Battlefield",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Planeswalker"
+          ],
+          "controller": "You",
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Graveyard"
+            }
+          ]
+        },
+        "owner_library": false,
+        "enter_transformed": false,
+        "enter_tapped": false,
+        "enters_attacking": false
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "White",
+                "White"
+              ],
+              "generic": 4
+            }
+          },
+          {
+            "type": "Exile",
+            "count": 1,
+            "zone": "Graveyard",
+            "filter": {
+              "type": "SelfRef"
+            }
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
+      "target_prompt": null,
+      "activation_zone": "Graveyard",
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "CantAttack",
+      "affected": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "Opponent",
+        "properties": []
+      },
+      "modifications": [],
+      "condition": {
+        "type": "UnlessPay",
+        "cost": {
+          "type": "Cost",
+          "shards": [],
+          "generic": 1
+        },
+        "scaling": {
+          "type": "PerAffectedCreature"
+        },
+        "defended": "Planeswalker"
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "Creatures can't attack planeswalkers you control unless their controller pays {1} for each creature they control that's attacking a planeswalker you control."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

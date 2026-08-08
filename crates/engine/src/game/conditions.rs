@@ -151,6 +151,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         | AttackTargetFilter::Planeswalker
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
+        | AttackTargetFilter::Monarch
         | AttackTargetFilter::Battle => false,
     }
 }
@@ -173,6 +174,11 @@ pub(crate) fn eval_is_initiative(state: &GameState, controller: PlayerId) -> boo
 /// CR 702.131a + CR 702.131c: True when the given player has the city's blessing.
 pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) -> bool {
     state.city_blessing.contains(&controller)
+}
+
+/// CR 702.195b: True when the given player has the enduring story designation.
+pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
+    state.enduring_story.contains(&controller)
 }
 
 /// CR 400.7: True when the source permanent entered the battlefield this turn.

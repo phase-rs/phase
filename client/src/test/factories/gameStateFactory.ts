@@ -29,6 +29,8 @@ type TriggerTargetSelectionWaitingFor = Extract<
   { type: "TriggerTargetSelection" }
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
+type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
+type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
@@ -178,6 +180,20 @@ export const buildManaPaymentWaitingFor = (
   return manaPaymentWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class UntapChoiceWaitingForFactory extends PlayerWaitingForFactory<UntapChoiceWaitingFor> {}
+
+export const untapChoiceWaitingForFactory =
+  UntapChoiceWaitingForFactory.define((): UntapChoiceWaitingFor => ({
+    type: "UntapChoice",
+    data: { player: 0, candidates: [1] },
+  }));
+
+export const buildUntapChoiceWaitingFor = (
+  overrides: Partial<UntapChoiceWaitingFor> = {},
+): UntapChoiceWaitingFor => {
+  return untapChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
 export const pendingCastFactory = Factory.define<PendingCast>(() => ({
   object_id: 1,
   card_id: 1,
@@ -267,6 +283,26 @@ export const buildChooseXValueWaitingFor = (
   overrides: Partial<ChooseXValueWaitingFor> = {},
 ): ChooseXValueWaitingFor => {
   return chooseXValueWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class PayAmountChoiceWaitingForFactory extends PlayerWaitingForFactory<PayAmountChoiceWaitingFor> {}
+
+export const payAmountChoiceWaitingForFactory =
+  PayAmountChoiceWaitingForFactory.define((): PayAmountChoiceWaitingFor => ({
+    type: "PayAmountChoice",
+    data: {
+      player: 0,
+      resource: { type: "Energy" },
+      min: 0,
+      max: 0,
+      source_id: 0,
+    },
+  }));
+
+export const buildPayAmountChoiceWaitingFor = (
+  overrides: Partial<PayAmountChoiceWaitingFor> = {},
+): PayAmountChoiceWaitingFor => {
+  return payAmountChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export class AssistPaymentWaitingForFactory extends WaitingForFactory<AssistPaymentWaitingFor> {
@@ -359,6 +395,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(manaPaymentWaitingForFactory.forPlayer(player).build());
   }
 
+  untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
+    return this.variant(untapChoiceWaitingForFactory.withData(data).build());
+  }
+
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
     return this.variant(targetSelectionWaitingForFactory.withData(data).build());
   }
@@ -371,6 +411,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
     return this.variant(chooseXValueWaitingForFactory.withData(data).build());
+  }
+
+  payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
+    return this.variant(payAmountChoiceWaitingForFactory.withData(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
@@ -528,6 +572,7 @@ export const buildStackEntry = (
 export const legalActionsResultFactory = Factory.define<LegalActionsResult>(() => ({
   actions: [],
   autoPassRecommended: false,
+  endContinuousEffectOffers: [],
 }));
 
 export const buildLegalActionsResult = (
@@ -597,6 +642,10 @@ export class GameStateFactory extends Factory<GameState> {
     return this.waitingFor(waitingForFactory.manaPayment(player).build());
   }
 
+  untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.untapChoice(data).build());
+  }
+
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.targetSelection(data).build());
   }
@@ -609,6 +658,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.chooseXValue(data).build());
+  }
+
+  payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.payAmountChoice(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {

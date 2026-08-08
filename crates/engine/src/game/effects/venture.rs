@@ -239,7 +239,7 @@ fn queue_room_trigger(
         source_id,
         controller: player,
         condition: None,
-        ability: room_ability,
+        ability: Box::new(room_ability),
         timestamp: 0,
         target_constraints,
         distribute: None,
@@ -255,6 +255,7 @@ fn queue_room_trigger(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
 
     // CR 603.2 + CR 309.4c: Dispatch through the standard

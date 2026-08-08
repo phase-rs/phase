@@ -20,14 +20,18 @@ use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
+    end_continuous_effect_offers as engine_end_continuous_effect_offers,
     legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
+use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
+use engine::types::interaction::InteractionSubmission;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
 use http::{HeaderMap, HeaderValue};
@@ -40,7 +44,7 @@ use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
 use server_core::client_message_wire_guard::{
-    guard_broker_projection_inbound, guard_client_message_before_dispatch,
+    guard_broker_projection_inbound, guard_client_message_before_dispatch, wire_rejection_message,
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::{draft_seats_needing_auto_pick, DraftSessionManager};
@@ -54,6 +58,7 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::game_state_snapshot_wire_guard::{
     guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
 };
+use server_core::interaction_payload_guard::guard_interaction_submission_payload;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
@@ -64,11 +69,14 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
-use server_core::session::{ActionResult, GameSession, SessionManager};
+use server_core::session::{
+    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionManager,
+};
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
+use server_core::takeback::RewindOption;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -91,12 +99,64 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
-#[cfg(windows)]
-// Windows gives the process' primary thread a comparatively small stack. A
-// persisted game is a deeply nested rules snapshot, so restore it on a
-// purpose-sized thread rather than letting one saved session prevent the
-// server from reaching its health endpoint on the next launch.
-const PERSISTED_SESSION_RESTORE_STACK_BYTES: usize = 16 * 1024 * 1024;
+/// Stack size for every thread that can run the engine: the runtime *owner*
+/// thread spawned in `main`, plus Tokio's worker and blocking threads.
+///
+/// Rust's default thread stack is 2 MiB and a single WebSocket action already
+/// spends most of it: `handle_socket`'s async state machine plus the engine
+/// and AI call chain under `run_ai` measured at ~1.35 MiB on a *turn-3*
+/// four-player Commander game. `GameState` is moved by value through that
+/// chain (`AiActionResult::state`, every `state.clone()`), so the budget is
+/// roughly "how many `GameState` values are live on the stack at once" — it is
+/// near-constant in board size, which is why an early game overruns it just as
+/// readily as a late one. Overrunning is not a catchable panic, so
+/// `panic = "unwind"` in `[profile.server-release]` cannot contain it: the
+/// process aborts and every player loses the game.
+///
+/// `GameState`'s inline size has since been cut from 30,112 B to 12,464 B
+/// (see `engine/src/types/game_state_size.rs`, which pins it), and 32 MiB is
+/// retained anyway, deliberately:
+///
+///   * the measured high-water does **not** fall in proportion to the struct.
+///     On the equivalent bisected fixture the struct shrank 2.42x while the
+///     stack high-water fell only ~1.36x. The residual is **unattributed** — it
+///     was not instrumented, so treat what follows as the leading candidate,
+///     not a finding. Boxing covered every `ResolvedAbility` *storage* site but
+///     none of the by-value *parameter* sites (**41 production-reachable**; 48
+///     in `crates/` total, of which 7 are test-only, and 13 of the 48 are in
+///     `engine/src/game/casting_costs.rs`; population and counting method are
+///     stated in `engine/tests/integration/game_state_stack_budget.rs`, and
+///     both figures are lower bounds because grep undercounts this shape). The
+///     production figure is the relevant one here: this is a claim about
+///     production stack frames, and a test-only parameter never appears in
+///     one. Those nest two
+///     deep on the ordinary cast path, so part of the residual plausibly still
+///     scales with `ResolvedAbility`. Either way, no static size fix is proven
+///     to bound it;
+///   * AI search depth is data-driven, so no static size fix bounds
+///     `depth x chain_depth x sizeof`;
+///   * `[profile.server-release]` (`opt-level = 2`, `lto = "thin"`,
+///     `codegen-units = 16`) uses measurably more stack than `ai_commander`'s
+///     profile;
+///   * the cost is reserved *address space*, not committed memory. Note the
+///     multiplier: `thread_stack_size` also sizes Tokio's **blocking** pool,
+///     whose default cap is 512 threads, so the worst-case reservation for that
+///     pool goes from ~1 GiB to ~16 GiB. Blocking threads are spawned on demand
+///     and 512 is a cap rather than a steady state, and on 64-bit this is
+///     address space only — but if this server ever runs somewhere with strict
+///     VA-commit accounting, `max_blocking_threads` is the knob to reach for.
+///
+/// 32 MiB matches what `ai_commander` and `duel_suite` already use for this
+/// same engine recursion.
+///
+/// Side effect worth knowing: a **debug** `phase-server` used to abort on any
+/// WebSocket connect, because a debug frame chain did not fit Tokio's 2 MiB
+/// default worker stack. Sizing the owner and worker threads here fixed that, so
+/// the debug binary is now a usable smoke target — `cargo run -p phase-server`,
+/// connect a client, and the handshake plus lobby path complete without an
+/// abort. Verified once by hand after this constant landed; if you are looking
+/// for a cheap end-to-end check of a server change, that is now available.
+const RUNTIME_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -113,24 +173,15 @@ type SharedDraftSpectators = Arc<
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
-#[cfg(windows)]
-fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
-    let json = json.to_owned();
-    let restore = std::thread::Builder::new()
-        .name("phase-session-restore".to_owned())
-        .stack_size(PERSISTED_SESSION_RESTORE_STACK_BYTES)
-        .spawn(move || {
-            let persisted = serde_json::from_str::<server_core::PersistedSession>(&json)
-                .map_err(|error| error.to_string())?;
-            Ok(GameSession::from_persisted(persisted, db.as_ref()))
-        })
-        .map_err(|error| format!("could not start restore thread: {error}"))?;
-    restore
-        .join()
-        .map_err(|_| "persisted session restore thread panicked".to_owned())?
-}
-
-#[cfg(not(windows))]
+/// Deserializing a persisted session is deeply nested and stack-hungry — and
+/// boxing a field does not help here, because `Box<T>::deserialize` still
+/// builds `T` on the stack before moving it into the allocation. It needs a
+/// large stack, and it now has one without a platform fork: the sole caller
+/// runs inside `serve()`, which `main` drives on the `phase-server-runtime`
+/// thread at `RUNTIME_THREAD_STACK_BYTES`. The former `#[cfg(windows)]` arm
+/// hopped onto a purpose-sized 16 MiB thread; against a 32 MiB runtime owner
+/// that is a *downgrade* on the one platform that reported the overflow, so
+/// both arms are gone and the restore runs inline.
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
@@ -198,6 +249,16 @@ async fn switch_game_spectator_slot(
         }
     }
     Ok(())
+}
+
+async fn prune_game_connections<'a>(
+    connections: &SharedConnections,
+    game_codes: impl IntoIterator<Item = &'a str>,
+) {
+    let mut conns = connections.lock().await;
+    for game_code in game_codes {
+        conns.remove(game_code);
+    }
 }
 
 async fn remove_draft_spectator_sender(
@@ -282,6 +343,11 @@ fn build_game_started_message(
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
     let is_actor = server_core::is_acting(&session.state, player);
     let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(&legal_actions)
+    } else {
+        Vec::new()
+    };
     let mana_payment_shortcut_actions = if is_actor {
         engine_mana_payment_shortcut_actions(&session.state, &by_object_all)
     } else {
@@ -299,6 +365,7 @@ fn build_game_started_message(
             }
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -308,6 +375,7 @@ fn build_game_started_message(
         player_names: session.display_names.clone(),
         legal_actions: if is_actor { legal_actions } else { Vec::new() },
         auto_pass_recommended: auto_pass,
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         spell_costs: if is_actor {
             spell_costs_all
@@ -315,13 +383,25 @@ fn build_game_started_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            by_object_all
+            object_action_payloads(&by_object_all)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
         player_token,
+        full_key: session
+            .full_runtime
+            .as_ref()
+            .map(|runtime| runtime.key.clone()),
         events: server_core::filter_events_for_player(&events, &session.state, player),
+        // Read from the session rather than taken as a parameter: every caller
+        // already hands this function the authoritative session, and there is
+        // no caller that should publish anything else. A parameter every site
+        // fills identically from an argument it already passes is a hazard,
+        // not a choice. Populating `GameStarted` (not just `StateUpdate`) is
+        // what makes a reconnect mid-game see the list immediately.
+        rewind_targets: session.rewind_options(),
     }
 }
 
@@ -343,10 +423,15 @@ fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, Serv
         .collect()
 }
 
+/// `rewind_targets` is a parameter here, unlike in
+/// `build_game_started_message`, because this builder has no `GameSession` to
+/// read it from — the caller captures `session.rewind_options()` under the same
+/// lock as the transition and threads it through.
 fn build_state_update_message(
     result: &ActionResult,
     state_revision: u64,
     player: PlayerId,
+    rewind_targets: Vec<RewindOption>,
 ) -> Result<ServerMessage, String> {
     let (
         raw_state,
@@ -368,8 +453,14 @@ fn build_state_update_message(
     let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_transport_views(raw_state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, player);
     let mana_payment_shortcut_actions = if is_actor {
         engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
+    } else {
+        Vec::new()
+    };
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(legal_actions)
     } else {
         Vec::new()
     };
@@ -384,6 +475,7 @@ fn build_state_update_message(
             Vec::new()
         },
         auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
+        end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         eliminated_players: Vec::new(),
         log_entries: log_entries.clone(),
@@ -393,11 +485,13 @@ fn build_state_update_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            legal_actions_by_object.clone()
+            object_action_payloads(legal_actions_by_object)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
+        rewind_targets,
     })
 }
 
@@ -409,6 +503,8 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
     guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(&session.state, &filtered, None);
+    let viewer_interaction =
+        derive_viewer_interaction(&session.state, &filtered, SPECTATOR_PLAYER_ID);
 
     Ok(ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -418,12 +514,22 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         player_names: session.display_names.clone(),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        end_continuous_effect_offers: Vec::new(),
         mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
         player_token: None,
+        full_key: session
+            .full_runtime
+            .as_ref()
+            .map(|runtime| runtime.key.clone()),
         events: Vec::new(),
+        // Always empty for spectators, deliberately — NOT `rewind_options()`.
+        // A spectator is a read-only viewer with no rollback affordance, and
+        // the list would only advertise targets they cannot request.
+        rewind_targets: Vec::new(),
     })
 }
 
@@ -443,6 +549,7 @@ fn build_spectator_state_update_message(
     })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(raw_state, &filtered, None);
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, SPECTATOR_PLAYER_ID);
     let eliminated_players = raw_state.eliminated_players.clone();
 
     Ok(ServerMessage::StateUpdate {
@@ -451,12 +558,19 @@ fn build_spectator_state_update_message(
         events: server_core::filter_events_for_player(events, raw_state, SPECTATOR_PLAYER_ID),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        end_continuous_effect_offers: Vec::new(),
         mana_payment_shortcut_actions: Vec::new(),
         eliminated_players,
         log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
+        // Empty for the same reason as the spectator `GameStarted` builder
+        // above: a spectator has no rollback affordance. This builder also
+        // takes a raw state rather than a session, so `rewind_options()` is
+        // not even in scope here.
+        rewind_targets: Vec::new(),
     })
 }
 
@@ -779,14 +893,19 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
+        | ClientMessage::ConcedeMatch
+        | ClientMessage::BootstrapTerminalDelivery { .. }
+        | ClientMessage::ReadTerminalResult { .. }
+        | ClientMessage::AckTerminalDelivery { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
-        | ClientMessage::RequestTakeback
+        | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => match mode {
             ServerMode::Full => None,
@@ -912,8 +1031,31 @@ impl SocketIdentity {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// `thread_stack_size` governs Tokio's worker and blocking threads, but
+/// `block_on` polls the root future on the **calling** thread — so `serve()`'s
+/// own body (including the persisted-session restore) would run on the process
+/// primary thread with whatever stack the OS handed it. `#[tokio::main]`
+/// expands to exactly the same `build().block_on(..)` shape, so this is a
+/// pre-existing gap rather than a regression: close it by owning the runtime
+/// from a thread whose stack we chose.
+fn main() {
+    std::thread::Builder::new()
+        .name("phase-server-runtime".to_owned())
+        .stack_size(RUNTIME_THREAD_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(RUNTIME_THREAD_STACK_BYTES)
+                .build()
+                .expect("failed to build the Tokio runtime")
+                .block_on(serve());
+        })
+        .expect("spawn phase-server runtime thread")
+        .join()
+        .expect("phase-server runtime thread panicked");
+}
+
+async fn serve() {
     let cli = Cli::parse();
 
     let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
@@ -992,10 +1134,12 @@ async fn main() {
 
     // A single-user instance has no other players whose seats a grace period
     // would free, so reconnects never expire — a game suspended for any length
-    // of time stays resumable. `with_grace_period` sets the reconnect window;
+    // of time stays resumable. `single_user` sets the reconnect window;
     // ten years is effectively unbounded without risking overflow in `now + grace`.
+    // It also stamps `HostingMode::SingleUser` on every session this manager
+    // owns, which is what grants the desktop sidecar its debug capability.
     let state: SharedState = Arc::new(Mutex::new(if cli.single_user {
-        SessionManager::with_grace_period(Duration::from_secs(10 * 365 * 24 * 60 * 60))
+        SessionManager::single_user(Duration::from_secs(10 * 365 * 24 * 60 * 60))
     } else {
         SessionManager::new()
     }));
@@ -1028,17 +1172,29 @@ async fn main() {
     // replayed — skip the restore pass entirely and let SQLite ignore the
     // stale rows until operators clean them up manually.
     if matches!(mode, ServerMode::Full) {
-        match game_db.load_all() {
+        match game_db.load_active_full_sessions() {
             Ok(persisted_games) => {
                 let mut mgr = state.lock().await;
                 let mut lob_guard = lobby.lock().await;
                 let lob = lob_guard.lobby_mut();
                 let mut restored = 0u32;
 
-                for (game_code, json) in &persisted_games {
+                for snapshot in &persisted_games {
+                    let game_code = &snapshot.key.game_code;
+                    let json = match serde_json::to_string(&snapshot.persisted) {
+                        Ok(json) => json,
+                        Err(error) => {
+                            warn!(game = %game_code, %error, "failed to serialize restored Full session");
+                            continue;
+                        }
+                    };
                     info!(game = %game_code, bytes = json.len(), "restoring persisted session");
-                    match restore_persisted_session(json, db.clone()) {
-                        Ok(session) => {
+                    match restore_persisted_session(&json, db.clone()) {
+                        Ok(mut session) => {
+                            session.full_runtime = Some(FullRuntime {
+                                key: snapshot.key.clone(),
+                                activation_epoch: snapshot.activation_epoch,
+                            });
                             let lobby_meta = session.lobby_meta.clone();
                             let is_started = session.game_started;
 
@@ -1085,8 +1241,7 @@ async fn main() {
                             restored += 1;
                         }
                         Err(e) => {
-                            warn!(game = %game_code, error = %e, "failed to restore session, deleting");
-                            let _ = game_db.delete_session(game_code);
+                            warn!(game = %game_code, error = %e, "failed to restore active session; retaining fenced row for recovery");
                         }
                     }
                 }
@@ -1157,34 +1312,81 @@ async fn main() {
                 mgr.reconnect.check_expired()
             };
             if !expired.is_empty() {
-                // Remove in-memory sessions first (state lock → connections lock order)
-                {
-                    let mut mgr = bg_state.lock().await;
-                    for game_code in &expired {
-                        mgr.remove_game(game_code);
-                    }
-                }
-                // Notify connected players and clean up persistence
-                let conns = bg_connections.lock().await;
-                for game_code in &expired {
-                    info!(game = %game_code, reason = "disconnect_expired", "game over");
-                    if let Some(players) = conns.get(game_code) {
-                        let msg = ServerMessage::GameOver {
-                            winner: None,
-                            reason: "Opponent disconnected (grace period expired)".to_string(),
-                            ranked_result: None,
-                        };
-                        for sender in players.values() {
-                            let _ = sender.send(msg.clone());
+                let terminal_candidates = {
+                    let mgr = bg_state.lock().await;
+                    expired
+                        .iter()
+                        .filter_map(|game_code| {
+                            let session = mgr.sessions.get(game_code)?;
+                            session
+                                .game_started
+                                .then(|| {
+                                    terminal_artifact(
+                                        session,
+                                        None,
+                                        "Opponent disconnected (grace period expired)".to_string(),
+                                        None,
+                                    )
+                                    .map(|artifact| (game_code.clone(), artifact))
+                                })?
+                                .ok()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut prepared = HashMap::new();
+                for (game_code, artifact) in terminal_candidates {
+                    match prepare_full_terminal(&bg_game_db, artifact).await {
+                        Ok(deliveries) => {
+                            prepared.insert(game_code, deliveries);
+                        }
+                        Err(error) => {
+                            error!(game = %game_code, %error, "disconnect terminal preparation failed")
                         }
                     }
-                    if let Err(e) = bg_game_db.delete_session(game_code) {
-                        error!(game = %game_code, error = %e, "failed to delete persisted session");
+                }
+                let removed = {
+                    let mut mgr = bg_state.lock().await;
+                    expired
+                        .iter()
+                        .filter_map(|game_code| {
+                            let session = mgr.sessions.get(game_code)?;
+                            if !session.game_started || prepared.contains_key(game_code) {
+                                mgr.remove_game(game_code)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                {
+                    let conns = bg_connections.lock().await;
+                    for session in &removed {
+                        let game_code = &session.game_code;
+                        info!(game = %game_code, reason = "disconnect_expired", "game over");
+                        if let Some(players) = conns.get(game_code) {
+                            if let Some(deliveries) = prepared.get(game_code) {
+                                for (player, delivery) in deliveries {
+                                    if let Some(sender) = players.get(player) {
+                                        let _ = sender.send(ServerMessage::TerminalResult {
+                                            delivery: Some(delivery.clone()),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if !session.game_started {
+                            retire_unstarted_session_async(&bg_game_db, session);
+                        }
                     }
                 }
+                prune_game_connections(
+                    &bg_connections,
+                    removed.iter().map(|session| session.game_code.as_str()),
+                )
+                .await;
                 let mut specs = bg_game_spectators.lock().await;
-                for game_code in &expired {
-                    specs.remove(game_code);
+                for session in &removed {
+                    specs.remove(&session.game_code);
                 }
             }
 
@@ -1210,12 +1412,21 @@ async fn main() {
                 info!(count = expired_lobby.len(), "expiring stale lobby games");
                 let mut mgr = bg_state.lock().await;
                 for game_code in &expired_lobby {
-                    mgr.remove_game(game_code);
-                    if let Err(e) = bg_game_db.delete_session(game_code) {
-                        error!(game = %game_code, error = %e, "failed to delete expired lobby session");
+                    if mgr
+                        .sessions
+                        .get(game_code)
+                        .is_some_and(|session| !session.game_started)
+                    {
+                        if let Some(session) = mgr.remove_game(game_code) {
+                            retire_unstarted_session_async(&bg_game_db, &session);
+                        }
+                    } else if mgr.sessions.contains_key(game_code) {
+                        error!(game = %game_code, "refusing to retire a started session from lobby expiry");
                     }
                 }
                 drop(mgr);
+                prune_game_connections(&bg_connections, expired_lobby.iter().map(String::as_str))
+                    .await;
                 let mut specs = bg_game_spectators.lock().await;
                 for game_code in &expired_lobby {
                     specs.remove(game_code);
@@ -1389,17 +1600,17 @@ async fn main() {
     let mgr = shutdown_state.lock().await;
     let mut persisted = 0u32;
     for (game_code, session) in &mgr.sessions {
-        let snapshot = session.to_persisted();
-        match serde_json::to_string(&snapshot) {
-            Ok(json) => {
-                if let Err(e) = shutdown_game_db.save_session(game_code, &json) {
-                    error!(game = %game_code, error = %e, "failed to persist session on shutdown");
-                } else {
-                    persisted += 1;
-                }
+        let Some(snapshot) = session.full_persist_snapshot() else {
+            warn!(game = %game_code, "skipping unbound Full session at shutdown");
+            continue;
+        };
+        match shutdown_game_db.save_full_session(&snapshot) {
+            Ok(server_core::FullPersistDisposition::Applied) => persisted += 1,
+            Ok(disposition) => {
+                warn!(game = %game_code, ?disposition, "shutdown snapshot was no longer current")
             }
-            Err(e) => {
-                error!(game = %game_code, error = %e, "failed to serialize session on shutdown");
+            Err(error) => {
+                error!(game = %game_code, %error, "failed to persist Full session on shutdown")
             }
         }
     }
@@ -1503,11 +1714,16 @@ async fn health() -> &'static str {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use clap::Parser;
+    use tokio::sync::Mutex;
 
     use super::{
-        bootstrap_required, origin_is_allowed, select_card_data_source, CardDataSource, Cli,
+        bootstrap_required, origin_is_allowed, prune_game_connections, select_card_data_source,
+        CardDataSource, Cli, SharedConnections,
     };
 
     #[test]
@@ -1551,6 +1767,38 @@ mod lifecycle_tests {
             select_card_data_source(temp.path(), true).expect("explicit fixture source"),
             CardDataSource::DevFixture(temp.path().join("mtgjson/test_fixture.json"))
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_expiry_prunes_only_the_finished_game_connections() {
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut conns = connections.lock().await;
+            conns.insert("EXPIRED".to_string(), HashMap::new());
+            conns.insert("ACTIVE".to_string(), HashMap::new());
+        }
+
+        prune_game_connections(&connections, ["EXPIRED"]).await;
+
+        let conns = connections.lock().await;
+        assert!(!conns.contains_key("EXPIRED"));
+        assert!(conns.contains_key("ACTIVE"));
+    }
+
+    #[tokio::test]
+    async fn lobby_expiry_prunes_only_the_finished_game_connections() {
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut conns = connections.lock().await;
+            conns.insert("EXPIRED".to_string(), HashMap::new());
+            conns.insert("ACTIVE".to_string(), HashMap::new());
+        }
+
+        prune_game_connections(&connections, ["EXPIRED"]).await;
+
+        let conns = connections.lock().await;
+        assert!(!conns.contains_key("EXPIRED"));
+        assert!(conns.contains_key("ACTIVE"));
     }
 }
 
@@ -2049,6 +2297,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
         } => ServerMessage::GameCreated {
             game_code,
             player_token,
+            full_key: None,
         },
         L::Error { message, code } => ServerMessage::Error { message, code },
         L::LobbyUpdate { games } => ServerMessage::LobbyUpdate { games },
@@ -2286,24 +2535,64 @@ async fn apply_outbounds(
     }
 }
 
-/// Fire-and-forget persistence of a game session to SQLite.
-fn persist_session_async(
+/// Binds a freshly allocated Full key to its authoritative runtime before any
+/// connection can publish it. The initial snapshot uses the same keyed writer
+/// as every later mutation; single-user activation additionally obtains the
+/// durable singleton epoch that fences a replaced native game.
+fn initialize_full_runtime(
     game_db: &SharedGameDb,
-    game_code: &str,
-    session: &server_core::session::GameSession,
-) {
+    session: &mut GameSession,
+    key: server_core::FullSessionKey,
+) -> Result<(), String> {
+    session.full_runtime = Some(FullRuntime {
+        key,
+        activation_epoch: None,
+    });
+    let snapshot = session
+        .full_persist_snapshot()
+        .expect("Full runtime was just initialized");
+    if game_db.is_single_user() {
+        let (epoch, disposition) = game_db
+            .activate_single_user_session(&snapshot)
+            .map_err(|error| format!("Failed to activate Full session: {error}"))?;
+        if disposition != server_core::FullPersistDisposition::Applied {
+            return Err("Full session activation was superseded".to_string());
+        }
+        session
+            .full_runtime
+            .as_mut()
+            .expect("Full runtime remains installed")
+            .activation_epoch = Some(epoch);
+    } else if game_db
+        .save_full_session(&snapshot)
+        .map_err(|error| format!("Failed to persist Full session: {error}"))?
+        != server_core::FullPersistDisposition::Applied
+    {
+        return Err("Full session persistence was superseded".to_string());
+    }
+    Ok(())
+}
+
+/// Fire-and-forget generation- and revision-fenced persistence of an active
+/// Full session. Terminal code never calls this writer after preparation.
+fn persist_full_session_async(game_db: &SharedGameDb, session: &GameSession) {
     let db = game_db.clone();
-    let persisted = session.to_persisted();
-    let code = game_code.to_string();
-    tokio::task::spawn_blocking(move || match serde_json::to_string(&persisted) {
-        Ok(json) => {
-            if let Err(e) = db.save_session(&code, &json) {
-                error!(game = %code, error = %e, "failed to persist game session");
-            }
-        }
-        Err(e) => {
-            error!(game = %code, error = %e, "failed to serialize game session");
-        }
+    let Some(snapshot) = session.full_persist_snapshot() else {
+        warn!(game = %session.game_code, "skipping persistence for unbound Full session");
+        return;
+    };
+    tokio::task::spawn_blocking(move || match db.save_full_session(&snapshot) {
+        Ok(server_core::FullPersistDisposition::Applied) => {}
+        Ok(disposition) => warn!(
+            game = %snapshot.key.game_code,
+            ?disposition,
+            "Full snapshot was no longer current"
+        ),
+        Err(error) => error!(
+            game = %snapshot.key.game_code,
+            %error,
+            "failed to persist Full session"
+        ),
     });
 }
 
@@ -2348,7 +2637,7 @@ async fn create_and_connect_multiplayer_session(
     connections: &SharedConnections,
     game_db: &SharedGameDb,
     req: MultiplayerSessionRequest,
-) -> (String, String, u32) {
+) -> Result<(String, String, u32, server_core::FullSessionKey), String> {
     let MultiplayerSessionRequest {
         resolved,
         display_name,
@@ -2365,7 +2654,7 @@ async fn create_and_connect_multiplayer_session(
     } = req;
 
     // Phase 1 ── state lock; released at end of block.
-    let (game_code, player_token, initial_player_count) = {
+    let (game_code, player_token, initial_player_count, full_key) = {
         let mut mgr = state.lock().await;
         let (game_code, player_token) = mgr.create_game_n_players(
             resolved,
@@ -2375,6 +2664,13 @@ async fn create_and_connect_multiplayer_session(
             match_config,
             format_config,
         );
+        let full_key = match game_db.create_full_session_key(&game_code) {
+            Ok(key) => key,
+            Err(error) => {
+                mgr.remove_game(&game_code);
+                return Err(format!("Failed to bind game session identity: {error}"));
+            }
+        };
         info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
 
         if let Some(session) = mgr.sessions.get_mut(&game_code) {
@@ -2411,10 +2707,13 @@ async fn create_and_connect_multiplayer_session(
                 start_when_full,
                 ranked,
             });
-            persist_session_async(game_db, &game_code, session);
+            if let Err(error) = initialize_full_runtime(game_db, session, full_key.clone()) {
+                mgr.remove_game(&game_code);
+                return Err(error);
+            }
         }
 
-        (game_code, player_token, initial_player_count)
+        (game_code, player_token, initial_player_count, full_key)
     }; // state lock released here
 
     // Phase 2 ── connections lock; released at end of block.
@@ -2426,7 +2725,7 @@ async fn create_and_connect_multiplayer_session(
             .insert(PlayerId(0), host_tx);
     } // connections lock released here
 
-    (game_code, player_token, initial_player_count)
+    Ok((game_code, player_token, initial_player_count, full_key))
 }
 
 /// Broadcast `DraftSpectatorView` to all spectators watching a draft.
@@ -2484,13 +2783,86 @@ async fn persist_draft_session_async(
     });
 }
 
-/// Fire-and-forget deletion of a persisted game session.
-fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
+/// Immutable terminal result prepared before any recipient is told that a
+/// started Full session ended. The database transaction retires the runtime,
+/// creates recipient-scoped capabilities, and makes retries idempotent.
+fn terminal_artifact(
+    session: &GameSession,
+    winner: Option<PlayerId>,
+    reason: String,
+    ranked_result: Option<Vec<RankedPlayerResult>>,
+) -> Result<persistence::FullTerminalArtifact, String> {
+    let runtime = session
+        .full_runtime
+        .as_ref()
+        .ok_or_else(|| "Full session has no runtime identity".to_string())?;
+    let recipients = session
+        .player_tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !token.is_empty())
+        .map(|(player_id, token)| persistence::TerminalRecipient {
+            player_id: PlayerId(player_id as u8),
+            pre_terminal_player_token: token.clone(),
+        })
+        .collect();
+    Ok(persistence::FullTerminalArtifact {
+        key: runtime.key.clone(),
+        terminal_revision: session.state_revision,
+        display: server_core::TerminalMatchDisplay {
+            winner,
+            reason,
+            ranked_result,
+        },
+        recipients,
+    })
+}
+
+async fn prepare_full_terminal(
+    game_db: &SharedGameDb,
+    artifact: persistence::FullTerminalArtifact,
+) -> Result<Vec<(PlayerId, server_core::CurrentTerminalDelivery)>, String> {
     let db = game_db.clone();
-    let code = game_code.to_string();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = db.delete_session(&code) {
-            error!(game = %code, error = %e, "failed to delete persisted session");
+        db.prepare_full_terminal(&artifact)
+            .map_err(|error| format!("Failed to prepare terminal result: {error}"))?;
+        artifact
+            .recipients
+            .iter()
+            .map(|recipient| {
+                db.current_terminal_delivery_for_recipient(
+                    &artifact.key,
+                    recipient.player_id,
+                    &recipient.pre_terminal_player_token,
+                )
+                .map_err(|error| format!("Failed to load terminal delivery: {error}"))?
+                .map(|delivery| (recipient.player_id, delivery))
+                .ok_or_else(|| "Prepared terminal delivery is missing".to_string())
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("Terminal persistence task failed: {error}"))?
+}
+
+/// Only a waiting-room session can be retired without a recipient delivery:
+/// it has never entered engine play and therefore has no terminal outcome.
+fn retire_unstarted_session_async(game_db: &SharedGameDb, session: &GameSession) {
+    let Some(runtime) = session.full_runtime.clone() else {
+        warn!(game = %session.game_code, "unbound waiting-room session was removed");
+        return;
+    };
+    let db = game_db.clone();
+    let game_code = session.game_code.clone();
+    tokio::task::spawn_blocking(move || {
+        match db.retire_unstarted_full_session(&runtime.key, runtime.activation_epoch) {
+            Ok(server_core::FullPersistDisposition::Applied) => {}
+            Ok(disposition) => {
+                warn!(game = %game_code, ?disposition, "waiting-room retirement was not current")
+            }
+            Err(error) => {
+                error!(game = %game_code, %error, "failed to retire waiting-room session")
+            }
         }
     });
 }
@@ -2592,24 +2964,25 @@ fn ranked_result_for_duel(
             rating_delta: db,
         },
     ];
-    if let Err(e) = game_db.save_ranked_result(&deltas) {
-        error!(game = %game_code, error = %e, "failed to save ranked result");
-        return None;
-    }
-    Some(vec![
-        RankedPlayerResult {
-            player_id: 0,
-            rating_before: ra,
-            rating_after: ra_next,
-            rating_delta: da,
-        },
-        RankedPlayerResult {
-            player_id: 1,
-            rating_before: rb,
-            rating_after: rb_next,
-            rating_delta: db,
-        },
-    ])
+    let saved = match game_db.save_ranked_result_idempotent(&deltas) {
+        Ok(saved) => saved,
+        Err(e) => {
+            error!(game = %game_code, error = %e, "failed to save ranked result");
+            return None;
+        }
+    };
+    Some(
+        saved
+            .into_iter()
+            .enumerate()
+            .map(|(player_id, delta)| RankedPlayerResult {
+                player_id: player_id as u8,
+                rating_before: delta.rating_before,
+                rating_after: delta.rating_after,
+                rating_delta: delta.rating_delta,
+            })
+            .collect(),
+    )
 }
 
 /// If this game_code belongs to a draft tournament, auto-report the match
@@ -3003,7 +3376,7 @@ async fn broadcast_game_started(
         };
 
         session.run_ai();
-        persist_session_async(game_db, game_code, session);
+        persist_full_session_async(game_db, session);
         (
             build_game_started_messages(session),
             build_spectator_game_started_message(session),
@@ -3095,11 +3468,147 @@ async fn draft_pack_generator_for_start(
         .ok_or_else(|| format!("No draft pool data for set: {set_code}"))
 }
 
+/// Per-AI-result fan-out for a batch of `run_ai` results.
+///
+/// Lifted verbatim out of `handle_full_game_submission` so the approved-takeback
+/// path can reuse it rather than duplicate 110 lines: a rollback can restore an
+/// AI seat to priority, and that AI's follow-up must reach clients with the same
+/// 100 ms pacing, size guard, `is_last` legal-action gating, per-player filter
+/// and spectator fan-out as a normal action's. Pure extraction — no behavioural
+/// delta on the shipped path.
+///
+/// `rewind_targets` and `eliminated` are both captured under the same lock as
+/// the results themselves, and both **after** `run_ai` — neither can be
+/// recomputed here because this function holds no session. Taking either from a
+/// pre-`run_ai` value would ship a list one transition stale: the AI's follow-up
+/// can cross a turn (adding a rewind boundary) or finish a player off (adding an
+/// elimination), and every `StateUpdate` in the batch would then contradict the
+/// state travelling with it.
+async fn broadcast_ai_results(
+    connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    player_count: u8,
+    eliminated: &[PlayerId],
+    ai_results: &[RevisionedActionResult],
+    rewind_targets: &[RewindOption],
+) {
+    // Broadcast AI follow-up results with delays
+    for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (
+            ai_raw_state,
+            ai_events,
+            ai_legal,
+            ai_log_entries,
+            _ai_auto_pass,
+            ai_spell_costs,
+            ai_by_object,
+        ) = result;
+        if guard_state_snapshot_broadcast(StateSnapshotParts {
+            state: ai_raw_state,
+            events: ai_events,
+            log_entries: ai_log_entries,
+            legal_actions: ai_legal,
+            legal_actions_by_object: ai_by_object,
+            spell_costs: ai_spell_costs,
+        })
+        .is_err()
+        {
+            continue;
+        }
+        let is_last = i == ai_results.len() - 1;
+
+        // Filter AI state per-player outside the lock
+        let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
+            .map(|j| {
+                let pid = PlayerId(j);
+                (pid, server_core::filter_state_for_player(ai_raw_state, pid))
+            })
+            .collect();
+
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(game_code) {
+            for (pid, pstate) in &ai_filtered {
+                if let Some(s) = players.get(pid) {
+                    let is_actor = server_core::is_acting(ai_raw_state, *pid);
+                    let player_legals = if is_last && is_actor {
+                        ai_legal.clone()
+                    } else {
+                        vec![]
+                    };
+                    let p_auto_pass = if is_last {
+                        engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
+                    } else {
+                        false
+                    };
+                    let p_end_continuous_effect_offers =
+                        engine_end_continuous_effect_offers(&player_legals);
+                    let p_mana_payment_shortcut_actions = if is_last && is_actor {
+                        engine_mana_payment_shortcut_actions(ai_raw_state, ai_by_object)
+                    } else {
+                        Vec::new()
+                    };
+                    let p_spell_costs = if is_last && is_actor {
+                        ai_spell_costs.clone()
+                    } else {
+                        HashMap::new()
+                    };
+                    let p_by_object = if is_last && is_actor {
+                        ai_by_object.clone()
+                    } else {
+                        HashMap::new()
+                    };
+                    let _ = s.send(ServerMessage::StateUpdate {
+                        state_revision: *ai_revision,
+                        state: pstate.clone(),
+                        events: server_core::filter_events_for_player(
+                            ai_events,
+                            ai_raw_state,
+                            *pid,
+                        ),
+                        legal_actions: player_legals,
+                        auto_pass_recommended: p_auto_pass,
+                        end_continuous_effect_offers: p_end_continuous_effect_offers,
+                        mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
+                        eliminated_players: eliminated.to_vec(),
+                        log_entries: ai_log_entries.clone(),
+                        spell_costs: p_spell_costs,
+                        legal_actions_by_object: object_action_payloads(&p_by_object),
+                        derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
+                        viewer_interaction: derive_viewer_interaction(ai_raw_state, pstate, *pid),
+                        rewind_targets: rewind_targets.to_vec(),
+                    });
+                }
+            }
+        }
+        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
+        if let Ok(spectator_msg) = build_spectator_state_update_message(
+            ai_raw_state,
+            ai_events,
+            ai_log_entries,
+            *ai_revision,
+        ) {
+            let mut specs = game_spectators.lock().await;
+            if let Some(spectators) = specs.get_mut(game_code) {
+                spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                if spectators.is_empty() {
+                    specs.remove(game_code);
+                }
+            }
+        }
+    }
+}
+
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
 /// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
 /// `resolved_by` is the player whose response concluded the request, or
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
+// Same shape as the sibling transport fan-outs at `:2010`/`:3767`/`:4071`:
+// every argument is a distinct broadcast input captured under the session lock,
+// and bundling them into a struct here would only move the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 async fn broadcast_takeback_approved(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
@@ -3108,6 +3617,7 @@ async fn broadcast_takeback_approved(
     state_revision: u64,
     snapshot: server_core::BroadcastSnapshot,
     resolved_by: Option<PlayerId>,
+    rewind_targets: Vec<RewindOption>,
 ) {
     let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) = snapshot;
     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
@@ -3128,6 +3638,8 @@ async fn broadcast_takeback_approved(
                     vec![]
                 };
                 let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
+                let p_end_continuous_effect_offers =
+                    engine_end_continuous_effect_offers(&player_legals);
                 let p_mana_payment_shortcut_actions = if is_actor {
                     engine_mana_payment_shortcut_actions(&raw_state, &by_object)
                 } else {
@@ -3149,12 +3661,26 @@ async fn broadcast_takeback_approved(
                     events: vec![],
                     legal_actions: player_legals,
                     auto_pass_recommended: p_auto_pass,
+                    end_continuous_effect_offers: p_end_continuous_effect_offers,
                     mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
                     eliminated_players: raw_state.eliminated_players.clone(),
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
-                    legal_actions_by_object: p_by_object,
+                    legal_actions_by_object: object_action_payloads(&p_by_object),
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
+                    viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
+                    // Captured by the caller under the same lock as the
+                    // rollback, and — like the shipped action path's own
+                    // capture — *after* its `run_ai`, not before. Both halves
+                    // matter. Under the lock, because an approved rewind prunes
+                    // the ring and a list read outside it could advertise
+                    // boundaries that no longer exist. After `run_ai`, because
+                    // `run_ai` is itself a capture site: an AI follow-up that
+                    // crosses a turn adds a boundary, and a pre-`run_ai` read
+                    // would ship a list already one behind the state travelling
+                    // with it. The list is a live session affordance, not a
+                    // projection of `snapshot`.
+                    rewind_targets: rewind_targets.clone(),
                 });
             }
         }
@@ -3182,6 +3708,378 @@ async fn broadcast_takeback_approved(
             spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
             if spectators.is_empty() {
                 specs.remove(game_code);
+            }
+        }
+    }
+}
+
+/// What a Full-mode game socket submitted: a client-materialized `GameAction`,
+/// or an opaque engine-authored interaction response. Both are authenticated,
+/// applied, and broadcast identically, so they share one handler. A bool or a
+/// pair of `Option`s here would hide that the two are alternatives — and would
+/// not give the payload-guard match below a total, wildcard-free form.
+#[derive(Debug)]
+enum GameSubmission {
+    Action(GameAction),
+    Interaction(InteractionSubmission),
+}
+
+impl GameSubmission {
+    /// Wire-bounds this submission and, on failure, names the channel the
+    /// rejection is answered on.
+    ///
+    /// Defense in depth: `guard_client_message_before_dispatch` already ran
+    /// these exact bounds before dispatch, so in production this returns `Ok`
+    /// for every frame that reaches the handler — the same standing as the
+    /// `Action` guard it replaces. It is kept because the handler must not
+    /// assume its caller ran them.
+    ///
+    /// The channels here MUST agree with
+    /// `client_message_wire_guard::wire_rejection_message`, which answers the
+    /// same failure at the wire. An oversized `GameAction` is a malformed
+    /// frame — a client materializes actions from engine-published legal
+    /// actions and cannot produce one by accident. An oversized interaction
+    /// response is a rejected decision: `TextChoiceProjection::allow_arbitrary`
+    /// accepts free-form text and the bound is 256 bytes, so an ordinary paste
+    /// trips it and `ServerMessage::Error` would tear the session down.
+    /// `handler_payload_channels_agree_with_the_wire` pins that agreement
+    /// directly, by comparing this function's answer with
+    /// `wire_rejection_message`'s for the same payload.
+    ///
+    /// The `Err` is boxed because `ServerMessage` is ~13 KiB (it carries a
+    /// `GameState`), matching how this file already passes the type around
+    /// (`game_started_msg: Box<ServerMessage>`).
+    /// Stable `kind` label for the diagnostics this handler emits.
+    ///
+    /// Both submission variants share one handler, so an unlabelled event is
+    /// unattributable: an operator triaging an interaction report greps for
+    /// "interaction" and matches nothing. Deriving the label here keeps the two
+    /// call sites from restating the variant set.
+    fn kind(&self) -> &'static str {
+        match self {
+            GameSubmission::Action(_) => "action",
+            GameSubmission::Interaction(_) => "interaction",
+        }
+    }
+
+    fn payload_rejection(&self) -> Result<(), Box<ServerMessage>> {
+        match self {
+            GameSubmission::Action(action) => guard_game_action_payload(action)
+                .map_err(|reason| Box::new(ServerMessage::error(reason))),
+            GameSubmission::Interaction(submission) => {
+                guard_interaction_submission_payload(submission)
+                    .map_err(|reason| Box::new(ServerMessage::ActionRejected { reason }))
+            }
+        }
+    }
+}
+
+/// Apply one authenticated game submission from a Full-mode game socket, then
+/// broadcast the resulting state to every participant and spectator.
+///
+/// Extracted verbatim from the `ClientMessage::Action` arm of
+/// [`handle_client_message`] so that `ClientMessage::Interaction` can reuse the
+/// identical authorization, application, and fan-out path instead of growing a
+/// second ~400-line copy that would drift.
+#[allow(clippy::too_many_arguments)]
+async fn handle_full_game_submission(
+    submission: GameSubmission,
+    socket: &mut WebSocket,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    // Read-only: this handler reads `game_code`, `player_token`, and `player_id`
+    // and mutates nothing. `&SocketIdentity` is deliberate, not an oversight --
+    // `require_host`, `is_joining_current_game`, and their neighbours already
+    // take it by shared reference; only `dispatch_broker` and
+    // `handle_client_message` need `&mut`. Do not "fix" this to `&mut`.
+    identity: &SocketIdentity,
+) {
+    let kind = submission.kind();
+    let game_code = match &identity.game_code {
+        Some(c) => c.clone(),
+        None => {
+            warn!(kind, "game submission received but not in a game");
+            let msg = ServerMessage::error("Not in a game".to_string());
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+    };
+    let player_token = match &identity.player_token {
+        Some(t) => t.clone(),
+        None => {
+            let msg = ServerMessage::error("No player token".to_string());
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
+    };
+
+    debug!(game = %game_code, player = ?identity.player_id, submission = ?submission, "game submission");
+
+    // Bound client-supplied payload sizes before the clone-heavy engine
+    // reducers process them (mirrors guard_draft_action_payload for draft
+    // actions). The channel each variant answers on is declared by
+    // `GameSubmission::payload_rejection`.
+    if let Err(msg) = submission.payload_rejection() {
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
+    }
+
+    // Apply human action and collect AI follow-up results while holding the lock.
+    // Filtering is deferred until after the lock is dropped to reduce contention.
+    let action_result = {
+        let lock_start = std::time::Instant::now();
+        let mut mgr = state.lock().await;
+        let applied = match submission {
+            GameSubmission::Action(action) => mgr.handle_action(&game_code, &player_token, action),
+            GameSubmission::Interaction(submission) => {
+                mgr.handle_interaction(&game_code, &player_token, submission)
+            }
+        };
+        match applied {
+            Ok(human_result) => {
+                let human_revision = mgr
+                    .sessions
+                    .get_mut(&game_code)
+                    .expect("handled action must retain its session")
+                    .advance_state_revision();
+                // Run AI follow-up actions (still inside lock — needs &mut state)
+                let ai_results = match mgr.sessions.get_mut(&game_code) {
+                    Some(session) => session.run_ai(),
+                    None => vec![],
+                };
+                let session = mgr.sessions.get(&game_code).unwrap();
+                let eliminated = session.state.eliminated_players.clone();
+                // Captured once, AFTER `run_ai`, and reused for both the human
+                // and the AI fan-out below: the list is a live session
+                // affordance rather than a per-snapshot projection, so the
+                // freshest value under this lock is the correct one for every
+                // message this transition produces.
+                let rewind_targets = session.rewind_options();
+                let player_count = session.player_count;
+                let game_over_winner = match &session.state.waiting_for {
+                    engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                    _ => None,
+                };
+                let terminal = if let Some(winner) = game_over_winner {
+                    info!(game = %game_code, winner = ?winner, reason = "game_rules", "game over");
+                    let ranked_result = ranked_duel_players(session).and_then(|players| {
+                        ranked_result_for_duel(game_db, &game_code, &players, winner)
+                    });
+                    terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                        .map(Some)
+                } else {
+                    persist_full_session_async(game_db, session);
+                    Ok(None)
+                };
+
+                let lock_ms = lock_start.elapsed().as_millis();
+                info!(
+                    game = %game_code,
+                    kind,
+                    lock_ms,
+                    ai_actions = ai_results.len(),
+                    "game submission processed (lock held)"
+                );
+
+                terminal.map(|terminal| {
+                    (
+                        human_revision,
+                        human_result,
+                        ai_results,
+                        eliminated,
+                        player_count,
+                        game_over_winner,
+                        terminal,
+                        rewind_targets,
+                    )
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }; // lock dropped — filtering happens below without blocking other games
+
+    match action_result {
+        Ok((
+            human_revision,
+            (
+                raw_state,
+                events,
+                legal_actions,
+                log_entries,
+                _auto_pass_rec,
+                spell_costs,
+                legal_actions_by_object,
+            ),
+            ai_results,
+            eliminated,
+            player_count,
+            game_over_winner,
+            terminal,
+            rewind_targets,
+        )) => {
+            if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
+                state: &raw_state,
+                events: &events,
+                log_entries: &log_entries,
+                legal_actions: &legal_actions,
+                legal_actions_by_object: &legal_actions_by_object,
+                spell_costs: &spell_costs,
+            }) {
+                warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
+                let msg = ServerMessage::error(reason);
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let terminal_deliveries = match terminal {
+                Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
+                    Ok(deliveries) => deliveries,
+                    Err(error) => {
+                        error!(game = %game_code, %error, "terminal preparation failed");
+                        let msg = ServerMessage::error(error);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                },
+                None => Vec::new(),
+            };
+
+            // Filter state per-player outside the lock
+            let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
+                .map(|i| {
+                    let pid = PlayerId(i);
+                    (pid, server_core::filter_state_for_player(&raw_state, pid))
+                })
+                .collect();
+
+            // Broadcast human action result
+            {
+                let conns = connections.lock().await;
+                if let Some(players) = conns.get(&game_code) {
+                    for (pid, pstate) in &filtered_states {
+                        if let Some(s) = players.get(pid) {
+                            let is_actor = server_core::is_acting(&raw_state, *pid);
+                            let player_legals = if ai_results.is_empty() && is_actor {
+                                legal_actions.clone()
+                            } else {
+                                // AI will act next — don't send legal actions yet
+                                vec![]
+                            };
+                            let p_auto_pass = if ai_results.is_empty() {
+                                engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions)
+                            } else {
+                                false
+                            };
+                            let p_end_continuous_effect_offers =
+                                engine_end_continuous_effect_offers(&player_legals);
+                            let p_mana_payment_shortcut_actions =
+                                if ai_results.is_empty() && is_actor {
+                                    engine_mana_payment_shortcut_actions(
+                                        &raw_state,
+                                        &legal_actions_by_object,
+                                    )
+                                } else {
+                                    Vec::new()
+                                };
+                            let p_spell_costs = if ai_results.is_empty() && is_actor {
+                                spell_costs.clone()
+                            } else {
+                                HashMap::new()
+                            };
+                            let p_by_object = if ai_results.is_empty() && is_actor {
+                                legal_actions_by_object.clone()
+                            } else {
+                                HashMap::new()
+                            };
+                            let _ = s.send(ServerMessage::StateUpdate {
+                                state_revision: human_revision,
+                                state: pstate.clone(),
+                                events: server_core::filter_events_for_player(
+                                    &events, &raw_state, *pid,
+                                ),
+                                legal_actions: player_legals,
+                                auto_pass_recommended: p_auto_pass,
+                                end_continuous_effect_offers: p_end_continuous_effect_offers,
+                                mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
+                                eliminated_players: eliminated.clone(),
+                                log_entries: log_entries.clone(),
+                                spell_costs: p_spell_costs,
+                                legal_actions_by_object: object_action_payloads(&p_by_object),
+                                derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
+                                viewer_interaction: derive_viewer_interaction(
+                                    &raw_state, pstate, *pid,
+                                ),
+                                rewind_targets: rewind_targets.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            if let Ok(spectator_msg) = build_spectator_state_update_message(
+                &raw_state,
+                &events,
+                &log_entries,
+                human_revision,
+            ) {
+                let mut specs = game_spectators.lock().await;
+                if let Some(spectators) = specs.get_mut(&game_code) {
+                    spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                    if spectators.is_empty() {
+                        specs.remove(&game_code);
+                    }
+                }
+            }
+
+            broadcast_ai_results(
+                connections,
+                game_spectators,
+                &game_code,
+                player_count,
+                &eliminated,
+                &ai_results,
+                &rewind_targets,
+            )
+            .await;
+
+            if !terminal_deliveries.is_empty() {
+                let conns = connections.lock().await;
+                if let Some(players) = conns.get(&game_code) {
+                    for (player, delivery) in &terminal_deliveries {
+                        if let Some(sender) = players.get(player) {
+                            let _ = sender.send(ServerMessage::TerminalResult {
+                                delivery: Some(delivery.clone()),
+                            });
+                        }
+                    }
+                }
+                drop(conns);
+                report_draft_game_over(
+                    draft_state,
+                    connections,
+                    &game_code,
+                    game_over_winner.flatten(),
+                )
+                .await;
+                state.lock().await.remove_game(&game_code);
+            }
+        }
+        Err(e) => {
+            let msg = ServerMessage::ActionRejected { reason: e };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
             }
         }
     }
@@ -3284,7 +4182,10 @@ async fn handle_client_message(
     }
 
     if let Err(reason) = guard_client_message_before_dispatch(&client_msg, mode) {
-        let msg = ServerMessage::error(reason);
+        // The answer channel is wire policy, declared per variant alongside the
+        // bounds themselves. Every variant except `Interaction` keeps today's
+        // `ServerMessage::error`.
+        let msg = wire_rejection_message(&client_msg, reason);
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = socket.send(Message::text(json)).await;
         }
@@ -3295,6 +4196,43 @@ async fn handle_client_message(
         ClientMessage::ClientHello { .. } => {
             // Unreachable: IgnoreRedundantHello above handled this case.
             debug!("unreachable ClientHello arm");
+        }
+        // These terminal-only messages deliberately do not touch identity,
+        // SessionManager, connection registration, or reconnect leases. A
+        // terminal-unavailable bootstrap leaves the caller free to open a
+        // separate ordinary reconnect socket.
+        ClientMessage::BootstrapTerminalDelivery { request } => {
+            let response = match game_db.bootstrap_terminal_delivery(&request) {
+                Ok(delivery) => ServerMessage::TerminalBootstrapResult { delivery },
+                Err(error) => ServerMessage::error(format!("Terminal bootstrap rejected: {error}")),
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+        ClientMessage::ReadTerminalResult { credential } => {
+            let response = match game_db.read_terminal_result(&credential) {
+                Ok(delivery) => ServerMessage::TerminalResult { delivery },
+                Err(error) => ServerMessage::error(format!("Terminal read rejected: {error}")),
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+        ClientMessage::AckTerminalDelivery {
+            delivery_id,
+            credential,
+        } => {
+            let response = match game_db.ack_terminal_delivery(&delivery_id, &credential) {
+                Ok(true) => ServerMessage::TerminalDeliveryAcknowledged { delivery_id },
+                Ok(false) => ServerMessage::error("Terminal acknowledgement rejected".to_string()),
+                Err(error) => {
+                    ServerMessage::error(format!("Terminal acknowledgement failed: {error}"))
+                }
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
         }
         ClientMessage::CreateGame { deck } => {
             info!(deck_size = deck.main_deck.len(), "CreateGame");
@@ -3332,6 +4270,35 @@ async fn handle_client_message(
 
             let mut mgr = state.lock().await;
             let (game_code, player_token) = mgr.create_game(resolved);
+            let full_key = match game_db.create_full_session_key(&game_code) {
+                Ok(key) => key,
+                Err(error) => {
+                    mgr.remove_game(&game_code);
+                    drop(mgr);
+                    let msg = ServerMessage::error(format!(
+                        "Failed to bind game session identity: {error}"
+                    ));
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+            if let Err(error) = initialize_full_runtime(
+                game_db,
+                mgr.sessions
+                    .get_mut(&game_code)
+                    .expect("new game session must exist"),
+                full_key.clone(),
+            ) {
+                mgr.remove_game(&game_code);
+                drop(mgr);
+                let msg = ServerMessage::error(error);
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
             info!(game = %game_code, "game created");
 
             identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
@@ -3345,6 +4312,7 @@ async fn handle_client_message(
             let msg = ServerMessage::GameCreated {
                 game_code: game_code.clone(),
                 player_token: player_token.clone(),
+                full_key: Some(full_key.clone()),
             };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
@@ -3353,6 +4321,7 @@ async fn handle_client_message(
                 game_code,
                 player_id: PlayerId(0),
                 player_token,
+                full_key: Some(full_key),
             };
             if let Ok(json) = serde_json::to_string(&attached) {
                 let _ = socket.send(Message::text(json)).await;
@@ -3395,7 +4364,7 @@ async fn handle_client_message(
                     let joiner = session.player_for_token(&player_token).unwrap();
                     let started_messages = if session.is_full() {
                         session.run_ai();
-                        persist_session_async(game_db, &game_code, session);
+                        persist_full_session_async(game_db, session);
                         // The joiner is excluded from the fan-out send below
                         // (`pid != joiner`), so it receives the contest dice via
                         // its own message here. Snapshot the events before the
@@ -3479,375 +4448,37 @@ async fn handle_client_message(
         }
 
         ClientMessage::Action { action } => {
-            let game_code = match &identity.game_code {
-                Some(c) => c.clone(),
-                None => {
-                    warn!("Action received but not in a game");
-                    let msg = ServerMessage::error("Not in a game".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
-                    return;
-                }
-            };
-            let player_token = match &identity.player_token {
-                Some(t) => t.clone(),
-                None => {
-                    let msg = ServerMessage::error("No player token".to_string());
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
-                    return;
-                }
-            };
+            handle_full_game_submission(
+                GameSubmission::Action(action),
+                socket,
+                state,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+                identity,
+            )
+            .await;
+        }
 
-            debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
-
-            // Bound client-supplied action payload sizes before the clone-heavy
-            // engine reducers process them (mirrors guard_draft_action_payload
-            // for draft actions).
-            if let Err(reason) = guard_game_action_payload(&action) {
-                let msg = ServerMessage::error(reason);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-
-            // Apply human action and collect AI follow-up results while holding the lock.
-            // Filtering is deferred until after the lock is dropped to reduce contention.
-            let action_result = {
-                let lock_start = std::time::Instant::now();
-                let mut mgr = state.lock().await;
-                match mgr.handle_action(&game_code, &player_token, action) {
-                    Ok(human_result) => {
-                        let human_revision = mgr
-                            .sessions
-                            .get_mut(&game_code)
-                            .expect("handled action must retain its session")
-                            .advance_state_revision();
-                        // Run AI follow-up actions (still inside lock — needs &mut state)
-                        let ai_results = match mgr.sessions.get_mut(&game_code) {
-                            Some(session) => session.run_ai(),
-                            None => vec![],
-                        };
-                        let session = mgr.sessions.get(&game_code).unwrap();
-                        let eliminated = session.state.eliminated_players.clone();
-                        let player_count = session.player_count;
-                        let game_over_winner = match &session.state.waiting_for {
-                            engine::types::game_state::WaitingFor::GameOver { winner } => {
-                                Some(*winner)
-                            }
-                            _ => None,
-                        };
-                        let ranked_players = if game_over_winner.is_some() {
-                            ranked_duel_players(session)
-                        } else {
-                            None
-                        };
-
-                        // Persist or delete based on game-over state
-                        if let Some(winner) = game_over_winner {
-                            info!(game = %game_code, winner = ?winner, reason = "game_rules", "game over");
-                            delete_session_async(game_db, &game_code);
-
-                            // Auto-report draft match result if this game belongs to a draft
-                            // (spawn as a separate task to avoid holding the state lock)
-                            let ds = draft_state.clone();
-                            let cs = connections.clone();
-                            let gc = game_code.clone();
-                            tokio::spawn(async move {
-                                report_draft_game_over(&ds, &cs, &gc, winner).await;
-                            });
-                        } else {
-                            persist_session_async(game_db, &game_code, session);
-                        }
-
-                        let lock_ms = lock_start.elapsed().as_millis();
-                        info!(
-                            game = %game_code,
-                            lock_ms,
-                            ai_actions = ai_results.len(),
-                            "action processed (lock held)"
-                        );
-
-                        Ok((
-                            human_revision,
-                            human_result,
-                            ai_results,
-                            eliminated,
-                            player_count,
-                            game_over_winner,
-                            ranked_players,
-                        ))
-                    }
-                    Err(e) => Err(e),
-                }
-            }; // lock dropped — filtering happens below without blocking other games
-
-            match action_result {
-                Ok((
-                    human_revision,
-                    (
-                        raw_state,
-                        events,
-                        legal_actions,
-                        log_entries,
-                        _auto_pass_rec,
-                        spell_costs,
-                        legal_actions_by_object,
-                    ),
-                    ai_results,
-                    eliminated,
-                    player_count,
-                    game_over_winner,
-                    ranked_players,
-                )) => {
-                    let ranked_result =
-                        game_over_winner
-                            .zip(ranked_players)
-                            .and_then(|(winner, players)| {
-                                ranked_result_for_duel(game_db, &game_code, &players, winner)
-                            });
-
-                    if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
-                        state: &raw_state,
-                        events: &events,
-                        log_entries: &log_entries,
-                        legal_actions: &legal_actions,
-                        legal_actions_by_object: &legal_actions_by_object,
-                        spell_costs: &spell_costs,
-                    }) {
-                        warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
-                        let msg = ServerMessage::error(reason);
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = socket.send(Message::text(json)).await;
-                        }
-                        return;
-                    }
-
-                    // Filter state per-player outside the lock
-                    let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
-                        .map(|i| {
-                            let pid = PlayerId(i);
-                            (pid, server_core::filter_state_for_player(&raw_state, pid))
-                        })
-                        .collect();
-
-                    // Broadcast human action result
-                    {
-                        let conns = connections.lock().await;
-                        if let Some(players) = conns.get(&game_code) {
-                            for (pid, pstate) in &filtered_states {
-                                if let Some(s) = players.get(pid) {
-                                    let is_actor = server_core::is_acting(&raw_state, *pid);
-                                    let player_legals = if ai_results.is_empty() && is_actor {
-                                        legal_actions.clone()
-                                    } else {
-                                        // AI will act next — don't send legal actions yet
-                                        vec![]
-                                    };
-                                    let p_auto_pass = if ai_results.is_empty() {
-                                        engine_auto_pass_for_viewer(
-                                            &raw_state,
-                                            *pid,
-                                            &legal_actions,
-                                        )
-                                    } else {
-                                        false
-                                    };
-                                    let p_mana_payment_shortcut_actions =
-                                        if ai_results.is_empty() && is_actor {
-                                            engine_mana_payment_shortcut_actions(
-                                                &raw_state,
-                                                &legal_actions_by_object,
-                                            )
-                                        } else {
-                                            Vec::new()
-                                        };
-                                    let p_spell_costs = if ai_results.is_empty() && is_actor {
-                                        spell_costs.clone()
-                                    } else {
-                                        HashMap::new()
-                                    };
-                                    let p_by_object = if ai_results.is_empty() && is_actor {
-                                        legal_actions_by_object.clone()
-                                    } else {
-                                        HashMap::new()
-                                    };
-                                    let _ = s.send(ServerMessage::StateUpdate {
-                                        state_revision: human_revision,
-                                        state: pstate.clone(),
-                                        events: server_core::filter_events_for_player(
-                                            &events, &raw_state, *pid,
-                                        ),
-                                        legal_actions: player_legals,
-                                        auto_pass_recommended: p_auto_pass,
-                                        mana_payment_shortcut_actions:
-                                            p_mana_payment_shortcut_actions,
-                                        eliminated_players: eliminated.clone(),
-                                        log_entries: log_entries.clone(),
-                                        spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
-                                        derived: derive_transport_views(
-                                            &raw_state,
-                                            pstate,
-                                            Some(*pid),
-                                        ),
-                                    });
-                                }
-                            }
-                            if let (Some(winner), Some(ranked_result)) =
-                                (game_over_winner, ranked_result.clone())
-                            {
-                                let msg = ServerMessage::GameOver {
-                                    winner,
-                                    reason: "Game ended".to_string(),
-                                    ranked_result: Some(ranked_result),
-                                };
-                                for sender in players.values() {
-                                    let _ = sender.send(msg.clone());
-                                }
-                            }
-                        }
-                    }
-                    if let Ok(spectator_msg) = build_spectator_state_update_message(
-                        &raw_state,
-                        &events,
-                        &log_entries,
-                        human_revision,
-                    ) {
-                        let mut specs = game_spectators.lock().await;
-                        if let Some(spectators) = specs.get_mut(&game_code) {
-                            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-                            if spectators.is_empty() {
-                                specs.remove(&game_code);
-                            }
-                        }
-                    }
-
-                    // Broadcast AI follow-up results with delays
-                    for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (
-                            ai_raw_state,
-                            ai_events,
-                            ai_legal,
-                            ai_log_entries,
-                            _ai_auto_pass,
-                            ai_spell_costs,
-                            ai_by_object,
-                        ) = result;
-                        if guard_state_snapshot_broadcast(StateSnapshotParts {
-                            state: ai_raw_state,
-                            events: ai_events,
-                            log_entries: ai_log_entries,
-                            legal_actions: ai_legal,
-                            legal_actions_by_object: ai_by_object,
-                            spell_costs: ai_spell_costs,
-                        })
-                        .is_err()
-                        {
-                            continue;
-                        }
-                        let is_last = i == ai_results.len() - 1;
-
-                        // Filter AI state per-player outside the lock
-                        let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
-                            .map(|j| {
-                                let pid = PlayerId(j);
-                                (pid, server_core::filter_state_for_player(ai_raw_state, pid))
-                            })
-                            .collect();
-
-                        let conns = connections.lock().await;
-                        if let Some(players) = conns.get(&game_code) {
-                            for (pid, pstate) in &ai_filtered {
-                                if let Some(s) = players.get(pid) {
-                                    let is_actor = server_core::is_acting(ai_raw_state, *pid);
-                                    let player_legals = if is_last && is_actor {
-                                        ai_legal.clone()
-                                    } else {
-                                        vec![]
-                                    };
-                                    let p_auto_pass = if is_last {
-                                        engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
-                                    } else {
-                                        false
-                                    };
-                                    let p_mana_payment_shortcut_actions = if is_last && is_actor {
-                                        engine_mana_payment_shortcut_actions(
-                                            ai_raw_state,
-                                            ai_by_object,
-                                        )
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    let p_spell_costs = if is_last && is_actor {
-                                        ai_spell_costs.clone()
-                                    } else {
-                                        HashMap::new()
-                                    };
-                                    let p_by_object = if is_last && is_actor {
-                                        ai_by_object.clone()
-                                    } else {
-                                        HashMap::new()
-                                    };
-                                    let _ = s.send(ServerMessage::StateUpdate {
-                                        state_revision: *ai_revision,
-                                        state: pstate.clone(),
-                                        events: server_core::filter_events_for_player(
-                                            ai_events,
-                                            ai_raw_state,
-                                            *pid,
-                                        ),
-                                        legal_actions: player_legals,
-                                        auto_pass_recommended: p_auto_pass,
-                                        mana_payment_shortcut_actions:
-                                            p_mana_payment_shortcut_actions,
-                                        eliminated_players: eliminated.clone(),
-                                        log_entries: ai_log_entries.clone(),
-                                        spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
-                                        derived: derive_transport_views(
-                                            ai_raw_state,
-                                            pstate,
-                                            Some(*pid),
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
-                        if let Ok(spectator_msg) = build_spectator_state_update_message(
-                            ai_raw_state,
-                            ai_events,
-                            ai_log_entries,
-                            *ai_revision,
-                        ) {
-                            let mut specs = game_spectators.lock().await;
-                            if let Some(spectators) = specs.get_mut(&game_code) {
-                                spectators
-                                    .retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-                                if spectators.is_empty() {
-                                    specs.remove(&game_code);
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = ServerMessage::ActionRejected { reason: e };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
-                }
-            }
+        ClientMessage::Interaction { submission } => {
+            handle_full_game_submission(
+                GameSubmission::Interaction(submission),
+                socket,
+                state,
+                draft_state,
+                connections,
+                game_db,
+                game_spectators,
+                identity,
+            )
+            .await;
         }
 
         ClientMessage::Reconnect {
             game_code,
             player_token,
+            full_key,
         } => {
             info!(game = %game_code, "Reconnect attempt");
 
@@ -3857,6 +4488,27 @@ async fn handle_client_message(
                     let _ = socket.send(Message::text(json)).await;
                 }
                 return;
+            }
+            match game_db.load_active_full_key(&game_code) {
+                Ok(Some(active_key)) if active_key == full_key => {}
+                Ok(_) => {
+                    let msg = ServerMessage::error(
+                        "Reconnect session identity is no longer current".to_string(),
+                    );
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+                Err(error) => {
+                    let msg = ServerMessage::error(format!(
+                        "Failed to validate reconnect identity: {error}"
+                    ));
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
             }
 
             // Determine game phase and handle reconnect in a single lock
@@ -3874,6 +4526,11 @@ async fn handle_client_message(
                     /// so the reconnecting socket gets the same prompt it
                     /// would have received had it stayed connected.
                     pending_takeback_msg: Option<Box<ServerMessage>>,
+                    /// Captured under the same lock as `ai_result`, for the
+                    /// `StateUpdate` fan-out to the *other* seats below. The
+                    /// reconnecting socket gets its own copy inside
+                    /// `game_started_msg`.
+                    rewind_targets: Vec<RewindOption>,
                 },
                 Err(String),
             }
@@ -3916,7 +4573,7 @@ async fn handle_client_message(
                             let ai_results = session.run_ai();
                             let ai_result = ai_results.last().cloned().map(Box::new);
                             if ai_result.is_some() {
-                                persist_session_async(game_db, &game_code, session);
+                                persist_full_session_async(game_db, session);
                             }
                             // Reconnect: no contest dice (the player must not
                             // re-see the first-player roll).
@@ -3924,11 +4581,13 @@ async fn handle_client_message(
                                 build_game_started_message(session, player, None, Vec::new());
                             let pending_takeback_msg =
                                 session.pending_takeback_message().map(Box::new);
+                            let rewind_targets = session.rewind_options();
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
                                 ai_result,
                                 pending_takeback_msg,
+                                rewind_targets,
                             }
                         }
                         Err(e) => ReconnectOutcome::Err(e),
@@ -3953,6 +4612,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::GameCreated {
                         game_code: game_code.clone(),
                         player_token: player_token.clone(),
+                        full_key: Some(full_key.clone()),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -3961,6 +4621,7 @@ async fn handle_client_message(
                         game_code,
                         player_id: player,
                         player_token,
+                        full_key: Some(full_key),
                     };
                     if let Ok(json) = serde_json::to_string(&attached) {
                         let _ = socket.send(Message::text(json)).await;
@@ -3976,6 +4637,7 @@ async fn handle_client_message(
                     game_started_msg,
                     ai_result,
                     pending_takeback_msg,
+                    rewind_targets,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token);
@@ -4019,9 +4681,12 @@ async fn handle_client_message(
                         if let Some(game_conns) = conns.get(&game_code) {
                             for (&pid, sender) in game_conns.iter() {
                                 if pid != player {
-                                    if let Ok(msg) =
-                                        build_state_update_message(&result, state_revision, pid)
-                                    {
+                                    if let Ok(msg) = build_state_update_message(
+                                        &result,
+                                        state_revision,
+                                        pid,
+                                        rewind_targets.clone(),
+                                    ) {
                                         let _ = sender.send(msg);
                                     }
                                 }
@@ -4303,7 +4968,7 @@ async fn handle_client_message(
 
             if !ai_requests.is_empty() && ai_requests.len() as u8 == pc - 1 {
                 // --- AI game path: create, start, and run initial AI actions ---
-                let (game_code, player_token, game_started_msg) = {
+                let (game_code, player_token, full_key, game_started_msg) = {
                     let mut mgr = state.lock().await;
                     let (game_code, player_token) = mgr.create_game_with_ai(
                         resolved,
@@ -4316,6 +4981,17 @@ async fn handle_client_message(
                         db.as_ref(),
                     );
 
+                    let full_key = match game_db.create_full_session_key(&game_code) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            mgr.remove_game(&game_code);
+                            let _ = tx.send(ServerMessage::error(format!(
+                                "Failed to bind game session identity: {error}"
+                            )));
+                            return;
+                        }
+                    };
+
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
                     session.run_ai();
                     // Initial start of a Play-vs-AI game: the human seat sees
@@ -4325,10 +5001,14 @@ async fn handle_client_message(
                     let game_started_msg =
                         build_game_started_message(session, PlayerId(0), None, start_events);
 
-                    // Persist the AI game session
-                    persist_session_async(game_db, &game_code, session);
+                    if let Err(error) = initialize_full_runtime(game_db, session, full_key.clone())
+                    {
+                        mgr.remove_game(&game_code);
+                        let _ = tx.send(ServerMessage::error(error));
+                        return;
+                    }
 
-                    (game_code, player_token, game_started_msg)
+                    (game_code, player_token, full_key, game_started_msg)
                 }; // lock dropped
 
                 identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
@@ -4345,6 +5025,7 @@ async fn handle_client_message(
                 let created_msg = ServerMessage::GameCreated {
                     game_code: game_code.clone(),
                     player_token: player_token.clone(),
+                    full_key: Some(full_key.clone()),
                 };
                 if let Ok(json) = serde_json::to_string(&created_msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4353,6 +5034,7 @@ async fn handle_client_message(
                     game_code: game_code.clone(),
                     player_id: PlayerId(0),
                     player_token,
+                    full_key: Some(full_key),
                 };
                 if let Ok(json) = serde_json::to_string(&attached_msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4387,8 +5069,8 @@ async fn handle_client_message(
                 // are released inside `create_and_connect_multiplayer_session`
                 // before it returns, so `broadcast_player_slots` (Phase 4) can
                 // re-acquire them without deadlocking.
-                let (game_code, player_token, initial_player_count) =
-                    create_and_connect_multiplayer_session(
+                let (game_code, player_token, initial_player_count, full_key) =
+                    match create_and_connect_multiplayer_session(
                         state,
                         connections,
                         game_db,
@@ -4407,7 +5089,17 @@ async fn handle_client_message(
                             host_tx: tx.clone(),
                         },
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(session) => session,
+                        Err(error) => {
+                            let msg = ServerMessage::error(error);
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let _ = socket.send(Message::text(json)).await;
+                            }
+                            return;
+                        }
+                    };
 
                 identity.set_session(game_code.clone(), PlayerId(0), player_token.clone());
 
@@ -4482,6 +5174,7 @@ async fn handle_client_message(
                 let msg = ServerMessage::GameCreated {
                     game_code: game_code.clone(),
                     player_token: player_token.clone(),
+                    full_key: Some(full_key.clone()),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4490,6 +5183,7 @@ async fn handle_client_message(
                     game_code: game_code.clone(),
                     player_id: PlayerId(0),
                     player_token,
+                    full_key: Some(full_key),
                 };
                 if let Ok(json) = serde_json::to_string(&attached) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4966,6 +5660,7 @@ async fn handle_client_message(
                 Waiting {
                     player_token: String,
                     joiner: PlayerId,
+                    full_key: server_core::FullSessionKey,
                     slot_info: Vec<server_core::PlayerSlotInfo>,
                     current_count: u32,
                     raw_state: Box<engine::types::game_state::GameState>,
@@ -5012,7 +5707,7 @@ async fn handle_client_message(
                                 // holds the joining player. We keep them seated — rolling back
                                 // would require deleting their deck/token which is more invasive.
                                 // The host can correct the deck(s) and trigger a new start.
-                                persist_session_async(game_db, &game_code, session);
+                                persist_full_session_async(game_db, session);
                                 // Capture the message so we can fan it out to all connected
                                 // players after the state lock releases (mirrors seat-delta path).
                                 bracket_broadcast =
@@ -5022,7 +5717,7 @@ async fn handle_client_message(
                                 Err(format!("Cannot start cEDH game: {bracket_err}"))
                             } else {
                                 // Persist updated session (now has the new player and is started)
-                                persist_session_async(game_db, &game_code, session);
+                                persist_full_session_async(game_db, session);
                                 Ok(JoinOutcome::Started {
                                     player_token,
                                     joiner,
@@ -5031,16 +5726,20 @@ async fn handle_client_message(
                             }
                         } else {
                             // Persist updated session (now has the new player, not yet started)
-                            persist_session_async(game_db, &game_code, session);
-                            Ok(JoinOutcome::Waiting {
-                                player_token,
-                                joiner,
-                                slot_info: session.player_slot_info(),
-                                current_count: session.current_player_count(),
-                                raw_state: Box::new(session.state.clone()),
-                                filtered_state: Box::new(filtered_state),
-                                state_revision: session.state_revision,
-                            })
+                            persist_full_session_async(game_db, session);
+                            match session.full_runtime.as_ref() {
+                                Some(runtime) => Ok(JoinOutcome::Waiting {
+                                    player_token,
+                                    joiner,
+                                    full_key: runtime.key.clone(),
+                                    slot_info: session.player_slot_info(),
+                                    current_count: session.current_player_count(),
+                                    raw_state: Box::new(session.state.clone()),
+                                    filtered_state: Box::new(filtered_state),
+                                    state_revision: session.state_revision,
+                                }),
+                                None => Err("Full session runtime is unavailable".to_string()),
+                            }
                         }
                     }
                     Err(e) => Err(e),
@@ -5051,6 +5750,7 @@ async fn handle_client_message(
                 Ok(JoinOutcome::Waiting {
                     player_token,
                     joiner,
+                    full_key,
                     slot_info,
                     current_count,
                     raw_state,
@@ -5071,6 +5771,7 @@ async fn handle_client_message(
                         game_code: game_code.clone(),
                         player_id: joiner,
                         player_token,
+                        full_key: Some(full_key),
                     };
                     if let Ok(json) = serde_json::to_string(&attached) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5099,18 +5800,28 @@ async fn handle_client_message(
                     }
 
                     let derived = derive_transport_views(&raw_state, &filtered_state, Some(joiner));
+                    let viewer_interaction =
+                        derive_viewer_interaction(&raw_state, &filtered_state, joiner);
                     let msg = ServerMessage::StateUpdate {
                         state_revision,
                         state: filtered_state,
                         events: vec![],
                         legal_actions: vec![],
                         auto_pass_recommended: false,
+                        end_continuous_effect_offers: vec![],
                         mana_payment_shortcut_actions: vec![],
                         eliminated_players: vec![],
                         log_entries: vec![],
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
                         derived,
+                        viewer_interaction,
+                        // `JoinOutcome::Waiting` — the game has not started, so
+                        // no authoritative transition has happened and no turn
+                        // boundary can exist. Empty by construction, not by
+                        // omission; the first `GameStarted` publishes the real
+                        // list.
+                        rewind_targets: Vec::new(),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5195,23 +5906,63 @@ async fn handle_client_message(
                 return;
             };
 
-            {
-                let mut mgr = state.lock().await;
-                if mgr.remove_game(&game_code).is_none() {
-                    let msg = ServerMessage::GameAbandoned {
-                        game_code: game_code.clone(),
-                    };
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send(Message::text(json)).await;
+            let terminal = {
+                let mgr = state.lock().await;
+                match mgr.sessions.get(&game_code) {
+                    Some(session) if session.game_started => {
+                        match terminal_artifact(session, None, "Game abandoned".to_string(), None) {
+                            Ok(artifact) => Some(artifact),
+                            Err(error) => {
+                                let _ = tx.send(ServerMessage::error(error));
+                                return;
+                            }
+                        }
                     }
-                    return;
+                    Some(_) => None,
+                    None => {
+                        let msg = ServerMessage::GameAbandoned {
+                            game_code: game_code.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                }
+            };
+            let terminal_deliveries = match terminal {
+                Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
+                    Ok(deliveries) => deliveries,
+                    Err(error) => {
+                        error!(game = %game_code, %error, "terminal preparation failed");
+                        let _ = tx.send(ServerMessage::error(error));
+                        return;
+                    }
+                },
+                None => Vec::new(),
+            };
+
+            let removed = state.lock().await.remove_game(&game_code);
+            if let Some(session) = removed.filter(|session| !session.game_started) {
+                retire_unstarted_session_async(game_db, &session);
+            }
+
+            if !terminal_deliveries.is_empty() {
+                let conns = connections.lock().await;
+                if let Some(players) = conns.get(&game_code) {
+                    for (player, delivery) in &terminal_deliveries {
+                        if let Some(sender) = players.get(player) {
+                            let _ = sender.send(ServerMessage::TerminalResult {
+                                delivery: Some(delivery.clone()),
+                            });
+                        }
+                    }
                 }
             }
 
             connections.lock().await.remove(&game_code);
             game_spectators.lock().await.remove(&game_code);
             lobby.lock().await.lobby_mut().unregister_game(&game_code);
-            delete_session_async(game_db, &game_code);
 
             let msg = ServerMessage::GameAbandoned { game_code };
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -5220,9 +5971,15 @@ async fn handle_client_message(
         }
 
         ClientMessage::Concede => {
-            let game_code = match &identity.game_code {
-                Some(c) => c.clone(),
-                None => {
+            let (game_code, player_token, player_id) = match (
+                identity.game_code.clone(),
+                identity.player_token.clone(),
+                identity.player_id,
+            ) {
+                (Some(game_code), Some(player_token), Some(player_id)) => {
+                    (game_code, player_token, player_id)
+                }
+                _ => {
                     let msg = ServerMessage::error("Not in a game".to_string());
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5230,62 +5987,189 @@ async fn handle_client_message(
                     return;
                 }
             };
-            let player_id = match identity.player_id {
-                Some(p) => p,
-                None => return,
+
+            info!(game = %game_code, player = ?player_id, "player conceded game");
+            let outcome = {
+                let mut mgr = state.lock().await;
+                match mgr.handle_action(
+                    &game_code,
+                    &player_token,
+                    engine::types::actions::GameAction::Concede { player_id },
+                ) {
+                    Ok(result) => {
+                        let session = mgr
+                            .sessions
+                            .get_mut(&game_code)
+                            .expect("handled concession must retain its session");
+                        let revision = session.advance_state_revision();
+                        let winner = match &session.state.waiting_for {
+                            engine::types::game_state::WaitingFor::GameOver { winner } => *winner,
+                            _ => None,
+                        };
+                        let terminal = if matches!(
+                            &session.state.waiting_for,
+                            engine::types::game_state::WaitingFor::GameOver { .. }
+                        ) {
+                            let ranked_result = ranked_duel_players(session).and_then(|players| {
+                                ranked_result_for_duel(game_db, &game_code, &players, winner)
+                            });
+                            terminal_artifact(
+                                session,
+                                winner,
+                                "Opponent conceded".to_string(),
+                                ranked_result,
+                            )
+                            .map(Some)
+                        } else {
+                            persist_full_session_async(game_db, session);
+                            Ok(None)
+                        };
+                        let rewind_targets = session.rewind_options();
+                        terminal
+                            .map(|terminal| (revision, result, winner, terminal, rewind_targets))
+                    }
+                    Err(error) => Err(error),
+                }
             };
 
-            info!(game = %game_code, player = ?player_id, "player conceded");
+            match outcome {
+                Err(reason) => {
+                    if let Ok(json) =
+                        serde_json::to_string(&ServerMessage::ActionRejected { reason })
+                    {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Ok((revision, result, winner, terminal, rewind_targets)) => {
+                    let terminal_deliveries = match terminal {
+                        Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
+                            Ok(deliveries) => deliveries,
+                            Err(error) => {
+                                error!(game = %game_code, %error, "terminal preparation failed");
+                                let _ = tx.send(ServerMessage::error(error));
+                                return;
+                            }
+                        },
+                        None => Vec::new(),
+                    };
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        for (player, sender) in players {
+                            if let Ok(update) = build_state_update_message(
+                                &result,
+                                revision,
+                                *player,
+                                rewind_targets.clone(),
+                            ) {
+                                let _ = sender.send(update);
+                            }
+                            let _ = sender.send(ServerMessage::Conceded { player: player_id });
+                        }
+                        for (player, delivery) in &terminal_deliveries {
+                            if let Some(sender) = players.get(player) {
+                                let _ = sender.send(ServerMessage::TerminalResult {
+                                    delivery: Some(delivery.clone()),
+                                });
+                            }
+                        }
+                    }
+                    drop(conns);
 
-            let conceded_msg = ServerMessage::Conceded { player: player_id };
-            // In 2-player, the opponent wins. In multiplayer, game continues unless only 1 remains.
-            let mgr_ref = state.lock().await;
-            let (winner, ranked_players) = if let Some(session) = mgr_ref.sessions.get(&game_code) {
-                let living: Vec<_> = session
-                    .state
-                    .players
-                    .iter()
-                    .filter(|p| p.id != player_id && !p.is_eliminated)
-                    .map(|p| p.id)
-                    .collect();
-                let winner = if living.len() == 1 {
-                    Some(living[0])
-                } else {
-                    None
-                };
-                let ranked_players = ranked_duel_players(session);
-                (winner, ranked_players)
-            } else {
-                (None, None)
-            };
-            drop(mgr_ref);
-            let ranked_result = ranked_players
-                .as_ref()
-                .and_then(|players| ranked_result_for_duel(game_db, &game_code, players, winner));
-
-            info!(game = %game_code, winner = ?winner, reason = "concession", "game over");
-
-            let game_over_msg = ServerMessage::GameOver {
-                winner,
-                reason: "Opponent conceded".to_string(),
-                ranked_result,
-            };
-
-            let conns = connections.lock().await;
-            if let Some(players) = conns.get(&game_code) {
-                for sender in players.values() {
-                    let _ = sender.send(conceded_msg.clone());
-                    let _ = sender.send(game_over_msg.clone());
+                    if !terminal_deliveries.is_empty() {
+                        report_draft_game_over(draft_state, connections, &game_code, winner).await;
+                        state.lock().await.remove_game(&game_code);
+                    }
                 }
             }
-            drop(conns);
+        }
 
-            // Auto-report draft match result if this game belongs to a draft
-            report_draft_game_over(draft_state, connections, &game_code, winner).await;
+        ClientMessage::ConcedeMatch => {
+            let (game_code, player_token) =
+                match (identity.game_code.clone(), identity.player_token.clone()) {
+                    (Some(game_code), Some(player_token)) => (game_code, player_token),
+                    _ => {
+                        let msg = ServerMessage::error("Not in a game".to_string());
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                };
 
-            let mut mgr = state.lock().await;
-            mgr.remove_game(&game_code);
-            delete_session_async(game_db, &game_code);
+            let outcome = {
+                let mut mgr = state.lock().await;
+                match mgr.handle_match_concede(&game_code, &player_token) {
+                    Ok((revision, result)) => {
+                        let winner = match &result.0.waiting_for {
+                            engine::types::game_state::WaitingFor::GameOver { winner } => *winner,
+                            _ => None,
+                        };
+                        let session = mgr
+                            .sessions
+                            .get(&game_code)
+                            .expect("handled match concession must retain its session");
+                        let ranked_result = winner.and_then(|winner| {
+                            ranked_duel_players(session).and_then(|players| {
+                                ranked_result_for_duel(game_db, &game_code, &players, Some(winner))
+                            })
+                        });
+                        let rewind_targets = session.rewind_options();
+                        terminal_artifact(
+                            session,
+                            winner,
+                            "Match conceded".to_string(),
+                            ranked_result,
+                        )
+                        .map(|terminal| (revision, result, winner, terminal, rewind_targets))
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+
+            match outcome {
+                Err(reason) => {
+                    if let Ok(json) =
+                        serde_json::to_string(&ServerMessage::ActionRejected { reason })
+                    {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Ok((revision, result, winner, terminal, rewind_targets)) => {
+                    let terminal_deliveries = match prepare_full_terminal(game_db, terminal).await {
+                        Ok(deliveries) => deliveries,
+                        Err(error) => {
+                            error!(game = %game_code, %error, "terminal preparation failed");
+                            let _ = tx.send(ServerMessage::error(error));
+                            return;
+                        }
+                    };
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        for (player, sender) in players {
+                            if let Ok(update) = build_state_update_message(
+                                &result,
+                                revision,
+                                *player,
+                                rewind_targets.clone(),
+                            ) {
+                                let _ = sender.send(update);
+                            }
+                            if let Some((_, delivery)) =
+                                terminal_deliveries.iter().find(|(seat, _)| seat == player)
+                            {
+                                let _ = sender.send(ServerMessage::TerminalResult {
+                                    delivery: Some(delivery.clone()),
+                                });
+                            }
+                        }
+                    }
+                    drop(conns);
+
+                    report_draft_game_over(draft_state, connections, &game_code, winner).await;
+
+                    state.lock().await.remove_game(&game_code);
+                }
+            }
         }
 
         // GH #1507: multiplayer-safe "request takeback" — see
@@ -5293,7 +6177,7 @@ async fn handle_client_message(
         // delegates to. None of these three arms touch `session.state`
         // directly; they only call into `GameSession` methods that own the
         // takeback/rollback invariants.
-        ClientMessage::RequestTakeback => {
+        ClientMessage::RequestTakeback(target) => {
             let (game_code, player_id) = match (&identity.game_code, identity.player_id) {
                 (Some(c), Some(p)) => (c.clone(), p),
                 _ => {
@@ -5310,7 +6194,10 @@ async fn handle_client_message(
                 drop(mgr);
                 return;
             };
-            let outcome = session.request_takeback(player_id);
+            // An absent payload is the frame every pre-rewind client sends;
+            // normalizing at the transport edge keeps `RewindTarget` — not
+            // `Option<RewindTarget>` — the session API's vocabulary.
+            let outcome = session.request_takeback(player_id, target.unwrap_or_default());
             // `pending_takeback_message` reads `session.pending_takeback`,
             // which `request_takeback` already cleared on an Approved
             // outcome — so this is `Some` exactly when we need it (the
@@ -5324,19 +6211,56 @@ async fn handle_client_message(
                         session.current_broadcast_snapshot(),
                     )
                 });
+            // A rollback can restore an AI seat to priority — most obviously a
+            // `TurnStart` rewind onto an AI turn, but a `LastAction` rewind can
+            // land there too. Without this the table freezes: nothing else on
+            // the approved path drives the AI. `run_ai` is a no-op when there
+            // are no AI seats, and its own pending-takeback guard is already
+            // cleared by the time we get here. Revisions stay contiguous: the
+            // rollback took R+1 above, `run_ai` allocates R+2..R+k.
+            let ai_results = if approved_snapshot.is_some() {
+                session.run_ai()
+            } else {
+                Vec::new()
+            };
+            // Both read AFTER `run_ai`, matching the shipped action path: an AI
+            // follow-up can cross a turn (new rewind boundary) or finish a
+            // player off (new elimination), and the AI fan-out below must not
+            // describe the state as it stood before its own results.
+            // `snapshot.0` is the *pre*-`run_ai` rollback state, so sourcing
+            // eliminations from it would be exactly that staleness.
+            let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately, in the
             // same lock as the rollback itself — otherwise SQLite still
             // holds the pre-rollback `GameState` until some later action
             // happens to persist, and a crash/restart in that window
-            // resurrects the branch the table just agreed to undo.
+            // resurrects the branch the table just agreed to undo. Ordered
+            // AFTER `run_ai`, matching the normal action path: otherwise a
+            // crash between the rollback and the next action resurrects a
+            // state the AI has already moved past.
             if approved_snapshot.is_some() {
-                persist_session_async(game_db, &game_code, session);
+                persist_full_session_async(game_db, session);
             }
             drop(mgr);
 
             match outcome {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // A refused takeback is a benign rejection, not a
+                    // transport error: "there is no previous action of yours
+                    // to take back", "a takeback request is already pending",
+                    // "only human players may request a takeback". Answer on
+                    // the same channel the sibling `ClientMessage::Action`
+                    // handler uses for a rejected action.
+                    //
+                    // `ServerMessage::error` is read by the native client as a
+                    // terminal socket failure: `handleNativeEvent` disposes the
+                    // adapter on ANY `error` event and GamePage then sets
+                    // `reconnectState: "failed"`, leaving the desktop session
+                    // unrecoverable. Reaching for the error channel here was
+                    // this handler's inconsistency with its own sibling ~2,400
+                    // lines above, not a deliberate signal.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -5364,6 +6288,17 @@ async fn handle_client_message(
                         state_revision,
                         snapshot,
                         None,
+                        rewind_targets.clone(),
+                    )
+                    .await;
+                    broadcast_ai_results(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        &eliminated,
+                        &ai_results,
+                        &rewind_targets,
                     )
                     .await;
                 }
@@ -5399,16 +6334,33 @@ async fn handle_client_message(
                         session.current_broadcast_snapshot(),
                     )
                 });
+            // Same reason, same ordering, as the `RequestTakeback` arm above:
+            // the rolled-back state can put an AI seat on priority.
+            let ai_results = if approved_snapshot.is_some() {
+                session.run_ai()
+            } else {
+                Vec::new()
+            };
+            // Read AFTER `run_ai` for the same reason as the `RequestTakeback`
+            // arm above.
+            let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately — see the
             // matching comment in the `RequestTakeback` arm above.
             if approved_snapshot.is_some() {
-                persist_session_async(game_db, &game_code, session);
+                persist_full_session_async(game_db, session);
             }
             drop(mgr);
 
             match outcome {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // Same classification as the `RequestTakeback` arm above:
+                    // "there is no pending takeback request" and "only human
+                    // players may respond" are refusals, not socket failures.
+                    // Fixed here too so the pair stays consistent — a benign
+                    // refusal must never travel the channel the native client
+                    // treats as terminal.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -5428,6 +6380,17 @@ async fn handle_client_message(
                         state_revision,
                         snapshot,
                         Some(player_id),
+                        rewind_targets.clone(),
+                    )
+                    .await;
+                    broadcast_ai_results(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        &eliminated,
+                        &ai_results,
+                        &rewind_targets,
                     )
                     .await;
                 }
@@ -5469,7 +6432,15 @@ async fn handle_client_message(
 
             match result {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // The third member of the same class as the two arms
+                    // above: `cancel_takeback`'s only failures are benign
+                    // refusals ("only the player who requested the takeback
+                    // may cancel it", "there is no pending takeback
+                    // request"). Answer on the rejection channel, not the
+                    // terminal error channel — `handleNativeEvent` disposes
+                    // the adapter on ANY `error` event, so a mis-clicked
+                    // cancel would end the desktop session.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -5716,7 +6687,7 @@ async fn handle_client_message(
                 let slot_info = session.player_slot_info();
                 let current_players = session.current_player_count();
                 let max_players = session.player_count;
-                persist_session_async(game_db, &game_code, session);
+                persist_full_session_async(game_db, session);
 
                 // Keep the token-to-game index consistent: this seat mutation
                 // invalidated these tokens (kicked / replaced / removed seats),
@@ -6399,7 +7370,9 @@ mod state_transport_derived_tests {
     }
 
     fn state_update_action_fields(result: &ActionResult, viewer: PlayerId) -> (usize, bool) {
-        match build_state_update_message(result, 1, viewer).expect("fixture state update") {
+        match build_state_update_message(result, 1, viewer, Vec::new())
+            .expect("fixture state update")
+        {
             ServerMessage::StateUpdate {
                 legal_actions,
                 auto_pass_recommended,
@@ -6947,7 +7920,8 @@ mod issue_4548_full_create_tests {
         }
     }
 
-    async fn spawn_full_mode_server() -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+    pub(super) async fn spawn_full_mode_server(
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let game_db = Arc::new(
             persistence::GameDb::open(
@@ -6985,7 +7959,7 @@ mod issue_4548_full_create_tests {
         (format!("ws://{addr}/ws"), handle, temp_dir)
     }
 
-    async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    pub(super) async fn recv_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -7220,6 +8194,404 @@ mod issue_4548_full_create_tests {
     }
 }
 
+/// End-to-end coverage for the shared game-submission handler
+/// ([`handle_full_game_submission`]) over a real socket.
+///
+/// Before this module existed, `ClientMessage::Action` had **no** end-to-end
+/// test through `handle_client_message` at all: every `ClientMessage::Action`
+/// occurrence in this file's test modules exercised `reject_if_disabled` or
+/// `classify_hello_gate` as pure functions. These tests are what gate the
+/// extraction of that arm into a shared handler.
+#[cfg(test)]
+mod game_submission_tests {
+    use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+    use super::*;
+    use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
+    use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
+    use futures_util::SinkExt;
+    use server_core::game_action_payload_guard::MAX_ACTION_LIST_LEN;
+    use server_core::protocol::DeckData;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::MaybeTlsStream;
+    use tokio_tungstenite::WebSocketStream;
+
+    /// Connect, handshake, and create a two-seat game so the socket carries an
+    /// authenticated `SocketIdentity` with both a `game_code` and a
+    /// `player_token`.
+    ///
+    /// Seat 1 never joins, so the game never *starts* — which is exactly the
+    /// reachable surface these tests need: everything up to and including
+    /// `SessionManager`'s verdict and the `Err(e) => ActionRejected` arm. The
+    /// `Ok(..)` broadcast fan-out is not reachable over this harness, because
+    /// `spawn_full_mode_server` builds `AppState` with an empty
+    /// `CardDatabase::default()`.
+    async fn create_authenticated_game_socket(
+        url: String,
+    ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect");
+
+        assert!(matches!(
+            recv_server_message(&mut socket).await,
+            ServerMessage::ServerHello { .. }
+        ));
+
+        let hello = ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&hello).expect("hello json").into(),
+            ))
+            .await
+            .expect("send hello");
+
+        let create = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: false,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats: Vec::new(),
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+        };
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&create).expect("create json").into(),
+            ))
+            .await
+            .expect("send create");
+
+        let mut saw_created = false;
+        let mut saw_slots = false;
+        while !saw_created || !saw_slots {
+            match recv_server_message(&mut socket).await {
+                ServerMessage::GameCreated { .. } => saw_created = true,
+                ServerMessage::PlayerSlotsUpdate { .. } => saw_slots = true,
+                _ => {}
+            }
+        }
+
+        socket
+    }
+
+    /// Read frames until one is an `ActionRejected` or an `Error`, ignoring the
+    /// unrelated broadcasts the session emits. The enclosing
+    /// `tokio::time::timeout` is the failure mode, as in every sibling test.
+    async fn recv_submission_answer<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            let msg = recv_server_message(socket).await;
+            if matches!(
+                msg,
+                ServerMessage::ActionRejected { .. } | ServerMessage::Error { .. }
+            ) {
+                return msg;
+            }
+        }
+    }
+
+    /// Gates the extraction of the `ClientMessage::Action` arm body into
+    /// [`handle_full_game_submission`]: an extraction that broke identity
+    /// extraction, the payload guard, the lock, `player_for_token`, or the
+    /// `Err(e) => ActionRejected` arm fails here.
+    ///
+    /// `GrantDebugPermission` is chosen over `PassPriority` deliberately.
+    /// `GameState::new` initializes `waiting_for: WaitingFor::Priority` with the
+    /// host holding priority, so a `PassPriority` from this socket may well be
+    /// *accepted* — which would make the assertion pass for the wrong reason.
+    /// The sandbox refusal, by contrast, is decidable without running the
+    /// engine: the action is Full-mode allowed, is a payloadless no-op in
+    /// `guard_game_action_payload`, and hits `handle_action`'s Grant/Revoke gate
+    /// *first* — before the seat check, before `debug_permitted`, and before
+    /// `apply` — where `format_config.allow_debug_actions` is `false` because
+    /// the wire sent `format_config: None` and `FormatConfig::standard()` sets
+    /// it to `false`. `handle_action`'s `Err(String)` is then answered verbatim,
+    /// with no `"Engine error: "` prefix.
+    #[tokio::test]
+    async fn action_frame_reaches_the_shared_submission_handler() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = create_authenticated_game_socket(url).await;
+
+            let action = ClientMessage::Action {
+                action: GameAction::GrantDebugPermission {
+                    player_id: PlayerId(1),
+                },
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&action).expect("action json").into(),
+                ))
+                .await
+                .expect("send action");
+
+            recv_submission_answer(&mut socket).await
+        })
+        .await;
+        server.abort();
+
+        let answer = answer.expect("action frame was never answered");
+        match answer {
+            ServerMessage::ActionRejected { reason } => {
+                assert_eq!(reason, "Sandbox mode is not enabled for this game");
+            }
+            other => panic!("expected ActionRejected from the shared handler, got {other:?}"),
+        }
+    }
+
+    fn submission(response: InteractionResponse) -> InteractionSubmission {
+        InteractionSubmission {
+            interaction_id: InteractionId("interaction-1".to_string()),
+            response,
+        }
+    }
+
+    fn oversized_submission() -> InteractionSubmission {
+        submission(InteractionResponse::Text {
+            value: "x".repeat(MAX_INTERACTION_STRING_LEN + 1),
+        })
+    }
+
+    /// The real cross-check of the two independent channel declarations.
+    ///
+    /// Both `GameSubmission::payload_rejection` and `wire_rejection_message`
+    /// are pure functions, so they can be compared directly. An end-to-end
+    /// socket test structurally cannot do this: the wire guard returns before
+    /// dispatch, so no frame ever reaches both layers.
+    #[test]
+    fn handler_payload_channels_agree_with_the_wire() {
+        let oversized = oversized_submission();
+        let oversized_action = GameAction::ReorderHand {
+            order: vec![engine::types::identifiers::ObjectId(1); MAX_ACTION_LIST_LEN + 1],
+        };
+
+        // (i) an oversized interaction answers on the benign channel.
+        let handler_reason = match *GameSubmission::Interaction(oversized.clone())
+            .payload_rejection()
+            .expect_err("an oversized interaction is refused")
+        {
+            ServerMessage::ActionRejected { reason } => reason,
+            ref other => panic!("an oversized paste must not tear the session down: {other:?}"),
+        };
+
+        // (ii) an oversized action stays a malformed frame.
+        let action_reason = match *GameSubmission::Action(oversized_action.clone())
+            .payload_rejection()
+            .expect_err("an oversized action is refused")
+        {
+            ServerMessage::Error { message, .. } => message,
+            ref other => panic!("an oversized action is a malformed frame, got {other:?}"),
+        };
+
+        // (iii) both layers agree, in variant *and* in reason string.
+        let wire_interaction = ClientMessage::Interaction {
+            submission: oversized,
+        };
+        let wire_reason =
+            guard_client_message_before_dispatch(&wire_interaction, ServerMode::Full).unwrap_err();
+        match wire_rejection_message(&wire_interaction, wire_reason) {
+            ServerMessage::ActionRejected { reason } => assert_eq!(reason, handler_reason),
+            other => panic!("wire and handler disagree on the interaction channel: {other:?}"),
+        }
+
+        let wire_action = ClientMessage::Action {
+            action: oversized_action,
+        };
+        let wire_action_reason =
+            guard_client_message_before_dispatch(&wire_action, ServerMode::Full).unwrap_err();
+        match wire_rejection_message(&wire_action, wire_action_reason) {
+            ServerMessage::Error { message, .. } => assert_eq!(message, action_reason),
+            other => panic!("wire and handler disagree on the action channel: {other:?}"),
+        }
+
+        // Reach guard: without it, a `payload_rejection` that always errored
+        // would satisfy (i) and (ii).
+        assert!(
+            GameSubmission::Interaction(submission(InteractionResponse::Choose {
+                choice_id: InteractionChoiceId("a".to_string()),
+            }))
+            .payload_rejection()
+            .is_ok()
+        );
+        assert!(GameSubmission::Action(GameAction::PassPriority)
+            .payload_rejection()
+            .is_ok());
+    }
+
+    /// The revert-failing assertion for #6941.
+    ///
+    /// Before the fix, the frame never reaches a handler at all: serde answers
+    /// `ServerMessage::Error { message: "Invalid message: unknown variant
+    /// `Interaction` ..." }` — a different variant *and* a different string.
+    ///
+    /// Asserting the exact reason is the reach guard: only a frame that
+    /// traversed serde, `reject_if_disabled`, the wire guard, both identity
+    /// checks, `payload_rejection`, `state.lock()`, `player_for_token`,
+    /// `submit_interaction`, and `slot_for_submission`'s
+    /// `.ok_or(StaleInteraction)` can produce it.
+    #[tokio::test]
+    async fn interaction_frame_is_accepted_by_the_wire_schema() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = create_authenticated_game_socket(url).await;
+
+            let frame = ClientMessage::Interaction {
+                submission: submission(InteractionResponse::Choose {
+                    choice_id: InteractionChoiceId("no-such-choice".to_string()),
+                }),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&frame)
+                        .expect("interaction json")
+                        .into(),
+                ))
+                .await
+                .expect("send interaction");
+
+            recv_submission_answer(&mut socket).await
+        })
+        .await;
+        server.abort();
+
+        let answer = answer.expect("interaction frame was never answered");
+        match answer {
+            ServerMessage::ActionRejected { reason } => {
+                assert_eq!(reason, "Engine error: StaleInteraction");
+            }
+            other => panic!("the wire schema must accept an Interaction frame, got {other:?}"),
+        }
+    }
+
+    /// Scope note: this exercises the **wire** layer only — the guard returns
+    /// before dispatch, so the handler's `payload_rejection` is never reached
+    /// by this frame. It makes no claim about the handler layer; that agreement
+    /// is pinned by `handler_payload_channels_agree_with_the_wire`.
+    #[tokio::test]
+    async fn an_oversized_interaction_is_answered_on_the_benign_channel() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let answers = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut socket = create_authenticated_game_socket(url).await;
+
+            let frame = ClientMessage::Interaction {
+                submission: oversized_submission(),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&frame)
+                        .expect("oversized json")
+                        .into(),
+                ))
+                .await
+                .expect("send oversized interaction");
+
+            let first = recv_submission_answer(&mut socket).await;
+
+            // Liveness probe rather than a vacuous `!matches!`: a socket that
+            // had been answered with `ServerMessage::Error` would have been
+            // torn down client-side, so a second answer on the same socket is
+            // what proves the benign channel was used.
+            let bounded = ClientMessage::Interaction {
+                submission: submission(InteractionResponse::Choose {
+                    choice_id: InteractionChoiceId("no-such-choice".to_string()),
+                }),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&bounded)
+                        .expect("bounded json")
+                        .into(),
+                ))
+                .await
+                .expect("send bounded interaction");
+
+            (first, recv_submission_answer(&mut socket).await)
+        })
+        .await;
+        server.abort();
+
+        let (first, second) = answers.expect("oversized interaction was never answered");
+        match first {
+            ServerMessage::ActionRejected { reason } => {
+                assert_eq!(reason, "Engine error: PayloadTooLarge");
+            }
+            other => panic!("an oversized paste must not end the match, got {other:?}"),
+        }
+        assert!(
+            matches!(second, ServerMessage::ActionRejected { .. }),
+            "the socket must still be live after a bounds rejection, got {second:?}"
+        );
+    }
+
+    /// Pins the pre-session rows of the channel table, and is the discriminator
+    /// for `interaction_frame_is_accepted_by_the_wire_schema`: it proves that
+    /// test's `ActionRejected` came from an engine verdict rather than being
+    /// this handler's blanket answer.
+    #[tokio::test]
+    async fn a_game_submission_without_a_session_is_answered_on_the_error_channel() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+
+            let frame = ClientMessage::Interaction {
+                submission: submission(InteractionResponse::Choose {
+                    choice_id: InteractionChoiceId("a".to_string()),
+                }),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&frame)
+                        .expect("interaction json")
+                        .into(),
+                ))
+                .await
+                .expect("send interaction");
+
+            recv_submission_answer(&mut socket).await
+        })
+        .await;
+        server.abort();
+
+        let answer = answer.expect("sessionless interaction was never answered");
+        match answer {
+            ServerMessage::Error { message, .. } => assert_eq!(message, "Not in a game"),
+            other => panic!("a pre-session condition is not an engine verdict: {other:?}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod mode_gate_tests {
     use super::*;
@@ -7251,9 +8623,14 @@ mod mode_gate_tests {
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
+                full_key: server_core::FullSessionKey {
+                    game_code: "X".into(),
+                    generation: 1,
+                },
             },
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
+            ClientMessage::ConcedeMatch,
             ClientMessage::Emote { emote: "GG".into() },
             ClientMessage::SpectatorJoin {
                 game_code: "X".into(),
@@ -7282,7 +8659,7 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 player_token: "t".into(),
             },
-            ClientMessage::RequestTakeback,
+            ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },
             ClientMessage::CancelTakeback,
         ];
@@ -7357,6 +8734,7 @@ mod mode_gate_tests {
             },
             ClientMessage::AbandonGame,
             ClientMessage::Concede,
+            ClientMessage::ConcedeMatch,
             ClientMessage::Ping { timestamp: 0 },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
@@ -7373,13 +8751,47 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 action: draft_core::types::DraftAction::StartDraft,
             },
-            ClientMessage::RequestTakeback,
+            ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },
             ClientMessage::CancelTakeback,
         ];
         for m in msgs {
             assert!(reject_if_disabled(&m, ServerMode::Full).is_none());
         }
+    }
+
+    fn interaction_frame() -> ClientMessage {
+        ClientMessage::Interaction {
+            submission: InteractionSubmission {
+                interaction_id: engine::types::interaction::InteractionId("i-1".to_string()),
+                response: engine::types::interaction::InteractionResponse::Choose {
+                    choice_id: engine::types::interaction::InteractionChoiceId("a".to_string()),
+                },
+            },
+        }
+    }
+
+    /// Both halves are required: either alone is satisfiable by a wrong
+    /// grouping. A LobbyOnly broker runs no engine and holds no
+    /// `SessionManager`, so it publishes no interactions and no client can hold
+    /// a live `interaction_id` against it — identical to `Action`.
+    #[test]
+    fn interaction_is_full_only() {
+        assert!(reject_if_disabled(&interaction_frame(), ServerMode::Full).is_none());
+        assert!(reject_if_disabled(&interaction_frame(), ServerMode::LobbyOnly).is_some());
+    }
+
+    /// Supplies the other half of `server-core`'s
+    /// `broker_projection_accepts_an_interaction_without_bounding_it`: leaving
+    /// the projection guard unbounded for this variant is safe only because
+    /// nothing is ever cloned into the broker.
+    ///
+    /// The paired positive is required in the same test so a wholesale-`None`
+    /// regression in `to_lobby_client_message` cannot satisfy it.
+    #[test]
+    fn interaction_is_never_projected_into_the_lobby_broker() {
+        assert!(to_lobby_client_message(&interaction_frame()).is_none());
+        assert!(to_lobby_client_message(&ClientMessage::SubscribeLobby).is_some());
     }
 }
 
@@ -7846,7 +9258,7 @@ mod issue_4548_deadlock_tests {
         };
         let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-        let (game_code, _token, _count) = create_and_connect_multiplayer_session(
+        let (game_code, _token, _count, _full_key) = create_and_connect_multiplayer_session(
             &state,
             &connections,
             &game_db,
@@ -7865,7 +9277,8 @@ mod issue_4548_deadlock_tests {
                 host_tx: tx,
             },
         )
-        .await;
+        .await
+        .expect("test session must be created");
 
         // Both state and connections locks must be free at this point.
         // A regression that holds either guard across the helper's return

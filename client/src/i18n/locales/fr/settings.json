@@ -29,6 +29,7 @@
     "logDefault": "Journal par défaut",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",
+    "spellPaymentOptions": { "auto": "Automatique", "autoExceptSacrificialMana": "Demander avant de sacrifier", "manual": "Manuel" },
     "nativeEngine": "Utiliser le moteur natif pour les parties locales et le multijoueur hébergé",
     "nativeEngineDescription": "Utilisez le moteur téléchargé pour les parties locales contre l’IA et les parties que vous hébergez via un salon. Les invités se connectent toujours via la connexion pair à pair du salon. Utilise le moteur intégré lorsqu’il n’est pas disponible.",
     "boardBackground": "Arrière-plan du plateau",

@@ -22,22 +22,13 @@ expression: "&ir"
         "fragment": "Flying"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Flying",
             "description": "Flying"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Flying",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     },
@@ -59,22 +50,13 @@ expression: "&ir"
         "fragment": "Vigilance (Attacking doesn't cause ~ to tap.)"
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "unknown",
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Vigilance",
             "description": "Vigilance"
           },
-          "cost": null,
-          "sub_ability": null,
-          "duration": null,
-          "description": "Vigilance",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "min_x_value": 0
         }
       }
     }

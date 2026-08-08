@@ -22,38 +22,91 @@ expression: "&ir"
         "fragment": "[+1]: Each player discards a card."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Discard",
-            "count": {
-              "type": "Fixed",
-              "value": 1
+        "Spell": {
+          "source_text": "Each player discards a card.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 27,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Each player discards a card"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Discard",
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    },
+                    "target": {
+                      "type": "Controller"
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": {
+                  "type": "All"
+                },
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": 1
             },
-            "target": {
-              "type": "Controller"
-            }
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[+1]: Each player discards a card."
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": 1
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "[+1]: Each player discards a card.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false,
-          "player_scope": {
-            "type": "All"
-          }
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -75,40 +128,94 @@ expression: "&ir"
         "fragment": "[−2]: Target player sacrifices a creature."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Sacrifice",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": "TargetPlayer",
-              "properties": []
+        "Spell": {
+          "source_text": "Target player sacrifices a creature.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 35,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target player sacrifices a creature"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Sacrifice",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "TargetPlayer",
+                      "properties": []
+                    },
+                    "count": {
+                      "type": "Fixed",
+                      "value": 1
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              }
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
+          },
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": -2
             },
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            }
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[−2]: Target player sacrifices a creature."
           },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -2
-          },
-          "sub_ability": null,
-          "duration": null,
-          "description": "[−2]: Target player sacrifices a creature.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     },
@@ -130,67 +237,154 @@ expression: "&ir"
         "fragment": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "Unimplemented",
-            "name": "separate",
-            "description": "Separate all permanents target player controls into two piles"
-          },
-          "cost": {
-            "type": "Loyalty",
-            "amount": -6
-          },
-          "sub_ability": {
-            "kind": "Spell",
-            "effect": {
-              "type": "Sacrifice",
-              "target": {
-                "type": "Typed",
-                "type_filters": [
-                  "Permanent"
-                ],
-                "controller": "ParentTargetController",
-                "properties": []
-              },
-              "count": {
-                "type": "Ref",
-                "qty": {
-                  "type": "ObjectCount",
-                  "filter": {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Permanent"
-                    ],
-                    "controller": null,
-                    "properties": []
+        "Spell": {
+          "source_text": "Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
+          "body": {
+            "clauses": [
+              {
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 61,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Separate all permanents target player controls into two piles"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Unimplemented",
+                    "name": "separate",
+                    "description": "Separate all permanents target player controls into two piles"
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
+              },
+              {
+                "id": 1,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 2
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 63,
+                    "end_byte": 128,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 1
+                  },
+                  "fragment": "That player sacrifices all permanents in the pile of their choice"
+                },
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
+                  }
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "Sacrifice",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Permanent"
+                      ],
+                      "controller": "ParentTargetController",
+                      "properties": []
+                    },
+                    "count": {
+                      "type": "Ref",
+                      "qty": {
+                        "type": "ObjectCount",
+                        "filter": {
+                          "type": "Typed",
+                          "type_filters": [
+                            "Permanent"
+                          ],
+                          "controller": null,
+                          "properties": []
+                        }
+                      }
+                    }
+                  },
+                  "duration": null,
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": "Sentence",
+                "condition": null,
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
-            },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
-            "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            ],
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "duration": null,
-          "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",
-          "target_prompt": null,
-          "activation_restrictions": [
-            {
-              "type": "AsSorcery"
-            }
-          ],
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Loyalty",
+              "amount": -6
+            },
+            "activation_restrictions": [
+              {
+                "type": "AsSorcery"
+              }
+            ],
+            "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice."
+          },
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

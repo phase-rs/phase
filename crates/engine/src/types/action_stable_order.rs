@@ -227,6 +227,18 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             a0.cmp_stable(b0)
         }
+        GameAction::ActivateManaSource { selection: a0 } => {
+            let GameAction::ActivateManaSource { selection: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            a0.cmp_stable(b0)
+        }
+        GameAction::BackToManaPayment => {
+            let GameAction::BackToManaPayment = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            Ordering::Equal
+        }
         GameAction::UntapLandForMana { object_id: a0 } => {
             let GameAction::UntapLandForMana { object_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -771,6 +783,26 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             Ordering::Equal
         }
+        // CR 116.2c: the group key is the semantic identity, followed by the
+        // engine-authored display payload so this remains a true total order
+        // over every `GameAction` field even for forged wire actions.
+        GameAction::EndContinuousEffect {
+            group: a0,
+            source_name: a1,
+            cost: a2,
+        } => {
+            let GameAction::EndContinuousEffect {
+                group: b0,
+                source_name: b1,
+                cost: b2,
+            } = b
+            else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+        }
         GameAction::DiscoverChoice { choice: a0 } => {
             let GameAction::DiscoverChoice { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -1173,6 +1205,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             zone: a2,
             attach_to: a3,
             run_etb: a4,
+            nonlegendary: a5,
         } => {
             let DebugAction::CreateCard {
                 card_name: b0,
@@ -1180,6 +1213,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 zone: b2,
                 attach_to: b3,
                 run_etb: b4,
+                nonlegendary: b5,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1189,6 +1223,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a2, b2))
                 .then_with(|| cmp_val(a3, b3))
                 .then_with(|| cmp_val(a4, b4))
+                .then_with(|| cmp_val(a5, b5))
         }
         DebugAction::RemoveObject { object_id: a0 } => {
             let DebugAction::RemoveObject { object_id: b0 } = b else {
@@ -1512,15 +1547,19 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
         DebugAction::CreateTokenCopy {
             source_id: a0,
             owner: a1,
+            nonlegendary: a2,
         } => {
             let DebugAction::CreateTokenCopy {
                 source_id: b0,
                 owner: b1,
+                nonlegendary: b2,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
         }
     }
 }
@@ -1617,8 +1656,9 @@ mod tests {
     };
     use crate::game::combat::AttackTarget;
     use crate::types::actions::{MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse};
-    use crate::types::game_state::{MayTriggerAutoChoiceKey, MayTriggerOrigin};
+    use crate::types::game_state::{EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
 
     fn assert_distinct_order(a: GameAction, b: GameAction) {
@@ -1628,6 +1668,24 @@ mod tests {
 
     #[test]
     fn newer_action_variants_compare_their_payloads() {
+        assert_distinct_order(
+            GameAction::EndContinuousEffect {
+                group: EndEffectGroupId(1),
+                source_name: "Calming Licid".to_string(),
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                },
+            },
+            GameAction::EndContinuousEffect {
+                group: EndEffectGroupId(1),
+                source_name: "Calming Licid".to_string(),
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+        );
         assert_distinct_order(
             GameAction::ChooseMeldPair {
                 source_id: ObjectId(1),

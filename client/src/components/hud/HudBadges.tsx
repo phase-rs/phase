@@ -6,6 +6,7 @@ import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import type {
   DungeonId,
+  FamilyCollapseState,
   NextSpellModifier,
   PendingNextSpellModifier,
   PendingSpellCostReduction,
@@ -13,6 +14,7 @@ import type {
   PlayerStatusView,
   ResourceAxis,
   ResourceAxisTag,
+  UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
@@ -102,6 +104,21 @@ export function CityBlessingBadge() {
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),radial-gradient(circle_at_50%_50%,rgba(254,240,138,0.85)_0_36%,transparent_42%),linear-gradient(135deg,#fefce8_0%,#fde047_36%,#ca8a04_72%,#422006_100%)]"
         />
         <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+      </span>
+    </BadgeTip>
+  );
+}
+
+export function EnduringStoryBadge() {
+  const { t } = useTranslation("game");
+  return (
+    <BadgeTip text={t("badges.enduringStoryTooltip")}>
+      <span
+        role="img"
+        aria-label={t("badges.enduringStory")}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-indigo-500 ring-indigo-200/80 shadow-[0_0_14px_rgba(99,102,241,0.55)]"
+      >
+        <span aria-hidden className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">📖</span>
       </span>
     </BadgeTip>
   );
@@ -373,30 +390,15 @@ export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
   );
 }
 
-// CR 732.2a: the display families an unbounded `ResourceAxis` maps to. Pure
-// presentation grouping — the engine owns axis identity and attribution; the FE
-// only collapses the per-axis rows into one badge per family.
-export type ResourceAxisFamily =
-  | "mana"
-  | "life"
-  | "damage"
-  | "mill"
-  | "counters"
-  | "tokens"
-  | "cards"
-  | "casts"
-  | "combats"
-  | "turns"
-  | "triggers";
-
 // Externally-tagged `ResourceAxis`: unit variants are bare strings, data/tuple
 // variants are single-key objects. The tag is the string itself or its only key.
 const axisTag = (axis: ResourceAxis): ResourceAxisTag =>
   typeof axis === "string" ? axis : (Object.keys(axis)[0] as ResourceAxisTag);
 
 // Exhaustive `Record<ResourceAxisTag, …>` so a new engine axis tag forces a
-// compile-time update here (the TS drift guard).
-const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
+// compile-time update here (the TS drift guard). Pinned VALUE-BY-VALUE against the engine's
+// `family_of` by `unbounded-family-tags.json`, which is why it is exported for that test.
+export const UNBOUNDED_FAMILY_FOR_TEST: Record<ResourceAxisTag, UnboundedFamily> = {
   Mana: "mana",
   Life: "life",
   DamageDealt: "damage",
@@ -416,12 +418,17 @@ const UNBOUNDED_FAMILY: Record<ResourceAxisTag, ResourceAxisFamily> = {
   Poison: "counters",
 };
 
-/** Map an engine-provided `ResourceAxis` to its display family. Presentation
- *  formatting only — never decides attribution or which axes are unbounded. */
-export const familyOf = (axis: ResourceAxis): ResourceAxisFamily =>
-  UNBOUNDED_FAMILY[axisTag(axis)];
+/** Map an engine-provided `ResourceAxis` to its display family. No STATE surface uses this — the
+ *  engine publishes each seat's families on `unbounded_families`, and both the HUD badge and
+ *  `ManaPoolSummary`'s mana marker read that channel. It survives for the ONE caller holding a
+ *  bare axis list with no family channel to read: `LoopShortcutModal`'s PRE-accept offer badges,
+ *  where nothing is marked unbounded yet so the engine has published nothing. This table is pinned
+ *  tag-by-tag against the engine's `family_of` by the `unbounded-family-tags.json` golden, so the
+ *  mirror cannot drift from the authority. */
+export const familyOf = (axis: ResourceAxis): UnboundedFamily =>
+  UNBOUNDED_FAMILY_FOR_TEST[axisTag(axis)];
 
-const UNBOUNDED_FAMILY_GLYPH: Record<ResourceAxisFamily, string> = {
+const UNBOUNDED_FAMILY_GLYPH: Record<UnboundedFamily, string> = {
   mana: "💎",
   life: "❤",
   damage: "🔥",
@@ -435,7 +442,7 @@ const UNBOUNDED_FAMILY_GLYPH: Record<ResourceAxisFamily, string> = {
   triggers: "✴",
 };
 
-const UNBOUNDED_FAMILY_LABEL_KEY: Record<ResourceAxisFamily, string> = {
+const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   mana: "badges.unboundedMana",
   life: "badges.unboundedLife",
   damage: "badges.unboundedDamage",
@@ -451,14 +458,46 @@ const UNBOUNDED_FAMILY_LABEL_KEY: Record<ResourceAxisFamily, string> = {
 
 /**
  * CR 732.2a: an `∞` badge for one unbounded-resource display family. Rendered
- * once per distinct family per player (the caller de-dups via a `Set`). The
- * engine decides which families are present and on which HUD; this badge only
+ * once per distinct family per player. The HUD callers pass the engine's
+ * `unbounded_families` rows straight through — the engine decides which families
+ * are present, on which HUD, and what each one may promise; `LoopShortcutModal`
+ * still de-dups a bare axis list with a `Set` and passes no state. This badge only
  * formats the family to a glyph + label.
  */
-export function UnboundedBadge({ family }: { family: ResourceAxisFamily }) {
+// `state` is OPTIONAL and defaults to `Unscheduled` so a caller with no family row in hand renders
+// today's bare-`∞` badge unchanged. `LoopShortcutModal`'s FamilyBadges is exactly that caller and
+// stays that way on purpose: it renders at OFFER time, before any player has accepted, so nothing
+// can be scheduled.
+export function UnboundedBadge({
+  family,
+  state = { type: "Unscheduled" },
+}: {
+  family: UnboundedFamily;
+  state?: FamilyCollapseState;
+}) {
   const { t } = useTranslation("game");
   const resource = t(UNBOUNDED_FAMILY_LABEL_KEY[family]);
-  const title = t("badges.unboundedTooltip", { resource });
+  // A `Committed` scheduled collapse is an accepted-but-unapplied bound, and N is named at the
+  // next step/phase end by the loop's CONTROLLER — who is not necessarily the seat this badge sits
+  // on. `Conditional` promises no bound at all, which is why it gets its own copy. The row is
+  // keyed by the engine's attribution player, which for `Life`/`DamageDealt`/`LibraryDelta`/
+  // `Poison` axes is the victim, and the badge also renders on opponent HUDs. So the copy stays in
+  // the passive voice: a second-person promise here would be addressed to the wrong seat in both
+  // cases. Emitting the prompted seat is the engine's to add, and is owned by the follow-on PR.
+  // The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
+  // what the engine says is pending.
+  const title = ((): string => {
+    switch (state.type) {
+      case "Unscheduled":
+        return t("badges.unboundedTooltip", { resource });
+      case "Mixed":
+        return t("badges.unboundedMixedTooltip", { resource });
+      case "Scheduled":
+        return state.data === "Committed"
+          ? t("badges.unboundedScheduledTooltip", { resource })
+          : t("badges.unboundedConditionalTooltip", { resource });
+    }
+  })();
   return (
     <BadgeTip text={title}>
       <span
@@ -470,7 +509,24 @@ export function UnboundedBadge({ family }: { family: ResourceAxisFamily }) {
           aria-hidden
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.85)_0_9%,transparent_11%),linear-gradient(135deg,#fae8ff_0%,#d946ef_42%,#701a75_100%)]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">∞</span>
+        {/* `∞` alone is a universal symbol, but the bounded form is frontend-authored copy — the
+            "N" is a letter standing for "some number", which is language-dependent. Localized for
+            the same reason its tooltip is. */}
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
+          {((): string => {
+            switch (state.type) {
+              // `Mixed` renders a BARE `∞`: part of this family has a pending collapse and part
+              // does not, and one glyph cannot say two things, so it says the weaker true one.
+              case "Unscheduled":
+              case "Mixed":
+                return "∞";
+              case "Scheduled":
+                return state.data === "Committed"
+                  ? t("badges.unboundedScheduledGlyph")
+                  : t("badges.unboundedConditionalGlyph");
+            }
+          })()}
+        </span>
         <span aria-hidden className="relative text-[10px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">
           {UNBOUNDED_FAMILY_GLYPH[family]}
         </span>

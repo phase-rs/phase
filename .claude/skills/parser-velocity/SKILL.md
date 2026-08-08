@@ -5,7 +5,7 @@ description: "Fast-iteration loop for quick parser wins — surface near-miss ca
 
 # Parser Velocity — Quick-Win Iteration Loop
 
-`unlock-set` runs full gates (`cargo fmt` / `clippy-strict` / `test -p engine` / `coverage` / `semantic-audit`) between every cluster. That's right for cluster-level infrastructure but fatal for near-miss work where the real fix is "add one `tag()` arm to an existing `alt()`." This skill keeps the inner loop fast by batching edits per compile cycle, then running the full gate exactly **once** at session end.
+`unlock-set` runs full gates (`cargo fmt` / `clippy-strict` / `test -p phase-engine` / `coverage` / `semantic-audit`) between every cluster. That's right for cluster-level infrastructure but fatal for near-miss work where the real fix is "add one `tag()` arm to an existing `alt()`." This skill keeps the inner loop fast by batching edits per compile cycle, then running the full gate exactly **once** at session end.
 
 **When to use this skill vs. `unlock-set`:**
 - **Use this skill** when the target is "cards that are almost supported" — the parser recognizes most of the text but misses one variation. Category A (VerbVariation), B (SubjectStripping), D (StaticCondition), and parser-miss C (TriggerEffect) cards.
@@ -67,7 +67,7 @@ When the parser-gap-analyzer pool is thin or you want to target a specific *anti
 
 ```bash
 # Rank exact warning patterns by likely shared fix.
-cargo run -p engine --bin coverage-report -- data --brief \
+cargo run -p phase-engine --bin coverage-report -- data --brief \
   --write-warning-patterns /tmp/parser-warning-patterns.json >/tmp/coverage.json
 jq -r '
   [.[] | select(.category=="swallowed-clause")]
@@ -78,7 +78,7 @@ jq -r '
 
 # Drill into a detector family before choosing a batch.
 DETECTOR='Replacement_Instead'   # or DynamicQty, Condition_If, Duration_ThisTurn, etc.
-cargo run -p engine --bin coverage-report -- data \
+cargo run -p phase-engine --bin coverage-report -- data \
   --warning-detector "$DETECTOR" \
   --warning-limit 25 >/tmp/warning-drilldown.json
 jq -r '.cards[] | [.name, .supported, .gap_count, (.parsed_labels|join("+"))] | @tsv' \
@@ -123,9 +123,9 @@ For each batch:
 4. **Edit the whole batch.** One parser file per card (or shared file for related cards). No compile between edits.
 5. **Compile + parser test.**
    ```bash
-   cargo test -p engine --lib parser::
+   cargo test -p phase-engine --lib parser::
    ```
-   One compile (~60s cold, ~10–30s warm), then 2150 parser tests at 0.26s. Passing = high confidence you haven't broken existing patterns. For a faster mid-batch "did I break types?" signal, use `cargo check -p engine` (no test-binary codegen).
+   One compile (~60s cold, ~10–30s warm), then 2150 parser tests at 0.26s. Passing = high confidence you haven't broken existing patterns. For a faster mid-batch "did I break types?" signal, use `cargo check -p phase-engine` (no test-binary codegen).
 6. **Validate the batch flipped.**
    ```bash
    cargo run --profile test --bin oracle-gen --features cli -- data \
@@ -163,8 +163,8 @@ cargo fmt --all
 if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else
-  cargo clippy -p engine --all-targets -- -D warnings  # engine only — parser changes don't touch downstream crates
-  cargo test -p engine                                  # engine suite — parser + game + types
+  cargo clippy -p phase-engine --all-targets -- -D warnings  # engine only — parser changes don't touch downstream crates
+  cargo test -p phase-engine                                  # engine suite — parser + game + types
   ./scripts/gen-card-data.sh                            # regen card-data.json (Tilt's `card-data` resource handles this when up)
 fi
 
@@ -176,7 +176,7 @@ rm -f /tmp/velocity-flipped.txt                       # clear session state
 ```
 
 **Do NOT use `cargo test-all` in this gate.** Parser-only changes don't touch
-`engine-wasm`, `phase-ai`, or `server-core` code paths — `cargo test -p engine`
+`engine-wasm`, `phase-ai`, or `server-core` code paths — `cargo test -p phase-engine`
 is authoritative. `cargo test-all` adds ~5 minutes of unrelated test runtime.
 The only time to escalate to `test-all` is if you knowingly changed an AST type
 signature exported across crate boundaries (e.g., added a variant to

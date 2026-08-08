@@ -6,16 +6,19 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map, opt, value};
+use nom::character::complete::{alphanumeric1, space1};
+use nom::combinator::{map, not, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_pt_modifier};
+use super::primitives::{
+    parse_article, parse_property_keyword, parse_pt_modifier, parse_superlative_adjective,
+};
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
+    QuantityExpr,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -286,6 +289,33 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         FilterProp::AnyOf { props }
     };
     Ok((rest, prop))
+}
+
+/// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
+/// postnominal superlative property qualifier — "with the `<superlative>`
+/// `<property>`".
+///
+/// SINGLE AUTHORITY for that head. The trailing eligible-set clause is the
+/// caller's business: an explicit "among `<set>`" (CR 109.2, owned by
+/// `oracle_target::parse_superlative_property_suffix`), or the enclosing noun
+/// phrase itself (CR 109.2, owned by the bare-form pass in
+/// `parse_type_phrase_with_ctx`).
+///
+/// The `not(alphanumeric1)` tail guard enforces a word boundary so "mana values"
+/// or "powerstone" cannot half-match the property word. The `among`-form caller
+/// gets that boundary implicitly from its following `tag(" among ")`; the
+/// bare-form caller has none. The guard lives HERE rather than inside
+/// `parse_property_keyword`, because narrowing that shared atom would silently
+/// change the ten existing condition-layer call sites.
+pub(crate) fn parse_superlative_property_head(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    let (input, _) = tag("with the ").parse(input)?;
+    let (input, function) = parse_superlative_adjective(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, property) = parse_property_keyword(input)?;
+    let (input, _) = not(alphanumeric1).parse(input)?;
+    Ok((input, (function, property)))
 }
 
 /// CR 208.1: Possessive pronoun introducing a creature's *own* stat in a

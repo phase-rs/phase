@@ -1,4 +1,4 @@
-use crate::game::effects::life::{apply_damage_life_loss, apply_life_gain};
+use crate::game::effects::life::{apply_life_gain, apply_life_loss};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, PtStat, ResolvedAbility,
@@ -127,7 +127,7 @@ pub fn resolve(
     let diff = stat_value - old_life;
     let deferred = match diff.signum() {
         1 => apply_life_gain(state, player_id, diff as u32, events).err(),
-        -1 => apply_damage_life_loss(state, player_id, (-diff) as u32, events).err(),
+        -1 => apply_life_loss(state, player_id, (-diff) as u32, events).err(),
         _ => None,
     };
     if deferred.is_some() {

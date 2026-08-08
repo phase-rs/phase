@@ -36,6 +36,8 @@ pub(crate) fn run_post_action_pipeline_from(
     skip_trigger_scan: bool,
     skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
+    stage_pending_activation_trigger_events(state, events, event_start);
+
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
@@ -98,17 +100,13 @@ pub(crate) fn run_post_action_pipeline_from(
             }
         }
         // A completed logical owner has already collected its segment and
-        // settlement contexts into the existing deferred queue. The owner is
-        // intentionally gone before the trailing completion event, so use those
-        // exact queued occurrences to keep the generic scan from rediscovering
-        // them while still allowing every unrelated event through.
-        let deferred_logical_zone_events: Vec<_> = state
-            .deferred_triggers
-            .iter()
-            .flat_map(|context| context.trigger_events.iter())
-            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
-            .collect();
-        let unconsumed_events = triggers::filter_consumed_trigger_events_from(
+        // settlement contexts into the deferred queue, and a paused owner that
+        // drained may instead have claimed them in the consumed ledger.
+        // `filter_already_collected_trigger_events_from` is the single authority
+        // for both (CR 603.2c), shared with the search-delivery park family so
+        // the two collectors cannot drift.
+        let unconsumed_events = triggers::filter_already_collected_trigger_events_from(
+            state,
             events,
             event_start,
             &consumed_trigger_events,
@@ -119,7 +117,6 @@ pub(crate) fn run_post_action_pipeline_from(
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
                     && !retained_logical_zone_events.contains(event)
-                    && !deferred_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();
@@ -336,6 +333,39 @@ pub(crate) fn run_post_action_pipeline_from(
     ))
 }
 
+/// Route events emitted while a target-bearing activation remains pending into
+/// its private trigger transaction before the ordinary post-action collector
+/// can observe them.
+///
+/// CR 602.2a-b + CR 603.2: target declaration and cost payment can create
+/// trigger events before the activated ability reaches the stack. These events
+/// remain pending until the activation commits; recording their occurrences in
+/// the consumed buffer preserves the generic collector's exactly-once contract
+/// for this action without making the transaction public state.
+fn stage_pending_activation_trigger_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let new_events = &events[event_start..];
+    if new_events.is_empty() {
+        return;
+    }
+    let Some(mut collection) = state.take_pending_activation_trigger_collection() else {
+        return;
+    };
+    collection.collect(state, new_events);
+    state.restore_pending_activation_trigger_collection(collection);
+    state
+        .consumed_before_priority_trigger_events
+        .extend(new_events.iter().enumerate().map(|(offset, event)| {
+            triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: triggers::trigger_event_occurrence(events, event_start + offset),
+            }
+        }));
+}
+
 /// CR 603.3b + CR 608.2g: settles a terminal resolution marker only after its
 /// final free cast has actually been announced. The drain uses the
 /// stack-announcement boundary so B/C's triggers may be ordered above their
@@ -365,7 +395,10 @@ fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
     // resolution. Now its terminal instruction has completed, so clear the
     // resolution-only LKI before the explicit post-announcement drain.
     state.pending_resolution_completion = None;
-    state.resolving_stack_entry = None;
+    super::stack::finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
     state.resolution_source_relatch = None;
     true
 }

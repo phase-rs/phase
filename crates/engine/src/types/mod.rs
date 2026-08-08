@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod ability_visit;
 pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
@@ -6,9 +7,11 @@ pub mod card;
 pub mod card_type;
 pub mod counter;
 pub mod definitions;
+pub(crate) mod deterministic_serde;
 pub mod events;
 pub mod format;
 pub mod game_state;
+mod game_state_size;
 pub mod identifiers;
 pub mod interaction;
 pub mod keywords;
@@ -45,10 +48,10 @@ pub use events::GameEvent;
 pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
-    LandPlayRecord, NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
-    PendingSpellCostReduction, PlayerDeckPool, PriorityPassingMode, ScheduledTurnControl,
-    SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
-    ZoneChangeRecord,
+    LandPlayRecord, LoopDetectSample, NextSpellModifier, PayCostKind, PendingNextSpellModifier,
+    PendingReplacement, PendingSpellCostReduction, PlayerDeckPool, PriorityPassingMode,
+    ScheduledTurnControl, SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect,
+    WaitingFor, ZoneChangeRecord,
 };
 pub use identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
@@ -60,13 +63,17 @@ pub use interaction::{
 };
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
-pub use log::{GameLogEntry, LogCategory, LogSegment};
+pub use log::{
+    GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
+};
 pub use mana::{
-    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourcePenalty,
-    ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
+    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourceOutput,
+    ManaSourcePenalty, ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
 };
 pub use match_config::{
-    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
+    BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchForfeitCause, MatchForfeitResult,
+    MatchPhase, MatchScore, MatchType,
 };
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
@@ -91,10 +98,14 @@ pub use resolved_commands::{
     ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
     ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
-    ResolvedRulesJournalError, ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
-    ResolvedTriggerCollectionReplayInvariantError, ResolvedTriggerLedgerEdit,
-    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
-    SpentManaUnit,
+    ResolvedRulesJournalError, ResolvedStackEntryFinalizeCommand,
+    ResolvedStackEntryFinalizeReplayInvariantError, ResolvedStackPushCommand,
+    ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError, ResolvedStackRemovalCommand,
+    ResolvedStackRemovalReplayInvariantError, ResolvedTriggerCollection,
+    ResolvedTriggerCollectionCommand, ResolvedTriggerCollectionReplayInvariantError,
+    ResolvedTriggerLedgerEdit, ResolvedUncommittedTriggerRemovalCommand,
+    ResolvedUncommittedTriggerRemovalReplayInvariantError, RulesExecutionNodeKind,
+    RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};

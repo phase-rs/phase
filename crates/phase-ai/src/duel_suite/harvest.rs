@@ -5,8 +5,9 @@
 //! snapshotting the last quiescent (empty-stack) position of each completed turn
 //! from **p0's** perspective. [`FeatureRow::extract`] is the single
 //! reconstruction authority: the exact unweighted feature vector the planner's
-//! leaf eval (`evaluate_with_strategy`) applies its weights to, minus the two
-//! serve-time carve-outs (`energy_offset`, `threat_adjustment`). Fitting weights
+//! leaf eval (`evaluate_with_strategy`) applies its weights to, minus the three
+//! serve-time carve-outs (`energy_offset`, `mana_development_offset`,
+//! `threat_adjustment`). Fitting weights
 //! against these rows and their final-outcome labels (logistic regression) is the
 //! Texel tuning method; see `scripts/train_eval_weights.py`.
 //!
@@ -21,22 +22,31 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
-use crate::eval::{evaluate_features, EvalWeights};
+use crate::eval::{evaluate_features, EvalFeatures, EvalWeights};
 use crate::session::AiSession;
 
 /// p0's perspective is fixed for the harvest — the win-label is p0's outcome and
 /// every feature is a (p0 − opponent) differential.
 const HARVEST_PERSPECTIVE: PlayerId = PlayerId(0);
 
-/// The 9 fitted eval features plus the `energy_offset` regression control, all
-/// unweighted. Field names are exactly the [`EvalWeights`] field names (no proxy
-/// map): the Python trainer maps each coefficient directly onto its weight.
+/// The 9 fitted eval features plus the 2 regression controls (`energy_offset`,
+/// `mana_development_offset`), all unweighted. Field names are exactly the
+/// [`EvalWeights`] field names (no proxy map): the Python trainer maps each
+/// coefficient directly onto its weight.
 ///
 /// This is the serve reconstruction of `evaluate_with_strategy`'s linear
-/// component: `weighted_total(w)` equals the planner's leaf eval minus
-/// `energy_offset` (a fixed serve-time offset) and `threat_adjustment` (an
-/// unfitted heuristic). The serve-reconstruction test in `planner::mod` pins that
-/// identity so a future strategic term without a matching field fails loudly.
+/// component: `weighted_total(w)` equals the planner's leaf eval minus the three
+/// unfitted serve-time terms — `energy_offset` and `mana_development_offset`
+/// (fixed serve-time offsets) and `threat_adjustment` (an unfitted heuristic).
+/// Completeness of that reconstruction is enforced in two different places, and
+/// only one of them is a guarantee:
+///
+/// - a term on **`EvalFeatures`** cannot be dropped — `extract` destructures it
+///   exhaustively, so a new field is an **E0027** compile error;
+/// - a term added **directly in `evaluate_with_strategy`** (as `threat_adjustment`
+///   is) has no such tie, and `serve_reconstruction_equals_planner_leaf_eval`
+///   catches it only when it is non-zero on that test's single fixture. That half
+///   is fixture-dependent; see the test's doc for what to do when adding one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeatureRow {
     pub life: f64,
@@ -55,6 +65,12 @@ pub struct FeatureRow {
     /// Fixed-coefficient control (`energy × 0.1`); excluded from `weighted_total`,
     /// discarded by the trainer.
     pub energy_offset: f64,
+    /// Fixed-coefficient control (`7.5 × clamp(self − opponent_aggregate, −12, 12)`),
+    /// signed as of schema 3; excluded from `weighted_total`, discarded by the
+    /// trainer. Fed to the regression anyway so its explanatory power is not pushed
+    /// onto the correlated fitted features (`hand_size`, `zone_quality`,
+    /// `card_advantage`).
+    pub mana_development_offset: f64,
 }
 
 impl FeatureRow {
@@ -71,7 +87,35 @@ impl FeatureRow {
         session: &AiSession,
         player: PlayerId,
     ) -> Option<FeatureRow> {
-        let features = evaluate_features(state, player).ok()?;
+        // EXHAUSTIVE DESTRUCTURING — deliberately no `..`, and it must stay that
+        // way. This is the compile-time tie between `EvalFeatures` and the
+        // harvested vector: adding a field to `EvalFeatures` is an **E0027** here,
+        // not a silent omission. It is the struct analogue of CLAUDE.md's
+        // "exhaustive `match` without wildcard fallbacks — let the compiler catch
+        // missing arms".
+        //
+        // Why field access was not safe enough. `EvalFeatures` has zero struct
+        // literal sites (only `Default::default()` plus assignment), so there is no
+        // E0063 to catch a forgotten field either. Without this `let`, a successor
+        // adding a term, wiring it into `evaluate_state_breakdown` and forgetting
+        // `extract` produces NO diagnostic: the term reaches the served score but
+        // never the harvested row, and every subsequently fitted weight is trained
+        // against a vector that no longer reconstructs what is served — a silent
+        // train/serve divergence, which is the one invariant this module exists to
+        // hold. `serve_reconstruction_equals_planner_leaf_eval` only catches that
+        // when the new term is non-zero on its single fixture, so it is a
+        // fixture-dependent guarantee; this makes it a structural one.
+        let EvalFeatures {
+            life,
+            board_presence,
+            board_power,
+            board_toughness,
+            hand_size,
+            aggression,
+            card_advantage_breakdown,
+            energy_offset,
+            mana_development_offset,
+        } = evaluate_features(state, player).ok()?;
         let differential = crate::card_advantage::differential(state, player);
         let synergy = session
             .synergy
@@ -85,21 +129,23 @@ impl FeatureRow {
         let zone_quality = crate::zone_eval::zone_bonus(state, player, archetype);
 
         Some(FeatureRow {
-            life: features.life,
-            board_presence: features.board_presence,
-            board_power: features.board_power,
-            board_toughness: features.board_toughness,
-            hand_size: features.hand_size,
-            aggression: features.aggression,
-            card_advantage: features.card_advantage_breakdown + differential,
+            life,
+            board_presence,
+            board_power,
+            board_toughness,
+            hand_size,
+            aggression,
+            card_advantage: card_advantage_breakdown + differential,
             zone_quality,
             synergy,
-            energy_offset: features.energy_offset,
+            energy_offset,
+            mana_development_offset,
         })
     }
 
-    /// Weighted sum of all 9 fitted features, **excluding** `energy_offset`. Mirrors
-    /// `evaluate_with_strategy` minus its two serve-time carve-outs.
+    /// Weighted sum of all 9 fitted features, **excluding both controls**
+    /// (`energy_offset`, `mana_development_offset`). Mirrors
+    /// `evaluate_with_strategy` minus its three serve-time carve-outs.
     pub fn weighted_total(&self, w: &EvalWeights) -> f64 {
         self.life * w.life
             + self.board_presence * w.board_presence
@@ -380,9 +426,9 @@ mod tests {
     }
 
     /// `FeatureRow` survives a JSONL round-trip and `weighted_total` sums the 9
-    /// fitted features while excluding the energy control.
+    /// fitted features while excluding **both** fixed-coefficient controls.
     #[test]
-    fn feature_row_round_trips_and_excludes_energy_from_weighted_total() {
+    fn feature_row_round_trips_and_excludes_both_offsets_from_weighted_total() {
         let row = FeatureRow {
             life: 1.0,
             board_presence: 2.0,
@@ -393,7 +439,11 @@ mod tests {
             card_advantage: 7.0,
             zone_quality: 8.0,
             synergy: 9.0,
+            // The two control literals are deliberately DISTINCT: a
+            // `weighted_total` that leaked one control but not the other, or that
+            // read the wrong control field, cannot land on 45.0 by coincidence.
             energy_offset: 100.0,
+            mana_development_offset: 200.0,
         };
         let json = serde_json::to_string(&row).unwrap();
         let back: FeatureRow = serde_json::from_str(&json).unwrap();
@@ -410,7 +460,9 @@ mod tests {
             card_advantage: 1.0,
             synergy: 1.0,
         };
-        // 1+2+3+4+5+6+7+8+9 = 45; energy_offset (100) is excluded.
+        // 1+…+9 = 45; both controls (energy 100, mana-development 200) are
+        // excluded. Leaking energy alone gives 145, mana-development alone 245,
+        // both 345 — so this single equality discriminates all three defects.
         assert!((row.weighted_total(&w) - 45.0).abs() < 1e-9);
     }
 }

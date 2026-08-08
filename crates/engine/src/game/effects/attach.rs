@@ -1,4 +1,5 @@
 use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds};
+use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
@@ -6,11 +7,70 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility,
     TargetFilter, TargetRef, TypedFilter,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedAttachmentCommand, ResolvedAttachmentReplayInvariantError,
+};
 use crate::types::zones::Zone;
+
+/// An engine-authored Equip announcement for the Priority preflight. The
+/// Equipment identity remains provider-owned until the Priority facade rebuilds
+/// the ordinary reducer primer.
+pub(in crate::game) struct PriorityEquipAnnouncement {
+    equipment_id: ObjectId,
+}
+
+impl PriorityEquipAnnouncement {
+    fn new(equipment_id: ObjectId) -> Self {
+        Self { equipment_id }
+    }
+
+    pub(in crate::game) fn equipment_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.equipment_id
+    }
+}
+
+/// Enumerates the attachment authority's finite Equip primers for the current
+/// Priority holder. The ordinary reducer remains responsible for sorcery-speed
+/// timing and target selection when the announcement is replayed.
+pub(in crate::game) fn priority_equip_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityEquipAnnouncement> {
+    let controller = principal.semantic_holder();
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&equipment_id| {
+            state.objects.get(&equipment_id).is_some_and(|equipment| {
+                equipment.controller == controller
+                    && equipment
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Equipment")
+                    && state.battlefield.iter().copied().any(|candidate_id| {
+                        state.objects.get(&candidate_id).is_some_and(|candidate| {
+                            candidate.controller == controller
+                                && candidate
+                                    .card_types
+                                    .core_types
+                                    .contains(&CoreType::Creature)
+                        })
+                    })
+            })
+        })
+        .map(PriorityEquipAnnouncement::new)
+        .collect()
+}
 
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(
@@ -25,6 +85,28 @@ pub fn resolve(
     };
 
     if prompt_resolution_attachment_choice(state, ability, attachment_filter, events)? {
+        return Ok(());
+    }
+
+    // CR 400.7 + CR 603.7c: a delayed attach whose pinned referent became a new
+    // object attaches nothing. The trigger fired and resolved (CR 603.7b); it
+    // affected nothing.
+    //
+    // PLACEMENT IS LOAD-BEARING — this MUST sit above the two `ok_or_else(..)?`
+    // conversions below. Letting the substitution in `resolve_object_filter`
+    // empty the list instead would surface `EffectError::MissingParam` and emit
+    // NO EffectResolved. Mirrors the CR 303.4j no-op guard further down, which
+    // is this function's proof that an events sink is in scope here.
+    //
+    // Reached by `gift of immortality` and `next of kin`: their ROOT is
+    // `ChangeZone{SelfRef}`, but `ability_pins_object_anaphor` walks the whole
+    // chain, so the `Attach` sub-ability's `ParentTarget` earns the pins.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id,
+            subject: None,
+        });
         return Ok(());
     }
 
@@ -167,7 +249,28 @@ pub fn resolve_unattach_all(
         attachment_filter,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
     )
-    .then(|| super::effect_object_targets(attachment_filter, &ability.targets));
+    .then(|| {
+        // CR 400.7 + CR 603.7c: substitution only. Population inside the class
+        // is 0 (zero `UnattachAll` nodes), and the one card that reaches this
+        // (`stolen uniform`) is denied a pin by
+        // `condition_names_referent_zone_change`, so `live_object_targets` is
+        // the identity here today. Applied for uniformity and defence in depth;
+        // deliberately NO early return, since a population of 0 admits no
+        // non-vacuous test.
+        //
+        // Slot carve-out DOES apply: `attachment_filter` may be
+        // `ParentTargetSlot`, and `effect_object_targets` indexes it
+        // positionally. This is the second call site of the standing
+        // 22-call-site constraint.
+        let live_targets = ability.live_object_targets(state);
+        let pool: &[TargetRef] =
+            if matches!(attachment_filter, TargetFilter::ParentTargetSlot { .. }) {
+                &ability.targets
+            } else {
+                &live_targets
+            };
+        super::effect_object_targets(attachment_filter, pool)
+    });
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -205,14 +308,6 @@ pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
         AttachTarget::Object(id) => TargetRef::Object(id),
         AttachTarget::Player(id) => TargetRef::Player(id),
     }
-}
-
-fn current_attachment_target(state: &GameState, attachment_id: ObjectId) -> Option<TargetRef> {
-    state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
-        .map(target_ref_from_attach_target)
 }
 
 fn attachment_tree_contains(state: &GameState, root_id: ObjectId, candidate_id: ObjectId) -> bool {
@@ -442,10 +537,19 @@ fn resolve_object_filter<'a>(
                     TargetRef::Player(_) => None,
                 })
         }
-        TargetFilter::ParentTarget => ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        }),
+        // CR 400.7 + CR 603.7c: a pinned referent that became a new object is
+        // dropped. The all-stale case is caught by the early return at the top
+        // of `resolve` (which can emit `EffectResolved`); this substitution
+        // handles the PARTIAL-stale case.
+        TargetFilter::ParentTarget => {
+            ability
+                .live_object_targets(state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+        }
         // CR 608.2c: a precise slot anaphor ("Attach it to the chosen creature"
         // → attachment slot 1, target slot 0) resolves against the whole
         // resolving chain's accumulated targets. The per-clause `ability.targets`
@@ -565,9 +669,12 @@ pub fn attach_to(
     // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once. The timestamp
     // bump (below) must distinguish first-attach (None) from a same-host re-attach
     // (Some(host)); `old_target` collapses both to `None` and cannot. `old_target`
-    // is just the filtered view, so derive it from the single read rather than
-    // querying the attachment's host twice.
-    let prior_host = current_attachment_target(state, attachment_id);
+    // and the CR 733 command's `expected_old_host` are both views of this one read
+    // rather than repeat queries of the attachment's host.
+    let attachment_object = state.objects.get(&attachment_id);
+    let reference = attachment_object.map(ObjectIncarnationRef::from_object);
+    let expected_old_host = attachment_object.and_then(|obj| obj.attached_to);
+    let prior_host = expected_old_host.map(target_ref_from_attach_target);
     // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
     // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
     // different host; false only on a same-host re-attach (CR 701.3b keeps the stamp).
@@ -597,12 +704,13 @@ pub fn attach_to(
 
     // CR 613.7e + CR 701.3c: first attach (None) or a move to a different host
     // bumps the timestamp; a same-host re-attach (CR 701.3b) does not.
-    if moving_to_new_host {
+    let resulting_timestamp = moving_to_new_host.then(|| {
         let ts = state.next_timestamp();
         if let Some(attachment) = state.objects.get_mut(&attachment_id) {
             attachment.timestamp = ts;
         }
-    }
+        ts
+    });
 
     // Add to target's attachments list
     if let Some(target) = state.objects.get_mut(&target_id) {
@@ -613,7 +721,42 @@ pub fn attach_to(
 
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+
+    // CR 733: journal the settled edit through its owning family. A same-host
+    // re-attach (CR 701.3b) leaves every field above unchanged, so only a real
+    // host transition is recorded.
+    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+        record_attachment_edit(
+            state,
+            reference,
+            expected_old_host,
+            Some(AttachTarget::Object(target_id)),
+            resulting_timestamp,
+        );
+    }
     old_target
+}
+
+/// Stamps one settled attachment-graph edit into the CR 733 resolved-command
+/// journal on behalf of the three attachment authorities.
+fn record_attachment_edit(
+    state: &mut GameState,
+    attachment: ObjectIncarnationRef,
+    expected_old_host: Option<AttachTarget>,
+    resulting_host: Option<AttachTarget>,
+    resulting_timestamp: Option<u64>,
+) {
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_attachment(ResolvedAttachmentCommand {
+            attachment,
+            expected_old_host,
+            resulting_host,
+            resulting_timestamp,
+            cause,
+        })
+        .expect("resolved attachment must have a live journal cause");
 }
 
 /// Why a host forbids an attachment, independent of the Enchant filter and zone.
@@ -1186,9 +1329,13 @@ pub fn attach_to_player(
 
     // CR 613.7e + CR 701.3b/c: read the UNFILTERED prior host once so a first-attach
     // (None) and a same-player re-attach (Some(player)) are distinguishable —
-    // `old_target` collapses both to `None`. Derive the filtered view from the
-    // single read rather than querying the attachment's host twice.
-    let prior_host = current_attachment_target(state, attachment_id);
+    // `old_target` collapses both to `None`. The filtered view and the CR 733
+    // command's `expected_old_host` both derive from this single read rather than
+    // querying the attachment's host again.
+    let attachment_object = state.objects.get(&attachment_id);
+    let reference = attachment_object.map(ObjectIncarnationRef::from_object);
+    let expected_old_host = attachment_object.and_then(|obj| obj.attached_to);
+    let prior_host = expected_old_host.map(target_ref_from_attach_target);
     // Discriminate the timestamp bump (below) before `filter` consumes `prior_host`:
     // `==` borrows, `Option::filter` moves. True on first-attach (None) or a move to a
     // different player; false only on a same-player re-attach (CR 701.3b keeps the stamp).
@@ -1214,15 +1361,29 @@ pub fn attach_to_player(
 
     // CR 613.7e + CR 701.3c: first attach (None) or a move to a different player
     // host bumps the timestamp; a same-player re-attach (CR 701.3b) does not.
-    if moving_to_new_host {
+    let resulting_timestamp = moving_to_new_host.then(|| {
         let ts = state.next_timestamp();
         if let Some(attachment) = state.objects.get_mut(&attachment_id) {
             attachment.timestamp = ts;
         }
-    }
+        ts
+    });
 
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+
+    // CR 733: journal the settled edit through its owning family, on the same
+    // terms as the object-host authority — a same-player re-attach (CR 701.3b)
+    // changed nothing and is not recorded.
+    if let Some(reference) = reference.filter(|_| moving_to_new_host) {
+        record_attachment_edit(
+            state,
+            reference,
+            expected_old_host,
+            Some(AttachTarget::Player(target_player)),
+            resulting_timestamp,
+        );
+    }
     old_target
 }
 
@@ -1230,14 +1391,16 @@ pub fn attach_to_player(
 /// to while it remains on the battlefield. This is the single graph update
 /// primitive for explicit unattach costs and effects.
 pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option<TargetRef> {
-    let old_target = current_attachment_target(state, attachment_id)?;
-    let old_target_id = state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
-        .and_then(|target| target.as_object());
+    // One read serves the returned host, the old host's list cleanup, and the
+    // CR 733 command's `expected_old_host`. The `?` means an already-unattached
+    // attachment returns before any mutation, so every reachable path below is a
+    // real host transition.
+    let attachment_object = state.objects.get(&attachment_id)?;
+    let reference = ObjectIncarnationRef::from_object(attachment_object);
+    let expected_old_host = attachment_object.attached_to?;
+    let old_target = target_ref_from_attach_target(expected_old_host);
 
-    if let Some(old_target_id) = old_target_id {
+    if let Some(old_target_id) = expected_old_host.as_object() {
         if let Some(old_target) = state.objects.get_mut(&old_target_id) {
             old_target.attachments.retain(|&id| id != attachment_id);
         }
@@ -1247,7 +1410,83 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
     }
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+
+    // CR 733 + CR 701.3d: an unattach installs no host and, unlike an attach,
+    // draws no new timestamp (CR 613.7e applies to attaching to a new host).
+    record_attachment_edit(state, reference, Some(expected_old_host), None, None);
     Some(old_target)
+}
+
+/// Installs one already-resolved CR 701.3 attachment edit verbatim.
+///
+/// Deliberately re-runs NONE of the CR 301.5 / CR 303.4 / CR 702.16 attach
+/// legality guards: those decided at resolve time whether this edit happened at
+/// all, and re-evaluating them against a replayed board could reject an edit the
+/// game already made. The applier only verifies that the state it is installing
+/// into is the state the command was resolved from, then performs the structural
+/// graph move and installs the recorded timestamp.
+pub fn apply_resolved_attachment(
+    state: &mut GameState,
+    command: &ResolvedAttachmentCommand,
+) -> Result<(), ResolvedAttachmentReplayInvariantError> {
+    let attachment_id = command.attachment.object_id;
+    let attachment = state.objects.get(&attachment_id).ok_or(
+        ResolvedAttachmentReplayInvariantError::UnknownAttachment(attachment_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(attachment);
+    if found != command.attachment {
+        return Err(ResolvedAttachmentReplayInvariantError::StaleAttachment {
+            expected: command.attachment,
+            found,
+        });
+    }
+    if attachment.attached_to != command.expected_old_host {
+        return Err(
+            ResolvedAttachmentReplayInvariantError::HostPreconditionMismatch {
+                expected: command.expected_old_host,
+                found: attachment.attached_to,
+            },
+        );
+    }
+    // CR 303.4f: the recorded host must still be an object the graph can point
+    // at, checked before any mutation so a rejected command leaves no partial edit.
+    if let Some(new_host_id) = command.resulting_host.and_then(|host| host.as_object()) {
+        if !state.objects.contains_key(&new_host_id) {
+            return Err(ResolvedAttachmentReplayInvariantError::UnknownHost(
+                new_host_id,
+            ));
+        }
+    }
+
+    if let Some(old_host_id) = command.expected_old_host.and_then(|host| host.as_object()) {
+        if let Some(old_host) = state.objects.get_mut(&old_host_id) {
+            old_host.attachments.retain(|&id| id != attachment_id);
+        }
+    }
+    if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+        attachment.attached_to = command.resulting_host;
+        // CR 613.7e + CR 701.3c: install the timestamp the authority drew rather
+        // than re-drawing one, which would reorder the layer system.
+        if let Some(timestamp) = command.resulting_timestamp {
+            attachment.timestamp = timestamp;
+        }
+    }
+    // CR 613.7e: an unattach and a same-host re-attach draw no timestamp, so
+    // only a recorded draw advances the allocator past the value it installed.
+    if let Some(timestamp) = command.resulting_timestamp {
+        state.adopt_replayed_timestamp(timestamp);
+    }
+    if let Some(new_host_id) = command.resulting_host.and_then(|host| host.as_object()) {
+        if let Some(new_host) = state.objects.get_mut(&new_host_id) {
+            if !new_host.attachments.contains(&attachment_id) {
+                new_host.attachments.push(attachment_id);
+            }
+        }
+    }
+
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    Ok(())
 }
 
 #[cfg(test)]

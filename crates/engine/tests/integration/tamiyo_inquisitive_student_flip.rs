@@ -34,6 +34,7 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::stack::resolve_top;
 use engine::game::triggers::process_triggers;
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+use engine::types::card::PrintedLoyalty;
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -91,6 +92,7 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
         power: None,
         toughness: None,
         loyalty: Some(2),
+        printed_loyalty: Some(PrintedLoyalty::Fixed(2)),
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],

@@ -1,4 +1,8 @@
 import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  AiDecisionDiagnosticsCapability,
+  AiProposalSubmission,
   BatchResolveResult,
   EngineAdapter,
   EngineSnapshot,
@@ -12,39 +16,25 @@ import type {
   PlayerId,
   SubmitResult,
   ViewerSnapshot,
-  WaitingFor,
 } from "./types";
+import type { InteractionSubmission } from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, isStaleRejectionMessage, isStateLostMessage, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
-import type { AiCardDataMode } from "./card-db-subset";
+import type { AiCardDataMode, AiPoolCardDbPlan } from "./card-db-subset";
 import {
   applyAiPoolCardDbPlan,
   DEFAULT_AI_CARD_DATA_MODE,
   resolveAiPoolCardDbPlan,
 } from "./card-db-subset";
-import type { AiPoolCardDbPlan } from "./card-db-subset";
 
-/**
- * True on handheld browsers whose per-tab memory ceiling cannot hold the main
- * WASM engine instance plus the 2–4 pooled AI instances. Every iOS browser is
- * WebKit and shares one per-tab budget, so N copies of the full ~48MB engine
- * module silently OOM-reload the tab. Desktop browsers have GB-scale ceilings
- * and return false. Used by `ensureAiPool` to skip the pool on these devices.
- *
- * iPadOS 13+ reports the desktop `MacIntel` platform, so it is distinguished by
- * its touch support rather than the user-agent string.
- */
 function isMemoryConstrainedDevice(): boolean {
   if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent;
-  const isIOS =
-    /iP(hone|od|ad)/.test(ua) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  const isAndroidPhone = /Android/.test(ua) && /Mobile/.test(ua);
-  return isIOS || isAndroidPhone;
+  const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
 }
 
 /**
@@ -134,26 +124,20 @@ export function getSharedAdapter(): WasmAdapter {
  * Falls back to direct main-thread WASM calls if Worker creation fails
  * (e.g., restrictive CSP, very old browser).
  */
-export class WasmAdapter implements EngineAdapter {
+export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   cardDbLoaded = false;
 
   // Worker-based engine (primary path)
   private engine: EngineWorkerClient | null = null;
 
-  // Multi-worker AI pool for VeryHard root parallelism (lazy-initialized)
+  // Score-only workers are an optional VeryHard optimization. They never own
+  // proposals or action submission authority.
   private aiPool: AiWorkerPool | null = null;
   private aiPoolPromise: Promise<AiWorkerPool | null> | null = null;
   private aiPoolGeneration = 0;
   private aiPoolFailed = false;
-  /** This game's card universe is unbounded (e.g. Momir): the pool was
-   *  disposed instead of loading the full corpus into every worker, and must
-   *  not be recreated until the next game (cleared in `resetGameState`). */
   private aiPoolUnboundedGame = false;
-
-  // How the AI worker pool loads its card database. `auto`/`subset` load an
-  // engine-built game-scoped subset (escalating to full for unbounded games
-  // like Momir); `full` loads the entire corpus into every pool worker.
   private aiCardDataMode: AiCardDataMode = DEFAULT_AI_CARD_DATA_MODE;
 
   // Fallback: direct WASM on main thread (only used if Worker fails)
@@ -166,6 +150,51 @@ export class WasmAdapter implements EngineAdapter {
   // worker's ~90 MB instance. Concurrent callers share one promise.
   private initPromise: Promise<void> | null = null;
   private lifecycleGeneration = 0;
+  private aiDecisionDiagnosticsEnabled = false;
+  private aiDecisionDiagnosticsEpoch = 0;
+  private readonly receiptByToken = new Map<string, AiDecisionDiagnosticReceipt>();
+  private readonly tokenBySemanticOwner = new Map<PlayerId, string>();
+  private readonly aiDecisionDiagnosticListeners = new Set<(receipt: AiDecisionDiagnosticReceipt) => void>();
+
+  /** Invalidate local observations whenever the WASM authority invalidates proposals. */
+  private invalidateAiDecisionDiagnostics(): void {
+    this.aiDecisionDiagnosticsEpoch += 1;
+    this.receiptByToken.clear();
+    this.tokenBySemanticOwner.clear();
+  }
+
+  setAiDecisionDiagnosticsEnabled(enabled: boolean): void {
+    if (this.aiDecisionDiagnosticsEnabled === enabled) return;
+    this.aiDecisionDiagnosticsEnabled = enabled;
+    this.invalidateAiDecisionDiagnostics();
+  }
+
+  subscribeAiDecisionDiagnostics(listener: (receipt: AiDecisionDiagnosticReceipt) => void): () => void {
+    this.aiDecisionDiagnosticListeners.add(listener);
+    return () => this.aiDecisionDiagnosticListeners.delete(listener);
+  }
+
+  private retainAiDecisionDiagnostic(
+    startEpoch: number,
+    proposal: AiActionProposal,
+    receipt: AiDecisionDiagnosticReceipt,
+  ): void {
+    if (!this.aiDecisionDiagnosticsEnabled || startEpoch !== this.aiDecisionDiagnosticsEpoch) return;
+    const previous = this.tokenBySemanticOwner.get(proposal.semanticOwner);
+    if (previous) this.receiptByToken.delete(previous);
+    this.tokenBySemanticOwner.set(proposal.semanticOwner, proposal.token);
+    this.receiptByToken.set(proposal.token, receipt);
+  }
+
+  private takeAiDecisionDiagnostic(token: string): AiDecisionDiagnosticReceipt | undefined {
+    const receipt = this.receiptByToken.get(token);
+    if (!receipt) return undefined;
+    this.receiptByToken.delete(token);
+    if (this.tokenBySemanticOwner.get(receipt.semanticOwner) === token) {
+      this.tokenBySemanticOwner.delete(receipt.semanticOwner);
+    }
+    return receipt;
+  }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -229,9 +258,6 @@ export class WasmAdapter implements EngineAdapter {
           console.log(`Card database loaded: ${count} cards`);
         }
         this.cardDbLoaded = true;
-        // Also load into AI pool if it's already initialized. AI-pool workers
-        // get the game-scoped subset (built on the main engine), not the full
-        // corpus; an unbounded universe (e.g. Momir) disposes the pool instead.
         if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
           await this.ensureAiPool();
         }
@@ -271,8 +297,23 @@ export class WasmAdapter implements EngineAdapter {
       await this.ensureCardDb();
     }
     try {
-      if (this.engine) return await this.engine.submitAction(actor, action);
-      return await this.fallback!.submitAction(action, actor);
+      const result = this.engine ? await this.engine.submitAction(actor, action) : await this.fallback!.submitAction(action, actor);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async submitInteraction(
+    submission: InteractionSubmission,
+    actor: PlayerId,
+  ): Promise<SubmitResult> {
+    this.assertInitialized();
+    try {
+      const result = this.engine ? await this.engine.submitInteraction(actor, submission) : await this.fallback!.submitInteraction(submission, actor);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -376,200 +417,193 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-  async getAiAction(
+  async getAiActionProposal(
     difficulty: string,
     playerId: number,
-    waitingForType?: WaitingFor["type"],
-  ): Promise<GameAction | null> {
+  ): Promise<AiActionProposal | null> {
     this.assertInitialized();
-
-    // Root parallelism for VeryHard: multiple workers score independently, merge results.
-    // Only worthwhile for Priority decisions where MCTS search explores multiple trees.
-    // Deterministic decisions (mulligan, scry, combat, etc.) return immediately in
-    // score_candidates and don't benefit from parallelism — serializing/deserializing
-    // the full game state (2.5+ MB for Commander) exceeds any parallel gain.
-    // The caller passes the current `waiting_for.type` so we don't reach into UI
-    // state from a transport adapter (adapters are thin serialization boundaries).
-    if (difficulty === "VeryHard" && this.engine && waitingForType === "Priority") {
-      const pool = await this.ensureAiPool();
-      if (pool) {
-        try {
-          const stateJson = await this.engine.exportState();
-          const merged = await pool.getAiScoredCandidates(
-            stateJson,
-            difficulty,
-            playerId,
-          );
-          if (merged && merged.length > 0) {
-            if (merged.length === 1) return merged[0][0];
-            // Delegate softmax selection to Rust (keeps all AI logic in the engine)
-            const scoresJson = JSON.stringify(merged);
-            const selected = await this.engine.selectActionFromScores(
-              scoresJson,
-              difficulty,
-              Date.now(),
-            );
-            if (selected != null) return selected;
-          }
-        } catch (err) {
-          // STATE_LOST / ENGINE_PANIC must escalate immediately — falling
-          // through to the single-worker path would just hit the same sentinel
-          // (or panic) and waste a round-trip. The async classifier drains
-          // the panic from the engine worker so callers see ENGINE_PANIC
-          // when applicable. All other pool failures are recoverable via
-          // the single-worker fallback.
-          if (err instanceof Error && isStateLostMessage(err.message)) {
-            throw await classifyEngineErrorAsync(err, this.takePanic);
+    try {
+      const captureEpoch = this.aiDecisionDiagnosticsEpoch;
+      const capture = this.aiDecisionDiagnosticsEnabled;
+      if (capture) {
+        // Preserve the existing VeryHard score-worker route. Capturing may
+        // observe its rebinding receipt, but never chooses a different path.
+        if (difficulty === "VeryHard" && this.engine) {
+          try {
+            const state = await this.engine!.getState();
+            if (state.waiting_for.type === "Priority") {
+              const pool = await this.ensureAiPool();
+              if (pool) {
+                const scores = await pool.getAiScoredCandidates(
+                  await this.engine!.exportState(),
+                  difficulty,
+                  playerId,
+                );
+                if (scores?.length) {
+                  const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
+                    JSON.stringify(scores),
+                    difficulty,
+                    playerId,
+                    Date.now(),
+                  );
+                  if (captured) {
+                    this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                    return captured.proposal;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+            console.warn("AI worker pool failed; using authoritative single worker", error);
           }
         }
+        const captured = this.engine
+          ? await this.engine.getAiActionProposalWithDiagnostics(difficulty, playerId)
+          : await this.fallback!.getAiActionProposalWithDiagnostics(difficulty, playerId);
+        if (captured) this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+        return captured?.proposal ?? null;
       }
-    }
-
-    // Single-worker path for non-VeryHard or when pool unavailable
-    try {
-      if (this.engine) return await this.engine.getAiAction(difficulty, playerId);
-      return await this.fallback!.getAiAction(difficulty, playerId);
+      if (difficulty === "VeryHard" && this.engine) {
+        try {
+          // A snapshot can become stale while scoring. That is safe: the main
+          // worker rebinds every score against a newly-issued contract below.
+          const state = await this.engine.getState();
+          if (state.waiting_for.type === "Priority") {
+            const pool = await this.ensureAiPool();
+            if (pool) {
+              const scores = await pool.getAiScoredCandidates(
+                await this.engine.exportState(),
+                difficulty,
+                playerId,
+              );
+              if (scores?.length) {
+                const proposal = await this.engine.getAiActionProposalFromScores(
+                  JSON.stringify(scores),
+                  difficulty,
+                  playerId,
+                  Date.now(),
+                );
+                if (proposal) return proposal;
+              }
+            }
+          }
+        } catch (error) {
+          if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+          console.warn("AI worker pool failed; using authoritative single worker", error);
+        }
+      }
+      if (this.engine) return await this.engine.getAiActionProposal(difficulty, playerId);
+      return await this.fallback!.getAiActionProposal(difficulty, playerId);
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
   }
 
-/** Load an EXISTING pool's per-game card data, or dispose it when the game's
-   * universe is unbounded (e.g. Momir). Fanning the full ~93MB corpus onto
-   * every pool worker costs ~380MB of WASM linear memory per worker — measured
-   * at ~3GB total on a desktop 4-worker pool (user report, 2026-07-18). The
-   * single-worker fallback (main engine already holds the full DB) runs the
-   * same fixed-budget beam search; the pool only adds cross-seed
-   * rollout-variance averaging — the same tradeoff already accepted for
-   * memory-constrained handhelds. Pool *creation* resolves the plan before
-   * spawning workers (see `ensureAiPool`); this handles the cross-game case
-   * where a pool from a bounded game meets an unbounded one. Returns the
-   * surviving pool or null. */
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    this.assertInitialized();
+    try {
+      const outcome = this.engine
+        ? await this.engine.submitAiActionProposal(proposal)
+        : await this.fallback!.submitAiActionProposal(proposal);
+      if (outcome.status === "applied") {
+        const receipt = this.takeAiDecisionDiagnostic(proposal.token);
+        if (receipt && this.aiDecisionDiagnosticsEnabled) {
+          for (const listener of this.aiDecisionDiagnosticListeners) listener(receipt);
+        }
+        this.invalidateAiDecisionDiagnostics();
+      } else if (outcome.status === "stale") {
+        this.takeAiDecisionDiagnostic(proposal.token);
+      }
+      return outcome;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  private trackAiPoolWork(pending: Promise<AiWorkerPool | null>): Promise<AiWorkerPool | null> {
+    this.aiPoolPromise = pending;
+    const clear = () => {
+      if (this.aiPoolPromise === pending) this.aiPoolPromise = null;
+    };
+    void pending.then(clear, clear);
+    return pending;
+  }
+
   private async reloadAiPoolGameDb(
     engine: EngineWorkerClient,
-    aiPool: AiWorkerPool,
+    pool: AiWorkerPool,
     generation: number,
   ): Promise<AiWorkerPool | null> {
     try {
       const plan = await resolveAiPoolCardDbPlan(this.aiCardDataMode, engine);
-      if (this.aiPoolGeneration !== generation || this.aiPool !== aiPool) {
-        return null;
-      }
+      if (generation !== this.aiPoolGeneration || pool !== this.aiPool) return null;
       if (plan.kind === "unbounded") {
-        aiPool.dispose();
+        pool.dispose();
         this.aiPool = null;
         this.aiPoolUnboundedGame = true;
         return null;
       }
-      await applyAiPoolCardDbPlan(plan, aiPool);
-      if (this.aiPoolGeneration !== generation || this.aiPool !== aiPool) {
-        aiPool.invalidateCardDb();
+      await applyAiPoolCardDbPlan(plan, pool);
+      if (generation !== this.aiPoolGeneration || pool !== this.aiPool) {
+        // A reset may have started a new game while this old subset loaded.
+        // Never let that result become usable by the next decision.
+        pool.invalidateCardDb();
         return null;
       }
-      return aiPool;
-    } catch (err) {
-      if (this.aiPoolGeneration === generation && this.aiPool === aiPool) {
-        // Degrade to the single-worker path for this decision instead of
-        // crashing the AI flow. The pool stays invalid so a transient failure
-        // retries on the next decision.
-        console.warn("Failed to load game DB into AI pool:", err);
+      return pool;
+    } catch (error) {
+      if (generation === this.aiPoolGeneration && pool === this.aiPool) {
+        console.warn("Failed to load bounded card DB into AI pool", error);
       }
       return null;
     }
   }
 
-  /** Lazy AI pool init — only created on first VeryHard request. */
   private ensureAiPool(): Promise<AiWorkerPool | null> {
-    // Unbounded-universe game (e.g. Momir): the pool was already dropped for
-    // this game — don't recreate it just to escalate and drop it again on
-    // every AI decision.
-    if (this.aiPoolUnboundedGame) return Promise.resolve(null);
+    if (!this.engine || !this.cardDbLoaded || this.aiPoolUnboundedGame || isMemoryConstrainedDevice()) {
+      return Promise.resolve(null);
+    }
     if (this.aiPoolPromise) return this.aiPoolPromise;
     if (this.aiPool) {
-      // The pool's subset is game-scoped: after `resetGameState` invalidated it,
-      // rebuild this game's subset (the pool instance is preserved across games).
-      if (this.cardDbLoaded && this.engine && !this.aiPool.isCardDbLoaded) {
-        const generation = this.aiPoolGeneration;
-        return this.trackAiPoolWork(
-          this.reloadAiPoolGameDb(this.engine, this.aiPool, generation),
-        );
-      }
-      return Promise.resolve(this.aiPool);
+      return this.aiPool.isCardDbLoaded
+        ? Promise.resolve(this.aiPool)
+        : this.trackAiPoolWork(this.reloadAiPoolGameDb(this.engine, this.aiPool, this.aiPoolGeneration));
     }
     if (this.aiPoolFailed) return Promise.resolve(null);
-    // Skip the AI worker pool on memory-constrained handhelds (iOS WebKit in
-    // particular): the main engine instance plus 2–4 pooled instances each hold
-    // a full ~48MB WASM module and exceed the per-tab memory ceiling, silently
-    // OOM-reloading the tab. VeryHard then falls through to the single-worker
-    // path below (getAiAction), which runs the same fixed-budget beam search;
-    // the pool only adds cross-seed rollout-variance averaging, not search depth.
-    if (isMemoryConstrainedDevice()) return Promise.resolve(null);
-
-    const generation = this.aiPoolGeneration;
-    return this.trackAiPoolWork(this.createAiPool(generation));
-  }
-
-  private trackAiPoolWork(
-    pending: Promise<AiWorkerPool | null>,
-  ): Promise<AiWorkerPool | null> {
-    this.aiPoolPromise = pending;
-    const clearPending = () => {
-      if (this.aiPoolPromise === pending) this.aiPoolPromise = null;
-    };
-    void pending.then(clearPending, clearPending);
-    return pending;
+    return this.trackAiPoolWork(this.createAiPool(this.aiPoolGeneration));
   }
 
   private async createAiPool(generation: number): Promise<AiWorkerPool | null> {
-    let candidatePool: AiWorkerPool | null = null;
+    let candidate: AiWorkerPool | null = null;
     try {
-      // Resolve this game's card-data plan BEFORE paying to spawn workers:
-      // an unbounded-universe game (e.g. Momir) never creates a pool at all.
-      let plan: AiPoolCardDbPlan | null = null;
-      if (this.cardDbLoaded && this.engine) {
-        plan = await resolveAiPoolCardDbPlan(this.aiCardDataMode, this.engine);
-        if (this.aiPoolGeneration !== generation) return null;
-        if (plan.kind === "unbounded") {
-          this.aiPoolUnboundedGame = true;
-          return null;
-        }
-      }
-      const cores = navigator.hardwareConcurrency ?? 0;
-      const count = Math.max(2, Math.min(cores - 1, 4));
-      candidatePool = new AiWorkerPool(count);
-      await candidatePool.initialize();
-      if (plan) {
-        await applyAiPoolCardDbPlan(plan, candidatePool);
-      }
-      if (this.aiPoolGeneration !== generation) {
-        candidatePool.dispose();
+      const plan: AiPoolCardDbPlan = await resolveAiPoolCardDbPlan(this.aiCardDataMode, this.engine!);
+      if (generation !== this.aiPoolGeneration) return null;
+      if (plan.kind === "unbounded") {
+        this.aiPoolUnboundedGame = true;
         return null;
       }
-      // Publish only a fully initialized, game-data-ready pool. A partially
-      // initialized pool must never become observable to later AI decisions.
-      this.aiPool = candidatePool;
-      return candidatePool;
-    } catch {
-      candidatePool?.dispose();
-      if (this.aiPoolGeneration === generation) {
+      const workers = Math.max(2, Math.min((navigator.hardwareConcurrency ?? 0) - 1, 4));
+      candidate = new AiWorkerPool(workers);
+      await candidate.initialize();
+      await applyAiPoolCardDbPlan(plan, candidate);
+      if (generation !== this.aiPoolGeneration) {
+        candidate.dispose();
+        return null;
+      }
+      this.aiPool = candidate;
+      return candidate;
+    } catch (error) {
+      candidate?.dispose();
+      if (generation === this.aiPoolGeneration) {
         this.aiPool = null;
         this.aiPoolFailed = true;
       }
+      console.warn("AI worker pool unavailable; using authoritative single worker", error);
       return null;
     }
-  }
-
-  /**
-   * Get AI actions for multiple AI seats with per-seat difficulty.
-   * Returns the action for the AI player whose turn it currently is, or null.
-   */
-  getAiActionForSeats(
-    aiSeats: { playerId: number; difficulty: string }[],
-    activePlayer: number,
-  ): Promise<GameAction | null> {
-    const seat = aiSeats.find((s) => s.playerId === activePlayer);
-    if (!seat) return Promise.resolve(null);
-    return this.getAiAction(seat.difficulty, seat.playerId);
   }
 
   async resolveAll(
@@ -579,17 +613,31 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<BatchResolveResult> {
     this.assertInitialized();
     if (this.engine) {
-      return this.engine.resolveAll(requester, aiSeats, maxResolutions);
+      const result = await this.engine.resolveAll(requester, aiSeats, maxResolutions);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
     throw new Error("resolveAll requires worker-based engine");
   }
 
+  private async requireCardDbForRestore(): Promise<void> {
+    await this.ensureCardDb();
+    // Soft-failed ensureCardDb leaves cardDbLoaded false and skips
+    // rehydrate_game_from_card_db — restored CardName NamedChoices then have
+    // empty legal actions and softlock the AI (#6393). Refuse DB-less restore
+    // / P2P host resume the same way warmCardDatabase surfaces load failure.
+    if (!this.cardDbLoaded) {
+      throw new Error("Card database failed to load");
+    }
+  }
+
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
-    await this.ensureCardDb();
+    await this.requireCardDbForRestore();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+    this.invalidateAiDecisionDiagnostics();
   }
 
   /**
@@ -616,15 +664,20 @@ export class WasmAdapter implements EngineAdapter {
     } else {
       this.fallback!.setMultiplayerMode(enabled);
     }
+    this.invalidateAiDecisionDiagnostics();
   }
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
     this.assertInitialized();
     await this.ensureCardDb();
     if (this.engine) {
-      return this.engine.applySeatMutation(stateJson, mutationJson);
+      const result = await this.engine.applySeatMutation(stateJson, mutationJson);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
-    return this.fallback!.applySeatMutation(stateJson, mutationJson);
+    const result = await this.fallback!.applySeatMutation(stateJson, mutationJson);
+    this.invalidateAiDecisionDiagnostics();
+    return result;
   }
 
   async projectSeatView(stateJson: string): Promise<unknown> {
@@ -647,49 +700,26 @@ export class WasmAdapter implements EngineAdapter {
    */
   async resumeMultiplayerHostState(state: PersistedGameState): Promise<void> {
     this.assertInitialized();
+    // Same CARD_DB requirement as restoreState — resume rehydrates abilities
+    // only when the DB is loaded (engine-wasm resume_multiplayer_host_state).
+    await this.requireCardDbForRestore();
     const json = JSON.stringify(state);
-    if (this.engine) {
-      // Ensure the card database is loaded before the engine rehydrates
-      // ability definitions on restore. Same sequential-queue guarantee
-      // as `restoreState`.
-      if (!this.cardDbLoaded) {
-        await this.engine.loadCardDbFromUrl().then(
-          () => { this.cardDbLoaded = true; },
-          () => { /* card DB is best-effort */ },
-        );
-      }
-      await this.engine.resumeMultiplayerHostState(json);
-    } else {
-      this.fallback!.resumeMultiplayerHostState(json);
-    }
+    if (this.engine) await this.engine.resumeMultiplayerHostState(json);
+    else await this.fallback!.resumeMultiplayerHostState(json);
+    this.invalidateAiDecisionDiagnostics();
   }
 
-  /**
-   * Clear the WASM game state without terminating the worker.
-   *
-   * Preserves the WASM instance (with V8 TurboFan optimizations), the main
-   * worker's full card database, and the AI worker pool INSTANCE. In
-   * subset/auto mode the pool's game-scoped subset is invalidated so the next
-   * `ensureAiPool`/`ensureCardDb` rebuilds it for the new game; in full mode the
-   * pool's full DB is preserved (it's game-independent). Any in-flight AI
-   * computation on the old state will short-circuit with an error rather than
-   * running a full search.
-   */
+  /** Clear the WASM game state without terminating the worker. */
   async resetGameState(): Promise<void> {
-    // Invalidate unpublished pool candidates immediately. A later game may
-    // start creating its own pool while an earlier game's initialization is
-    // still unwinding; identity checks prevent the stale promise from clearing
-    // the newer one.
     this.aiPoolGeneration += 1;
     this.aiPoolPromise = null;
     this.aiPoolFailed = false;
-    if (this.aiCardDataMode !== "full") {
-      this.aiPool?.invalidateCardDb();
-    }
     this.aiPoolUnboundedGame = false;
+    if (this.aiCardDataMode !== "full") this.aiPool?.invalidateCardDb();
     if (this.engine) {
       await this.engine.resetGame();
     }
+    this.invalidateAiDecisionDiagnostics();
   }
 
   async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
@@ -709,10 +739,7 @@ export class WasmAdapter implements EngineAdapter {
    */
   async warmCardDatabase(): Promise<void> {
     await this.initialize();
-    await this.ensureCardDb();
-    if (!this.cardDbLoaded) {
-      throw new Error("Card database failed to load");
-    }
+    await this.requireCardDbForRestore();
   }
 
   /**
@@ -757,6 +784,8 @@ export class WasmAdapter implements EngineAdapter {
   }
 
   dispose(): void {
+    this.setAiDecisionDiagnosticsEnabled(false);
+    this.aiDecisionDiagnosticListeners.clear();
     this.lifecycleGeneration += 1;
     this.aiPoolGeneration += 1;
     // Clear the singleton reference so getSharedAdapter() creates a fresh
@@ -797,7 +826,7 @@ export class WasmAdapter implements EngineAdapter {
     }
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {
-      return this.engine.initializeGame(
+      const result = await this.engine.initializeGame(
         deckData ?? null,
         seed,
         formatConfig ?? null,
@@ -805,8 +834,10 @@ export class WasmAdapter implements EngineAdapter {
         playerCount,
         firstPlayer,
       );
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
-    return this.fallback!.initializeGame(
+    const result = await this.fallback!.initializeGame(
       deckData ?? null,
       seed,
       formatConfig ?? null,
@@ -814,6 +845,8 @@ export class WasmAdapter implements EngineAdapter {
       playerCount,
       firstPlayer,
     );
+    this.invalidateAiDecisionDiagnostics();
+    return result;
   }
 
   /** Expose the worker client for AI pool state export (Phase 4). */
@@ -838,6 +871,7 @@ export class WasmAdapter implements EngineAdapter {
 interface MainThreadFallback {
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   getState(): Promise<GameState>;
   getFilteredState(viewerId: number): Promise<GameState>;
@@ -845,10 +879,15 @@ interface MainThreadFallback {
   getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
-  getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
+  getAiActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
+  getAiActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null>;
+  submitAiActionProposal(proposal: AiActionProposal): Promise<AiProposalSubmission>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
-  resumeMultiplayerHostState(stateJson: string): void;
+  resumeMultiplayerHostState(stateJson: string): Promise<void>;
   setMultiplayerMode(enabled: boolean): void;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   projectSeatView(stateJson: string): Promise<unknown>;
@@ -890,6 +929,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
         const r = wasm.submit_action(actor, action);
+        if (typeof r === "string") throw new Error(r);
+        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
+      enqueue(() => {
+        const r = wasm.submit_interaction_js(actor, submission);
         if (typeof r === "string") throw new Error(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
@@ -955,20 +1001,29 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return r as ViewerSnapshot;
       }),
 
-    getAiAction: (difficulty: string, playerId: number) =>
-      enqueue(() => {
-        const r = wasm.get_ai_action(difficulty, playerId);
-        return (r ?? null) as GameAction | null;
-      }),
+    getAiActionProposal: (difficulty: string, playerId: number) =>
+      enqueue(() => (wasm.get_ai_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
+
+    getAiActionProposalWithDiagnostics: (difficulty: string, playerId: number) =>
+      enqueue(() => (wasm.get_ai_action_proposal_with_diagnostics(difficulty, playerId) ?? null) as {
+        proposal: AiActionProposal;
+        receipt: AiDecisionDiagnosticReceipt;
+      } | null),
+
+    submitAiActionProposal: (proposal: AiActionProposal) =>
+      enqueue(() => wasm.submit_ai_action_proposal(
+        proposal.token,
+        proposal.actor,
+        proposal.action,
+      ) as AiProposalSubmission),
 
     exportState: () => enqueue(() => wasm.export_game_state_json()),
 
     restoreState: (stateJson: string) =>
       enqueue(() => wasm.restore_game_state(stateJson)),
 
-    resumeMultiplayerHostState: (stateJson: string) => {
-      enqueue(() => wasm.resume_multiplayer_host_state(stateJson));
-    },
+    resumeMultiplayerHostState: (stateJson: string) =>
+      enqueue(() => wasm.resume_multiplayer_host_state(stateJson)),
 
     setMultiplayerMode: (enabled: boolean) => {
       enqueue(() => wasm.set_multiplayer_mode(enabled));

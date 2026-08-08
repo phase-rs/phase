@@ -16,13 +16,23 @@ use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
 use super::{casting, priority, triggers};
 
+/// Both owned parameters are `Box`ed deliberately, not incidentally.
+/// `PendingTrigger::ability` and `GameState::pending_trigger` are both already
+/// `Box`es, and every caller's source is one; taking them by value here would
+/// move a 5,264 B `ResolvedAbility` and a 744 B `PendingTrigger` through this
+/// frame only to re-box both, buying two allocations and a free for nothing.
+/// Threading the boxes keeps the frame at two pointers. See
+/// `engine/src/types/game_state_size.rs` for the stack budget these sizes
+/// count against.
 pub(super) fn finalize_trigger_target_selection(
     state: &mut GameState,
-    trigger: PendingTrigger,
-    ability: ResolvedAbility,
+    mut trigger: Box<PendingTrigger>,
+    ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     let assigned_targets = flatten_targets_in_chain(&ability);
+    let crime_candidate =
+        casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(
         state,
         &assigned_targets,
@@ -34,7 +44,6 @@ pub(super) fn finalize_trigger_target_selection(
     // CR 601.2d: Division is announced only among the distributing effect's own targets, not sibling-effect targets (which still become targets above).
     let dist_targets = distribution_targets(&ability);
 
-    let mut trigger = trigger;
     let controller = trigger.controller;
     let distribute = trigger.distribute.clone();
     trigger.ability = ability;
@@ -46,33 +55,35 @@ pub(super) fn finalize_trigger_target_selection(
         if let Some(total) =
             extract_distribution_total(state, &trigger.ability, &trigger.ability.effect)
         {
-            if dist_targets.len() == 1 {
-                trigger.ability.distribution = Some(vec![(dist_targets[0].clone(), total)]);
-            } else {
-                // CR 601.2d: Distribution still outstanding. Entry is already
-                // on the stack with empty `distribution`; mutate the on-stack
-                // ability's targets (so they match what was just chosen) and
-                // keep `pending_trigger_entry` set until division completes.
-                if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
-                    // Unexpected dangling cursor: the entry is gone before the
-                    // division prompt could open. Recover per CR 608.2b / CR
-                    // 800.4a (a stack object that has left the stack does not
-                    // resolve) — record the diagnostic, abandon, hand back
-                    // priority. Matches the DistributeAmong-return convention
-                    // below; the next priority pass re-normalizes (CR 117.3b
-                    // would give the active player).
-                    triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+            match dist_targets.as_slice() {
+                [] => trigger.ability.distribution = Some(Vec::new()),
+                [target] => trigger.ability.distribution = Some(vec![(target.clone(), total)]),
+                _ => {
+                    // CR 601.2d: Distribution still outstanding. Entry is already
+                    // on the stack with empty `distribution`; mutate the on-stack
+                    // ability's targets (so they match what was just chosen) and
+                    // keep `pending_trigger_entry` set until division completes.
+                    if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
+                        // Unexpected dangling cursor: the entry is gone before the
+                        // division prompt could open. Recover per CR 608.2b / CR
+                        // 800.4a (a stack object that has left the stack does not
+                        // resolve) — record the diagnostic, abandon, hand back
+                        // priority. Matches the DistributeAmong-return convention
+                        // below; the next priority pass re-normalizes (CR 117.3b
+                        // would give the active player).
+                        triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+                        priority::clear_priority_passes(state);
+                        return WaitingFor::Priority { player: controller };
+                    }
+                    state.pending_trigger = Some(trigger);
                     priority::clear_priority_passes(state);
-                    return WaitingFor::Priority { player: controller };
+                    return WaitingFor::DistributeAmong {
+                        player: controller,
+                        total,
+                        targets: dist_targets,
+                        unit,
+                    };
                 }
-                state.pending_trigger = Some(trigger);
-                priority::clear_priority_passes(state);
-                return WaitingFor::DistributeAmong {
-                    player: controller,
-                    total,
-                    targets: dist_targets,
-                    unit,
-                };
             }
         }
     }
@@ -92,6 +103,8 @@ pub(super) fn finalize_trigger_target_selection(
         priority::clear_priority_passes(state);
         return WaitingFor::Priority { player: controller };
     }
+
+    casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
 
     priority::clear_priority_passes(state);
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the

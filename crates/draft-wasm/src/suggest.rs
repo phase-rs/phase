@@ -8,7 +8,7 @@ use engine::types::mana::ManaType;
 use phase_ai::config::AiDifficulty;
 use phase_ai::{draft_eval, mana_colors};
 
-/// A suggested Limited deck: spell names + land distribution.
+/// A suggested Limited deck: drafted-card names + unlimited land distribution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedDeck {
     pub main_deck: Vec<String>,
@@ -88,10 +88,11 @@ pub fn suggest_deck(
         }
     }
 
-    // `main_deck` holds the non-land spells only; `lands` carries the land
-    // distribution separately. Consumers (the deckbuilder store, `get_bot_deck`)
-    // concatenate the two — appending lands here as well would double-count them
-    // (e.g. 23 spells + 17 lands in `main_deck`, then +17 lands again = 57).
+    // `main_deck` includes every selected drafted card, including nonbasic lands.
+    // `lands` is exclusively for addable cards, which the deck builder tracks
+    // separately from the drafted pool. Keeping drafted lands in `main_deck`
+    // makes them leave the pool and appear in the main-deck area instead of being
+    // mistaken for unlimited addable lands.
     let spell_names: Vec<String> = spells.iter().map(|c| c.name.clone()).collect();
     let land_total = min_deck_size.saturating_sub(spell_names.len()) as u8;
 
@@ -109,15 +110,23 @@ pub fn suggest_deck(
     };
     let nonbasic_count: u8 = nonbasic_lands.values().copied().sum();
     let basics_total = land_total.saturating_sub(nonbasic_count);
-    let mut lands = suggest_addable_cards(&spell_names, pool, basics_total, addable_cards);
-    for (name, count) in nonbasic_lands {
-        *lands.entry(name).or_insert(0) += count;
+    let lands = suggest_addable_cards(&spell_names, pool, basics_total, addable_cards);
+
+    // Preserve drafted-pool order when adding selected nonbasic lands. A count
+    // map is used for selection, so decrement it as each matching pool entry is
+    // included to handle multiple drafted copies correctly.
+    let mut selected_land_counts = nonbasic_lands;
+    let mut main_deck = spell_names;
+    for card in pool {
+        if let Some(count) = selected_land_counts.get_mut(&card.name) {
+            if *count > 0 {
+                main_deck.push(card.name.clone());
+                *count -= 1;
+            }
+        }
     }
 
-    SuggestedDeck {
-        main_deck: spell_names,
-        lands,
-    }
+    SuggestedDeck { main_deck, lands }
 }
 
 /// On-color drafted nonbasic fixing lands as a `name -> copy-count` map, capped at
@@ -473,13 +482,18 @@ mod tests {
             &DeckAddableCards::standard_basics(),
         );
         assert!(
-            deck.lands.contains_key("On Color Dual"),
-            "on-color (W/U) fixing land should be admitted to the manabase, got {:?}",
-            deck.lands
+            deck.main_deck.contains(&"On Color Dual".to_string()),
+            "on-color (W/U) fixing land should be in the drafted main deck, got {:?}",
+            deck.main_deck
         );
         assert!(
-            !deck.lands.contains_key("Off Color Dual"),
+            !deck.main_deck.contains(&"Off Color Dual".to_string()),
             "off-color (B/R) fixing land must not be admitted, got {:?}",
+            deck.main_deck
+        );
+        assert!(
+            !deck.lands.contains_key("On Color Dual"),
+            "drafted lands must not be reported as unlimited addable lands, got {:?}",
             deck.lands
         );
     }
@@ -505,6 +519,33 @@ mod tests {
     }
 
     #[test]
+    fn admits_each_copy_of_a_selected_nonbasic_land() {
+        let db = fixture_db();
+        let mut pool = wu_pool();
+        let mut second_dual = instance("On Color Dual", &[], 0, "Land — Plains Island");
+        second_dual.instance_id = "id-on-color-dual-2".to_string();
+        pool.push(second_dual);
+
+        let deck = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            8,
+            &DeckAddableCards::standard_basics(),
+        );
+        let selected_dual_count = deck
+            .main_deck
+            .iter()
+            .filter(|name| name.as_str() == "On Color Dual")
+            .count();
+        let basic_land_count: u8 = deck.lands.values().sum();
+
+        assert_eq!(selected_dual_count, 2);
+        assert_eq!(basic_land_count, 2, "each selected dual replaces one basic");
+        assert_eq!(deck.main_deck.len() + basic_land_count as usize, 8);
+    }
+
+    #[test]
     fn no_card_db_admits_no_nonbasics() {
         // Without a card DB the produced colors are unknown, so no nonbasic is
         // admitted (the manabase falls back to basics only).
@@ -515,6 +556,6 @@ mod tests {
             8,
             &DeckAddableCards::standard_basics(),
         );
-        assert!(!deck.lands.contains_key("On Color Dual"));
+        assert!(!deck.main_deck.contains(&"On Color Dual".to_string()));
     }
 }

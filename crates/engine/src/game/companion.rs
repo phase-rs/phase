@@ -15,11 +15,24 @@ use crate::types::player::{CompanionInfo, PlayerId};
 use crate::types::zones::Zone;
 
 use super::casting::{self, SpecialActionManaPayment};
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityPrincipal};
 use super::zones;
 
 /// CR 702.139: Companion costs {3} generic mana to move to hand.
 const COMPANION_COST: usize = 3;
+
+/// An engine-authored Companion special-action announcement for Priority
+/// preflight. The private field prevents sibling modules from manufacturing a
+/// unit-like announcement without the Companion legality authority.
+pub(in crate::game) struct PriorityCompanionAnnouncement {
+    _private: (),
+}
+
+impl PriorityCompanionAnnouncement {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// Permanent card types for companion condition evaluation.
 const PERMANENT_TYPES: [CoreType; 5] = [
@@ -492,6 +505,16 @@ pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
         )
 }
 
+/// Returns the finite Companion special action for the current Priority holder
+/// when the existing legality and payment authority admits it.
+pub(in crate::game) fn priority_companion_announcement(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Option<PriorityCompanionAnnouncement> {
+    can_activate_companion(state, principal.semantic_holder())
+        .then(PriorityCompanionAnnouncement::new)
+}
+
 /// CR 116.2g + CR 702.139a: Pay the companion special action's already-derived
 /// cost. A paused mana-source replacement leaves the companion outside the game
 /// and returns that prompt; only a completed payment commits the move.
@@ -519,7 +542,7 @@ fn pay_companion_to_hand_cost(
 /// CR 116.2g + CR 702.139a: Commit the once-per-game companion action only
 /// after its full payment succeeds. This is also the sole point that clears the
 /// player's undoable mana-tap record for this non-mana action.
-fn commit_companion_to_hand(
+pub(crate) fn finish_paid_companion_to_hand(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
@@ -572,7 +595,7 @@ pub fn handle_companion_to_hand(
     }
 
     match pay_companion_to_hand_cost(state, player, &cost, events)? {
-        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paid => Ok(finish_paid_companion_to_hand(state, player, events)),
         SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
 }
@@ -587,7 +610,7 @@ pub(crate) fn resume_companion_to_hand_payment(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     match pay_companion_to_hand_cost(state, player, &cost, events)? {
-        SpecialActionManaPayment::Paid => Ok(commit_companion_to_hand(state, player, events)),
+        SpecialActionManaPayment::Paid => Ok(finish_paid_companion_to_hand(state, player, events)),
         SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
 }

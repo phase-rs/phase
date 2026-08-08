@@ -442,7 +442,7 @@ mod tests {
             source_id: ObjectId(999),
             controller: AI,
             kind: StackEntryKind::Spell {
-                ability: Some(dummy_ability),
+                ability: Some(Box::new(dummy_ability)),
                 card_id: CardId(999),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

@@ -15,7 +15,9 @@ use super::oracle_effect::{
     parse_named_choice_object, try_parse_named_choice, try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::doc::OracleNodeIr;
 use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::{
     parse_attached_subject_target_filter, parse_inner_condition,
@@ -41,13 +43,14 @@ use crate::types::ability::{
     PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
     QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::CastFrequency;
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 /// Parse a replacement effect line into a ReplacementDefinition.
@@ -696,16 +699,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         );
     }
 
-    // --- "Whenever you cast [spell], that [subject] enters with ... counter(s) on it" ---
-    // CR 614.1c: Despite the "whenever you cast" framing, "enters with" is a
-    // replacement effect (not a triggered ability), so Wildgrowth Archaic and
-    // its cousin family (Runadi, Boreal Outrider, Torgal, …) are modeled as
-    // static replacements on the *cast spell itself*, not delayed triggers.
-    // This branch must run before `parse_enters_with_counters` so the
-    // "whenever you cast …" prefix is recognized first.
-    if let Some(def) = parse_whenever_you_cast_enters_with(&norm_lower, &text) {
-        return Some(def);
-    }
+    // NOTE: "Whenever you cast [spell], that [subject] enters with ... counter(s)
+    // on it" (Wildgrowth Archaic, Runadi, Boreal Outrider, Torgal, …) is NOT
+    // handled here. CR 603.1 + CR 603.3: "whenever" IS a triggered ability that
+    // goes on the stack — the effect it creates must survive the source leaving
+    // the battlefield before the cast spell resolves (issue #6492 review).
+    // Modeled as a `TriggerDefinition` by `parse_whenever_you_cast_enters_with_trigger`,
+    // dispatched from the Priority 5-pre interceptor in `oracle.rs` BEFORE this
+    // function is ever reached for that shape — `parse_whenever_you_cast_enters_with`
+    // (below) is reused only as the core ChangeZone/PutCounter builder for that
+    // trigger's floating-replacement payload, never as a standalone object-hosted
+    // replacement.
 
     // --- "[Subject] enters/escapes with N [type] counter(s)" ---
     // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
@@ -1603,22 +1607,27 @@ fn parse_assemble_contraption_subject(subject: &str) -> Option<TargetFilter> {
 /// Handles Bloodletter-style doublers and preserves generic "If you would lose
 /// life, instead ..." replacement recognition without substring dispatch.
 fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
-    let ((scope, quantity_modification), rest) = nom_on_lower(text, lower, |i| {
-        let (i, _) = tag("if ").parse(i)?;
-        let (i, scope) = parse_lose_life_subject(i)?;
-        let (i, _) = tag(" would lose life").parse(i)?;
-        let (i, _) = opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
-        let (i, _) = tag(", ").parse(i)?;
-        let (i, quantity_modification) = alt((
-            value(
-                Some(QuantityModification::DOUBLE),
-                terminated(parse_double_lose_life_consequence, opt(char('.'))),
-            ),
-            value(None, parse_lose_life_instead_consequence),
-        ))
-        .parse(i)?;
-        Ok((i, (scope, quantity_modification)))
-    })?;
+    let ((scope, during_your_turn, quantity_modification), rest) =
+        nom_on_lower(text, lower, |i| {
+            let (i, _) = tag("if ").parse(i)?;
+            let (i, scope) = parse_lose_life_subject(i)?;
+            let (i, _) = tag(" would lose life").parse(i)?;
+            let (i, during_your_turn) =
+                opt(preceded(tag(" "), tag("during your turn"))).parse(i)?;
+            let (i, _) = tag(", ").parse(i)?;
+            let (i, quantity_modification) = alt((
+                value(
+                    Some(QuantityModification::DOUBLE),
+                    terminated(parse_double_lose_life_consequence, opt(char('.'))),
+                ),
+                value(None, parse_lose_life_instead_consequence),
+            ))
+            .parse(i)?;
+            Ok((
+                i,
+                (scope, during_your_turn.is_some(), quantity_modification),
+            ))
+        })?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -1630,6 +1639,18 @@ fn parse_lose_life_replacement(text: &str, lower: &str) -> Option<ReplacementDef
     }
     if let Some(quantity_modification) = quantity_modification {
         def = def.quantity_modification(quantity_modification);
+    }
+    if during_your_turn {
+        // CR 109.5 + CR 102.1: "during your turn" means while the source's
+        // controller is the active player.
+        // Reuse the existing parameterized active-player gate rather than
+        // hiding Bloodletter's restriction in the LoseLife event matcher.
+        def = def.condition(ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+            active_player_req: Some(ControllerRef::You),
+        });
     }
     Some(def)
 }
@@ -2092,7 +2113,7 @@ fn front_opponent_choice_for_nontargeted_look(reveal: &Effect) -> Option<(Effect
     // observable outcome.
     let choose_opponent = Effect::Choose {
         // CR 608.2d + CR 102.3: the controller chooses one opponent.
-        choice_type: ChoiceType::Opponent { restriction: None },
+        choice_type: ChoiceType::opponent(),
         persist: true,
         // Same controller-choice selection mode as the fronted card-name choice.
         selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -2478,6 +2499,7 @@ fn parse_as_enters_becomes(text: &str) -> Option<ReplacementDefinition> {
                 .modifications(modifications)],
             duration: Some(Duration::Permanent),
             target: None,
+            end_cost: None,
         },
     )
     .duration(Duration::Permanent);
@@ -2576,6 +2598,33 @@ fn color_label_word(color: crate::types::mana::ManaColor) -> &'static str {
     }
 }
 
+/// The IR emission for one "As ~ enters, it becomes your choice of …" line
+/// (Plan 05b U0-40).
+///
+/// # Emission order is load-bearing
+///
+/// This recognizer used to push into a scratch `ParsedAbilities` that
+/// `drain_result_vectors` then emitted in ITS fixed order — abilities, then
+/// triggers, then statics, then replacements — regardless of the order the
+/// pushes happened in. `emit_at` stamps `ordinal_within_span` in emission
+/// order, so emitting in any other order renumbers them. The caller therefore
+/// emits `face_up_residual` FIRST and `nodes` after, and `nodes` itself is
+/// ordered statics-then-replacement — none of which is the order this
+/// recognizer constructs them in.
+pub(crate) struct AsEntersChoiceModalIr {
+    /// CR 614.1e residual, `None` when the line has no "or is turned face up"
+    /// half. A bare `AbilityDefinition` rather than a node, so the caller emits
+    /// it through `ability_at`: it is a fixed strict-failure marker with no
+    /// parsed body to carry, and Plan 05b's burn-down ratchet keeps every
+    /// pre-lowered construction inside `oracle.rs` — constructing one here would
+    /// move a producer into a file the ledger does not track. Giving it a real
+    /// IR node is U0-62's residual-node question, which this row does not answer.
+    pub(crate) face_up_residual: Option<AbilityDefinition>,
+    /// The heterogeneous node sequence: one `Static` per mode, then the single
+    /// `Replacement`.
+    pub(crate) nodes: Vec<OracleNodeIr>,
+}
+
 /// CR 208.2b (governing) + CR 614.1c + CR 614.12a + CR 205.1b: lower the modal
 /// "As ~ enters, it becomes your choice of <profile_1>, <profile_2>, [or]
 /// <profile_N>" as-enters replacement (Primal Plasma, Primal Clay, Corrupted
@@ -2608,26 +2657,23 @@ fn color_label_word(color: crate::types::mana::ManaColor) -> &'static str {
 /// (a modal P/T as-enters replacement, not a CR 607.2d anchor-word linked
 /// ability). No `614.12c` annotation appears in this lowering.
 ///
-/// Returns `true` when a modal replacement + statics were emitted; `false` when
-/// the line was an honest gap (fewer than two parseable P/T profiles, a mode
-/// missing P/T, or a duplicate-label collision) so the caller can fall through.
-pub(crate) fn lower_as_enters_becomes_choice_modal(
-    text: &str,
-    result: &mut super::oracle::ParsedAbilities,
-) -> bool {
+/// Returns the IR emission for the line; `None` when the line was an honest gap
+/// (fewer than two parseable P/T profiles, a mode missing P/T, or a
+/// duplicate-label collision) so the caller can fall through.
+pub(crate) fn lower_as_enters_becomes_choice_modal(text: &str) -> Option<AsEntersChoiceModalIr> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // nom-frame: "as " + `~` self-anchor + the "becomes your choice of" pivot.
     let Ok((after_as, _)) = tag::<_, _, VE>("as ").parse(lower.as_str()) else {
-        return false;
+        return None;
     };
     let Ok((after_subject, subject_lower)) = take_until::<_, _, VE>(" enters").parse(after_as)
     else {
-        return false;
+        return None;
     };
     if subject_lower.trim() != "~" {
-        return false;
+        return None;
     }
     let Ok((tail_lower, _)) = alt((
         tag::<_, _, VE>(" enters, it becomes your choice of "),
@@ -2635,7 +2681,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         tag(" enters or is turned face up, it becomes your choice of "),
     ))
     .parse(after_subject) else {
-        return false;
+        return None;
     };
 
     // CR 614.1e: "or is turned face up" is a separate replacement class not yet
@@ -2645,9 +2691,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
 
     // Recover the ORIGINAL-case descriptor tail — subtype proper-noun casing
     // (e.g. "Wall") is load-bearing for `parse_animation_spec`.
-    let Some(desc_start) = text.len().checked_sub(tail_lower.len()) else {
-        return false;
-    };
+    let desc_start = text.len().checked_sub(tail_lower.len())?;
     let descriptor_original = text[desc_start..].trim().trim_end_matches('.').trim();
 
     // CR 205.1b: strip the "in addition to its other types" marker once, and
@@ -2689,7 +2733,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
     )
     .parse(modes_text);
     let Ok((_, profiles)) = profile_split else {
-        return false;
+        return None;
     };
 
     // Per profile: parse the animation spec, require fixed P/T, synthesize the
@@ -2702,14 +2746,12 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         let (profile_body, _) = opt(alt((tag::<_, _, VE>("a "), tag("an "))))
             .parse(profile.trim())
             .unwrap_or((profile.trim(), None));
-        let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        let spec = super::oracle_effect::animation::parse_animation_spec(
             profile_body.trim(),
             &mut ParseContext::default(),
-        ) else {
-            return false;
-        };
+        )?;
         if spec.power.is_none() || spec.toughness.is_none() {
-            return false;
+            return None;
         }
         labels.push(synthesize_mode_label(&spec));
         mode_mods.push(
@@ -2722,7 +2764,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
 
     // Require >= 2 modes (CR 208.2b lists "two or more").
     if labels.len() < 2 {
-        return false;
+        return None;
     }
     // Collision guard: duplicate synthesized labels would make the gate
     // ambiguous. Abort rather than emit an unusable modal (honest gap).
@@ -2730,7 +2772,7 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         // allow-noncombinator: `Vec<String>` slice containment (label collision
         // check), not string parsing dispatch.
         if labels[..idx].contains(label) {
-            return false;
+            return None;
         }
     }
 
@@ -2751,7 +2793,6 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
         // CR 614.1c: battlefield-entry-scoped as-enters replacement.
         .destination_zone(Zone::Battlefield)
         .description(text.to_string());
-    result.replacements.push(choice_replacement);
 
     // Per mode: a continuous static gated on `ChosenLabelIs { label }`. Inline the
     // `ChosenLabelIs` composition (these fresh statics carry no pre-existing
@@ -2765,31 +2806,46 @@ pub(crate) fn lower_as_enters_becomes_choice_modal(
     // choice is persisted, and that `Labeled` re-layer flushes the gated
     // `ChosenLabelIs` statics below before state-based actions run — without it the
     // creature would keep its printed P/T (e.g. 0/0) and die to SBAs.
-    for (label, mods) in labels.iter().zip(mode_mods) {
-        // CR 208.2b: chosen-mode P/T (+ additional characteristics) applied as a
-        // Layer-7b continuous effect while this label was chosen at entry.
-        result.statics.push(
+    let mode_statics: Vec<StaticDefinition> = labels
+        .iter()
+        .zip(mode_mods)
+        .map(|(label, mods)| {
+            // CR 208.2b: chosen-mode P/T (+ additional characteristics) applied as a
+            // Layer-7b continuous effect while this label was chosen at entry.
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(mods)
                 .condition(StaticCondition::ChosenLabelIs {
                     label: label.clone(),
-                }),
-        );
-    }
+                })
+        })
+        .collect();
 
-    // CR 614.1e: "or is turned face up" is a separate replacement class not yet
-    // supported for modal choice. Surface it as an honest `Effect::unimplemented`
-    // (coverage-red) instead of silently dropping the face-up entry path — do NOT
-    // emit any `TurnFaceUp` replacement.
-    if has_face_up {
-        result.abilities.push(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::unimplemented("modal-enters-face-up", "or is turned face up"),
-        ));
-    }
+    // Assembled in `drain_result_vectors`' order — see this function's doc block.
+    let mut nodes: Vec<OracleNodeIr> = Vec::with_capacity(mode_statics.len() + 1);
+    nodes.extend(
+        mode_statics
+            .into_iter()
+            .map(|def| OracleNodeIr::Static(StaticIr::from_definition(text, def))),
+    );
+    nodes.push(OracleNodeIr::Replacement(ReplacementIr::from_definition(
+        text,
+        choice_replacement,
+    )));
 
-    true
+    Some(AsEntersChoiceModalIr {
+        // CR 614.1e: "or is turned face up" is a separate replacement class not
+        // yet supported for modal choice. Surface it as an honest
+        // `Effect::unimplemented` (coverage-red) instead of silently dropping the
+        // face-up entry path — do NOT emit any `TurnFaceUp` replacement.
+        face_up_residual: has_face_up.then(|| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("modal-enters-face-up", "or is turned face up"),
+            )
+        }),
+        nodes,
+    })
 }
 
 /// nom combinator: the mode separator between profiles (", or " / ", " / " or ").
@@ -2854,16 +2910,13 @@ fn subject_lower_has_face_up(after_subject: &str) -> bool {
 /// CR 708.11: an "As … is turned face up" ability applies while the permanent is
 /// being turned face up (the face-up arm).
 /// CR 122.1a: the placed +1/+1 counters add to the creature's power and toughness.
-pub(crate) fn lower_as_enters_or_face_up_counters(
-    text: &str,
-    result: &mut super::oracle::ParsedAbilities,
-) -> bool {
+pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<ReplacementIr>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // nom-frame: "as ~ enters[ the battlefield][ or is turned face up], ".
     let Ok((rest, _)) = tag::<_, _, VE>("as ~ enters").parse(lower.as_str()) else {
-        return false;
+        return None;
     };
     let (rest, _the_battlefield) = opt(tag::<_, _, VE>(" the battlefield"))
         .parse(rest)
@@ -2873,17 +2926,15 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
         .unwrap_or((rest, None));
     let has_face_up = face_up.is_some();
     let Ok((tail_lower, _)) = tag::<_, _, VE>(", ").parse(rest) else {
-        return false;
+        return None;
     };
 
     // Recover the ORIGINAL-case effect slice via byte offset (mirrors
     // `split_once_on_lower`) so `parse_effect_chain` sees the printed casing.
-    let Some(effect_start) = text.len().checked_sub(tail_lower.len()) else {
-        return false;
-    };
+    let effect_start = text.len().checked_sub(tail_lower.len())?;
     let effect_text = text[effect_start..].trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
-        return false;
+        return None;
     }
 
     // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
@@ -2894,32 +2945,39 @@ pub(crate) fn lower_as_enters_or_face_up_counters(
     // Unimplemented or externally targeted). Rewrites the "it" placeholder to
     // `SelfRef` so the runtime event-modifier fold recognizes it.
     if !normalize_self_put_counter_chain(&mut execute) {
-        return false;
+        return None;
     }
+
+    // Both arms derive from the same printed sentence, so both carry `text` as
+    // their provenance — the sentence never splits, which is why this recognizer
+    // exists at all.
+    let mut irs = Vec::new();
 
     // CR 614.1c: ETB arm — a battlefield-entry-scoped `Moved` replacement whose
     // `PutCounter { SelfRef }` execute is folded into the entering object's
     // enter-with-counters by the runtime event-modifier path.
-    result.replacements.push(
+    irs.push(ReplacementIr::from_definition(
+        text,
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute.clone())
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
             .description(text.to_string()),
-    );
+    ));
 
     // CR 708.11: face-up arm — the same effect applies as the permanent is turned
     // face up (Disguise/megamorph turn-up), bound to that permanent via SelfRef.
     if has_face_up {
-        result.replacements.push(
+        irs.push(ReplacementIr::from_definition(
+            text,
             ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
                 .valid_card(TargetFilter::SelfRef)
                 .execute(execute)
                 .description(text.to_string()),
-        );
+        ));
     }
 
-    true
+    Some(irs)
 }
 
 /// Validate + normalize the execute chain of an as-enters / turned-face-up
@@ -3905,6 +3963,15 @@ fn parse_enters_with_counters(
     // the bug class being fixed (Hotheaded Giant / Steel Exemplar).
     let (work_text, unless_outcome) = extract_enters_with_unless_suffix(work_text);
 
+    // CR 614.1c + CR 207.2c: Peel a SENTENCE-INITIAL "[<ability word> — ]if
+    // <game-state condition>, " gate (Adamant / Spell mastery / bare leading
+    // conditional). Before this, no leading-position gate was recognized at all
+    // and the whole clause was swallowed, making the replacement unconditional.
+    // Runs AFTER `extract_kicker_enters_condition`, which already consumes and
+    // strips its own "if ~ was kicked, " prefix, so kicker lines arrive here as
+    // "it enters with …" → `NoLeadingIf`.
+    let (work_text, leading_if_outcome) = extract_enters_with_leading_if_gate(work_text);
+
     // CR 702.138c: "escapes with" / plural-subject "escape with" is
     // semantically "enters with" gated on escape.
     let is_escape = nom_primitives::scan_contains(work_text, "escapes with")
@@ -3993,7 +4060,8 @@ fn parse_enters_with_counters(
             // one condition slot — so their co-occurrence fails closed.
             let other_suffix =
                 enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
-            match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+            match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix)
+            {
                 None => return None,
                 Some(Some(cond)) => def = def.condition(cond),
                 Some(None) => {}
@@ -4181,7 +4249,7 @@ fn parse_enters_with_counters(
     // condition slot, so their co-occurrence fails closed (→ unimplemented)
     // rather than silently dropping one gate.
     let other_suffix = enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
-    match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+    match resolve_enters_with_condition(&unless_outcome, &leading_if_outcome, other_suffix) {
         None => return None,
         Some(Some(cond)) => def = def.condition(cond),
         Some(None) => {}
@@ -4223,22 +4291,51 @@ fn enters_with_condition_suffix(
     }
 }
 
-/// CR 614.1c: Reconcile the up-front " unless " gate with the trailing
-/// conditional-suffix gate. `None` = fail closed (the caller returns `None` so
-/// the line falls through to `Effect::unimplemented`): either the unless clause
-/// was present-but-unparsed, or both gates co-occur and there is only one
-/// condition slot. `Some(None)` = no gate. `Some(Some(cond))` = the single
-/// applicable gate.
+/// CR 614.1c: Reconcile the three mutually exclusive gate positions an
+/// "enters with" clause can carry — the up-front " unless " gate, the
+/// sentence-initial "if <cond>, " gate, and the trailing conditional suffix.
+/// `ReplacementDefinition` has exactly ONE condition slot, so any co-occurrence
+/// fails closed rather than silently dropping a gate.
+///
+/// `None` = fail closed (the caller returns `None` so the line falls through to
+/// `Effect::unimplemented`): a gate was present-but-unparsed, or two gates
+/// co-occur. `Some(None)` = no gate. `Some(Some(cond))` = the single applicable
+/// gate.
 fn resolve_enters_with_condition(
     unless_outcome: &EntersWithUnlessOutcome,
+    leading_if_outcome: &EntersWithLeadingIfOutcome,
     other_suffix: Option<ReplacementCondition>,
 ) -> Option<Option<ReplacementCondition>> {
-    match (unless_outcome, other_suffix) {
-        (EntersWithUnlessOutcome::Unparsed, _) => None,
-        (EntersWithUnlessOutcome::Parsed(_), Some(_)) => None,
-        (EntersWithUnlessOutcome::Parsed(cond), None) => Some(Some(cond.clone())),
-        (EntersWithUnlessOutcome::NoUnlessClause, Some(other)) => Some(Some(other)),
-        (EntersWithUnlessOutcome::NoUnlessClause, None) => Some(None),
+    match (unless_outcome, leading_if_outcome, other_suffix) {
+        // Present-but-unparsed on either gate axis: fail closed.
+        (EntersWithUnlessOutcome::Unparsed, _, _)
+        | (_, EntersWithLeadingIfOutcome::Unparsed, _) => None,
+        // The " unless " gate, alone.
+        (EntersWithUnlessOutcome::Parsed(cond), EntersWithLeadingIfOutcome::NoLeadingIf, None) => {
+            Some(Some(cond.clone()))
+        }
+        // Any two gates at once: one slot, fail closed.
+        (EntersWithUnlessOutcome::Parsed(_), _, Some(_))
+        | (EntersWithUnlessOutcome::Parsed(_), EntersWithLeadingIfOutcome::Parsed(_), _)
+        | (_, EntersWithLeadingIfOutcome::Parsed(_), Some(_)) => None,
+        // The sentence-initial "if <cond>, " gate, alone.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::Parsed(cond),
+            None,
+        ) => Some(Some(cond.clone())),
+        // The trailing conditional suffix, alone.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::NoLeadingIf,
+            Some(other),
+        ) => Some(Some(other)),
+        // No gate at all.
+        (
+            EntersWithUnlessOutcome::NoUnlessClause,
+            EntersWithLeadingIfOutcome::NoLeadingIf,
+            None,
+        ) => Some(None),
     }
 }
 
@@ -4368,6 +4465,89 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithUnlessOutco
     }
 
     (head, EntersWithUnlessOutcome::Unparsed)
+}
+
+/// Outcome of scanning an "enters with [counters]" clause for a SENTENCE-INITIAL
+/// "if <condition>, " gate (CR 614.1c).
+///
+/// The presence axis is decided independently of the parse axis: once `"if "`
+/// matches at position 0 the clause IS a gate, so an unrecognized condition
+/// yields `Unparsed` (caller fails closed) and never `NoLeadingIf`. Silently
+/// dropping the gate — which would make the replacement unconditional — is the
+/// bug class this fixes.
+#[derive(Debug, Clone)]
+enum EntersWithLeadingIfOutcome {
+    /// No sentence-initial "if " — the payload text is returned byte-identical,
+    /// ability-word label included.
+    NoLeadingIf,
+    /// A recognized game-state condition; the replacement applies only while it
+    /// holds (only-if polarity).
+    Parsed(ReplacementCondition),
+    /// A sentence-initial "if " gate is present but unrecognized — the caller
+    /// MUST fail closed so the line falls through to `Effect::unimplemented`.
+    ///
+    /// Note the fall-through is a SHARED `None` signal: `parse_enters_with_counters`
+    /// returns `None` both for "not my shape" and for "my shape, gate unparseable",
+    /// so nothing structurally stops a LATER replacement parser from claiming the
+    /// same line as an UNCONDITIONAL replacement and reintroducing the bug class.
+    /// That it does not happen is a corpus fact pinned card-level by
+    /// `unparseable_leading_if_gate_fails_closed` (Henge Walker), not a type-level
+    /// guarantee — a new sibling shape with a leading gate needs its own pin.
+    Unparsed,
+}
+
+/// CR 614.1c: Split a SENTENCE-INITIAL "if <game-state condition>, " gate off an
+/// "enters with [counter payload]" clause and classify the condition. Returns
+/// the gate-free body plus the outcome.
+///
+/// This is the leading-position mirror of `extract_enters_with_only_if_suffix`
+/// (which scans for a TRAILING " if "). Adamant (Ardenvale Paladin), Spell
+/// mastery (Necromantic Summons) and bare-conditional cards (Dust Animus) all
+/// write the gate first: "[<ability word> — ]If <condition>, ~ enters with …".
+///
+/// CR 207.2c: the optional em-dash label is an ability word, which has no rules
+/// meaning and must be peeled before the `"if "` test.
+///
+/// The peel uses `parse_known_ability_word_name`, i.e. the CURATED list in
+/// `oracle_modal::ABILITY_WORD_NAMES` — the CR 207.2c ability words PLUS a small
+/// number of curated CR 207.2d flavor markers ("protector", "proclamator hailer",
+/// "increment"). It is deliberately NOT the loose 4-word `strip_ability_word`
+/// heuristic, which would peel ANY short em-dash label: that would strip Scarlet
+/// Spider, Ben Reilly's "Sensational Save" (a CR 207.2d flavor word, absent from
+/// the curated list), exposing its `"if ~ was cast using web-slinging, …"` body
+/// to the `"if "` test. `parse_inner_condition` consumes only `"~ was cast"`
+/// there, the `", "` check then fails, and the card would regress from its
+/// working `CastVariantPaid` routing to `Unparsed`.
+///
+/// The three curated flavor markers ARE peelable, so this is a bounded widening
+/// rather than a strict CR 207.2c gate. That is accepted, not overlooked: no card
+/// in the corpus writes `"<one of those three> — If …, … enters with …"`, and a
+/// future one would fail closed to `Effect::unimplemented` (honest gap), never
+/// silently drop its gate. Pinned by `flavor_word_label_is_not_peelable_as_an_ability_word`.
+fn extract_enters_with_leading_if_gate(text: &str) -> (&str, EntersWithLeadingIfOutcome) {
+    let after_label = opt(terminated(
+        super::oracle_modal::parse_known_ability_word_name,
+        alt((tag(" — "), tag(" – "), tag(" - "))),
+    ))
+    .parse(text)
+    .map_or(text, |(rest, _)| rest);
+
+    let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(after_label) else {
+        return (text, EntersWithLeadingIfOutcome::NoLeadingIf);
+    };
+
+    // `parse_inner_condition` is self-delimiting (not `all_consuming`), so it
+    // stops at the comma that separates the gate from the payload.
+    let Ok((rest, condition)) = parse_inner_condition(condition_text) else {
+        return (text, EntersWithLeadingIfOutcome::Unparsed);
+    };
+    let Ok((body, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) else {
+        return (text, EntersWithLeadingIfOutcome::Unparsed);
+    };
+    match replacement_condition_from_static(condition) {
+        Some(cond) => (body, EntersWithLeadingIfOutcome::Parsed(cond)),
+        None => (text, EntersWithLeadingIfOutcome::Unparsed),
+    }
 }
 
 /// CR 614.1c + CR 614.1d: Map a parsed `StaticCondition` to the `unless`-polarity
@@ -4672,11 +4852,19 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 
 /// CR 614.1c + CR 601.2: Parse "Whenever you cast a [spell], that [subject]
 /// enters with [an additional] [count] [type] counter(s) on it[, where X is
-/// [quantity]]" as a replacement effect on the *cast spell itself*.
+/// [quantity]]" into the `ChangeZone` + `PutCounter` replacement payload for
+/// this shape. Wildgrowth Archaic and its cousin family (Runadi, Boreal
+/// Outrider, Torgal, …) all share this shape.
 ///
-/// Despite the "whenever you cast" framing, CR 614.1c classifies "enters with"
-/// as a replacement effect, not a triggered ability. Wildgrowth Archaic and its
-/// cousin family (Runadi, Boreal Outrider, Torgal, …) all share this shape.
+/// CR 603.1 + CR 603.3: "whenever" is a triggered ability that goes on the
+/// stack — the entering-with-counters EFFECT (CR 614.1c/614.12) only applies
+/// once that ability resolves. This function builds only the reusable
+/// replacement PAYLOAD (the `ChangeZone`/`PutCounter` shape keyed to the spell
+/// filter); it is never returned as a top-level, object-hosted replacement.
+/// `parse_whenever_you_cast_enters_with_trigger` is the actual recognizer —
+/// it wraps this payload in `Effect::AddTargetReplacement { target: None, .. }`
+/// so the triggered ability installs a floating, filter-scoped replacement
+/// that survives the source leaving the battlefield (issue #6492 review).
 ///
 /// Composition:
 ///   "whenever you cast " → spell filter → ", that " → subject →
@@ -4772,21 +4960,18 @@ fn parse_whenever_you_cast_enters_with(
     .parse(rest)
     .ok()?;
 
-    // Optional trailing "where X is [quantity]" clause.
+    // Optional trailing "where X is [quantity]" clause. Delegate to
+    // `parse_enters_with_where_x_suffix` — the single authority for this tail
+    // grammar, already shared with the self-ETB `parse_enters_with_counters`
+    // path — so composite/offset quantities ("its mana value minus 4"; CR
+    // 107.1 arithmetic over a CR 202.3 mana-value reference) resolve here too,
+    // not just atomic `QuantityRef`s. The previous atomic-only
+    // `parse_quantity_ref` call silently failed (via `?`) on any composite
+    // expression, misrouting the whole ability to the generic self-ETB
+    // fallback (Runadi, Behemoth Caller — issue #6492).
     let count_expr = match fixed_count {
         Some(n) => QuantityExpr::Fixed { value: n as i32 },
-        None => {
-            // Expect ", where x is " then a quantity ref.
-            let (rest, _) = alt((
-                tag::<_, _, OracleError<'_>>(", where x is "),
-                tag(", where X is "),
-            ))
-            .parse(rest)
-            .ok()?;
-            let qty_text = rest.trim_end_matches('.').trim();
-            let qty = crate::parser::oracle_quantity::parse_quantity_ref(qty_text)?;
-            QuantityExpr::Ref { qty }
-        }
+        None => parse_enters_with_where_x_suffix(rest)?,
     };
 
     let put_counter = AbilityDefinition::new(
@@ -4806,6 +4991,82 @@ fn parse_whenever_you_cast_enters_with(
             .valid_card(TargetFilter::Typed(spell_typed))
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
+    )
+}
+
+/// CR 603.1 + CR 603.3 + CR 614.1c/614.12: The actual recognizer for "Whenever
+/// you cast a [spell], that [subject] enters with ... counter(s) on it[,
+/// where X is [quantity]]" (Wildgrowth Archaic, Runadi, Boreal Outrider,
+/// Torgal, …).
+///
+/// "Whenever" is a triggered ability — it goes on the stack ABOVE the spell
+/// that triggered it (CR 603.3b) and resolves first. Modeling this whole
+/// sentence as an object-hosted static replacement (the pre-#6492-review
+/// design) is rules-wrong: the entering-with-counters effect must survive the
+/// source leaving the battlefield after the trigger resolves but before the
+/// cast spell does. Instead, this builds a real `TriggerDefinition`
+/// (`TriggerMode::SpellCast`, matching the same spell filter) whose resolving
+/// effect installs a FLOATING replacement via `Effect::AddTargetReplacement {
+/// target: TargetFilter::None, .. }` — pushed to `GameState::pending_damage_replacements`
+/// under the `ObjectId(0)` sentinel (see `add_target_replacement.rs`), which the
+/// replacement scan (`find_applicable_replacements`) admits independent of any
+/// object's zone. `consume_on_apply` makes it one-shot.
+///
+/// CR 117.3b: after Runadi's trigger resolves, the active player receives
+/// priority BEFORE the originally-cast spell resolves, and could cast a
+/// second qualifying flash creature in response — a bare filter-scoped
+/// one-shot install would let that INTERLOPING spell's battlefield entry
+/// consume the replacement first, leaving the original entrant uncountered.
+/// This is closed by AND-ing the spell filter with
+/// `TargetFilter::SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }` — a
+/// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
+/// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
+/// object named by `state.current_trigger_event` (this trigger's own
+/// originating `SpellCast` event — CR 603.2) at install time, so only that
+/// exact spell's entry can ever satisfy it.
+pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
+    text: &str,
+    card_name: &str,
+) -> Option<TriggerDefinition> {
+    let text = strip_reminder_text(text);
+    let normalized = replace_self_refs(&text, card_name);
+    let norm_lower = normalized.to_lowercase();
+
+    let mut replacement = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
+    let spell_filter = replacement.valid_card.clone()?;
+    // CR 614.1c: one qualifying entry, then gone — this floating install must
+    // never persist to affect a second, later cast of the same shape.
+    replacement.consume_on_apply = true;
+    // CR 603.2 + CR 117.3b: bind to the SPECIFIC spell that caused this trigger,
+    // not just any spell matching the type/mana-value filter — see the
+    // interleaving-flash-creature note in the doc comment above.
+    // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
+    // spell's id (or `ObjectId(0)`, matching nothing) by
+    // `Effect::AddTargetReplacement`'s resolve function at install time.
+    replacement.valid_card = Some(TargetFilter::And {
+        filters: vec![
+            spell_filter.clone(),
+            TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+            },
+        ],
+    });
+
+    let install = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
+        },
+    );
+
+    Some(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(spell_filter)
+            .valid_target(TargetFilter::Controller)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(install)
+            .description(text.to_string()),
     )
 }
 
@@ -5019,50 +5280,30 @@ fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, ExternalEntryKin
                     )
                 })
         })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters tapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: true,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enter untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
-        .or_else(|| {
-            // allow-noncombinator: fixed external-entry suffix peel after type-phrase subject
-            stripped.strip_suffix(" enters untapped").map(|subject| {
-                (
-                    subject,
-                    ExternalEntryKind::Plain {
-                        enters_tapped: false,
-                    },
-                )
-            })
-        })
+        .or_else(|| parse_external_entry_plain_suffix(stripped))
+}
+
+/// CR 614.1c: Parse the external-entry tap-state grammar. The type-phrase
+/// subject is arbitrary, while verb number, battlefield wording, and tap state
+/// vary independently; parse those axes once rather than adding suffix arms.
+fn parse_external_entry_plain_suffix(input: &str) -> Option<(&str, ExternalEntryKind)> {
+    type VE<'a> = OracleError<'a>;
+    let (_, (subject, (_, enters_tapped))) = terminated(
+        pair(
+            take_until::<_, _, VE>(" enter"),
+            preceded(
+                pair(tag(" enter"), opt(tag("s"))),
+                pair(
+                    opt(tag(" the battlefield")),
+                    alt((value(true, tag(" tapped")), value(false, tag(" untapped")))),
+                ),
+            ),
+        ),
+        eof::<&str, VE<'_>>,
+    )
+    .parse(input)
+    .ok()?;
+    Some((subject, ExternalEntryKind::Plain { enters_tapped }))
 }
 
 fn build_external_entry_replacement(
@@ -9828,23 +10069,63 @@ fn parse_damage_prevention_replacement(
     // the amount. The bare "all" arm below must stay ordered after this one
     // because it shares the "all" prefix.
     let after_prevent = strip_after(working_lower, "prevent ");
-    let amount = if let Some((after_all_but, _)) =
+    // CR 615.1a: A prevention clause resolves to one of two representations on the
+    // resulting `DamageDone` replacement:
+    //   * a `ShieldKind::Prevention` shield — "prevent all", "prevent all but N",
+    //     the depleting "prevent the next N", or the redirection-context
+    //     "prevent that damage"; or
+    //   * for the continuous, non-depleting bare "prevent N of that damage" class
+    //     (Heart-Shaped Herb — issue #5902, Sphere of Purity, Orbs of Warding,
+    //     Urza's Armor, Guardian Seraph, Daunting Defender, ...), a
+    //     `DamageModification::PreventionMinus { value: N }` that
+    //     saturating-subtracts N from every qualifying damage event.
+    //
+    // CR 702.64: `PreventionMinus` deliberately reuses the same shared per-event
+    // damage-subtraction authority that Absorb already synthesizes
+    // (`database::synthesis::build_absorb_replacement`) rather than a new
+    // prevention-amount variant — it is the typed PREVENTION provenance of the
+    // shared `Minus` subtraction arm, so parser and resolver keep a single
+    // semantic representation for continuous per-event prevention (it is
+    // non-consumed and re-fires for every event — exactly Absorb's CR 702.64b
+    // semantics) while plain arithmetic `Minus` (Benevolent Unicorn) stays
+    // outside the prevention bookkeeping.
+    enum PreventionRepr {
+        Shield(PreventionAmount),
+        Reduce(u32),
+    }
+    let repr = if let Some((after_all_but, _)) =
         after_prevent.and_then(|s| tag::<_, _, OracleError<'_>>("all but ").parse(s).ok())
     {
         let (n, _) = parse_number(after_all_but)?;
-        PreventionAmount::AllBut(n)
+        PreventionRepr::Shield(PreventionAmount::AllBut(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent all") {
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
-        PreventionAmount::Next(n)
+        PreventionRepr::Shield(PreventionAmount::Next(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else {
-        return None;
+        // CR 615.1a: bare "prevent N of that damage" — a numeric amount
+        // immediately following the "prevent " verb, anchored by the literal
+        // " of that damage" suffix DIRECTLY after the number (a composed nom
+        // sequence, not a scan), so a non-adjacent "of that damage" phrase
+        // elsewhere in the clause cannot be misbound as the anchor.
+        // `nom_primitives::parse_number` (unlike `parse_number_or_x`) never
+        // matches the bare pronoun "x", so the dynamic "prevent X ..." idiom is
+        // not swallowed into a static `PreventionMinus { value: 0 }` no-op and
+        // stays with the chunk-level where-X machinery. Any miss (no number, or
+        // no adjacent " of that damage" anchor) means this is not a recognized
+        // prevention pattern, so `?` bails the whole parse.
+        let n = after_prevent.and_then(|s| {
+            nom_parse_lower(s, |i| {
+                terminated(nom_primitives::parse_number, tag(" of that damage")).parse(i)
+            })
+        })?;
+        PreventionRepr::Reduce(n)
     };
 
     // --- 2. Extract combat scope ---
@@ -9960,8 +10241,22 @@ fn parse_damage_prevention_replacement(
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .prevention_shield(amount)
         .description(original_text.to_string());
+    def = match repr {
+        // CR 615.1a: shield-style prevention (all / all-but / depleting next /
+        // redirection-context "prevent that damage").
+        PreventionRepr::Shield(amount) => def.prevention_shield(amount),
+        // CR 615.1a + CR 702.64: continuous "prevent N of that damage" reuses the
+        // shared `Minus` per-event subtraction authority (Branch 1 of
+        // `damage_done_applier`) under its typed PREVENTION provenance,
+        // `DamageModification::PreventionMinus` — never consumed, re-firing for
+        // every qualifying event, and emitting `DamagePrevented` bookkeeping
+        // (which plain-arithmetic `Minus`, e.g. Benevolent Unicorn's "minus 1",
+        // must not).
+        PreventionRepr::Reduce(n) => {
+            def.damage_modification(DamageModification::PreventionMinus { value: n })
+        }
+    };
 
     if let Some(cs) = combat_scope {
         def = def.combat_scope(cs);
@@ -11133,8 +11428,8 @@ mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementCondition, ShieldKind, ZoneRef,
+        AbilityCondition, Comparator, ControllerRef, CountScope, QuantityExpr,
+        QuantityModification, QuantityRef, ReplacementCondition, ShieldKind, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -12803,6 +13098,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount
                     },
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -12916,6 +13212,103 @@ mod tests {
             }
             other => panic!("expected Typed recipient filter, got {other:?}"),
         }
+    }
+
+    /// CR 615.1a + CR 702.64: Heart-Shaped Herb (issue #5902) — "If a source an
+    /// opponent controls would deal damage to you, prevent 1 of that damage."
+    /// Before this fix the bare "prevent N of that damage" amount phrasing (no
+    /// "all" / "all but" / "the next") matched none of the amount branches, so
+    /// `parse_damage_prevention_replacement` returned `None` and the whole
+    /// static ability silently failed to install — matching the reported symptom
+    /// ("isn't affecting it at all"). Per the maintainer's CR review the class is
+    /// re-emitted onto the shared `Minus` per-event subtraction authority under
+    /// its typed prevention provenance, `DamageModification::PreventionMinus`
+    /// (the CR 702.64 Absorb representation), NOT a new prevention-amount
+    /// variant. This idiom is shared by many real cards
+    /// (Sphere of Purity, Orbs of Warding, Urza's Armor, Guardian Seraph,
+    /// Daunting Defender, ...), so the fix is generic.
+    #[test]
+    fn heart_shaped_herb_prevent_n_of_that_damage_is_minus_modification() {
+        let def = parse_replacement_line(
+            "If a source an opponent controls would deal damage to you, prevent 1 of that damage.",
+            "Heart-Shaped Herb",
+        )
+        .expect("Heart-Shaped Herb should parse as damage prevention");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::PreventionMinus { value: 1 }),
+            "bare 'prevent 1 of that damage' must install a continuous \
+             PreventionMinus(1) modification (prevention provenance of the \
+             shared Minus subtraction), not fall through unparsed"
+        );
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::None,
+            "the Minus representation must not also carry a prevention shield_kind"
+        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.damage_target_filter,
+            Some(damage_target_controller()),
+            "recipient must be the shield controller ('deal damage to you')"
+        );
+
+        let source_filter = def
+            .damage_source_filter
+            .as_ref()
+            .expect("'a source an opponent controls' must produce a source filter");
+        match source_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "source must be scoped to opponent-controlled, not any source"
+                );
+            }
+            other => panic!("expected Typed opponent-controlled source filter, got {other:?}"),
+        }
+    }
+
+    /// Sibling coverage for the same bare "prevent N of that damage" idiom with
+    /// N > 1 and no source-controller qualifier (Sphere of Purity-style). Pins
+    /// that the fix generalizes to other N and doesn't require an "an opponent
+    /// controls" clause to be present.
+    #[test]
+    fn bare_prevent_n_of_that_damage_generalizes_without_source_controller_clause() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to equipped creature, prevent 2 of that damage.",
+            "Shield of the Realm",
+        )
+        .expect("bare 'prevent N of that damage' with no controller qualifier should parse");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::PreventionMinus { value: 2 })
+        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(
+            def.damage_source_filter.is_none(),
+            "unqualified 'a source' must not synthesize a source filter"
+        );
+    }
+
+    /// CR 615.1a: the "prevent N of that damage" grammar is an ANCHORED nom
+    /// sequence — the number must be immediately followed by " of that damage".
+    /// A non-adjacent "of that damage" later in the clause must NOT satisfy the
+    /// anchor (the pre-fix scan-based check accepted it), and the clause must
+    /// fall through unrecognized rather than misbind the amount.
+    #[test]
+    fn prevent_n_requires_adjacent_of_that_damage_anchor() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to you, prevent 2 damage this turn of that damage.",
+            "Anchor Probe",
+        );
+        assert!(
+            def.is_none(),
+            "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
+             'prevent N of that damage' grammar, got {def:?}"
+        );
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
@@ -13562,24 +13955,6 @@ mod tests {
     }
 
     #[test]
-    fn replacement_prevent_all_combat_damage_to_you() {
-        let def = parse_replacement_line(
-            "Prevent all combat damage that would be dealt to you.",
-            "Some Card",
-        )
-        .unwrap();
-        assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert!(matches!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        ));
-        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
-    }
-
-    #[test]
     fn replacement_prevent_all_combat_damage_fog() {
         // Fog: "Prevent all combat damage that would be dealt this turn."
         let def = parse_replacement_line(
@@ -13871,6 +14246,47 @@ mod tests {
             Some(QuantityModification::DOUBLE)
         );
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: Some(ControllerRef::You),
+            })
+        );
+    }
+
+    #[test]
+    fn bloodletter_full_oracle_parses_without_coverage_gaps() {
+        let parsed = parse_oracle_text(
+            "Flying\nIf an opponent would lose life during your turn, they lose twice that much \
+             life instead. (Damage causes loss of life.)",
+            "Bloodletter of Aclazotz",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Demon".to_string()],
+        );
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "Bloodletter must not hide a swallowed turn condition: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            parsed.abilities.is_empty(),
+            "Bloodletter's static replacement must not lower as a spell ability"
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+        assert_eq!(
+            parsed.replacements[0].condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Fixed { value: 0 },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                active_player_req: Some(ControllerRef::You),
+            })
+        );
     }
 
     #[test]
@@ -14001,47 +14417,6 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// Board-wide graveyard replacements keep their external typed filter.
-    #[test]
-    fn graveyard_exile_card_subject_stays_external_nontoken() {
-        use crate::types::ability::{FilterProp, TypedFilter};
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Leyline of the Void",
-        )
-        .expect("Leyline-style exile must parse");
-        assert_eq!(
-            def.valid_card,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NonToken])
-            ))
-        );
-    }
-
-    /// Regression: exile-branch must remain fully backward-compatible after the
-    /// dispatcher refactor. Rest in Peace / Leyline-style wording.
-    #[test]
-    fn replacement_graveyard_exile_branch_still_parses() {
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Rest in Peace",
-        )
-        .expect("exile branch must parse");
-        let execute = def.execute.as_ref().unwrap();
-        assert!(matches!(
-            *execute.effect,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ));
-        assert!(
-            execute.sub_ability.is_none(),
-            "exile branch has no post-redirect sub_ability"
-        );
-    }
-
     #[test]
     fn shock_land_watery_grave() {
         let def = parse_replacement_line(
@@ -14165,6 +14540,13 @@ mod tests {
                 state: TapStateChange::Tap,
             }
         ));
+        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
+        // Regression guard retained after the Tarkir reveal-land extension.
+        assert!(
+            decline.condition.is_none(),
+            "Port Town on_decline must remain unconditional, got {:?}",
+            decline.condition
+        );
     }
 
     #[test]
@@ -14293,30 +14675,6 @@ mod tests {
         }
     }
 
-    /// Regression: Port Town (and the rest of the if-you-don't reveal-land
-    /// cycle) must continue to emit an unconditional Tap on_decline. The
-    /// Tarkir-variant tail recognizer must not fire on the older grammar.
-    #[test]
-    fn reveal_land_port_town_unchanged_after_tarkir_extension() {
-        let def = parse_replacement_line(
-            "As Port Town enters, you may reveal a Plains or Island card from your hand. If you don't, Port Town enters tapped.",
-            "Port Town",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        let on_decline = match &*execute.effect {
-            Effect::RevealFromHand { on_decline, .. } => on_decline,
-            other => panic!("expected RevealFromHand, got {other:?}"),
-        };
-        let decline = on_decline.as_ref().unwrap();
-        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
-        assert!(
-            decline.condition.is_none(),
-            "Port Town on_decline must remain unconditional, got {:?}",
-            decline.condition
-        );
-    }
-
     /// Negative: a mismatched filter pair ("reveal a Soldier ... or you control
     /// a Dragon") must NOT be accepted as a Tarkir variant — the parser bails
     /// rather than synthesize a coherently-typed disjunction from incoherent
@@ -14420,7 +14778,10 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
@@ -14531,7 +14892,10 @@ mod tests {
             matches!(
                 &*mid.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::Opponent { restriction: None },
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        ..
+                    },
                     persist: true,
                     ..
                 }
@@ -14689,19 +15053,6 @@ mod tests {
             .is_none(),
             "bare object as-enters choose must not claim Moved without CopyChosen"
         );
-    }
-
-    #[test]
-    fn as_enters_choose_does_not_match_shock_land() {
-        // Shock lands with "choose a basic land type" should be handled by parse_shock_land,
-        // not parse_as_enters_choose
-        let def = parse_replacement_line(
-            "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
-            "Multiversal Passage",
-        )
-        .unwrap();
-        // Should be Optional (shock land), not Mandatory (simple choose)
-        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
     }
 
     #[test]
@@ -16017,21 +16368,31 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        match &def.valid_card {
-            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
-                assert!(
-                    properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 730.3e)"
-                );
-                assert!(
-                    !properties.contains(&FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    }),
-                    "any-graveyard scope must not add an owner constraint"
-                );
+        // Exact equality: the "a card" subject must exclude tokens (CR 730.3e) and the
+        // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
+        // no `Owned { Opponent }` and no other property.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::NonToken])
+            ))
+        );
+        // Regression: the exile branch stays backward-compatible after the dispatcher
+        // refactor — Rest in Peace / Leyline-style wording redirects to exile with no
+        // post-redirect sub-ability.
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
             }
-            other => panic!("Expected Typed filter with NonToken, got {other:?}"),
-        }
+        ));
+        assert!(
+            execute.sub_ability.is_none(),
+            "exile branch has no post-redirect sub_ability"
+        );
     }
 
     #[test]
@@ -16578,6 +16939,55 @@ mod tests {
         }
     }
 
+    // CR 614.1c: the untapped-entry counterpart of the tapped-entry short-vs-long
+    // templating gap (see `frozen_aether_enters_the_battlefield_tapped_long_form`
+    // above) — Vigorous Farming prints "Lands you control enter the battlefield
+    // untapped." where the `spelunking_lands_you_control_enter_untapped` test
+    // above uses the short "enter untapped" simplification.
+    #[test]
+    fn vigorous_farming_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Lands you control enter the battlefield untapped.",
+            "Vigorous Farming",
+        )
+        .expect("long-form 'enter the battlefield untapped' must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // The controller-scoped Or-filter shape (mirroring
+    // `frozen_aether_enters_the_battlefield_tapped_long_form`) must also parse
+    // for the untapped long form.
+    #[test]
+    fn opponents_control_enters_the_battlefield_untapped_long_form() {
+        let def = parse_replacement_line(
+            "Artifacts, creatures, and lands your opponents control enter the battlefield untapped.",
+            "Untapped Aether",
+        )
+        .expect("long-form 'enter the battlefield untapped' with Or-filter subject must parse");
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => assert_eq!(filters.len(), 3),
+            other => panic!("Expected Or filter with 3 elements, got {other:?}"),
+        }
+    }
+
     #[test]
     fn archelos_untapped_other_permanents_enter_untapped() {
         let def = parse_replacement_line(
@@ -16671,20 +17081,6 @@ mod tests {
             }
             other => panic!("Expected UnlessControlsOtherLeq, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn fast_land_does_not_capture_check_land() {
-        // Check lands must still parse as UnlessControlsSubtype, not UnlessControlsOtherLeq
-        let def = parse_replacement_line(
-            "This land enters tapped unless you control a Mountain or a Plains.",
-            "Clifftop Retreat",
-        )
-        .unwrap();
-        assert!(matches!(
-            def.condition,
-            Some(ReplacementCondition::UnlessControlsSubtype { .. })
-        ));
     }
 
     #[test]
@@ -16793,20 +17189,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unless_controls_does_not_steal_check_land() {
-        // Check lands must still produce UnlessControlsSubtype, not UnlessControlsMatching
-        let def = parse_replacement_line(
-            "This land enters tapped unless you control a Mountain or a Plains.",
-            "Clifftop Retreat",
-        )
-        .unwrap();
-        assert!(matches!(
-            def.condition,
-            Some(ReplacementCondition::UnlessControlsSubtype { .. })
-        ));
-    }
-
     /// CR 614.1d: "unless your opponents control N or more [type]" — Turbulent land cycle (SOC).
     /// One parser test covers the class; all five Turbulent lands share this clause verbatim.
     #[test]
@@ -16875,22 +17257,6 @@ mod tests {
             }
             other => panic!("Expected IfControlsMatching, got {other:?}"),
         }
-    }
-
-    /// CR 614.1d: The "if you control" pattern must NOT fall through to the
-    /// unconditional enters-tapped handler. Regression guard.
-    #[test]
-    fn if_controls_pattern_does_not_match_unconditional() {
-        let def = parse_replacement_line(
-            "If you control two or more other lands, this land enters tapped.",
-            "Test Land",
-        )
-        .unwrap();
-        // Must have a non-None condition — the unconditional handler would produce None.
-        assert!(
-            def.condition.is_some(),
-            "conditional ETB must not produce unconditional replacement"
-        );
     }
 
     /// CR 614.1d: Generality — three or more threshold.
@@ -17474,10 +17840,22 @@ mod tests {
                 match target {
                     TargetFilter::Typed(tf) => {
                         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                        // Clone's filter must not gain a spurious InZone { Battlefield } —
+                        // the engine-side `find_copy_targets` defaults to the battlefield
+                        // when the filter has no InZone property. Preserving the empty
+                        // properties list keeps the filter shape identical to pre-change
+                        // Clone behaviour.
+                        assert!(
+                            tf.properties.is_empty(),
+                            "Clone's filter must not carry InZone; got {:?}",
+                            tf.properties
+                        );
                     }
                     other => panic!("Expected Typed creature filter, got {other:?}"),
                 }
             }
+            // A non-tapped clone (Phantasmal Image class) must keep `BecomeCopy` as the
+            // top-level effect — it must NOT compose through Tap.
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
     }
@@ -17815,22 +18193,6 @@ mod tests {
     }
 
     #[test]
-    fn clone_without_tapped_still_direct_become_copy() {
-        // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        assert!(
-            matches!(&*execute.effect, Effect::BecomeCopy { .. }),
-            "non-tapped clone must have BecomeCopy as top-level, got {:?}",
-            execute.effect
-        );
-    }
-
-    #[test]
     fn clone_uses_self_ref_normalization() {
         // "this creature" should be normalized to "~" by replace_self_refs
         let def = parse_replacement_line(
@@ -17947,10 +18309,15 @@ mod tests {
             Effect::BecomeCopy {
                 mana_value_limit,
                 additional_modifications,
+                duration,
                 ..
             } => {
                 assert_eq!(*mana_value_limit, None);
                 assert!(additional_modifications.is_empty());
+                // Regression: the Phantasmal Image class uses "enter as a copy of" and
+                // must continue producing a permanent copy after the verb split was
+                // generalised to also accept "become a copy of".
+                assert_eq!(*duration, None, "Clone must produce a permanent copy");
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
@@ -18062,25 +18429,6 @@ mod tests {
     }
 
     #[test]
-    fn phantasmal_image_clone_has_no_duration() {
-        // Regression: the Phantasmal Image class uses "enter as a copy of" and
-        // must continue producing a permanent copy (duration: None) after the
-        // verb split was generalised to also accept "become a copy of".
-        let def = parse_replacement_line(
-            "You may have this creature enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        match &*execute.effect {
-            Effect::BecomeCopy { duration, .. } => {
-                assert_eq!(*duration, None, "Clone must produce a permanent copy");
-            }
-            other => panic!("Expected BecomeCopy, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn clone_suffix_multiple_keywords_produce_multiple_add_keyword() {
         // Hypothetical clone: "except it's a Spirit in addition to its other
         // types and it has flying, trample, and lifelink." Each keyword must
@@ -18130,7 +18478,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::CreateToken);
-        assert!(def.quantity_modification.is_some());
+        // Regression: "twice that many" still parameterizes to factor 2 after
+        // the Double → Times { factor } migration.
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Times { factor: 2 })
+        );
         assert!(def.token_owner_scope.is_some());
     }
 
@@ -18264,21 +18617,6 @@ mod tests {
     }
 
     #[test]
-    fn token_doubling_via_twice_is_factor_two() {
-        // Regression: "twice that many" still parameterizes to factor 2 after
-        // the Double → Times { factor } migration.
-        let def = parse_replacement_line(
-            "If one or more tokens would be created under your control, twice that many tokens are created instead.",
-            "Parallel Lives",
-        )
-        .unwrap();
-        assert_eq!(
-            def.quantity_modification,
-            Some(QuantityModification::Times { factor: 2 })
-        );
-    }
-
-    #[test]
     fn counter_doubling_replacement() {
         let def = parse_replacement_line(
             "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on it instead.",
@@ -18341,21 +18679,6 @@ mod tests {
                 zone: Zone::Battlefield
             }]
         ));
-    }
-
-    #[test]
-    fn counter_agnostic_one_or_more_does_not_set_counter_match() {
-        // CR 614.1a + CR 122.1: Sanity check — "if an effect would put one
-        // or more counters on a permanent you control" (Doubling Season's
-        // modern wording) must NOT be treated as type-specific. The
-        // counter-agnostic wording leaves counter_match = None so the
-        // replacement matches every counter type.
-        let def = parse_replacement_line(
-            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
-            "Doubling Season",
-        )
-        .unwrap();
-        assert_eq!(def.counter_match, None);
     }
 
     #[test]
@@ -19190,33 +19513,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn zone_qualifier_defaults_to_battlefield_for_classic_clones() {
-        // Clone's filter must not gain a spurious InZone { Battlefield } — the
-        // engine-side `find_copy_targets` defaults to the battlefield when the
-        // filter has no InZone property. Preserving the empty properties list
-        // keeps the filter shape identical to pre-change Clone behaviour.
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
-            panic!("expected BecomeCopy");
-        };
-        match target {
-            TargetFilter::Typed(tf) => {
-                assert!(
-                    tf.properties.is_empty(),
-                    "Clone's filter must not carry InZone; got {:?}",
-                    tf.properties
-                );
-            }
-            other => panic!("expected Typed filter, got {other:?}"),
-        }
-    }
-
     // `parse_pt_pair` building-block tests moved to
     // `oracle_effect::become_copy_except` along with the helper itself.
 
@@ -19370,38 +19666,60 @@ mod tests {
         );
     }
 
-    /// CR 614.1c + CR 601.2h + CR 202.2: Wildgrowth Archaic's replacement line
+    /// CR 603.1 + CR 603.3 + CR 614.1c/614.12: Wildgrowth Archaic's ability
     /// ("Whenever you cast a creature spell, that creature enters with X
     /// additional +1/+1 counters on it, where X is the number of colors of
-    /// mana spent to cast it.") parses into a `ChangeZone` replacement on the
-    /// entering creature with a self-scoped spent-mana counter quantity.
+    /// mana spent to cast it.") parses into a `SpellCast` TRIGGER — not an
+    /// object-hosted replacement (issue #6492 review: "whenever" is a
+    /// triggered ability per CR 603.1/603.3, so the entering-with-counters
+    /// effect must survive the source leaving the battlefield after the
+    /// trigger resolves but before the cast spell does). The trigger's
+    /// resolution installs a floating, one-shot `ChangeZone` replacement via
+    /// `Effect::AddTargetReplacement`.
     #[test]
-    fn parses_wildgrowth_archaic_replacement() {
+    fn parses_wildgrowth_archaic_trigger() {
         let text = "Whenever you cast a creature spell, that creature enters with X additional +1/+1 counters on it, where X is the number of colors of mana spent to cast it.";
-        let def = parse_replacement_line(text, "Wildgrowth Archaic")
-            .expect("Wildgrowth line should parse as a replacement");
-        assert_eq!(def.event, ReplacementEvent::ChangeZone);
-        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Wildgrowth Archaic")
+            .expect("Wildgrowth line should parse as a trigger");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
 
-        // valid_card: creature controlled by the Archaic's controller.
-        let TargetFilter::Typed(ref tf) = def.valid_card.as_ref().expect("valid_card set") else {
-            panic!("expected Typed filter, got {:?}", def.valid_card);
+        // valid_card: creature spell.
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!("expected Typed filter, got {:?}", trigger.valid_card);
         };
         assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
         assert_eq!(tf.controller, Some(ControllerRef::You));
 
-        // execute: PutCounter { target: SelfRef, count: Ref(self spent-mana colors) }.
-        let exec = def.execute.as_ref().expect("execute set");
-        let Effect::PutCounter {
-            counter_type,
-            count,
+        // execute: AddTargetReplacement { target: None, replacement: one-shot
+        // ChangeZone + PutCounter { target: SelfRef, count: Ref(self spent-mana colors) } }.
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement {
+            replacement,
             target,
         } = &*exec.effect
         else {
-            panic!("expected PutCounter, got {:?}", exec.effect);
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        assert_eq!(target, &TargetFilter::None);
+        assert!(
+            replacement.consume_on_apply,
+            "floating install must be one-shot (CR 614.1c: one qualifying entry, then gone)"
+        );
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target: put_target,
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter, got {:?}", put_counter.effect);
         };
         assert_eq!(counter_type, &CounterType::Plus1Plus1);
-        assert_eq!(target, &TargetFilter::SelfRef);
+        assert_eq!(put_target, &TargetFilter::SelfRef);
         assert_eq!(
             count,
             &QuantityExpr::Ref {
@@ -19414,11 +19732,134 @@ mod tests {
     }
 
     /// Regression: a plain "Whenever you cast" trigger without an "enters with"
-    /// body must NOT be misrouted to the replacement path.
+    /// body must NOT be misrouted to either the trigger recognizer above or the
+    /// object-hosted replacement path.
     #[test]
     fn plain_whenever_you_cast_is_not_replacement() {
         let text = "Whenever you cast a creature spell, draw a card.";
         assert!(parse_replacement_line(text, "Filler").is_none());
+        assert!(parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none());
+    }
+
+    /// CR 603.1 + CR 603.3 + CR 614.1c/614.12 + CR 202.3 + CR 107.1: Runadi,
+    /// Behemoth Caller's first ability ("Whenever you cast a creature spell
+    /// with mana value 5 or greater, that creature enters with X additional
+    /// +1/+1 counters on it, where X is its mana value minus 4.") parses into
+    /// a `SpellCast` trigger (not a static replacement scoped to Runadi
+    /// herself — issue #6492 regression), whose resolution installs a
+    /// floating one-shot `ChangeZone` replacement gated on mana value >= 5,
+    /// with a composite offset quantity over the entering creature's own
+    /// mana value.
+    #[test]
+    fn parses_runadi_behemoth_caller_trigger() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Runadi, Behemoth Caller")
+            .expect("Runadi's first ability should parse as a trigger");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+
+        // valid_card: creature with mana value >= 5, controlled by Runadi's controller.
+        let TargetFilter::Typed(ref tf) = trigger.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!("expected Typed filter, got {:?}", trigger.valid_card);
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 5 },
+                }
+            )),
+            "valid_card must gate on mana value >= 5, got {:?}",
+            tf.properties
+        );
+
+        // execute: AddTargetReplacement { target: None, replacement: one-shot
+        // ChangeZone + PutCounter { target: SelfRef, count: Offset(its mana value, -4) } }.
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = &*exec.effect
+        else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        assert_eq!(target, &TargetFilter::None);
+        assert!(
+            replacement.consume_on_apply,
+            "floating install must be one-shot, or it would apply to a later, \
+             unrelated qualifying spell too"
+        );
+        // valid_card must AND the spell filter with a `SpecificObject` leaf
+        // carrying the trigger-source placeholder — `Effect::AddTargetReplacement`
+        // concretizes this to the SPECIFIC triggering spell's id at install
+        // time, so a different qualifying creature entering during the
+        // post-trigger priority window can't steal the install.
+        let TargetFilter::And { filters } =
+            replacement.valid_card.as_ref().expect("valid_card set")
+        else {
+            panic!(
+                "expected valid_card to be an And{{spell filter, trigger-source \
+                 placeholder}}, got {:?}",
+                replacement.valid_card
+            );
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::SpecificObject { id }
+                    if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+            )),
+            "valid_card must carry the trigger-source placeholder, got {filters:?}"
+        );
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target: put_target,
+        } = &*put_counter.effect
+        else {
+            panic!("expected PutCounter, got {:?}", put_counter.effect);
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(put_target, &TargetFilter::SelfRef);
+        assert_eq!(
+            count,
+            &QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Recipient,
+                    },
+                }),
+                offset: -4,
+            },
+            "count must be the entering creature's own mana value minus 4, not a \
+             garbage literal or Runadi's own mana value"
+        );
+    }
+
+    /// Regression: an unparseable composite quantity in the "where X is" clause
+    /// must still fail closed (return `None`) rather than silently absorbing
+    /// the condition text as a garbage counter-type literal — the exact
+    /// failure mode issue #6492 reported before the fix. Checked against both
+    /// the internal payload builder and the public trigger recognizer.
+    #[test]
+    fn whenever_you_cast_enters_with_garbage_quantity_fails_closed() {
+        let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its unrecognized nonsense value minus 4.";
+        assert!(
+            parse_whenever_you_cast_enters_with(&text.to_lowercase(), text).is_none(),
+            "an unparseable quantity clause must fail this combinator closed, not \
+             succeed with a wrong AST"
+        );
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").is_none(),
+            "the trigger recognizer must also fail closed when its payload builder does"
+        );
     }
 
     /// Regression: "Whenever you cast" with a fixed additional counter amount
@@ -19427,9 +19868,14 @@ mod tests {
     #[test]
     fn parses_fixed_count_variant() {
         let text = "Whenever you cast a creature spell, that creature enters with an additional +1/+1 counter on it.";
-        let def = parse_replacement_line(text, "Filler").expect("should parse");
-        let exec = def.execute.as_ref().expect("execute set");
-        let Effect::PutCounter { count, .. } = &*exec.effect else {
+        let trigger =
+            parse_whenever_you_cast_enters_with_trigger(text, "Filler").expect("should parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let put_counter = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter { count, .. } = &*put_counter.effect else {
             panic!("expected PutCounter");
         };
         assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
@@ -19856,6 +20302,64 @@ mod tests {
         );
     }
 
+    /// Issue #5653 + CR 608.2c: the full Chains of Mephistopheles / Magus of
+    /// the Chains text carries two trailing sentences after the "discards a
+    /// card instead" antecedent — "If the player discards a card this way,
+    /// they draw a card. If the player doesn't discard a card this way, they
+    /// mill a card." Both must attach as typed `EffectOutcome` gates on the
+    /// execute chain's Draw/Mill sub-abilities, not run unconditionally.
+    #[test]
+    fn parses_chains_full_text_gates_draw_and_mill_on_discard_outcome() {
+        let def = parse_replacement_line(
+            "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+            "Chains of Mephistopheles",
+        )
+        .expect("Chains draw replacement must parse");
+
+        let discard = def.execute.as_deref().expect("execute chain present");
+        assert!(
+            matches!(&*discard.effect, Effect::Discard { .. }),
+            "the antecedent effect must be Discard, got {:?}",
+            discard.effect
+        );
+
+        let draw = discard
+            .sub_ability
+            .as_deref()
+            .expect("Draw sub-ability must be present");
+        assert!(
+            matches!(&*draw.effect, Effect::Draw { .. }),
+            "the first follow-on effect must be Draw, got {:?}",
+            draw.effect
+        );
+        assert_eq!(
+            draw.condition,
+            Some(AbilityCondition::effect_performed()),
+            "\"if the player discards a card this way\" must gate Draw on \
+             whether the discard actually happened, got {:?}",
+            draw.condition
+        );
+
+        let mill = draw
+            .sub_ability
+            .as_deref()
+            .expect("Mill sub-ability must be present");
+        assert!(
+            matches!(&*mill.effect, Effect::Mill { .. }),
+            "the second follow-on effect must be Mill, got {:?}",
+            mill.effect
+        );
+        assert_eq!(
+            mill.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed())
+            }),
+            "\"if the player doesn't discard a card this way\" must gate Mill \
+             on the discard having failed, got {:?}",
+            mill.condition
+        );
+    }
+
     #[test]
     fn parses_opponent_mill_replacement_with_multiplier() {
         let text =
@@ -20164,6 +20668,7 @@ mod tests {
                 static_abilities,
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: _,
             } => {
                 assert!(static_abilities.iter().any(|static_ability| {
                     static_ability.affected == Some(TargetFilter::ParentTarget)
@@ -20817,6 +21322,207 @@ mod tests {
                 "target nonland permanent becomes a copy of another target creature."
             ),
             "copy-effect must not match the modal as-enters recognizer"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 614.1c + CR 207.2c: the sentence-initial "if <cond>, " enters-with gate.
+    // -----------------------------------------------------------------------
+
+    /// POSITIVE reach-guard for every negative below: Ardenvale Paladin's
+    /// Adamant gate is peeled off the ability-word label and attached as an
+    /// only-if `ReplacementCondition`. Revert the peel and `condition` is
+    /// `None` — the counter would apply unconditionally.
+    #[test]
+    fn adamant_leading_if_gate_attaches_only_if_quantity() {
+        let def = parse_replacement_line(
+            "Adamant — If at least three white mana was spent to cast this spell, this creature \
+             enters with a +1/+1 counter on it.",
+            "Ardenvale Paladin",
+        )
+        .expect("Adamant enters-with must still parse to a replacement");
+
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                        metric: crate::types::ability::CastManaSpentMetric::OfColor {
+                            color: ManaColor::White,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                active_player_req: None,
+            }),
+            "the Adamant gate must be attached, not swallowed"
+        );
+        // Payload untouched by the peel: still one +1/+1 counter on itself.
+        let execute = def.execute.as_deref().expect("execute present");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// U5 — hostile co-occurrence rows. `ReplacementDefinition` has exactly one
+    /// condition slot, so a leading "if" gate that co-occurs with either of the
+    /// other two gate positions MUST fail closed (`None`), never silently drop
+    /// one. Both rows are dead on the current corpus; this pins them.
+    /// Reach-guard: the two single-gate rows immediately below return `Some`.
+    #[test]
+    fn resolve_enters_with_condition_fails_closed_on_gate_co_occurrence() {
+        let gate = || ReplacementCondition::CastViaEscape;
+        let other = || ReplacementCondition::YouAttackedThisTurn;
+
+        // (NoUnlessClause, Parsed, Some) — leading gate + trailing suffix.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::NoUnlessClause,
+            &EntersWithLeadingIfOutcome::Parsed(gate()),
+            Some(other()),
+        )
+        .is_none());
+        // (Parsed, Parsed, None) — unless gate + leading gate.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::Parsed(other()),
+            &EntersWithLeadingIfOutcome::Parsed(gate()),
+            None,
+        )
+        .is_none());
+        // Present-but-unparsed leading gate fails closed regardless of the rest.
+        assert!(resolve_enters_with_condition(
+            &EntersWithUnlessOutcome::NoUnlessClause,
+            &EntersWithLeadingIfOutcome::Unparsed,
+            None,
+        )
+        .is_none());
+
+        // POSITIVE reach-guards: each gate ALONE still resolves.
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::Parsed(gate()),
+                None,
+            ),
+            Some(Some(gate()))
+        );
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::NoLeadingIf,
+                Some(other()),
+            ),
+            Some(Some(other()))
+        );
+        assert_eq!(
+            resolve_enters_with_condition(
+                &EntersWithUnlessOutcome::NoUnlessClause,
+                &EntersWithLeadingIfOutcome::NoLeadingIf,
+                None,
+            ),
+            Some(None)
+        );
+    }
+
+    /// U6 — LOAD-BEARING: the peel uses `parse_known_ability_word_name` (the
+    /// curated `ABILITY_WORD_NAMES` list — the CR 207.2c ability words plus
+    /// three curated CR 207.2d flavor markers; see the contract on
+    /// `extract_enters_with_leading_if_gate`), NOT the loose 4-word
+    /// `strip_ability_word` heuristic. What matters here is that
+    /// "Sensational Save" is absent from that curated list; it is NOT the case
+    /// that every CR 207.2d flavor word is absent.
+    /// If "Sensational Save" were peelable, Scarlet Spider's body would
+    /// reach `tag("if ")`, `parse_inner_condition` would consume only
+    /// "~ was cast", the following `tag(", ")` would fail, and the card would
+    /// regress from green to `Unparsed` → `Effect::unimplemented`.
+    #[test]
+    fn flavor_word_label_is_not_peelable_as_an_ability_word() {
+        assert!(
+            super::super::oracle_modal::parse_known_ability_word_name(
+                "sensational save — if ~ was cast using web-slinging, he enters with x +1/+1 \
+                 counters on him."
+            )
+            .is_err(),
+            "\"Sensational Save\" is absent from the curated ABILITY_WORD_NAMES list and must \
+             stay unpeelable — peeling it regresses Scarlet Spider, Ben Reilly to Unparsed. \
+             (Note the list DOES contain three curated CR 207.2d markers, so this is the \
+             specific case, not a universal 'no flavor word is peelable' invariant.)"
+        );
+        // Positive reach-guard: a real CR 207.2c ability word IS peeled, so the
+        // negative above is not vacuous.
+        assert_eq!(
+            super::super::oracle_modal::parse_known_ability_word_name(
+                "adamant — if at least three white mana was spent to cast this spell, ~ enters \
+                 with a +1/+1 counter on it."
+            )
+            .map(|(_, name)| name),
+            Ok("adamant")
+        );
+    }
+
+    /// U7 — positive card-level pin for F1: Scarlet Spider's gate is still the
+    /// web-slinging suffix condition, reached by the scan-anywhere route the
+    /// peel deliberately does not intercept.
+    #[test]
+    fn flavor_word_card_keeps_its_scan_anywhere_gate() {
+        let def = parse_replacement_line(
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, he enters with X \
+             +1/+1 counters on him, where X is the mana value of the returned creature.",
+            "Scarlet Spider, Ben Reilly",
+        )
+        .expect("Scarlet Spider's enters-with must still parse");
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            })
+        );
+    }
+
+    /// U9 — honest failure, both polarities. Henge Walker's max-over-colors
+    /// ("mana of the same color") has no grammar and Red and Black Legac chains
+    /// three sentence-initial "if"s into one condition slot; both are explicitly
+    /// out of scope and MUST fail closed rather than parse to an unconditional
+    /// replacement. Reach-guard: the parseable sibling
+    /// `adamant_leading_if_gate_attaches_only_if_quantity` proves the peel is
+    /// live, so `None` here is not a dead-code pass.
+    #[test]
+    fn unparseable_leading_if_gate_fails_closed() {
+        assert!(
+            parse_replacement_line(
+                "Adamant — If at least three mana of the same color was spent to cast this spell, \
+                 this creature enters with a +1/+1 counter on it.",
+                "Henge Walker",
+            )
+            .is_none(),
+            "an unrecognized leading gate must fail closed, not become unconditional"
+        );
+        // Card level: the line falls through to `Effect::unimplemented` — the
+        // engine reports the gap instead of silently mis-resolving.
+        let card = parse_oracle_text(
+            "Adamant — If at least three mana of the same color was spent to cast this spell, \
+             this creature enters with a +1/+1 counter on it.",
+            "Henge Walker",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Golem".to_string()],
+        );
+        assert!(
+            card.replacements.is_empty(),
+            "no replacement may be published for the fail-closed line"
+        );
+        assert!(
+            card.abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "the fail-closed line must surface as Effect::Unimplemented, got {:?}",
+            card.abilities
         );
     }
 }

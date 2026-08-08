@@ -11,7 +11,7 @@
 #
 # Use the fixture-backed loaders in tests/integration/support.rs instead:
 #   shared_card_db()          -> parsed CardDatabase from the committed fixture
-#                                (tests/fixtures/integration_cards.json),
+#                                (tests/fixtures/integration_cards.json.gz),
 #                                parses in milliseconds and runs in CI.
 #   shared_card_export_json() -> raw JSON of the full export, ONLY for the few
 #                                drift-guard tests that must scan every card.

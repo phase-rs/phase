@@ -2,7 +2,12 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
-import { dispatchAction } from "../../../game/dispatch.ts";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  ViewerInteraction,
+} from "../../../adapter/generated/interaction";
+import { dispatchAction, dispatchInteraction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -14,6 +19,7 @@ import {
   buildPriorityWaitingFor,
   buildTargetSelectionProgress,
   buildTargetSelectionWaitingFor,
+  buildTriggerTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { AttachmentFan } from "../AttachmentFan.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
@@ -21,6 +27,7 @@ import { PermanentCard } from "../PermanentCard.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
+  dispatchInteraction: vi.fn(),
 }));
 
 vi.mock("../../card/CardImage.tsx", () => ({
@@ -117,6 +124,7 @@ function renderPermanent(
   boardChoiceObjectIds = new Set<number>(),
   activatableObjectIds = new Set<number>(),
   undoableTapObjectIds = new Set<number>(),
+  manaTappableObjectIds = new Set<number>(),
 ) {
   return render(
     <BoardInteractionContext.Provider
@@ -125,7 +133,7 @@ function renderPermanent(
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
-        manaTappableObjectIds: new Set(),
+        manaTappableObjectIds,
         selectableSacrificeObjectIds,
         selectableManaCostCreatureIds: new Set(),
         undoableTapObjectIds,
@@ -136,6 +144,49 @@ function renderPermanent(
       <PermanentCard objectId={1} />
     </BoardInteractionContext.Provider>,
   );
+}
+
+function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
+  const interactionId = "attachment-interaction" as InteractionId;
+  const choiceId = (objectId: number) => `attachment-${objectId}` as InteractionChoiceId;
+  return {
+    waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
+    authorizedSubmitters: [0],
+    canSubmit: true,
+    autoPassRecommended: false,
+    opportunities: [{
+      interactionId,
+      response: {
+        type: "exactChoices",
+        data: {
+          choices: objectIds.map((objectId) => ({
+            id: choiceId(objectId),
+            status: { type: "available" },
+            surfaces: [],
+          })),
+        },
+      },
+      surfaces: [],
+      progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+    }],
+    attachmentFans: {
+      1: {
+      hostId: 1,
+      children: objectIds.map((objectId) => ({
+        objectId,
+        submission: {
+          interactionId,
+          response: { type: "choose", data: { choiceId: choiceId(objectId) } },
+        },
+      })),
+      },
+    },
+    availability: { type: "inputRequired" },
+  };
+}
+
+function interactionForAttachedObject(objectId: number): ViewerInteraction {
+  return interactionForAttachedObjects([objectId]);
 }
 
 describe("PermanentCard", () => {
@@ -175,6 +226,7 @@ describe("PermanentCard", () => {
       tapRotation: "classic",
     });
     vi.mocked(dispatchAction).mockClear();
+    vi.mocked(dispatchInteraction).mockResolvedValue();
   });
 
   afterEach(() => {
@@ -209,7 +261,7 @@ describe("PermanentCard", () => {
 
   it("renders the engine-authored temporary can't-be-blocked badge with its public source", () => {
     const gameState = makeState();
-    gameState.derived = { temporary_cant_be_blocked: { 1: 2 } };
+    gameState.derived = { cant_be_blocked: [1], temporary_cant_be_blocked: { 1: 2 } };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();
@@ -223,10 +275,20 @@ describe("PermanentCard", () => {
     );
   });
 
+  it("renders the engine-authored permanent can't-be-blocked badge without temporary attribution", () => {
+    const gameState = makeState();
+    gameState.derived = { cant_be_blocked: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Can't be blocked")).toBeInTheDocument();
+  });
+
   it("renders the engine-authored temporary can't-be-blocked badge on a face-down recipient without source attribution", () => {
     const gameState = makeState();
     gameState.objects[1].face_down = true;
-    gameState.derived = { temporary_cant_be_blocked: { 1: null } };
+    gameState.derived = { cant_be_blocked: [1], temporary_cant_be_blocked: { 1: null } };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     renderPermanent();
@@ -317,7 +379,7 @@ describe("PermanentCard", () => {
     expect(attachmentLayer.style.zIndex).toBe("5");
     expect(nestedAttachmentLayer.style.zIndex).toBe("5");
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
     expect(attachmentLayer.style.zIndex).toBe("5");
@@ -329,7 +391,7 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const nestedAttachment = container.querySelector('[data-object-id="3"]') as HTMLElement;
 
-    fireEvent.mouseEnter(nestedAttachment);
+    fireEvent.pointerEnter(nestedAttachment, { pointerType: "mouse" });
 
     expect(host.style.zIndex).toBe("80");
   });
@@ -378,7 +440,7 @@ describe("PermanentCard", () => {
     });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
     expect(container.querySelector('[data-object-id="4"]')).toBeNull();
 
     act(() => {
@@ -460,6 +522,207 @@ describe("PermanentCard", () => {
     });
   });
 
+  /**
+   * Plan rows V10–V13 + V10c — hunk B: a host whose OWN click offers nothing,
+   * over an attachment the engine published affordances for, falls through to
+   * the full-card chooser instead of demanding a pixel-accurate click on a
+   * ~22px peek rendered BELOW the host (CR 301.5 / CR 303.4 — an attachment is
+   * its own object).
+   *
+   * EVIDENCE LABELS (plan §7.2): MEASURED = this PR ran that mutant arm and the
+   * quoted line is what flipped. QUOTED = verbatim from a named plan log.
+   * An untagged comment is prose and is evidence for nothing.
+   */
+  function clickHost(container: HTMLElement) {
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+  }
+
+  // V10 — the positive control for hunk B firing at all: an inert host over an
+  // actionable attachment opens the fan AND selects the host.
+  // QUOTED (plan §6.10, `.review3r4-v13.log`):
+  //   `PV13d[inert host + actionable attachment] dispatch=none fanHostId=1 selectedObjectId=1`
+  // MEASURED (drop side — hunk B deleted): `expected null to be 1`.
+  // MEASURED (always side — the `.some(...)` predicate forced constant-true):
+  //   V11's `expected 1 to be null` flips instead; on THIS fixture an
+  //   always-true predicate agrees, which is exactly why V11 exists.
+  it("opens the fan from an inert host when an attachment is actionable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+    expect(dispatchAction).not.toHaveBeenCalled();
+  });
+
+  // V10 (mana arm) — the predicate's SECOND disjunct. `activatableObjectIds` and
+  // `manaTappableObjectIds` are two independent affordance sets and hunk B reads
+  // both; without this arm the `|| manaTappableObjectIds.has(attachId)` half
+  // could be deleted and every other row here would stay green.
+  // MEASURED (drop side — the mana disjunct deleted): `expected null to be 1`.
+  it("opens the fan when the attachment is mana-tappable rather than activatable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent(
+      new Set(), new Set(), new Set(), new Set(), new Set(), new Set([2]),
+    );
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+  });
+
+  // V10c — hunk B's selection is UNCONDITIONAL, deliberately unlike the plain
+  // click fallback which TOGGLES. Only a fixture whose host is ALREADY selected
+  // can see the difference; V10 above passes under both implementations.
+  // QUOTED (plan §6.10):
+  //   `PC1[before=null]  unconditional=401 toggle=401 DISCRIMINATES=false`
+  //   `PC1[before=401] unconditional=401 toggle=null  DISCRIMINATES=true`
+  // MEASURED (drop side — `selectObject(objectId)` replaced by the toggle form
+  //   `selectObject(isSelected ? null : objectId)`): `expected null to be 1`.
+  it("keeps the host selected when the fan is re-opened from an already-selected host", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: 1 });
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+    clickHost(container);
+
+    // A toggle would strand the fan open over a host that just lost its ring,
+    // its attachment expansion and its exile-link expansion.
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+    expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+  });
+
+  // V11 — the negative side: no actionable attachment ⇒ the pre-existing
+  // fallback still owns the click. PAIR-ONLY (§7.1) — the row claims the change
+  // did NOTHING on this fixture, so no drop-the-fix mutant can be visible on it
+  // by construction; it is counted as always-side coverage only.
+  // QUOTED (plan §6.10): `PV13e[inert host + inert attachment] fanHostId=null selectedObjectId=1`
+  // MEASURED (always side — predicate forced constant-true): `expected 1 to be null`.
+  it("leaves the plain-click fallback alone when no attachment is actionable", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+
+    const { container } = renderPermanent();
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+  });
+
+  // V12 — the predicate's SOURCE. Hunk B reads the shared affordance sets, never
+  // the raw `legalActionsByObject` bucket, so it can never offer what the board
+  // itself would not (the sets already carry the timing/seat gates). The bucket
+  // here is populated exactly as in V10; only the affordance set is empty.
+  // MEASURED (drop side — `activatableObjectIds.has(attachId)` swapped for a raw
+  //   `collectObjectActions(legalActionsByObject, attachId).length > 0` check):
+  //   `expected 1 to be null` — the fan opens at a state the board gates off.
+  it("ignores a populated action bucket that the affordance sets exclude", () => {
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+    useGameStore.setState({
+      legalActionsByObject: {
+        "2": [{ type: "ActivateAbility", data: { source_id: 2, ability_index: 0 } }],
+      },
+    });
+
+    const { container } = renderPermanent();
+    clickHost(container);
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    // REACH GUARD, paired with the negative above: a bare "no fan" assertion
+    // would also pass if the click never landed at all. Selection proves the
+    // handler ran and fell through to the plain-click fallback.
+    expect(useUiStore.getState().selectedObjectId).toBe(1);
+  });
+
+  // V13 (mobile arm) — hunk B sits ABOVE the `isMobile` branch, so on a narrow
+  // viewport a host whose attachment is actionable opens the fan instead of the
+  // sticky preview. That is a deliberate trade (long-press still inspects, and
+  // the fan renders large legible cards), and it is pinned here so a future
+  // reorder cannot revert it silently.
+  // MEASURED (drop side — hunk B deleted): `expected null to be 1`, and the
+  //   preview arm takes the click instead.
+  it("prefers the fan over the mobile sticky preview when an attachment is actionable", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    act(() => {
+      useUiStore.setState({
+        attachmentFanHostId: null,
+        selectedObjectId: null,
+        inspectedObjectId: null,
+      });
+    });
+
+    try {
+      const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([2]));
+      clickHost(container);
+
+      expect(useUiStore.getState().attachmentFanHostId).toBe(1);
+      // The arm hunk B pre-empts, asserted as the pair: no sticky preview.
+      expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    }
+  });
+
+  // V13 — hunk B is placed LAST, so it can never pre-empt the host's own
+  // target / activation / undo intent. Every arm below holds the actionable
+  // attachment FIXED and varies only the host's own affordance, so a passing
+  // arm is a statement about branch ORDER and nothing else.
+  // QUOTED (plan §6.10, `.review3r4-v13.log`):
+  //   `PV13a[valid target + actionable attachment]      dispatch=ChooseTarget      fanHostId=null`
+  //   `PV13b[activatable host + actionable attachment]  dispatch=ActivateAbility   fanHostId=null`
+  //   `PV13c[undoable tap + actionable attachment]      dispatch=UntapLandForMana  fanHostId=null`
+  // MEASURED (drop side — hunk B moved ABOVE `isValidTarget`): the PV13a arm
+  //   flips to `expected "spy" to be called with ... ChooseTarget`, and
+  //   `fanHostId` reads 1 instead of null.
+  // V10 is the positive control proving these arms are not uniformly inert.
+  it("never pre-empts the host's own target, activation or undo intent", () => {
+    const actionableAttachment = new Set([2]);
+
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null, selectedObjectId: null });
+    });
+    const targetArm = renderPermanent(new Set([1]), new Set(), new Set(), actionableAttachment);
+    clickHost(targetArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 1 } },
+    });
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    cleanup();
+    vi.mocked(dispatchAction).mockClear();
+
+    const hostAbility = { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } } as const;
+    useGameStore.setState({ legalActionsByObject: { "1": [hostAbility] } });
+    const activateArm = renderPermanent(
+      new Set(), new Set(), new Set(), new Set([1, 2]),
+    );
+    clickHost(activateArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith(hostAbility);
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    cleanup();
+    vi.mocked(dispatchAction).mockClear();
+    useGameStore.setState({ legalActionsByObject: {} });
+
+    const undoArm = renderPermanent(
+      new Set(), new Set(), new Set(), actionableAttachment, new Set([1]),
+    );
+    clickHost(undoArm.container);
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "UntapLandForMana",
+      data: { object_id: 1 },
+    });
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+  });
+
   it("refreshes the attachment fan when the engine clears host attachments", () => {
     const gameState = makeState();
     const host = gameState.objects[1];
@@ -520,14 +783,120 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
     // Attachment 4 is a valid target — both attachments must render even though
     // the host is neither hovered nor inspected.
-    const { container } = renderPermanent(new Set([4]));
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
+  });
+
+  it("opens the full attachment chooser when a host has a targetable attachment", () => {
+    // Regression: Rampaging Yao Guai can target Darksteel Plate while it is
+    // attached beside Skullclamp on Bastion Protector. The targetable Plate
+    // expands into only a narrow overlapping board peek, so clicking the host
+    // must expose the fan's full-size cards and let the engine-authorized
+    // target dispatch unambiguously.
+    const darksteelPlate = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Darksteel Plate",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1] = { ...gameState.objects[1], name: "Bastion Protector", attachments: [2, 4] };
+    gameState.objects[2] = { ...gameState.objects[2], name: "Skullclamp" };
+    gameState.objects[4] = darksteelPlate;
+    gameState.battlefield = [1, 2, 3, 4];
+    const waitingFor = buildTriggerTargetSelectionWaitingFor({
+      data: {
+        player: 0,
+        target_slots: [],
+        selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 4 }] }),
+      },
+    });
+    gameState.waiting_for = waitingFor;
+    useGameStore.setState({
+      gameState,
+      waitingFor,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
+    useUiStore.setState({ attachmentFanHostId: null });
+
+    const { container } = renderPermanent();
+    render(<AttachmentFan />);
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    const fan = document.querySelector("[data-attachment-fan]");
+    expect(fan).not.toBeNull();
+    const darksteelCard = fan?.querySelector('[aria-label="Darksteel Plate"]') as HTMLElement;
+    expect(darksteelCard).not.toBeNull();
+
+    fireEvent.click(darksteelCard);
+
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: {
+        type: "choose",
+        data: { choiceId: "attachment-4" },
+      },
+    });
+  });
+
+  it("submits each attachment's engine-authored response independently", () => {
+    const secondEquipment = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = secondEquipment;
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObjects([2, 4]),
+    });
+    useUiStore.setState({ attachmentFanHostId: 1 });
+    render(<AttachmentFan />);
+
+    const fan = document.querySelector("[data-attachment-fan]") as HTMLElement;
+    fireEvent.click(fan.querySelector('[aria-label="Test Equipment"]') as HTMLElement);
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-2" } },
+    });
+
+    fireEvent.click(fan.querySelector('[aria-label="Second Equipment"]') as HTMLElement);
+    expect(dispatchInteraction).toHaveBeenCalledWith({
+      interactionId: "attachment-interaction",
+      response: { type: "choose", data: { choiceId: "attachment-4" } },
+    });
   });
 
   it("auto-expands collapsed attachments when one is activatable (re-equip)", () => {
@@ -551,14 +920,13 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
-    const { container } = renderPermanent(
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set([4]),
-    );
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
@@ -585,15 +953,13 @@ describe("PermanentCard", () => {
     gameState.objects[1].attachments = [2, 4];
     gameState.objects[4] = secondEquipment;
     gameState.battlefield = [1, 2, 3, 4];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: interactionForAttachedObject(4),
+    });
 
-    const { container } = renderPermanent(
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set(),
-      new Set([4]),
-    );
+    const { container } = renderPermanent();
 
     expect(container.querySelector('[data-object-id="2"]')).not.toBeNull();
     expect(container.querySelector('[data-object-id="4"]')).not.toBeNull();
@@ -641,7 +1007,7 @@ describe("PermanentCard", () => {
     expect(queryByLabelText("Exiled Two")).toBeNull();
     expect(container.textContent).toContain("+1");
 
-    fireEvent.mouseEnter(container.querySelector('[data-object-id="1"]') as HTMLElement);
+    fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, { pointerType: "mouse" });
 
     expect(queryByLabelText("Exiled Two")).not.toBeNull();
   });
@@ -651,15 +1017,94 @@ describe("PermanentCard", () => {
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
 
-    fireEvent.mouseEnter(host);
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
 
-    fireEvent.mouseEnter(attachment);
+    fireEvent.pointerEnter(attachment, { pointerType: "mouse" });
     expect(useUiStore.getState().inspectedObjectId).toBe(2);
 
-    fireEvent.mouseLeave(attachment, { relatedTarget: host });
+    fireEvent.pointerLeave(attachment, { pointerType: "mouse", relatedTarget: host });
     expect(useUiStore.getState().inspectedObjectId).toBe(1);
     expect(useUiStore.getState().hoveredObjectId).toBe(1);
+  });
+
+  // A remote-desktop session does not enumerate the local mouse as a HID, so the
+  // guest browser reports no hover-capable input — while still delivering honest
+  // `pointerenter` events with `pointerType: "mouse"`. Gating on the capability
+  // query killed battlefield hover outright on those hosts; gating on the event's
+  // own pointerType is what makes this environment work.
+  it("previews on a host whose hover capability queries all report false", () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
+
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+    // The card-lift/z-index hover state is a second, independent symptom: it
+    // rides on hoverObject, which only this inline gate calls.
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+    expect(host.style.zIndex).toBe("80");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+  });
+
+  it("clears the hover lift when the pointer leaves for a non-card element", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "mouse" });
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
+
+    fireEvent.pointerLeave(host, { pointerType: "mouse", relatedTarget: document.body });
+
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("ignores a touch-synthesized pointer enter", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerEnter(host, { pointerType: "touch" });
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().hoveredObjectId).toBeNull();
+  });
+
+  it("still cancels the long-press timer through the merged pointer-leave handler", () => {
+    // useLongPress owns an onPointerLeave of its own and the hover handler wins
+    // the key collision, so it must delegate — otherwise the timer survives the
+    // leave and opens a sticky preview over whatever the pointer moved on to.
+    vi.useFakeTimers();
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+    fireEvent.pointerDown(host, {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    fireEvent.pointerLeave(host, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().previewSticky).toBe(false);
+    vi.useRealTimers();
   });
 
   it("targets the attached permanent itself when the attachment is clicked", () => {
@@ -790,6 +1235,24 @@ describe("PermanentCard", () => {
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "ActivateStation",
       data: { spacecraft_id: 9, creature_id: 1 },
+    });
+  });
+
+  it("submits an authorized untap decision from the board", () => {
+    const gameState: GameState = {
+      ...makeState(),
+      turn_decision_controller: 0,
+      active_player: 1,
+      waiting_for: { type: "UntapChoice", data: { player: 1, candidates: [1] } },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    const { container } = renderPermanent(new Set(), new Set(), new Set([1]));
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 1, untap: true },
     });
   });
 
@@ -936,6 +1399,7 @@ describe("PermanentCard", () => {
           source: { object_id: 39, incarnation: 1 },
           ability_index: null,
           mana_type: "Green",
+          output: { type: "Concrete", data: "Green" },
           atomic_combination: null,
           restrictions: [],
           penalty: "None",
@@ -1000,9 +1464,16 @@ describe("PermanentCard", () => {
       mana_cost: { type: "NoCost" },
       color: [],
       base_color: [],
+      // `is_mana_ability` is the engine-derived key (CR 605.1a) that BOTH
+      // `deriveActivationAffordances` and `resolveObjectActivation` classify
+      // with, so in production the affordance sets and the resolver's partition
+      // can never disagree. This fixture asserts the mana-only affordance pair
+      // below, so the abilities must carry the flag that produces it; without it
+      // the fixture describes a state the engine cannot emit.
       abilities: [
         {
           kind: "Activated",
+          is_mana_ability: true,
           cost: { type: "Tap" },
           description: "{T}: Add {C}.",
           effect: {
@@ -1012,6 +1483,7 @@ describe("PermanentCard", () => {
         },
         {
           kind: "Activated",
+          is_mana_ability: true,
           cost: {
             type: "Composite",
             costs: [

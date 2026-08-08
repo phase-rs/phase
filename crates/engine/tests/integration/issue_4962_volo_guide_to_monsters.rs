@@ -2,7 +2,7 @@
 //! share a creature type with a creature you control or a creature card in
 //! your graveyard.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -152,5 +152,56 @@ fn volo_does_not_copy_when_sharing_type_with_graveyard_card() {
         before + 1,
         "Volo must not copy a creature spell sharing a type with a creature card in your \
          graveyard (before={before}, after={after})"
+    );
+}
+
+/// CR 109.5 + CR 205.3m (issue #6480): the "creature you control" leg is scoped
+/// to YOU. A creature an OPPONENT controls sharing the cast spell's type must NOT
+/// block Volo's copy — only your own board and graveyard count. This closes the
+/// coverage gap for the opponent case (the other tests cover the controlled and
+/// graveyard legs); it is non-vacuous — it fails if the runtime `SharesQuality`
+/// reference scan were to ignore the reference filter's `controller: You` and
+/// count an opponent's same-type creature.
+#[test]
+fn volo_copies_when_only_an_opponent_controls_the_shared_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_creature_from_oracle(P0, "Volo, Guide to Monsters", 3, 3, VOLO);
+    // The ONLY Goblin in play is the opponent's; you control none and your
+    // graveyard has none.
+    scenario
+        .add_creature(P1, "Opponent Goblin", 1, 1)
+        .with_subtypes(vec!["Goblin"]);
+    let goblin = scenario
+        .add_creature_to_hand_from_oracle(P0, "Test Goblin", 1, 1, "")
+        .with_mana_cost(ManaCost::generic(0))
+        .with_subtypes(vec!["Goblin"])
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Goblin".to_string()];
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(1),
+            false,
+            vec![],
+        ));
+
+    let before = battlefield_creature_count(&runner);
+    runner.cast(goblin).resolve();
+    runner.advance_until_stack_empty();
+    let after = battlefield_creature_count(&runner);
+
+    // Volo(1) + opponent Goblin(1) = 2 before; casting the Goblin adds the spell
+    // (1) AND Volo's copy token (1) = before + 2, because the opponent's Goblin
+    // does not count toward "a creature you control".
+    assert_eq!(
+        after,
+        before + 2,
+        "Volo must copy when only an OPPONENT controls the shared type (before={before}, \
+         after={after})"
     );
 }

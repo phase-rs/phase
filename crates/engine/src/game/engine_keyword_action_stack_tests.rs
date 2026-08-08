@@ -858,9 +858,7 @@ fn equip_can_be_countered_by_stack_targeting_effect() {
 /// Issue #3660: deferred copy observers must not drop remaining paradigm offers.
 #[test]
 fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
-    use crate::game::triggers::{
-        PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin,
-    };
+    use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::types::ability::{
         Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     };
@@ -879,38 +877,35 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
             name.to_string(),
             Zone::Battlefield,
         );
-        PendingTriggerContext {
-            pending: PendingTrigger {
-                source_id,
-                controller,
-                condition: None,
-                ability: {
-                    let mut ability = ResolvedAbility::new(
-                        Effect::Draw {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            target: TargetFilter::Controller,
-                        },
-                        vec![],
-                        source_id,
-                        controller,
-                    );
-                    ability.description = Some(name.to_string());
-                    ability
-                },
-                timestamp: 0,
-                target_constraints: Vec::new(),
-                distribute: None,
-                trigger_event: None,
-                modal: None,
-                mode_abilities: vec![],
-                description: Some(name.to_string()),
-                may_trigger_origin: None,
-                subject_match_count: None,
-                die_result: None,
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability: {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    controller,
+                );
+                ability.description = Some(name.to_string());
+                Box::new(ability)
             },
-            trigger_events: Vec::new(),
-            dispatch_origin: PendingTriggerDispatchOrigin::Normal,
-        }
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: Some(name.to_string()),
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        })
     }
 
     let mut state = GameState::new_two_player(42);
@@ -924,7 +919,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
         controller: player,
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Player,
@@ -932,7 +927,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
                 vec![TargetRef::Player(PlayerId(1))],
                 copy_id,
                 player,
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

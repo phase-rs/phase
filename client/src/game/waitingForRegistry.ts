@@ -38,6 +38,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "MeldAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
+    "ManaSourceSelection",
     "ChooseXValue",
     "PayAmountChoice",
     "TargetSelection",
@@ -247,6 +248,7 @@ export function waitingForReason(
     case "RetargetChoice":
       return { key: "status.reason.choosingTargets" };
     case "ManaPayment":
+    case "ManaSourceSelection":
     case "PhyrexianPayment":
     case "PayCost":
     case "PayManaAbilityMana":

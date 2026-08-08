@@ -12,7 +12,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -21,7 +21,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
@@ -81,6 +81,38 @@ pub struct BestowFormState;
 /// permanent — the merge identity lives in `GameObject::merged_components`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
+
+/// Serde adapter for presence-only unit markers stored in optional fields.
+///
+/// The owning fields retain `#[serde(default)]` so an absent field restores as
+/// `None`, while a present legacy `null` reaches this adapter and restores the
+/// marker. Canonical serialization omits `None` through the fields'
+/// `skip_serializing_if` attributes and represents `Some(_)` as `true`.
+///
+/// This adapter must not be used for markers that carry payload. Adding payload
+/// requires a deliberately versioned wire representation rather than silently
+/// discarding it behind this presence bit.
+mod unit_marker_option_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(value.is_some())
+    }
+
+    pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: Default,
+        D: Deserializer<'de>,
+    {
+        match Option::<bool>::deserialize(deserializer)? {
+            Some(true) | None => Ok(Some(T::default())),
+            Some(false) => Ok(None),
+        }
+    }
+}
 
 /// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
 /// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
@@ -185,6 +217,9 @@ pub struct BackFaceData {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4: Defense of a battle (printed number while off the battlefield).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defense: Option<u32>,
@@ -365,6 +400,12 @@ pub struct GameObject {
     pub base_controller: Option<PlayerId>,
     pub controller: PlayerId,
     pub zone: Zone,
+    /// Viewer-specific identity-display projection. This is false on
+    /// authoritative game state and populated only at client-view boundaries;
+    /// presentation consumers must use it instead of reconstructing hidden
+    /// information permissions from reveal bookkeeping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub display_visible_to_viewer: bool,
 
     // Battlefield state
     pub tapped: bool,
@@ -439,6 +480,10 @@ pub struct GameObject {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
+    /// loyalty itself is counter-derived (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4c: Defense of a battle on the battlefield — derived from defense
     /// counters. Kept in sync with `CounterType::Defense` by layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,7 +553,11 @@ pub struct GameObject {
     pub back_face: Option<BackFaceData>,
 
     /// Digital-only Specialize: specialized faces keyed by added color pip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_map"
+    )]
     pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
 
     /// Digital-only Specialize: set after specializing; prevents re-specializing.
@@ -522,6 +571,10 @@ pub struct GameObject {
     pub base_name: String,
     #[serde(default)]
     pub base_loyalty: Option<u32>,
+    /// CR 306.5b: Printed-loyalty baseline restored after layered copy effects;
+    /// live loyalty remains derived from counters on the battlefield (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
     #[serde(default)]
     pub base_defense: Option<u32>,
@@ -715,7 +768,11 @@ pub struct GameObject {
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
     /// CR 702.103e–g (illegal target, unattach, zone exit).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bestow_form: Option<BestowFormState>,
 
     /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
@@ -728,7 +785,11 @@ pub struct GameObject {
     /// the stack (cast for its mutate cost). Set by `apply_mutate_form`; cleared
     /// by `revert_mutate_form` when the target is illegal at resolution
     /// (CR 702.140b). Does not persist onto the merged permanent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mutate_form: Option<MutateFormState>,
 
     /// CR 730.2 + CR 702.140c: The ordered list of card/token `ObjectId`s that
@@ -921,13 +982,21 @@ pub struct GameObject {
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
     /// Multiple players can goad the same creature, creating additional combat requirements.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub goaded_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.35a: Which players have detained this permanent. A detained permanent
     /// can't attack or block and its activated abilities can't be activated until the
     /// detaining player's next turn. Cleared during layer evaluation like goaded_by.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub detained_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.60a: Whether this creature is currently suspected.
@@ -959,7 +1028,11 @@ pub struct GameObject {
     /// memory of its previous existence). `Option<PreparedState>` over a bool
     /// per project idiom (no bool flags). Assign when WotC publishes SOS CR
     /// update.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prepared: Option<PreparedState>,
 
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end
@@ -1119,6 +1192,25 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+
+    /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
+    /// object's own activated-ability mana cost, stamped by
+    /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
+    /// activation-time payment. PURELY A BRIDGE: `push_ability_entry` (the
+    /// single authority where an activated ability reaches the stack)
+    /// synchronously drains this field — via `std::mem::take` — into that
+    /// specific activation's own `ResolvedAbility::noted_mana_payment`
+    /// (paired with the source's live incarnation at that same moment)
+    /// immediately after cost payment completes, before any later activation
+    /// of this permanent could occur. Nothing reads this field at resolution
+    /// time; `Effect::NoteManaSpent` reads the per-activation snapshot
+    /// instead, so a permanent untapped and reactivated with a different
+    /// payment while an earlier activation still sits unresolved on the
+    /// stack cannot corrupt what that earlier instance observed. Always
+    /// empty except transiently between the payment stamp and the very next
+    /// `push_ability_entry` call for the same source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_to_activate: Vec<ManaType>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1137,6 +1229,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_controller: _,
         controller: _,
         zone: _,
+        display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
         flipped: _,
@@ -1156,6 +1249,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         power: _,
         toughness: _,
         loyalty: _,
+        printed_loyalty: _,
         defense: _,
         token_rules_text: _,
         card_types: _,
@@ -1183,6 +1277,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_toughness: _,
         base_name: _,
         base_loyalty: _,
+        base_printed_loyalty: _,
         base_defense: _,
         base_card_types: _,
         base_mana_cost: _,
@@ -1276,6 +1371,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // Activation-cost-payment latch — same omission class as
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
+        // synchronously by `push_ability_entry` into the resolving
+        // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
+        mana_spent_to_activate: _,
     } = o;
 }
 
@@ -1912,6 +2012,7 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             // CR 701.60b: Snapshot suspected status at the moment of the move,
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
@@ -1932,6 +2033,9 @@ impl GameObject {
         }
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
+        }
+        if self.base_printed_loyalty.is_none() && self.printed_loyalty.is_some() {
+            self.base_printed_loyalty = self.printed_loyalty;
         }
         if self.base_name.is_empty() && !self.name.is_empty() {
             self.base_name = self.name.clone();
@@ -1998,6 +2102,7 @@ impl GameObject {
             base_controller: Some(owner),
             controller: owner,
             zone,
+            display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
             flipped: false,
@@ -2018,6 +2123,7 @@ impl GameObject {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
@@ -2045,6 +2151,7 @@ impl GameObject {
             base_toughness: None,
             base_name: name.clone(),
             base_loyalty: None,
+            base_printed_loyalty: None,
             base_defense: None,
             base_card_types: CardType::default(),
             base_mana_cost: ManaCost::default(),
@@ -2137,6 +2244,7 @@ impl GameObject {
             phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+            mana_spent_to_activate: Vec::new(),
         }
     }
 
@@ -2320,6 +2428,7 @@ impl GameObject {
         self.power = self.base_power;
         self.toughness = self.base_toughness;
         self.loyalty = self.base_loyalty;
+        self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
         self.defense = self.base_defense;
         self.card_types = self.base_card_types.clone();
@@ -2458,6 +2567,102 @@ impl GameObject {
         self.phase_status.is_phased_in()
     }
 
+    /// CR 712.8a + CR 708.2a: the mana value this permanent will show **once it
+    /// leaves the battlefield** — the quantity a caller pricing a battlefield exit
+    /// must use, and which `self.mana_cost` and `self.base_mana_cost` each get
+    /// wrong in a different case.
+    ///
+    /// # Scope: BATTLEFIELD EXIT ONLY. Deliberately not zone-parameterized.
+    ///
+    /// `zones::apply_zone_exit_cleanup` (`zones.rs:137`) restores the stashed face
+    /// through **three independent gates**, not one disjunction, and only two of the
+    /// three are unconditional:
+    ///
+    /// | flag | gate in `apply_zone_exit_cleanup` | at `from = Battlefield` |
+    /// |---|---|---|
+    /// | `transformed` (`:261`, CR 712.8a + CR 400.7) | no zone gate at all | reverts |
+    /// | `modal_back_face` (`:273`, CR 712.8a + CR 400.7) | `to != Stack && to != Battlefield` | reverts for any non-stack, non-battlefield destination |
+    /// | `face_down` (`:286`, CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
+    ///
+    /// **Each flag INDEPENDENTLY reverts for `Battlefield -> Graveyard`** (CR
+    /// 701.21a's transition), which is what the disjunction below relies on. The
+    /// claim is deliberately per-flag: the disjunction also admits flag
+    /// COMBINATIONS, and one is real and handled in-tree — see the next section.
+    /// None of the three is exact for a battlefield-to-STACK move, where the
+    /// `modal_back_face` gate does not fire. A destination parameter is not added:
+    /// only the battlefield-exit value is proven, and a parameter with one proven
+    /// value is speculative generality. Add it when a second transition earns its
+    /// own per-flag proof.
+    ///
+    /// # The one flag combination that occurs, and why it is still correct
+    ///
+    /// A **flipped permanent that is then turned face down** (Ixidron, Cyber
+    /// Conversion — CR 712.16 does not cover flip cards, so this is legal) sets
+    /// `flipped` AND `face_down` at once, and the two statuses **share the single
+    /// `back_face` slot**. `effects::turn_face_down` (`turn_face_down.rs:66-69`)
+    /// keeps the FLIP stash there rather than overwriting it with a base snapshot,
+    /// and `zones::apply_zone_exit_cleanup` runs the CR 708.9 face-down restore
+    /// BEFORE the CR 710.4 flip revert (`zones.rs:300-309`) precisely so one slot
+    /// serves both.
+    ///
+    /// So for that object `back_face` holds the flip card's NORMAL half, not the
+    /// base face — and reading it is not merely harmless, it is REQUIRED. Turning
+    /// the permanent face down set both `mana_cost` and `base_mana_cost` to
+    /// `ManaCost::NoCost` (`morph.rs:47`, CR 708.2a), so the `None =>` arm would
+    /// return 0 here. The `face_down` disjunct is what routes this object to the
+    /// stash instead. CR 710.1c ("A flip card's color and mana cost don't change if
+    /// the permanent is flipped") makes that stash mana-cost-identical to the
+    /// printed cost, so the number returned is right. Pinned by F8-E arm (e).
+    ///
+    /// `flipped` is **not** a fourth conjunct, and this is settled — do not
+    /// re-chase it. CR 710.1c again: `flip::apply_flipped_face_to_object`
+    /// (`flip.rs:320`) leaves `mana_cost` and `base_mana_cost` untouched by design
+    /// (`flip.rs:363-365`), so for a flipped-but-face-UP permanent the `None =>`
+    /// arm already returns the right number.
+    ///
+    /// # Why not `self.mana_cost`
+    ///
+    /// It is the live, layer-mutable characteristic (CR 613.1). `layers::
+    /// seed_live_characteristics_from_base` re-seeds it from `base_mana_cost` at the
+    /// top of every layer pass, and `printed_cards::apply_copiable_values`
+    /// (`printed_cards.rs:644`) then overwrites **only** the live field — it writes
+    /// no `base_*` field at all. CR 903.3's own example puts a copied commander in
+    /// scope here ("A commander that's copying another card … is still a commander").
+    ///
+    /// # Why not `self.base_mana_cost` alone
+    ///
+    /// `printed_cards::apply_back_face_to_object` (`:287`) writes **both** the live
+    /// (`:295`) and base (`:308`) fields from the installed face, and
+    /// `morph::apply_face_down_creature_characteristics` (`morph.rs:47`) sets both to
+    /// `ManaCost::NoCost` (CR 708.2a). For those objects `base_mana_cost` describes
+    /// the face currently shown, not the face the card will show off the battlefield.
+    ///
+    /// # Known residual, stated per flag rather than as a blanket claim
+    ///
+    /// The `back_face` slot is **shared** by the transform, MDFC, face-down and flip
+    /// stashes, and its writers do not agree on which snapshot they take:
+    ///   * `transform.rs:85`/`:90` stash `printed_cards::snapshot_object_face`, which
+    ///     captures the **live** `mana_cost` (`printed_cards.rs:717`). A permanent
+    ///     transformed while already under a mana-cost-altering copy effect therefore
+    ///     parks a polluted value, and this method will read it.
+    ///   * `effects/turn_face_down.rs:68` stashes `snapshot_object_base_face` — the
+    ///     **printed** baseline. That path is clean.
+    ///     The divergence is **BIDIRECTIONAL**, not downward-only: `intrinsic_copiable_
+    ///     values` (`printed_cards.rs:486`) sources `obj.base_mana_cost` from the COPY
+    ///     SOURCE and `apply_copiable_values` writes it to the RECIPIENT's live field
+    ///     with no clamp, so a `{1}{U}` Clone copying a fifteen-drop ends with live 15
+    ///     against base 2. Tracked as task #36; the fix is an engine change at the
+    ///     transform site and is out of this unit's scope.
+    pub fn mana_value_on_battlefield_exit(&self) -> u32 {
+        let shows_stashed_face = self.transformed || self.modal_back_face || self.face_down;
+        match self.back_face.as_ref().filter(|_| shows_stashed_face) {
+            Some(stashed) => stashed.mana_cost.mana_value(),
+            // CR 613.1: "For a card, [the characteristics are] the values printed on
+            // that card" — `base_mana_cost` is the engine's name for that baseline.
+            None => self.base_mana_cost.mana_value(),
+        }
+    }
+
     /// CR 702.26b: Whether this object is currently phased out (treated as
     /// though it doesn't exist for almost all rules queries).
     pub fn is_phased_out(&self) -> bool {
@@ -2483,6 +2688,16 @@ impl GameObject {
     pub fn chosen_color(&self) -> Option<ManaColor> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Color(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
+    /// resolution on this permanent's own ability ("this artifact's last noted
+    /// type" — Jeweled Amulet). Read by `ManaProduction::NotedType`.
+    pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),
             _ => None,
         })
     }
@@ -2696,6 +2911,10 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
@@ -2983,6 +3202,28 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_game_object_payload_defaults_printed_loyalty_provenance() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        obj.printed_loyalty = Some(PrintedLoyalty::X);
+        obj.base_printed_loyalty = Some(PrintedLoyalty::X);
+
+        let mut json = serde_json::to_value(&obj).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("printed_loyalty");
+        fields.remove("base_printed_loyalty");
+
+        let legacy: GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.printed_loyalty, None);
+        assert_eq!(legacy.base_printed_loyalty, None);
     }
 
     #[test]
@@ -3642,6 +3883,95 @@ mod tests {
             hand_obj.effective_mana_value(),
             6,
             "a Room card in hand combines both halves (CR 709.4b): {{U}} + {{4}}{{U}} = 6"
+        );
+    }
+
+    fn exit_value_fixture(id: u64, mana_value: u32) -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(id),
+            CardId(id),
+            PlayerId(0),
+            "Exit Value Fixture".to_string(),
+            Zone::Battlefield,
+        );
+        obj.mana_cost = ManaCost::generic(mana_value);
+        obj.base_mana_cost = ManaCost::generic(mana_value);
+        obj
+    }
+
+    fn install_stashed_face(obj: &mut GameObject, mana_value: u32) {
+        let mut stashed = exit_value_fixture(obj.id.0 + 1000, mana_value);
+        stashed.name = "Stashed Face".to_string();
+        obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(&stashed));
+    }
+
+    /// CR 712.8a + CR 708.2a: the exit accessor reads the restored face, not a
+    /// currently displayed transformed or face-down shell. The paired
+    /// flipped-only and flipped-plus-face-down arms pin CR 710.1c's distinction.
+    #[test]
+    fn mana_value_on_battlefield_exit_uses_the_face_that_will_be_restored() {
+        let mut transformed = exit_value_fixture(1, 0);
+        transformed.transformed = true;
+        install_stashed_face(&mut transformed, 5);
+        assert_eq!(
+            transformed.mana_value_on_battlefield_exit(),
+            5,
+            "transformed DFC restores its stashed face"
+        );
+
+        let mut face_down = exit_value_fixture(2, 0);
+        face_down.face_down = true;
+        face_down.mana_cost = ManaCost::NoCost;
+        face_down.base_mana_cost = ManaCost::NoCost;
+        install_stashed_face(&mut face_down, 4);
+        assert_eq!(
+            face_down.mana_value_on_battlefield_exit(),
+            4,
+            "face-down permanent restores its stashed identity"
+        );
+
+        let mut copied_cost_strip = exit_value_fixture(3, 4);
+        copied_cost_strip.mana_cost = ManaCost::NoCost;
+        assert_eq!(
+            copied_cost_strip.mana_value_on_battlefield_exit(),
+            4,
+            "a live cost change does not alter the printed exit cost"
+        );
+
+        let untouched = exit_value_fixture(4, 3);
+        assert_eq!(
+            untouched.mana_value_on_battlefield_exit(),
+            3,
+            "an untouched permanent uses its printed baseline"
+        );
+
+        let mut flipped_then_face_down = exit_value_fixture(5, 0);
+        flipped_then_face_down.flipped = true;
+        flipped_then_face_down.face_down = true;
+        flipped_then_face_down.mana_cost = ManaCost::NoCost;
+        flipped_then_face_down.base_mana_cost = ManaCost::NoCost;
+        install_stashed_face(&mut flipped_then_face_down, 2);
+        assert_eq!(
+            flipped_then_face_down.mana_value_on_battlefield_exit(),
+            2,
+            "the face-down gate must preserve a flipped card's normal-half stash"
+        );
+
+        let mut flipped_only = exit_value_fixture(6, 2);
+        flipped_only.flipped = true;
+        install_stashed_face(&mut flipped_only, 9);
+        assert_eq!(
+            flipped_only.mana_value_on_battlefield_exit(),
+            2,
+            "CR 710.1c: flipped-only does not route through the stash"
+        );
+
+        let mut missing_stash = exit_value_fixture(7, 4);
+        missing_stash.face_down = true;
+        assert_eq!(
+            missing_stash.mana_value_on_battlefield_exit(),
+            4,
+            "a missing stash falls back to the baseline rather than panicking"
         );
     }
 }

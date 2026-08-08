@@ -59,6 +59,8 @@ pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
+// CR 116.2c: the "pay a cost to end a continuous effect" special action.
+pub mod end_continuous_effect;
 pub(crate) mod exile_links;
 pub mod filter;
 // CR 710: Kamigawa flip cards (flipping, alternative-face application).
@@ -78,6 +80,8 @@ pub mod layers;
 pub mod ledger;
 pub mod library;
 pub mod life_costs;
+pub mod life_safety;
+mod lifecycle;
 pub mod log;
 pub mod mana_abilities;
 pub mod mana_payment;
@@ -141,6 +145,7 @@ pub mod public_state;
 pub mod quantity;
 pub mod replacement;
 pub mod replay;
+pub(crate) mod resolution_prompt;
 pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;
@@ -166,6 +171,12 @@ pub mod token_presets;
 pub mod topology;
 pub mod transform;
 pub mod trigger_index;
+// Tests for the `trigger_index` live-zone guard live in a sibling file
+// (declared here, not in `trigger_index.rs`, so that file stays
+// implementation-only).
+#[cfg(test)]
+#[path = "trigger_index_zone_guard_tests.rs"]
+mod trigger_index_zone_guard_tests;
 pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;
@@ -200,7 +211,7 @@ pub use deck_loading::{
 };
 pub use deck_validation::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
     signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
     validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
     DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,

@@ -7,7 +7,7 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult, ZoneMoveRequest,
     ZoneMoveResult,
 };
-use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -18,6 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
+use super::filter::{matches_target_filter, FilterContext};
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -213,8 +214,17 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 return;
             }
 
-            // CR 704.5p + CR 310.9: If a battle is somehow attached to a permanent, unattach it.
-            check_battle_unattached(state, &mut any_performed, &battlefield_snapshot);
+            // CR 704.5p: If a battle or creature is attached to an object or player — or
+            // any nonbattle, noncreature permanent that's neither an Aura, an Equipment,
+            // nor a Fortification is — it becomes unattached and remains on the
+            // battlefield. Runs AFTER the CR 704.5m Aura and CR 704.5n Equipment sweeps,
+            // so a permanent those rules handle has already been resolved by its own rule.
+            check_illegal_attachment_unattach(
+                state,
+                events,
+                &mut any_performed,
+                &battlefield_snapshot,
+            );
 
             // CR 704.5w + CR 704.5x + CR 310.10: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
@@ -256,6 +266,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 702.131b: A player controlling an Ascend permanent with ten or more
             // permanents gets the city's blessing for the rest of the game.
             check_city_blessing(state, events, &mut any_performed, &battlefield_snapshot);
+            // CR 702.195a: A player with a Storied permanent and three historic
+            // permanents gets an enduring story for the rest of the game.
+            check_enduring_story(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 704.5t: If a player's venture marker is on the bottommost room
@@ -354,6 +367,51 @@ fn check_city_blessing(
     }
 }
 
+/// CR 702.195a: Storied grants an enduring story when its controller also controls
+/// three or more artifacts, Sagas, and/or legendary permanents.
+fn check_enduring_story(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+) {
+    let historic_filter =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+    let players_to_designate: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !state.enduring_story.contains(player))
+        .filter(|player| {
+            let permanents: Vec<ObjectId> = battlefield_snapshot
+                .iter()
+                .copied()
+                .filter(|id| {
+                    live_battlefield_object(state, id).is_some_and(|obj| obj.controller == *player)
+                })
+                .collect();
+            let context = FilterContext::neutral();
+            permanents.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Storied))
+            }) && permanents
+                .iter()
+                .filter(|id| matches_target_filter(state, **id, &historic_filter, &context))
+                .count()
+                >= 3
+        })
+        .collect();
+
+    for player_id in players_to_designate {
+        state.enduring_story.insert(player_id);
+        crate::game::layers::mark_layers_full(state);
+        events.push(GameEvent::EnduringStoryGained { player_id });
+        *any_performed = true;
+    }
+}
+
 /// CR 702.131b + CR 702.131d: Eagerly re-evaluate the city's blessing for all
 /// players outside the normal SBA loop. Called from `resolve_chain_body` after
 /// a parent effect resolves and before a `HasCityBlessing`-gated sub-ability
@@ -363,6 +421,18 @@ fn check_city_blessing(
 pub(crate) fn apply_city_blessing_if_triggered(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut any_performed = false;
     check_city_blessing_eager(state, events, &mut any_performed);
+    if any_performed {
+        crate::game::layers::flush_layers(state);
+    }
+}
+
+pub(crate) fn apply_enduring_story_if_triggered(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut any_performed = false;
+    let battlefield = state.battlefield_phased_in_ids();
+    check_enduring_story(state, events, &mut any_performed, &battlefield);
     if any_performed {
         crate::game::layers::flush_layers(state);
     }
@@ -1518,13 +1588,17 @@ fn world_acquisition_timestamp(
         .filter(|effect| {
             // Mirror apply_continuous_effect_filtered (layers.rs:4314-4332):
             // recipient must match affected_filter AND the effect's condition.
-            let ctx = crate::game::filter::FilterContext::from_source(state, effect.source_id);
+            let condition_controller = layers::active_effect_condition_controller(state, effect);
+            let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                effect.source_id,
+                condition_controller,
+            );
             crate::game::filter::matches_target_filter(state, obj.id, &effect.affected_filter, &ctx)
                 && effect.condition.as_ref().is_none_or(|condition| {
                     layers::evaluate_condition_with_recipient(
                         state,
                         condition,
-                        effect.controller,
+                        condition_controller,
                         effect.source_id,
                         obj.id,
                     )
@@ -1716,40 +1790,122 @@ fn check_zero_defense(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5p + CR 310.9: A battle can't be attached to players or permanents.
-/// If a battle is somehow attached, it becomes unattached and remains on the battlefield.
-fn check_battle_unattached(
+/// CR 704.5p (+ CR 310.9 for the battle half): the full "this permanent may not
+/// be attached to anything" state-based action, expressed as its two printed
+/// sentences.
+///
+/// > 704.5p If a battle or creature is attached to an object or player, it
+/// > becomes unattached and remains on the battlefield. Similarly, if any
+/// > nonbattle, noncreature permanent that's neither an Aura, an Equipment, nor
+/// > a Fortification is attached to an object or player, it becomes unattached
+/// > and remains on the battlefield.
+///
+/// Both sentences unattach and LEAVE THE PERMANENT ON THE BATTLEFIELD — unlike
+/// CR 704.5m, where an illegally-attached Aura goes to its owner's graveyard.
+///
+/// This generalizes the former `check_battle_unattached`, which implemented only
+/// the `CoreType::Battle` fragment of sentence 1. The widening is what makes the
+/// class-level cases work: March of the Machines animating an Equipment (whose
+/// own reminder text is this rule restated on a card), Ensoul Artifact on an
+/// Equipment, a Licid whose CR 116.2c animation effect has ended, and any
+/// attached permanent that is none of Aura/Equipment/Fortification.
+///
+/// CR 604.2 + CR 704.3: the predicate reads LAYER-DERIVED characteristics
+/// (`core_types`, `subtypes`), not printed ones. `check_state_based_actions`
+/// flushes layers once on entry, before its bounded iteration loop, so a type
+/// change made by the action that led to this check (e.g.
+/// `GameState::end_continuous_effect` marking layers full) is already visible on
+/// the first iteration. A type change caused by an SBA *within* the loop is seen
+/// one outer `check_state_based_actions` call later — the same latency every
+/// other type-reading SBA already has. Do not restructure the loop for it.
+fn check_illegal_attachment_unattach(
     state: &mut GameState,
+    events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
 ) {
-    let battles_to_unattach: Vec<_> = battlefield_snapshot
+    let to_unattach: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
-                obj.card_types.core_types.contains(&CoreType::Battle) && obj.attached_to.is_some()
+                if obj.attached_to.is_none() {
+                    return false;
+                }
+                // CR 704.5p sentence 1: "If a battle or creature is attached to
+                // an object or player, it becomes unattached and remains on the
+                // battlefield."
+                let sentence_1 = obj.card_types.core_types.contains(&CoreType::Battle)
+                    || obj.card_types.core_types.contains(&CoreType::Creature);
+                // CR 704.5p sentence 2: "Similarly, if any nonbattle,
+                // noncreature permanent that's neither an Aura, an Equipment,
+                // nor a Fortification is attached to an object or player, it
+                // becomes unattached and remains on the battlefield."
+                //
+                // CR 205.3h + CR 303.7 + CR 111.10j: Role is an enchantment
+                // subtype carried by permanents that are ALSO Auras ("Some Aura
+                // enchantments also have the subtype 'Role'"; a Cursed Role
+                // token is "a colorless Aura Role enchantment token"), so the
+                // `Aura` test below already excludes every Role.
+                //
+                // `eq_ignore_ascii_case` follows `check_unattached_auras`, the
+                // safer of the two existing conventions in this module.
+                let sentence_2 = !sentence_1
+                    && !obj.card_types.subtypes.iter().any(|s| {
+                        s.eq_ignore_ascii_case("Aura")
+                            || s.eq_ignore_ascii_case("Equipment")
+                            || s.eq_ignore_ascii_case("Fortification")
+                    });
+                sentence_1 || sentence_2
             })
         })
         .collect();
 
-    for battle_id in battles_to_unattach {
-        if live_battlefield_object(state, &battle_id).is_none() {
+    for attachment_id in to_unattach {
+        if live_battlefield_object(state, &attachment_id).is_none() {
             continue;
         }
+        // CR 701.3d: capture the host BEFORE mutating, so the event names what
+        // the permanent ceased to be attached to.
+        let old_target = live_battlefield_object(state, &attachment_id).and_then(|obj| {
+            obj.attached_to
+                .map(crate::game::effects::attach::target_ref_from_attach_target)
+        });
         // Remove from host's attachments list first. Only Object hosts have an
         // `attachments` list; Player hosts (CR 303.4 + CR 702.5d) do not.
         if let Some(crate::game::game_object::AttachTarget::Object(host)) = state
             .objects
-            .get(&battle_id)
+            .get(&attachment_id)
             .and_then(|obj| obj.attached_to)
         {
             if let Some(host_obj) = state.objects.get_mut(&host) {
-                host_obj.attachments.retain(|&id| id != battle_id);
+                host_obj.attachments.retain(|&id| id != attachment_id);
             }
         }
-        if let Some(battle) = live_battlefield_object_mut(state, &battle_id) {
-            battle.attached_to = None;
+        if let Some(attachment) = live_battlefield_object_mut(state, &attachment_id) {
+            attachment.attached_to = None;
+        }
+        // CR 701.3d: "If an Aura, Equipment, or Fortification that was attached
+        // to an object or player ceases to be attached to it, that counts as
+        // 'becoming unattached'." Emitted through the same filter the CR 704.5n
+        // path uses, so `trigger_matchers::match_unattach` observers see this
+        // sweep exactly as they see that one. The former battle-only
+        // implementation emitted nothing; under the widening that omission would
+        // have propagated to a far larger class.
+        //
+        // Deliberately hand-mutates rather than routing through
+        // `effects::attach::unattach`: that helper flushes layers per object and
+        // records a CR 733 journal command, and neither existing SBA unattach
+        // path journals or flushes. SBAs are deterministic sweeps that replay
+        // re-executes, so journaling here would double-record.
+        if let Some(old_target) = old_target
+            .as_ref()
+            .filter(|target| should_emit_sba_unattached_event(state, target))
+        {
+            events.push(GameEvent::Unattached {
+                attachment_id,
+                old_target: old_target.clone(),
+            });
         }
         *any_performed = true;
     }
@@ -1822,8 +1978,17 @@ fn check_battle_protector(
         }
 
         // Compute legal choices.
+        // CR 310.11a: a Siege's controller "must choose its protector from among their
+        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
+        // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
+        // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
+        // PLACE: `is_alive` reads `Player::is_eliminated` while this reads
+        // `GameState::eliminated_players` — two different stores whose equivalence is not
+        // measured here, so deleting the redundant filter would smuggle an unmeasured
+        // behaviour change into a one-token routing.
         let legal_choices: Vec<PlayerId> = if is_siege {
-            crate::game::players::opponents(state, controller)
+            crate::game::players::choosable_opponents(state, controller)
                 .into_iter()
                 .filter(|p| !state.eliminated_players.contains(p))
                 .collect()
@@ -2020,8 +2185,8 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+            zones::token_is_outside_battlefield_and_stack(state, obj)
+                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -2202,6 +2367,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::replacements::ReplacementEvent;
 
@@ -4269,6 +4435,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -4805,6 +4972,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bare_same_id_spell_entry_does_not_prevent_off_zone_noncard_cleanup() {
+        fn add_off_zone_noncard(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            is_token: bool,
+            is_copy: bool,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.is_token = is_token;
+            object.is_copy = is_copy;
+            id
+        }
+
+        fn push_spell_placeholder(state: &mut GameState, id: ObjectId, card_id: u64) {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(card_id),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        let mut state = setup();
+        let token = add_off_zone_noncard(&mut state, 1, "Orphan Token", true, false);
+        let copy = add_off_zone_noncard(&mut state, 2, "Orphan Copy", false, true);
+        push_spell_placeholder(&mut state, token, 1);
+        push_spell_placeholder(&mut state, copy, 2);
+
+        for id in [token, copy] {
+            assert!(state.objects.contains_key(&id));
+            assert_eq!(state.objects[&id].zone, Zone::Exile);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5d + CR 704.5e: Bare same-id spell entries do not establish a
+        // live casting lifecycle, so both synthetic off-zone objects cease.
+        for id in [token, copy] {
+            assert!(
+                !state.objects.contains_key(&id),
+                "off-zone noncard object {id:?} must cease without its own PendingCast"
+            );
+        }
+    }
+
     // --- CR 704.5e + CR 707.10a: Copy-of-a-card cease-to-exist tests ---
 
     /// A copy of a card (is_copy = true, is_token = false) resolving to the
@@ -5226,6 +5453,119 @@ mod tests {
 
     fn add_filler_permanent(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
         create_creature(state, CardId(9002), owner, name, 1, 1)
+    }
+
+    fn add_storied_permanent(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_creature(state, CardId(9003), owner, "Storied", 1, 1);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Storied);
+        id
+    }
+
+    #[test]
+    fn storied_grants_enduring_story_for_each_historic_leg_and_latches() {
+        let mut state = setup();
+        add_storied_permanent(&mut state, PlayerId(0));
+
+        let legendary = add_filler_permanent(&mut state, PlayerId(0), "Legendary");
+        state
+            .objects
+            .get_mut(&legendary)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        let artifact = add_filler_permanent(&mut state, PlayerId(0), "Artifact");
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let saga = add_filler_permanent(&mut state, PlayerId(0), "Saga");
+        state
+            .objects
+            .get_mut(&saga)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Saga".into());
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnduringStoryGained {
+                player_id: PlayerId(0)
+            }
+        )));
+
+        state
+            .battlefield
+            .retain(|id| *id != legendary && *id != artifact && *id != saga);
+        let mut later_events = Vec::new();
+        check_state_based_actions(&mut state, &mut later_events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_live_storied_and_three_live_historic_permanents() {
+        let mut state = setup();
+        let storied = add_storied_permanent(&mut state, PlayerId(0));
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedIn;
+        state.battlefield.pop_back();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_a_storied_permanent() {
+        let mut state = setup();
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EnduringStoryGained { .. })));
     }
 
     #[test]

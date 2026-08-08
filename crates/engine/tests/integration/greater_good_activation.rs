@@ -607,13 +607,12 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
     }
 }
 
-/// CR 601.2c + CR 701.21a — non-modal activated abilities with sacrifice
-/// costs must pay that cost before choosing targets when target legality or
-/// effect quantities depend on the sacrificed object. This mirrors Dina-style
-/// abilities that sacrifice one creature, then target another creature with an
-/// effect sized by `CostPaidObject`.
+/// CR 602.2b + CR 601.2c/h — target declaration precedes paying a sacrifice
+/// cost even when the effect's later quantity reads the sacrificed object's
+/// last-known information. This mirrors Dina-style abilities that sacrifice
+/// one creature, then put counters on a target creature based on its power.
 #[test]
-fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
+fn sacrifice_cost_selects_target_before_cost_paid_object_exists() {
     let ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::PutCounter {
@@ -640,8 +639,7 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
         .id();
     let victim_id = scenario.add_creature(P0, "Victim", 3, 3).id();
     let target_id = scenario.add_creature(P0, "Counter Target", 1, 1).id();
-    // A second legal creature target so auto-select does not skip the post-sacrifice
-    // target prompt when only one creature remains after the victim leaves play.
+    // A second legal creature target keeps target selection interactive.
     scenario.add_creature(P0, "Alternate Target", 2, 2);
 
     let mut runner = scenario.build();
@@ -654,35 +652,25 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
     assert!(
         matches!(
             &runner.state().waiting_for,
-            engine::types::WaitingFor::PayCost {
-                kind: engine::types::PayCostKind::Sacrifice,
-                ..
-            }
+            engine::types::WaitingFor::TargetSelection { .. }
         ),
-        "activating must prompt for sacrifice before target selection, got {:?}",
+        "activating must prompt for a target before the sacrifice cost, got {:?}",
         runner.state().waiting_for,
     );
-
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![victim_id],
-        })
-        .expect("selecting the sacrifice victim must succeed");
-
     match &runner.state().waiting_for {
         engine::types::WaitingFor::TargetSelection { target_slots, .. } => {
             assert_eq!(target_slots.len(), 1, "the effect has one target slot");
             let legal_targets = &target_slots[0].legal_targets;
             assert!(
                 legal_targets.contains(&TargetRef::Object(target_id)),
-                "the post-sacrifice target creature must be legal",
+                "the declared target creature must be legal before payment",
             );
             assert!(
-                !legal_targets.contains(&TargetRef::Object(victim_id)),
-                "the sacrificed creature must not remain targetable after cost payment",
+                legal_targets.contains(&TargetRef::Object(victim_id)),
+                "the sacrifice candidate is legal while targets are declared",
             );
         }
-        other => panic!("expected target selection after sacrifice cost, got {other:?}"),
+        other => panic!("expected target selection before sacrifice cost, got {other:?}"),
     }
 
     runner
@@ -690,12 +678,17 @@ fn sacrifice_cost_defers_target_selection_until_cost_paid_object_exists() {
             targets: vec![TargetRef::Object(target_id)],
         })
         .expect("selecting the remaining creature target must succeed");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![victim_id],
+        })
+        .expect("selecting the sacrifice victim after target declaration must succeed");
     runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().objects[&victim_id].zone,
         Zone::Graveyard,
-        "the victim must be sacrificed before target selection",
+        "the victim must be sacrificed after target selection",
     );
     assert_eq!(
         runner.state().objects[&target_id]

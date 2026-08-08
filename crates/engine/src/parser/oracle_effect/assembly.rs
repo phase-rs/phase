@@ -25,8 +25,8 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition,
-    SubAbilityLink, TapStateChange, TargetFilter,
+    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -37,6 +37,7 @@ use super::lower::{
     apply_where_x_to_latest_def, attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
+    attach_graveyard_redirect_rider_to_prior_free_cast_from_zones,
     attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
     clone_would_transplant_gated_referent, consolidate_die_and_coin_defs,
     definition_targets_self_source, effect_publishes_revealed_subject,
@@ -73,7 +74,9 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
-    parse_spell_graveyard_replacement_rider, publishes_aggregate_set_from_resolution,
+    parse_spell_graveyard_replacement_rider,
+    parse_spells_cast_this_way_graveyard_replacement_rider,
+    publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
@@ -96,6 +99,33 @@ fn is_multi_target_player_subject_definition(def: &AbilityDefinition) -> bool {
                 }
                 _ => false,
             })
+}
+
+/// CR 701.3a + CR 303.4f: Stamp `forward_result` on a ChangeZone→Battlefield that
+/// nests Attach, including when that return sits under TargetOnly (Necrotic Plague).
+fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition) {
+    let nests_attach = matches!(
+        def.sub_ability.as_deref().map(|s| &*s.effect),
+        Some(Effect::Attach { .. })
+    );
+    if nests_attach
+        && matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        )
+    {
+        def.forward_result = true;
+        return;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_battlefield_attach_return(else_ability);
+    }
 }
 
 /// CR 608.2c: A bare verb after a multi-target player subject continues that
@@ -851,6 +881,13 @@ pub(super) enum EffectClass {
     /// `ChooseDrawnThisTurnPayOrTopdeck` — the only effect
     /// `DrawnThisTurnFollowup` patches.
     DrawnThisTurnChoice,
+    /// CR 116.2c: a `GenericEffect` carrying at least one `StaticDefinition` —
+    /// the only shape an `EndEffectCost` continuation can name, because it is
+    /// the only one that installs a continuous effect for a later special action
+    /// to end. Membership is decided by
+    /// `super::effect_installs_continuous_effect`, the same predicate the
+    /// detector uses, so detection and binding cannot select different defs.
+    InstalledContinuousEffect,
 }
 
 /// What a handler does when its antecedent does not resolve.
@@ -1084,6 +1121,14 @@ impl AssemblyEnv {
                 &*defs[index].effect,
                 Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
             ),
+            // CR 116.2c: `role_members` applies this guard as a MEMBERSHIP
+            // filter, so `LastWithRole(GenericEffectHead)` resolves to "the last
+            // `GenericEffect` WITH non-empty statics" — it skips a later
+            // empty-statics one instead of binding it and stamping a cost that
+            // names nothing.
+            Some(BindGuard::EffectShape(EffectClass::InstalledContinuousEffect)) => {
+                super::effect_installs_continuous_effect(&defs[index].effect)
+            }
             Some(BindGuard::DigLookbackTransparentCost) => {
                 let d = &defs[index];
                 d.optional
@@ -1171,6 +1216,41 @@ impl AssemblyEnv {
             AntecedentSelector::AllWithRole(_) => None,
         }
     }
+}
+
+/// Coverage-honesty marker (issue #7046): a `DamageEachPlayer` reading "that
+/// much/that many" (`Ref(EventContextAmount)`) chained IMMEDIATELY after a mass
+/// zone move cannot be faithfully executed today. CR 608.2c requires the
+/// completed move's TOTAL for every recipient, but the runtime hand-off
+/// (`install_previous_effect_counts_by_player`) publishes a per-OWNER table that
+/// `DamageEachPlayer`'s per-recipient resolution consults first — each opponent
+/// reads their OWN swept-card count (0 in the Valakut Exploration native
+/// pattern). Emitting the parsed shape would be silently wrong at runtime,
+/// which is strictly worse than an honest residual gap (the Winnowing-class
+/// precedent in `imperative.rs`). Scoped to the immediately-chained pairing
+/// because only the next resolution step can see the table (any intermediate
+/// effect clears it), and only `DamageEachPlayer` resolves per-recipient —
+/// scalar consumers (Draw / DealDamage-to-object / Mill / LoseLife /
+/// SearchLibrary / Token) read max-over-owners, which equals the true total for
+/// every corpus pool (single-owner by CR 400.3). DELETE this gate when #7046
+/// provides the completed-sweep scalar-total channel; the T1 zero-delta
+/// assertions and the P2 marker assertion are the tripwires that force that
+/// deletion to be a conscious, tested change.
+pub(crate) const MASS_MOVE_TOTAL_DAMAGE_GAP: &str = "mass_move_total_damage";
+
+/// CR 608.2c: does `effect`'s amount expression read `EventContextAmount`
+/// ("that much"/"that many")? Leaf helper for the `MASS_MOVE_TOTAL_DAMAGE_GAP`
+/// gate above. Mirrors the game-side
+/// `quantity_expr_references_event_context_amount` (`game/effects/mod.rs`),
+/// which this parser module cannot call directly — the parser layer never
+/// reaches into game internals; both consult the single traversal authority
+/// `QuantityExpr::any_ref`.
+fn damage_amount_reads_event_context(effect: &Effect) -> bool {
+    let mut reads = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity.any_ref(&mut |qty| matches!(qty, QuantityRef::EventContextAmount));
+    });
+    reads
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -1583,9 +1663,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         // 1 runs as printed, then the tail runs from
                         // `else_ability`. Single-clause bases collapse to the
                         // prior shape (empty tail → no `else_ability`).
-                        // U6-C2: `Instead` is the ONLY handler that binds FirstEmitted
-                        // (CR 608.2c — the override replaces the FIRST printed
-                        // instruction). Do not unify it with the `Last*` selectors.
+                        // U6-C2: `Instead` is the ONLY handler that begins from
+                        // FirstEmitted. Its one structural refinement is an optional
+                        // payment: there, the override replaces the immediate
+                        // `IfYouDo` continuation, not the payment instruction.
+                        // Do not unify it with the `Last*` selectors.
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::FirstEmitted,
@@ -1607,21 +1689,51 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
                             let mut instead = *instead_def.clone();
-                            // CR 702.33d + CR 707.10: Resolve "create N of those
-                            // tokens" anaphor against the root (the antecedent
-                            // for a multi-clause base is the first printed clause).
-                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
-                            if rewrite_counter_instead_target_from_antecedent(
-                                &mut instead.effect,
-                                &root.effect,
-                            ) {
-                                instead.target_choice_timing = root.target_choice_timing;
+                            if instead_replaces_optional_payment_continuation(&root) {
+                                // CR 608.2c: after "you may pay ... If you do, X",
+                                // a later "Y instead" modifies X, not the preceding
+                                // payment instruction. Keep the payment as the root
+                                // and attach the override to its paid continuation.
+                                let continuation = root
+                                    .sub_ability
+                                    .as_deref_mut()
+                                    .expect("the optional-payment continuation was checked");
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &continuation.effect,
+                                ) {
+                                    instead.target_choice_timing =
+                                        continuation.target_choice_timing;
+                                }
+                                if has_explicit_player_target(continuation.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = continuation.sub_ability.take();
+                                continuation.sub_ability = Some(Box::new(instead));
+                            } else {
+                                // CR 702.33d + CR 707.10: Resolve "create N of those
+                                // tokens" anaphor against the root (the antecedent
+                                // for a multi-clause base is the first printed clause).
+                                rewrite_those_tokens_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                );
+                                if rewrite_counter_instead_target_from_antecedent(
+                                    &mut instead.effect,
+                                    &root.effect,
+                                ) {
+                                    instead.target_choice_timing = root.target_choice_timing;
+                                }
+                                if has_explicit_player_target(root.effect.as_ref()) {
+                                    rewrite_player_anaphor_targets_in_definition(&mut instead);
+                                }
+                                instead.else_ability = root.sub_ability.take();
+                                root.sub_ability = Some(Box::new(instead));
                             }
-                            if has_explicit_player_target(root.effect.as_ref()) {
-                                rewrite_player_anaphor_targets_in_definition(&mut instead);
-                            }
-                            instead.else_ability = root.sub_ability.take();
-                            root.sub_ability = Some(Box::new(instead));
                             defs.push(root);
                             if let Some(id) = root_id {
                                 env.arena.reinstate(id);
@@ -1774,14 +1886,43 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             continue;
         }
 
+        // CR 614.1a + CR 608.2g: An exact "if a spell cast this way would be
+        // put into a graveyard" rider scopes each cast in the immediately prior
+        // free-cast window. Absorb it before the legacy singular-spell route;
+        // this avoids converting a multi-cast destination into a sequential
+        // one-shot `ParentTarget` rider.
+        if let Some(dest) = parse_spells_cast_this_way_graveyard_replacement_rider(
+            &clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase(),
+        ) {
+            if attach_graveyard_redirect_rider_to_prior_free_cast_from_zones(
+                &mut defs,
+                dest.clone(),
+            ) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+            // Diluvian Primordial's paired target fanout remains a
+            // `CastFromZone` until its resolver opens the free-cast window.
+            // Preserve the canonical ParentTarget representation here; the
+            // direct resolver translates it to the same window metadata.
+            if attach_graveyard_redirect_rider_to_prior_cast_from_zone(&mut defs, dest) {
+                prev_boundary = clause_ir.boundary;
+                continue;
+            }
+        }
+
         // CR 614.1a + CR 608.2n: a "if that spell would be put into a graveyard,
         // [put on library / return to hand] instead" rider that trails an
         // optional `CastFromZone` (Kylox's Voltstrider) is a CR 608.2n
         // destination-replacement on the cast spell. Fold the canonical rider
         // onto the prior cast so the runtime stamps the redirect, intercepting it
         // before the generic chain assembly mistakes a `PutAtLibraryPosition{
-        // Bottom}` for the Sanwell free-cast bottom-cleanup. Exile is left to its
-        // existing clean path (the helper declines it).
+        // Bottom}` for the Sanwell free-cast bottom-cleanup. Every destination,
+        // including exile, becomes the same ParentTarget rider shape.
         if let Some(dest) = parse_spell_graveyard_replacement_rider(
             &clause_ir
                 .source
@@ -1844,6 +1985,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        // Coverage-honesty gate (issue #7046, see `MASS_MOVE_TOTAL_DAMAGE_GAP`
+        // doc comment above `assemble_effect_chain`): a `DamageEachPlayer`
+        // reading "that much/that many" chained IMMEDIATELY after a mass zone
+        // move cannot be faithfully executed today. `prev.sub_ability.is_none()`
+        // matches the runtime scope exactly — only the immediately-next
+        // resolution step can see the per-owner count table
+        // (`install_previous_effect_counts_by_player` clears it for any other
+        // consumer), and only `DamageEachPlayer` resolves per-recipient.
+        if let Some(prev) = defs.last() {
+            if prev.sub_ability.is_none()
+                && matches!(&*prev.effect, Effect::ChangeZoneAll { .. })
+                && matches!(&*def.effect, Effect::DamageEachPlayer { .. })
+                && damage_amount_reads_event_context(&def.effect)
+            {
+                *def.effect = Effect::unimplemented(
+                    MASS_MOVE_TOTAL_DAMAGE_GAP,
+                    clause_ir.source.fragment().unwrap_or_default(),
+                );
+            }
+        }
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
         // prevented this way, …" rider is printed as its own sentence but is not
         // an independent instruction — its "this way" back-reference binds to the
@@ -1878,7 +2039,36 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // `parse_target_with_ctx` during chunk parse, so a targeted "of their
         // choice" routes target selection to the scoped (upkeep) player.
         def.target_chooser = clause_ir.target_chooser.clone();
+        // CR 701.3a + CR 303.4f: ChangeZone→Battlefield with an Attach sub
+        // (Gift of Immortality delayed reattach) must nest Attach on the
+        // ChangeZone with `forward_result` BEFORE delayed wrapping. Sibling-
+        // pushing then wrapping each unit would yield CDT{ChangeZone} +
+        // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
+        // nests before wrap; mirror that for this attach-on-return shape.
         let clause_sub = if is_target_only {
+            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
+            // Plague) must stamp `forward_result` on the nested return so the
+            // chosen host propagates into Attach (see
+            // `change_zone_forwards_chosen_attach_host`).
+            if let Some(sub) = def.sub_ability.as_mut() {
+                stamp_forward_result_on_battlefield_attach_return(sub);
+            }
+            None
+        } else if matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && matches!(
+            clause_ir.parsed.sub_ability.as_deref().map(|s| &*s.effect),
+            Some(Effect::Attach { .. })
+        ) {
+            // CR 303.4f + CR 608.2c: forward the moved Aura into Attach so
+            // `resolve_forward_result_search_attach_host` stamps `attach_to`
+            // and skips the CR 303.4f host-choice consult.
+            def.forward_result = true;
             def.sub_ability = clause_ir.parsed.sub_ability.clone();
             None
         } else {
@@ -1933,6 +2123,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     ..
                 } if crate::game::casting_costs::cost_has_x(cost)
             );
+        // CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that
+        // clause is now absorbed into `Effect::GenericEffect.end_cost` by the
+        // `EndEffectCost` continuation and never reaches here. Kept as
+        // defense-in-depth for the non-mana shape the narrow extractor rejects.
         let is_pay_to_end_effect_termination =
             crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
                 &clause_ir
@@ -2233,12 +2427,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         },
                     ),
                 );
-                // CR 608.2c: Lift condition/optional/repeat/player_scope to outer wrapper.
-                let lifted_condition = inner.condition.clone();
-                let lifted_optional = inner.optional;
-                let lifted_optional_for = inner.optional_for;
-                let lifted_repeat_for = inner.repeat_for.clone();
-                let lifted_player_scope = inner.player_scope.clone();
+                // CR 608.2c: Lift condition/optional/repeat/player_scope to the
+                // outer wrapper — move, don't clone. Leaving
+                // `OptionalEffectPerformed` on the delayed payload (Next of Kin
+                // #4956) would re-check that creation-time "if you do" signal when
+                // the delayed trigger fires at end step and skip the return.
+                let lifted_condition = std::mem::take(&mut inner.condition);
+                let lifted_optional = std::mem::replace(&mut inner.optional, false);
+                let lifted_optional_for = std::mem::take(&mut inner.optional_for);
+                let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
+                let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`
@@ -2288,9 +2486,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
                 if has_tracked_ref {
+                    // CR 608.2c + CR 607.2a: same walk, narrower predicate —
+                    // does any prior clause publish members stamped `Exiled`?
+                    // Only then may a cast anaphor narrow to
+                    // `caused_by: Exiled`.
+                    let cast_anaphor_is_exiled = defs
+                        .iter()
+                        .any(|d| publishes_exiled_cause_at_resolution(&d.effect));
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
-                        rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                        rewrite_parent_targets_to_tracked_set(
+                            &mut current.effect,
+                            cast_anaphor_is_exiled,
+                        );
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
@@ -2816,6 +3024,19 @@ fn rebind_condition_instead_damage_anaphor(
         return bind_anaphoric_damage_subject_keep_recipient(chain.effect.as_mut());
     }
     false
+}
+
+/// CR 608.2c: identify the structural "you may pay ... If you do, X" form
+/// whose immediate paid continuation, rather than the payment itself, can be
+/// modified by a following "Y instead" clause.
+fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> bool {
+    matches!(root.effect.as_ref(), Effect::PayCost { .. })
+        && root.sub_ability.as_ref().is_some_and(|continuation| {
+            continuation
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+        })
 }
 
 #[cfg(test)]

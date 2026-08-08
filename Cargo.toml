@@ -9,7 +9,7 @@ members = ["crates/*"]
 exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
 
 [workspace.package]
-version = "0.37.0"
+version = "0.48.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -43,6 +43,32 @@ publish = false
 opt-level = 0
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+# mimalloc is the `#[global_allocator]` of every native binary in `crates/phase-ai/
+# src/bin/` — the motivating pair is `ai_gate.rs` / `ai_perf_gate.rs`, but all of them
+# pick this up. Its entire C core is one unity translation unit
+# (`libmimalloc-sys-*/c_src/mimalloc/v3/src/static.c`) and inherits `profile.dev`'s
+# `opt-level = 0`, so every allocation in a debug gate run walks an unoptimized malloc.
+# Measured on the linked artifact:
+#   readelf --debug-dump=info target/debug/ai-gate | grep -A1 'GNU C23'
+# reported `-O0` for exactly that file before this override and `-O2` after it.
+# This override is still not *provably* payload-neutral, but the one known
+# mechanism is now closed. The AI used to read the wall clock on its live decision
+# path: `phase-ai/src/projection.rs` bailed a projection after a 15 ms wall-clock
+# budget, and — unlike `search.rs`'s and `planner/mod.rs`'s deadlines — that
+# budget was the one still missing the measurement-mode carve-out, so a faster
+# allocator let more projections finish and could change a target, a board, a
+# winner and every counter downstream. That is fixed:
+# `projection::projection_deadline` returns `Deadline::none()` under
+# `ExecutionMode::Measurement`, mirroring the other two, so the gates' payloads no
+# longer contain a decision-affecting wall-clock read that allocation speed can
+# move. What remains host-variable on the measurement path is `RandomState`
+# iteration order (#4878), which is seeded from OS randomness, not allocation
+# addresses. This block is kept because the obvious "allocator changes are
+# invisible" claim was false once and the record is worth more than a clean claim.
+# Scoped to the one package so nothing else loses debug fidelity.
+[profile.dev.package.libmimalloc-sys]
+opt-level = 2
 
 [profile.test]
 inherits = "dev"

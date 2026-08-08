@@ -2204,6 +2204,9 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
             let short_name = &effective_name[..of_pos];
             let lower_short = short_name.to_lowercase();
             // structural: not dispatch — guarding single-word short names only
+            // CR 201.5 / CR 201.5c: "Next of Kin" short name "Next" must not
+            // rewrite temporal "the next end step" → "the ~ end step" (Gift of
+            // Immortality peer class; issue #4956).
             let is_common_english_word = !short_name.contains(' ')
                 && matches!(
                     lower_short.as_str(),
@@ -2223,6 +2226,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         | "back"
                         | "away"
                         | "off"
+                        | "next"
                 );
             // CR 201.3a: a card's "of"-derived short name normalizes to `~`
             // (interchangeable name reference). Suppress this ONLY when the

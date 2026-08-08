@@ -18,7 +18,14 @@ import type {
   MatchConfig,
   ObjectId,
   SerializedAbilityCost,
+  AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
+import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
+import type {
+  InteractionManaRestriction,
+  InteractionPresentationSurface,
+  ViewerInteraction,
+} from "../adapter/generated/interaction";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -66,7 +73,7 @@ import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
-import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { ManaPaymentUI, ManaSourceSelectionUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
@@ -125,6 +132,7 @@ import {
   type SettingsTabId,
 } from "../components/settings/PreferencesModal.tsx";
 import { DebugPanel } from "../components/chrome/DebugPanel.tsx";
+import { AiDecisionOverlay } from "../components/chrome/AiDecisionOverlay.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { TakebackRequestDialog } from "../components/multiplayer/TakebackRequestDialog.tsx";
@@ -144,9 +152,10 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
-import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
+import type { MultiplayerBoardLayout } from "../stores/preferencesStore.ts";
 import {
   FORMAT_DEFAULTS,
   getOpponentDisplayName,
@@ -342,6 +351,7 @@ export function GamePage() {
     {},
   );
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
+  const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
@@ -417,6 +427,17 @@ export function GamePage() {
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
+        break;
+      case "terminalDelivery":
+        clearPromptOverlayState();
+        if (gameId) clearGame(gameId);
+        setTerminalReason(event.delivery.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
         break;
       case "emoteReceived":
         setReceivedEmote(event.emote);
@@ -500,6 +521,15 @@ export function GamePage() {
         if (!isOnlineMode) {
           setReconnectState({ status: "failed" });
         }
+        break;
+      case "requestRejected":
+        // The server refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is server-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -626,6 +656,17 @@ export function GamePage() {
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
         });
         break;
+      case "terminalResult":
+        clearPromptOverlayState();
+        if (gameId) void clearGame(gameId);
+        setTerminalReason(event.result.display.reason);
+        useGameStore.setState({
+          waitingFor: { type: "GameOver", data: { winner: event.result.display.winner } },
+        });
+        break;
+      case "terminalUnavailable":
+        useMultiplayerStore.getState().showToast(event.message);
+        break;
       case "deckRejected":
         navigate("/multiplayer", {
           state: {
@@ -737,6 +778,7 @@ export function GamePage() {
         receivedEmote={receivedEmote}
         timerRemaining={timerRemaining}
         gameStartedAt={gameStartedAt}
+        terminalReason={terminalReason}
         pendingTakeback={pendingTakeback}
         onCloseTakebackDialog={() => setPendingTakeback(null)}
         disconnectChoice={disconnectChoice}
@@ -774,6 +816,7 @@ interface GamePageContentProps {
   receivedEmote: string | null;
   timerRemaining: Record<number, number>;
   gameStartedAt: number | null;
+  terminalReason: string | null;
   pendingTakeback: { requester: number; requesterName: string } | null;
   onCloseTakebackDialog: () => void;
   // 3-4p P2P additions
@@ -805,6 +848,7 @@ function GamePageContent({
   receivedEmote,
   timerRemaining,
   gameStartedAt,
+  terminalReason,
   pendingTakeback,
   onCloseTakebackDialog,
   disconnectChoice,
@@ -826,6 +870,9 @@ function GamePageContent({
   const focusedGridTemplateRows = useResolvedGridRows();
   const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
+  const isBestOfThree = gameState?.match_config?.match_type === "Bo3";
+  const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const submitIntergameCommand = useMultiplayerDraftStore((s) => s.submitIntergameCommand);
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
@@ -892,8 +939,8 @@ function GamePageContent({
   const canActForWaitingState = useCanActForWaitingState();
   const boardChoiceLayerActive = useMemo(() => {
     const choice = getBoardChoiceView(waitingFor, objects);
-    return canActForWaitingState && choice?.player === playerId;
-  }, [canActForWaitingState, objects, playerId, waitingFor]);
+    return canActForWaitingState && choice != null;
+  }, [canActForWaitingState, objects, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -909,6 +956,30 @@ function GamePageContent({
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
+  // GamePage owns the only local diagnostic subscription. Adapter events remain
+  // gameplay-only so no receipt can enter P2P/server state or wire traffic.
+  useEffect(() => {
+    setAiDecisionReceipt(null);
+    if (!supportsAiDecisionDiagnostics(adapter)) {
+      return;
+    }
+    adapter.setAiDecisionDiagnosticsEnabled(aiDecisionCaptureEnabled);
+    if (!aiDecisionCaptureEnabled) {
+      return;
+    }
+    const unsubscribe = adapter.subscribeAiDecisionDiagnostics(setAiDecisionReceipt);
+    return () => {
+      unsubscribe();
+      adapter.setAiDecisionDiagnosticsEnabled(false);
+    };
+  }, [adapter, aiDecisionCaptureEnabled]);
+  // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
+  // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
+  // it cannot answer "is anyone else at this table?".
+  const storeGameMode = useGameStore((s) => s.gameMode);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
     return getOpponentIds(gameState, perspectivePlayerId);
@@ -916,9 +987,13 @@ function GamePageContent({
   const activeOpponentId =
     resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
   const seatCount = getSeatCount(gameState);
-  const splitBoardActive = isSplitBoardActive(multiplayerBoardLayout, seatCount);
+  const effectiveMultiplayerBoardLayout: MultiplayerBoardLayout =
+    seatCount > 2 && canActForWaitingState && getBoardChoiceView(waitingFor, objects)?.intent === "untap"
+      ? "split"
+      : multiplayerBoardLayout;
+  const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, seatCount);
   const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
-    multiplayerBoardLayout,
+    effectiveMultiplayerBoardLayout,
     seatCount,
   );
   const handleToggleMultiplayerBoardLayout = useCallback(() => {
@@ -967,6 +1042,13 @@ function GamePageContent({
       } else if ("sendConcede" in adapter && typeof adapter.sendConcede === "function") {
         void (adapter.sendConcede as () => void | Promise<void>)();
       }
+    }
+    onHideConcedeDialog();
+  }, [adapter, onHideConcedeDialog]);
+
+  const handleMatchConcede = useCallback(() => {
+    if (supportsMatchConcede(adapter)) {
+      adapter.sendMatchConcede();
     }
     onHideConcedeDialog();
   }, [adapter, onHideConcedeDialog]);
@@ -1159,22 +1241,30 @@ function GamePageContent({
 
   const handleSubmitSideboard = useCallback(
     (main: DeckCardCount[], sideboard: DeckCardCount[]) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "SubmitSideboard", main, sideboard });
+        return;
+      }
       dispatch({
         type: "SubmitSideboard",
         data: { main, sideboard },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
   const handleChoosePlayDraw = useCallback(
     (playFirst: boolean) => {
+      if (draftMatchPairing?.matchConfig.match_type === "Bo3") {
+        void submitIntergameCommand({ type: "ChoosePlayDraw", playFirst });
+        return;
+      }
       dispatch({
         type: "ChoosePlayDraw",
         data: { play_first: playFirst },
       });
     },
-    [dispatch],
+    [dispatch, draftMatchPairing, submitIntergameCommand],
   );
 
 
@@ -1288,7 +1378,7 @@ function GamePageContent({
     >
       <SpectatorChrome />
       <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
-      <StackDisplay />
+      <StackDisplay effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
 
       {/* Persistent Sandbox banner — visible to all players whenever the
           game's format_config has debug actions enabled. Not dismissible. */}
@@ -1387,6 +1477,7 @@ function GamePageContent({
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
+            effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
             showOpponentCards={showAiHand}
@@ -1531,7 +1622,28 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
-        onRequestTakeback={isOnlineMode ? handleRequestTakeback : undefined}
+        // Takeback is a TRANSPORT capability, not a mode policy: only
+        // `WebSocketAdapter` implements `sendRequestTakeback`, which is why
+        // `handleRequestTakeback` already guards on the adapter type. Gating
+        // the prop the same way makes the button's presence agree with the
+        // handler instead of duplicating a different rule.
+        //
+        // `isOnlineMode` was wrong twice over. It is URL-derived and can never
+        // see `native-ai` (desktop solo arrives as `mode=ai`), so desktop solo
+        // — which has a real server-authoritative takeback and no client-side
+        // undo — never got the button. And it showed the button to spectators,
+        // whom `request_takeback` rejects server-side.
+        //
+        // A mode-based replacement would be wrong in the other direction:
+        // `p2p-host`/`p2p-join`/`draft-match` are also wire-authoritative but
+        // do not necessarily carry a `WebSocketAdapter`, so they would get a
+        // dead button that silently no-ops inside the handler's own guard.
+        onRequestTakeback={
+          adapter instanceof WebSocketAdapter && mode !== "spectate"
+            ? handleRequestTakeback
+            : undefined
+        }
+        takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
         showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
@@ -1668,7 +1780,14 @@ function GamePageContent({
       </AnimatePresence>
 
       {/* Overlay layers */}
-      <DebugPanel />
+      <DebugPanel
+        aiDecisionDiagnosticsAvailable={supportsAiDecisionDiagnostics(adapter)}
+      />
+      <AiDecisionOverlay
+        receipt={aiDecisionReceipt}
+        visible={aiDecisionCaptureEnabled}
+        onClose={() => setAiDecisionCaptureEnabled(false)}
+      />
       <ResolutionProgressOverlay />
 
       {preferencesOpen && (
@@ -1707,8 +1826,8 @@ function GamePageContent({
       <DiceRollOverlay />
 
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
-      <BlockAssignmentLines />
-      <AttackTargetLines />
+      <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+      <AttackTargetLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
       {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
           Self-gates: renders nothing unless the local player is assigning blockers
           to attackers that carry a minimum-blocker requirement. */}
@@ -1736,6 +1855,8 @@ function GamePageContent({
         {waitingFor != null &&
           MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <ManaPaymentUI />}
+        {waitingFor?.type === "ManaSourceSelection" &&
+          canActForWaitingState && <ManaSourceSelectionUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
         {waitingFor?.type === "PayAmountChoice" &&
@@ -1831,11 +1952,6 @@ function GamePageContent({
         {waitingFor?.type === "CipherEncodeChoice" &&
           canActForWaitingState && (
             <CipherEncodeModal />
-          )}
-
-        {waitingFor?.type === "UntapChoice" &&
-          canActForWaitingState && (
-            <UntapChoiceModal />
           )}
 
         {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
@@ -1963,6 +2079,8 @@ function GamePageContent({
               pool={pool}
               gameNumber={waitingFor.data.game_number}
               score={waitingFor.data.score}
+              minMainDeckSize={waitingFor.data.min_main_deck_size}
+              maxSideboardSize={waitingFor.data.max_sideboard_size}
               onSubmit={handleSubmitSideboard}
             />
           );
@@ -1997,7 +2115,16 @@ function GamePageContent({
         <>
           <ConcedeDialog
             isOpen={showConcedeDialog}
-            onConfirm={handleConcede}
+            gameAction={{
+              kind: "game",
+              consequence: isBestOfThree ? "best-of-three-game" : "ordinary-game",
+              onConfirm: handleConcede,
+            }}
+            matchAction={
+              supportsMatchConcede(adapter) && isBestOfThree
+                ? { kind: "match", onConfirm: handleMatchConcede }
+                : undefined
+            }
             onCancel={onHideConcedeDialog}
           />
           <TakebackRequestDialog
@@ -2038,6 +2165,7 @@ function GamePageContent({
           mode={mode}
           isOnlineMode={isOnlineMode}
           gameStartedAt={gameStartedAt}
+          terminalReason={terminalReason}
         />
       )}
 
@@ -2607,11 +2735,13 @@ function GameOverScreen({
   mode,
   isOnlineMode = false,
   gameStartedAt,
+  terminalReason,
 }: {
   winner: number | null;
   mode: string | null;
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
+  terminalReason?: string | null;
 }) {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -2736,6 +2866,7 @@ function GameOverScreen({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
           >
+            {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
             <p className="text-base text-gray-200 sm:text-lg">
               <Trans
                 i18nKey="gamePage.gameOver.lifeSummary"
@@ -2847,6 +2978,133 @@ function GameOverScreen({
 
 // ── Ability Choice Modal ──────────────────────────────────────────────────
 
+export function manaRestrictionLabel(
+  t: TFunction<"game">,
+  restriction: InteractionManaRestriction,
+): string {
+  switch (restriction.type) {
+    case "onlyForTypeSpellsOrAbilities":
+      return t(
+        restriction.data.ability === "ofSpellType"
+          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
+          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        { spellType: restriction.data.spellType },
+      );
+    case "onlyForSpell":
+      return t("gamePage.manaRestrictions.onlyForSpell");
+    case "onlyForActivation":
+      return t("gamePage.manaRestrictions.onlyForActivation");
+    case "onlyForSpellType":
+      return t("gamePage.manaRestrictions.onlyForSpellType", restriction.data);
+    case "onlyForCreatureType":
+      return t("gamePage.manaRestrictions.onlyForCreatureType", restriction.data);
+    case "onlyForTaggedActivation":
+      return t("gamePage.manaRestrictions.onlyForTaggedActivation", restriction.data);
+    case "onlyForXCosts":
+      return t("gamePage.manaRestrictions.onlyForXCosts");
+    case "onlyForSpellWithKeywordKind":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKind", restriction.data);
+    case "onlyForSpellWithKeywordKindFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellWithKeywordKindFromZone", restriction.data);
+    case "onlyForSpellWithManaValue":
+      return t("gamePage.manaRestrictions.onlyForSpellWithManaValue", restriction.data);
+    case "onlyForSpellMatchingCostCriteria":
+      return t("gamePage.manaRestrictions.onlyForSpellMatchingCostCriteria", {
+        spellType: restriction.data.spellType ?? t("gamePage.manaRestrictions.anySpell"),
+        criteria: restriction.data.criteria.map((criterion) => {
+          switch (criterion.type) {
+            case "manaValue":
+              return t("gamePage.manaRestrictions.manaValueCriterion", criterion.data);
+            case "hasXInCost":
+              return t("gamePage.manaRestrictions.hasXInCostCriterion");
+          }
+        }).join(", "),
+      });
+    case "onlyForSpellWithColorCount":
+      return t("gamePage.manaRestrictions.onlyForSpellWithColorCount", restriction.data);
+    case "onlyForSpellColor":
+      return t("gamePage.manaRestrictions.onlyForSpellColor", restriction.data);
+    case "onlyForSpellFromZone":
+      return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "onlyForFaceDownSpell":
+      return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
+    case "onlyForAny":
+      return t("gamePage.manaRestrictions.onlyForAny", {
+        restrictions: restriction.data.restrictions
+          .map((nested) => manaRestrictionLabel(t, nested))
+          .join(" "),
+      });
+    case "onlyForSpecialAction":
+      return t("gamePage.manaRestrictions.onlyForSpecialAction", restriction.data);
+    case "impossible":
+      return t("gamePage.manaRestrictions.impossible");
+    case "convokePayment":
+      return t("gamePage.manaRestrictions.convokePayment");
+  }
+}
+
+function projectedManaChoiceLabel(t: TFunction<"game">, surfaces: InteractionPresentationSurface[]): {
+  label: string;
+  description?: string;
+} {
+  const units = surfaces.filter(
+    (surface): surface is Extract<InteractionPresentationSurface, { type: "mana" }> =>
+      surface.type === "mana" && surface.data.role === "producedMana",
+  );
+  if (units.length === 0) return { label: t("gamePage.manaRestrictions.tapForMana") };
+
+  const grouped = new Map<string, { symbols: string[]; restrictions: InteractionManaRestriction[]; count: number }>();
+  for (const unit of units) {
+    const key = JSON.stringify([unit.data.symbols, unit.data.restrictions]);
+    const group = grouped.get(key);
+    if (group) {
+      group.count += 1;
+    } else {
+      grouped.set(key, {
+        symbols: unit.data.symbols,
+        restrictions: unit.data.restrictions,
+        count: 1,
+      });
+    }
+  }
+  const label = [...grouped.values()]
+    .map(({ symbols, count }) => {
+      const mana = symbols.map((symbol) => `{${symbol}}`).join("");
+      return count === 1 ? mana : `${mana} × ${count}`;
+    })
+    .join(" + ");
+  const restrictions = [...grouped.values()]
+    .flatMap((group) => group.restrictions.map((restriction) => manaRestrictionLabel(t, restriction)));
+  return {
+    label: t("gamePage.manaRestrictions.tapFor", { mana: label }),
+    description: restrictions.length > 0 ? [...new Set(restrictions)].join(" ") : undefined,
+  };
+}
+
+export function projectedManaChoices(
+  interaction: ViewerInteraction | null,
+  objectId: ObjectId,
+): Map<string, InteractionPresentationSurface[]> {
+  const choices = new Map<string, InteractionPresentationSurface[]>();
+  if (!interaction) return choices;
+  for (const opportunity of interaction.opportunities) {
+    if (opportunity.response.type !== "exactChoices") continue;
+    for (const choice of opportunity.response.data.choices) {
+      const action = choice.surfaces.find(
+        (surface): surface is Extract<InteractionPresentationSurface, { type: "action" }> =>
+          surface.type === "action" && surface.data.code === "tapLandForMana",
+      );
+      const isSource = choice.surfaces.some(
+        (surface) => surface.type === "object"
+          && surface.data.role === "source"
+          && surface.data.reference === String(objectId),
+      );
+      if (action?.data.actionId && isSource) choices.set(action.data.actionId, choice.surfaces);
+    }
+  }
+  return choices;
+}
+
 function AbilityChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -2859,6 +3117,7 @@ function AbilityChoiceModal() {
   const webSlingingCosts = useGameStore(
     (s) => s.gameState?.derived?.web_slinging_costs,
   );
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
 
   if (!pending || !obj) return null;
 
@@ -2890,6 +3149,7 @@ function AbilityChoiceModal() {
         : allPlayOrCast
           ? t("gamePage.abilityChoice.subtitlePlay")
           : t("gamePage.abilityChoice.subtitleChoose");
+  const manaChoices = projectedManaChoices(viewerInteraction, pending.objectId);
 
   return (
     <ChoiceModal
@@ -2898,12 +3158,18 @@ function AbilityChoiceModal() {
       previewCardName={obj.name}
       previewCardTypes={obj.card_types}
       options={pending.actions.map((action, i) => {
-        const { label, description } = abilityChoiceLabel(
+        let { label, description } = abilityChoiceLabel(
           action,
           obj,
           objects,
           webSlingingCosts,
         );
+        if (action.type === "TapLandForMana") {
+          const surfaces = action.interactionActionId
+            ? manaChoices.get(action.interactionActionId)
+            : undefined;
+          if (surfaces) ({ label, description } = projectedManaChoiceLabel(t, surfaces));
+        }
         // CR 606.1: prefix a loyalty badge for planeswalker ability costs,
         // reading the structured Loyalty cost (never parsing the label string).
         const ability =
@@ -3059,50 +3325,6 @@ function CipherEncodeModal() {
   return <CipherEncodeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
-// ── Untap Choice Modal ─────────────────────────────────────────────────
-
-function UntapChoiceModal() {
-  const { t } = useTranslation("game");
-  const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.waitingFor);
-  const objects = useGameStore((s) => s.gameState?.objects);
-
-  if (waitingFor?.type !== "UntapChoice") return null;
-
-  const objectId = waitingFor.data.candidates[0];
-  if (objectId == null) return null;
-
-  const object = objects?.[objectId];
-  const name = object?.name ?? t("gamePage.untap.permanentFallback");
-
-  return (
-    <ChoiceModal
-      title={t("gamePage.untap.title", { name })}
-      subtitle={t("gamePage.untap.subtitle")}
-      previewCardName={object?.name}
-      previewCardTypes={object?.card_types}
-      options={[
-        {
-          id: "untap",
-          label: t("gamePage.untap.untap"),
-          description: t("gamePage.untap.untapDescription", { name }),
-        },
-        {
-          id: "keep-tapped",
-          label: t("gamePage.untap.keepTapped"),
-          description: t("gamePage.untap.keepTappedDescription", { name }),
-        },
-      ]}
-      onChoose={(id) =>
-        dispatch({
-          type: "ChooseUntap",
-          data: { object_id: objectId, untap: id === "untap" },
-        })
-      }
-    />
-  );
-}
-
 // ── Exert Choice Modal (CR 701.43d: exert as it attacks) ────────────────
 
 function ExertChoiceModal() {
@@ -3208,9 +3430,51 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
 }
 
 function formatUnlessCost(
-  cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number },
+  cost:
+    // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost is a real
+    // discriminated variant with required fields (the engine's
+    // `AbilityCost::GetPlayerCounters` always sends both) — rendered
+    // unchanged, not reinterpreted (no lowercasing, no fallback defaults).
+    | {
+        type: "GetPlayerCounters";
+        count: number;
+        counter_kind: "Poison" | "Experience" | "Rad" | "Ticket";
+      }
+    | {
+        type: string;
+        cost?: { type: string; shards?: string[]; generic?: number };
+        amount?: number;
+        count?: number;
+      },
   t: TFunction<"game">,
 ): string {
+  // `"counter_kind" in cost` narrows via property presence rather than a
+  // `cost.type` literal comparison — the sibling union member's `type: string`
+  // is too wide for a `switch (cost.type)`/`cost.type === "GetPlayerCounters"`
+  // check to exclude it, so `cost.counter_kind` would otherwise fail to
+  // type-check inside that branch. The exhaustive switch below maps each
+  // engine value to its i18n key explicitly rather than interpolating
+  // `cost.counter_kind` directly into the key template — that would make the
+  // display layer depend on the engine's serde string matching the locale
+  // JSON's key names, an implicit coupling the compiler can't check. This way
+  // a future `PlayerCounterKind` variant fails to compile here instead of
+  // silently rendering a missing translation.
+  if ("counter_kind" in cost) {
+    const kindKey: "Poison" | "Experience" | "Rad" | "Ticket" = (() => {
+      switch (cost.counter_kind) {
+        case "Poison":
+          return "Poison";
+        case "Experience":
+          return "Experience";
+        case "Rad":
+          return "Rad";
+        case "Ticket":
+          return "Ticket";
+      }
+    })();
+    const kind = t(`gamePage.cost.playerCounterKind.${kindKey}`);
+    return t("gamePage.cost.playerCounters", { count: cost.count, kind });
+  }
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.

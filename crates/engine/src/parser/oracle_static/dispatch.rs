@@ -1120,6 +1120,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    if let Some(result) = try_parse_unspent_mana_loss_causes_life_loss_static(&text, &lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_retain_unspent_mana_static(&text, &lower) {
         return Some(result);
     }

@@ -855,6 +855,7 @@ fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() 
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -933,6 +934,7 @@ fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -1805,6 +1807,102 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
             .count(),
         1,
         "the deferred first departure trigger is collected once after the full group is stamped"
+    );
+}
+
+#[test]
+fn target_activation_replacement_paused_sacrifice_stages_cost_triggers_until_commit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Targeted Sacrifice Replacement Witness", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                2,
+            ))),
+        )
+        .id();
+    let first = scenario
+        .add_creature(P0, "First Targeted Sacrifice Witness", 1, 1)
+        .id();
+    let second = scenario
+        .add_creature(P0, "Second Targeted Sacrifice Witness", 1, 1)
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Exile))
+        .with_replacement_definition(redirect_self_moved_to(Zone::Graveyard, Zone::Hand))
+        .id();
+    let target = scenario.add_creature(P1, "Target", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("targeted activation starts with target selection");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("target is declared before the sacrifice cost");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("second sacrifice reaches the replacement pipeline");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the first sacrifice event stays inside the pending activation session"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement completion commits the activation");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == first
+            ))
+            .count(),
+        1,
+        "the replacement-paused sacrifice trigger is collected once at activation commit"
     );
 }
 
@@ -8493,6 +8591,7 @@ fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
     let mut ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(target)],
         source,
@@ -8676,6 +8775,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
     let mut top_ability = ResolvedAbility::new(
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
+            chooser: TargetFilter::ParentTargetOwner,
         },
         vec![TargetRef::Object(top_target)],
         top_source,
@@ -9619,6 +9719,97 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
             .count(),
         1,
         "the terminal effect fires exactly once after replacement delivery"
+    );
+}
+
+/// A resolver-created PutAtLibraryPosition choice must reject a repeated card
+/// before mutating its source zone, while preserving selection-order placement
+/// for a distinct follow-up choice.
+#[test]
+fn effect_zone_put_at_library_position_rejects_duplicate_selection() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Put-On-Top Duplicate Selection Source", 1, 1)
+        .id();
+    let first = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate First", true)
+        .id();
+    let second = scenario
+        .add_spell_to_hand(P0, "Put-On-Top Duplicate Second", true)
+        .id();
+    let marker = scenario
+        .add_spell_to_library_top(P0, "Put-On-Top Duplicate Marker", true)
+        .id();
+    let ability = ResolvedAbility::new(
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+            count: QuantityExpr::Fixed { value: 2 },
+            position: engine::types::ability::LibraryPosition::Top,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![marker];
+    let mut initial_events = Vec::new();
+
+    resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
+        .expect("PutAtLibraryPosition reaches its real resolver-created choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+
+    let duplicate = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, first],
+        })
+        .expect_err("a repeated card is not a legal resolution-time choice");
+    assert!(
+        matches!(duplicate, engine::game::EngineError::InvalidAction(message) if message == "Selected cards must be distinct")
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            effect_kind: EffectKind::PutAtLibraryPosition,
+            ..
+        }
+    ));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![marker],
+        "rejected input must not mutate the library"
+    );
+
+    let completed = runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .expect("distinct eligible cards resolve the existing choice");
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Library);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![first, second, marker],
+        "distinct selection retains the requested top order"
     );
 }
 

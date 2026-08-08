@@ -12,9 +12,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
-import { CardPreview } from "../components/card/CardPreview";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -481,9 +481,8 @@ function MatchInProgressView() {
         </button>
         {showPool && <PoolPanel onCardHover={setHoveredCard} />}
       </div>
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        sourcePrinting={hoveredCard?.sourcePrinting}
+      <HoverCardPreview
+        card={hoveredCard}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -564,6 +563,11 @@ function BetweenGamesView() {
         <p className="text-sm text-white/60">
           {t("betweenGames.waitingSideboard")}
         </p>
+        {submittedDeck.length > 0 && (
+          <p className="text-sm text-white/50">
+            {submittedDeck.join(", ")}
+          </p>
+        )}
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
       </div>
     );
@@ -662,7 +666,7 @@ function DraftingPhaseContent() {
         </div>
         <PoolPanel view={view} onCardHover={setHoveredCard} />
       </div>
-      <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+      <HoverCardPreview card={hoveredCard} />
     </>
   );
 }
@@ -675,6 +679,7 @@ function PodDeckBuilder() {
   const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
   const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  const submissionError = useMultiplayerDraftStore((s) => s.error);
 
   return (
     <LimitedDeckBuilder
@@ -685,6 +690,7 @@ function PodDeckBuilder() {
       onRemoveFromDeck={removeFromDeck}
       onSetLandCount={setLandCount}
       onSubmitDeck={submitDeck}
+      submissionError={submissionError}
       showSuggestions={false}
     />
   );

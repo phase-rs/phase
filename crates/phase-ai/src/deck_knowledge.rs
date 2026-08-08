@@ -310,7 +310,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: token,
-                ability: engine::types::ability::ResolvedAbility::new(
+                ability: Box::new(engine::types::ability::ResolvedAbility::new(
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
@@ -318,7 +318,7 @@ mod tests {
                     Vec::new(),
                     token,
                     PlayerId(0),
-                ),
+                )),
             },
         });
 
@@ -348,7 +348,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(30),
-                ability: Some(engine::types::ability::ResolvedAbility::new(
+                ability: Some(Box::new(engine::types::ability::ResolvedAbility::new(
                     engine::types::ability::Effect::Draw {
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         target: engine::types::ability::TargetFilter::Controller,
@@ -356,7 +356,7 @@ mod tests {
                     Vec::new(),
                     spell,
                     PlayerId(0),
-                )),
+                ))),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

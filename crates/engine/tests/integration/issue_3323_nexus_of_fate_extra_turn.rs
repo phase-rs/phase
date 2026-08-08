@@ -43,12 +43,16 @@ fn nexus_of_fate_grants_caster_extra_turn_on_opponents_turn() {
     runner.cast(nexus).resolve();
 
     assert!(
-        runner.state().extra_turns.contains(&P0),
-        "Nexus caster must receive an extra turn when cast on the opponent's turn, got {:?}",
+        runner
+            .state()
+            .extra_turns
+            .iter()
+            .any(|et| et.player == P0 && et.anchor == P1),
+        "Nexus caster must receive an extra turn anchored to the opponent's turn, got {:?}",
         runner.state().extra_turns
     );
     assert!(
-        !runner.state().extra_turns.contains(&P1),
+        !runner.state().extra_turns.iter().any(|et| et.player == P1),
         "active player must not receive the extra turn, got {:?}",
         runner.state().extra_turns
     );
@@ -68,7 +72,10 @@ fn nexus_of_fate_grants_caster_extra_turn_on_own_turn() {
 
     assert_eq!(
         runner.state().extra_turns,
-        vec![P0],
+        vec![engine::types::game_state::ExtraTurn {
+            player: P0,
+            anchor: P0
+        }],
         "Nexus caster must receive an extra turn on their own turn"
     );
 }
@@ -112,5 +119,24 @@ fn nexus_of_fate_extra_turn_is_taken_after_opponents_turn_ends() {
     assert!(
         runner.state().extra_turns.is_empty(),
         "consumed extra turn must be removed from the queue"
+    );
+
+    // CR 500.7: after the OOS extra turn ends, resume with P2 (next after P1),
+    // not with P1 again / not with natural-after-P0 (=P1 in 3p from P0).
+    for _ in 0..128 {
+        if runner.state().active_player != P0 {
+            break;
+        }
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass while ending caster's extra turn");
+    }
+    assert_eq!(
+        runner.state().active_player,
+        P2,
+        "after OOS extra turn, play must resume with the player after the specified turn (P1→P2)"
     );
 }

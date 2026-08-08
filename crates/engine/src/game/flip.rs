@@ -226,6 +226,7 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
         power: normal_face.power,
         toughness: normal_face.toughness,
         loyalty: normal_face.loyalty,
+        printed_loyalty: normal_face.printed_loyalty,
         keywords: normal_face.keywords.clone(),
         abilities: Arc::new(normal_face.abilities.clone()),
         trigger_definitions: Arc::new(
@@ -431,6 +432,7 @@ mod tests {
             power: Some(3),
             toughness: Some(4),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: CardType {
                 supertypes: vec![Supertype::Legendary],

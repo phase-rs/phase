@@ -445,6 +445,7 @@ fn modal_poison_ability() -> AbilityDefinition {
             static_abilities: Vec::new(),
             duration: None,
             target: None,
+            end_cost: None,
         },
     );
     ability.modal = Some(ModalChoice {
@@ -523,6 +524,7 @@ fn detects_proliferate_inside_a_modal_ability_mode() {
             static_abilities: Vec::new(),
             duration: None,
             target: None,
+            end_cost: None,
         },
     );
     ability.modal = Some(ModalChoice {

@@ -30,12 +30,14 @@ export const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
   OnlyForSpellWithManaValue: "manaPool.onlyForSpellWithManaValue",
   OnlyForSpellMatchingCostCriteria: "manaPool.onlyForSpellMatchingCostCriteria",
   OnlyForSpellWithColorCount: "manaPool.onlyForSpellWithColorCount",
+  OnlyForSpellColor: "manaPool.onlyForSpellColor",
   OnlyForSpellFromZone: "manaPool.onlyForSpellFromZone",
   OnlyForFaceDownSpell: "manaPool.onlyForFaceDownSpell",
   OnlyForActivation: "manaPool.onlyForActivation",
   OnlyForXCosts: "manaPool.onlyForXCosts",
   OnlyForAny: "manaPool.onlyForAny",
   OnlyForSpecialAction: "manaPool.onlyForSpecialAction",
+  Impossible: "manaPool.impossible",
   ConvokePayment: "manaPool.convokePayment",
 };
 

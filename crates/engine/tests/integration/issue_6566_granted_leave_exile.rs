@@ -318,6 +318,7 @@ fn grant_eot_leave_exile(state: &mut GameState, source: ObjectId, creature: Obje
         target: Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         )),
+        end_cost: None,
     };
     let resolved = ResolvedAbility::new(grant, vec![TargetRef::Object(creature)], source, P0);
     let mut events = Vec::<GameEvent>::new();
@@ -391,6 +392,7 @@ fn mixed_replacement_and_trigger_grant_is_not_promoted_to_permanent() {
         target: Some(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         )),
+        end_cost: None,
     };
     let resolved = ResolvedAbility::new(grant, vec![TargetRef::Object(recipient)], source, P0);
     let mut events = Vec::<GameEvent>::new();

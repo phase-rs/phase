@@ -137,6 +137,7 @@ fn lobby_server_messages_byte_identical_to_canonical() {
     let sc_gc = sc::ServerMessage::GameCreated {
         game_code: "GAME01".into(),
         player_token: "tok".into(),
+        full_key: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_gc).unwrap(),

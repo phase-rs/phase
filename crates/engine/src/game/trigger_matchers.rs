@@ -982,6 +982,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
+        // CR 116.2c: carries a group key and a player, no object subject to
+        // count for a "one or more <FILTER> …" trigger filter.
+        | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BlockersDeclared { .. }
         // Mirrors BlockersDeclared: the "becomes blocked" trigger uses the
         // dedicated matcher, not this generic per-object count helper.
@@ -1019,6 +1022,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ClassLevelGained { .. }
         | GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -1880,6 +1884,19 @@ fn attack_target_matches(
         if !attack_target_type_matches(target, filter) {
             return false;
         }
+        // CR 725.1: "attacks the monarch" additionally requires the defending
+        // player to currently hold the monarch designation. The monarch is a
+        // dynamic single-player identity, so it cannot be evaluated by the pure
+        // type matcher above — it is checked here against `state.monarch`. If no
+        // player is the monarch (CR 725.1), the trigger does not fire (The Spear
+        // of Bashenga).
+        if matches!(filter, crate::types::triggers::AttackTargetFilter::Monarch) {
+            let defending_player =
+                attack_target_defending_player(state, target, fallback_defending_player);
+            if state.monarch != Some(defending_player) {
+                return false;
+            }
+        }
     }
 
     if trigger.valid_target.is_some() {
@@ -1910,6 +1927,12 @@ pub(super) fn attack_target_type_matches(
         ) | (
             crate::types::triggers::AttackTargetFilter::Battle,
             crate::game::combat::AttackTarget::Battle(_)
+        ) | (
+            // CR 725.1: "attacks the monarch" is a Player-type attack; the
+            // monarch-identity constraint is applied statefully in
+            // `attack_target_matches` (The Spear of Bashenga).
+            crate::types::triggers::AttackTargetFilter::Monarch,
+            crate::game::combat::AttackTarget::Player(_)
         )
     )
 }
@@ -2410,7 +2433,13 @@ pub(super) fn match_player_action(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    let GameEvent::PlayerPerformedAction { player_id, action } = event else {
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action,
+        scry_bottom_count,
+        ..
+    } = event
+    else {
         return false;
     };
     if !valid_player_matches(trigger, state, *player_id, source_context) {
@@ -2419,7 +2448,19 @@ pub(super) fn match_player_action(
 
     match trigger.mode {
         TriggerMode::SearchedLibrary => *action == PlayerActionKind::SearchedLibrary,
-        TriggerMode::Scry => *action == PlayerActionKind::Scry,
+        TriggerMode::Scry => {
+            // CR 701.22a + CR 701.22d + CR 603.2: a completed scry emits its
+            // own action event with the number actually placed on bottom, and
+            // the trigger predicate compares that preserved event-local value.
+            *action == PlayerActionKind::Scry
+                && trigger
+                    .scry_bottom_count
+                    .is_none_or(|(comparator, threshold)| {
+                        scry_bottom_count.is_some_and(|count| {
+                            comparator.evaluate(count as i32, threshold as i32)
+                        })
+                    })
+        }
         TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
         TriggerMode::CollectEvidence => *action == PlayerActionKind::CollectEvidence,
         TriggerMode::Investigated => *action == PlayerActionKind::Investigate,
@@ -3016,6 +3057,7 @@ pub(super) fn match_shuffled(
     let GameEvent::PlayerPerformedAction {
         player_id,
         action: PlayerActionKind::ShuffledLibrary,
+        ..
     } = event
     else {
         return false;
@@ -4985,6 +5027,60 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// Issue #5249 — The Spear of Bashenga: "Whenever equipped creature attacks
+    /// the monarch, ...". `AttackTargetFilter::Monarch` is a Player-type attack
+    /// whose defending player must currently hold the monarch designation
+    /// (CR 725.1). The identity check is stateful (`state.monarch`), so it lives
+    /// in `attack_target_matches`, not the pure type matcher. Attacking the
+    /// monarch matches; attacking a non-monarch player does not; and with no
+    /// monarch in the game (CR 725.1) it never matches — the revert canary.
+    #[test]
+    fn attack_target_matches_monarch_requires_monarch_defender() {
+        let mut state = setup();
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Monarch);
+        let source_id = ObjectId(99);
+
+        // P1 is the monarch; attacking P1 matches.
+        state.monarch = Some(PlayerId(1));
+        assert!(
+            attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking the monarch (P1) must match"
+        );
+
+        // P0 is NOT the monarch; attacking P0 must NOT match (the reported bug).
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+                PlayerId(0),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking a non-monarch player must NOT match"
+        );
+
+        // No monarch in the game (CR 725.1) → never matches, even for the
+        // fallback defending player.
+        state.monarch = None;
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "with no monarch, the monarch attack-target filter must never match"
+        );
     }
 
     /// CR 701.31 / CR 701.31d / CR 901.11: the unified `match_planeswalked` matcher
@@ -7709,6 +7805,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7735,6 +7833,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7761,6 +7861,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7787,6 +7889,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::Surveil,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7813,6 +7917,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7839,6 +7945,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::Proliferate,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -8131,48 +8239,28 @@ mod tests {
     }
 
     #[test]
-    fn changes_zone_origin_zones_matches_library_source() {
-        // CR 603.10a: Laelia-style — source can be library OR graveyard.
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
+    fn changes_zone_origin_zones_matches_each_listed_source() {
+        // CR 603.10a: Laelia-style — source can be library OR graveyard. Every zone in
+        // `origin_zones` must match; `match_changes_zone` treats the list as a
+        // set-membership constraint (`OriginConstraint::OneOf`).
+        for origin in [Zone::Library, Zone::Graveyard] {
+            let state = setup();
+            let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
+            trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
+            trigger.destination = Some(Zone::Exile);
 
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Library,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
-    }
-
-    #[test]
-    fn changes_zone_origin_zones_matches_graveyard_source() {
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
-
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Graveyard,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+            let event =
+                zone_changed_event(ObjectId(5), origin, Zone::Exile, Vec::new(), Vec::new());
+            assert!(
+                match_changes_zone(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "listed origin {origin:?} → Exile must match"
+            );
+        }
     }
 
     #[test]
@@ -9715,7 +9803,7 @@ mod tests {
             controller,
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -10941,6 +11029,8 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -10971,6 +11061,8 @@ mod tests {
         let opp_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -10983,6 +11075,8 @@ mod tests {
         let self_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
+            scry_bottom_count: None,
         };
         assert!(!match_shuffled(
             &self_event,
@@ -11963,7 +12057,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -11971,7 +12065,7 @@ mod tests {
                     vec![],
                     spell_id,
                     PlayerId(0),
-                )),
+                ))),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12043,7 +12137,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12051,7 +12145,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(1),
-                ),
+                )),
             },
         });
         (state, ability_id)
@@ -12154,6 +12248,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         (state, ability_id)
@@ -12955,7 +13050,7 @@ mod tests {
             controller: PlayerId(0), // Different controller
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12963,7 +13058,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(0),
-                ),
+                )),
             },
         });
 
@@ -13019,7 +13114,7 @@ mod tests {
             controller: PlayerId(0), // Same player as trigger owner
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -13027,7 +13122,7 @@ mod tests {
                     vec![],
                     pw_id,
                     PlayerId(0),
-                ),
+                )),
             },
         });
 
@@ -13098,6 +13193,7 @@ mod tests {
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
                 die_result: None,
+                provenance: None,
             },
         });
 

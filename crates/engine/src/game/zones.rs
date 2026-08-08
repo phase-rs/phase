@@ -1,12 +1,15 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
+    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
-    ResolvedZoneChangeCommand, ResolvedZoneChangeReplayInvariantError,
+    ResolvedControllerOverrideCommand, ResolvedControllerOverrideReplayInvariantError,
+    ResolvedEntryProvenanceCommand, ResolvedEntryProvenanceReplayInvariantError,
+    ResolvedObjectCeaseCommand, ResolvedObjectCeaseReplayInvariantError, ResolvedZoneChangeCommand,
+    ResolvedZoneChangeReplayInvariantError,
 };
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -14,11 +17,38 @@ use crate::types::zones::Zone;
 use super::game_object::GameObject;
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
-/// CR 111.7 / CR 111.8: A token outside the battlefield ceases to exist at
-/// the next SBA, and can't change zones before then. Stack tokens are excluded
-/// so spell copies can finish resolving before the next SBA check.
-pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+/// CR 109.1 + CR 601.2a + CR 405.1: A spell is an object on the stack from
+/// announcement, even while this engine retains its origin-zone field until
+/// finalization. The retained-origin representation is stack-resident only while
+/// the exact spell's `PendingCast` lifecycle and announcement placeholder both
+/// remain live; a bare same-id stack entry is insufficient.
+fn object_has_stack_residency(state: &GameState, obj: &GameObject) -> bool {
+    if obj.zone == Zone::Stack {
+        return true;
+    }
+
+    let is_pending_spell = |pending: &crate::types::game_state::PendingCast| {
+        pending.object_id == obj.id && pending.activation_ability_index.is_none()
+    };
+    let has_pending_spell = state.pending_cast.as_deref().is_some_and(is_pending_spell)
+        || state
+            .waiting_for
+            .pending_cast_ref()
+            .is_some_and(is_pending_spell);
+
+    has_pending_spell
+        && state
+            .stack
+            .iter()
+            .any(|entry| entry.id == obj.id && matches!(entry.kind, StackEntryKind::Spell { .. }))
+}
+
+/// CR 704.5d / CR 111.7 / CR 111.8: A token outside the battlefield ceases to
+/// exist at the next SBA and can't change zones before then. Effectively
+/// stack-resident tokens are excluded so announced spell copies can finish
+/// casting and resolving before the next applicable SBA check.
+pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &GameObject) -> bool {
+    obj.is_token && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
@@ -27,8 +57,11 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// (CR 707.10f makes a permanent copy a token there) and may change zones freely
 /// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
 /// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
-pub(super) fn copy_of_card_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_copy && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+pub(super) fn copy_of_card_outside_battlefield_and_stack(
+    state: &GameState,
+    obj: &GameObject,
+) -> bool {
+    obj.is_copy && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
@@ -558,8 +591,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // enabled (every-enabler: `interactive_loop_bridge` Path C). Gated on a
         // non-empty enabler map so Off/On games (which never populate it — only the
         // Interactive B5 arm does) pay nothing and stay byte-identical. Whole-
-        // capability clear per controller whose enabler set contains this object
-        // (`clear_unbounded_loop` removes BOTH maps in lockstep).
+        // capability clear per controller whose enabler set contains this object:
+        // `clear_unbounded_loop` drops SIX maps, incl. the accepted-collapse stash.
         if !state.unbounded_loop_enablers.is_empty() {
             let revoked: Vec<PlayerId> = state
                 .unbounded_loop_enablers
@@ -791,6 +824,7 @@ pub fn resolve_and_apply_zone_change(
     zone_change_record.entered_incarnation =
         (to == Zone::Battlefield).then_some(resulting_incarnation);
     zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    zone_change_record.recorded_turn_number = state.turn_number;
 
     let command = ResolvedZoneChangeCommand {
         object: occurrence,
@@ -855,6 +889,14 @@ pub fn apply_resolved_zone_change(
             },
         );
     }
+    if command.zone_change_record.recorded_turn_number != state.turn_number {
+        return Err(
+            ResolvedZoneChangeReplayInvariantError::RecordedTurnMismatch {
+                expected: command.zone_change_record.recorded_turn_number,
+                found: state.turn_number,
+            },
+        );
+    }
 
     let destination_position = destination_position_after_removal(
         state,
@@ -899,8 +941,18 @@ pub fn apply_resolved_zone_change(
         );
     }
 
+    // CR 613.7d: the battlefield entry drew this timestamp during the original
+    // execution, so replay installs it rather than drawing a fresh one — and
+    // must carry the allocator past it or a later draw reissues it. A move to
+    // any other zone drew none, which is why this is bound to the recorded
+    // `Option` rather than applied to every zone change.
+    if let Some(entry_timestamp) = command.entry_timestamp {
+        state.adopt_replayed_timestamp(entry_timestamp);
+    }
+
+    let mut zone_change_record = command.zone_change_record.clone();
     let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, command.zone_change_record.clone());
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     if turn_zone_change_index != command.turn_zone_change_index {
         return Err(
             ResolvedZoneChangeReplayInvariantError::TurnRecordIndexMismatch {
@@ -929,7 +981,7 @@ pub fn move_to_zone(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
         return;
     }
@@ -1204,10 +1256,48 @@ pub fn move_to_zone(
     let static_dependency_after =
         crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
 
-    // CR 611.3a + CR 400.3: Hand size affects continuous effects gated on the
-    // controller's hand (Carnage Interpreter, issue #3991) and hand-zone
-    // effects (Miracle in hand). Re-evaluate layers on any hand entry/exit.
+    // pod-lab loop-3 Q5: a plain Battlefield entry that doesn't originate
+    // from Hand or Exile, and isn't itself the source of a live
+    // zone-membership-dependent static (static_dependency_before/after),
+    // can take the cheaper `mark_layers_entered` path instead of forcing a
+    // full re-evaluation of every object's characteristics. This does NOT
+    // skip re-verification: `prepare_incremental_flush` (layers.rs) re-runs
+    // its own full Axis-1/Axis-2 safety analysis fresh from live state at
+    // flush time regardless of which mark got set here, and escalates to a
+    // full pass itself whenever that analysis can't prove the entering
+    // object is safe (a sourced continuous effect, a CDA, counters,
+    // attachments, or a population-perturbing static). This call only
+    // proposes the cheap mark when the mutation site itself has nothing
+    // else forcing a full re-evaluation; it is not the safety net.
+    //
+    // Hand and Exile are excluded UNCONDITIONALLY here, not merely folded
+    // into static_dependency_before/after, because both have a proven blind
+    // spot in that check:
+    //   - CR 611.3a + CR 400.3: hand size affects continuous effects gated
+    //     on the controller's hand (Carnage Interpreter, issue #3991), and
+    //     `layers.rs`'s `quantity_ref_reads_zone` classifier maps
+    //     `QuantityRef::HandSize` to a hardcoded `false` — a live
+    //     HandSize-gated static is not detected as a zone dependency at all.
+    //   - CR 613.1: characteristics set by "for each card exiled with/by
+    //     [this]"-style statics (`QuantityRef::CardsExiledBySource`,
+    //     `ExiledCardPower`, `TrackedSetSize`, `FilteredTrackedSetSize`,
+    //     `TrackedSetAggregate` — e.g. Unlicensed Hearse, Veteran Survivor,
+    //     Sutured Ghoul) have the identical blind spot: the same classifier
+    //     maps all of them to `false`, and the count is live-filtered on
+    //     `obj.zone == Zone::Exile` (see `linked_exile_for_context` /
+    //     `players.rs`), so it changes the instant a linked card leaves
+    //     Exile for the Battlefield. Neither axis has a Axis-2 analog in
+    //     `prepare_incremental_flush` (which is exclusively board-population
+    //     framed), so there is no flush-time safety net for either — the
+    //     unconditional mark at this mutation site is these statics' ONLY
+    //     protection, exactly as it is today.
     if to == Zone::Battlefield
+        && from != Zone::Hand
+        && from != Zone::Exile
+        && !(static_dependency_before || static_dependency_after)
+    {
+        crate::game::layers::mark_layers_entered(state, object_id);
+    } else if to == Zone::Battlefield
         || from == Zone::Battlefield
         || to == Zone::Hand
         || from == Zone::Hand
@@ -1267,9 +1357,7 @@ pub fn move_to_zone(
     }
 
     if !transition_recorded {
-        let turn_zone_change_index =
-            super::restrictions::record_zone_change(state, zone_change_record.clone());
-        zone_change_record.turn_zone_change_index = turn_zone_change_index;
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     }
 
     if let Some(old_target) = unattached_from {
@@ -1287,6 +1375,75 @@ pub fn move_to_zone(
     });
 }
 
+/// CR 400.7 + CR 608.2i + CR 603.6a: record AND emit the battlefield entry of an object that came
+/// into existence on the battlefield — a zone change with NO origin zone (`from: None`): a created
+/// token (CR 111.1), a copy token (CR 707.2), an Incubator, or a conjured card. The `Some(from)`
+/// counterpart is the emit at the end of `move_to_zone`.
+///
+/// Routes through [`crate::game::restrictions::record_zone_change`] — the single authority that
+/// assigns this turn's zone-change index and performs the CR 608.2i battlefield-entry bookkeeping —
+/// then writes the assigned index back onto the record it emits.
+///
+/// Callers must NOT also call `restrictions::record_battlefield_entry` (`record_zone_change` does
+/// it; a second call double-counts `battlefield_entries_this_turn`) and must NOT also push onto
+/// `state.zone_changes_this_turn` (that would write a duplicate CR 400.7 row).
+///
+/// WHY record and emit are ONE call: `GameObject::snapshot_for_zone_change` leaves
+/// `turn_zone_change_index` at its `0` placeholder for the recorder to overwrite. The CR 603.2c
+/// batched zone-change replay guard (`triggers.rs::batched_zone_change_already_collected`) dedups
+/// on `(definition_ref, turn_zone_change_index)` read off the EVENT, and
+/// `Ability::self_ref_own_departure_successor` (`types/ability.rs`) uses that same index as a
+/// SUBSCRIPT into `state.zone_changes_this_turn`, then requires the row it lands on to carry the
+/// same `trigger_source_context().identity.reference` as the event's own record. An entry that
+/// emits without recording therefore ships index `0`, aliases onto occurrence `0`, and both
+/// consumers read a row belonging to a different object. Splitting the two halves is what made
+/// that defect writable at SIX call sites (measured on `4b34e5465`: `conjure.rs`, `counters.rs` x2,
+/// `gift_delivery.rs`, `token_copy.rs` x2); fusing them removes the seam a seventh would be written
+/// through.
+///
+/// Tripwired — not proved impossible — by
+/// `crates/engine/tests/integration/battlefield_entry_authority_census.rs`, a source-text census
+/// whose ceilings are documented in its own module header.
+///
+/// Returns the recorded row with its assigned index. `None` when the object is gone, in which case
+/// NOTHING is recorded and NOTHING is emitted.
+///
+/// THE `None` ARM IS NOT A SILENT NO-OP AT EVERY CALLER, and an earlier revision of this paragraph
+/// said it was — it named `gift_delivery.rs` and `token_copy.rs`, which are callers of
+/// [`crate::game::effects::token::push_committed_token_entry_events`] ONE LEVEL UP, not of this
+/// function. (That sentence is correct about ITS subject: of that emitter's eight callers, exactly
+/// those two `.expect(…)` its return.) Measured over this function's four direct callers with
+/// `rg -n 'record_and_emit_entry_from_no_zone\(' crates/engine/src`:
+///
+/// * `effects/conjure.rs:218` — `.expect("conjured object was just created")`: PANICS on `None`.
+/// * `effects/incubate.rs:123` — `.expect("incubator token was just created")`: PANICS on `None`.
+/// * `effects/token.rs:1881` — `if record.is_some()`, which is how
+///   `push_committed_token_entry_events` gates its `GameEvent::TokenCreated` emit. This is the
+///   object-existence predicate the token-creation ledger triple agrees on.
+/// * `effects/counters.rs:530` — statement position, discards.
+///
+/// So `None` is inert on exactly ONE of the four routes. The two `.expect` callers keep their
+/// pre-existing "just created" panic deliberately: each creates its object inside the same call, so
+/// `None` there is an engine invariant violation rather than a reachable game state.
+pub(crate) fn record_and_emit_entry_from_no_zone(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::ZoneChangeRecord> {
+    let mut record = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
+    super::restrictions::record_zone_change(state, &mut record);
+    events.push(GameEvent::ZoneChanged {
+        object_id,
+        from: None,
+        to: Zone::Battlefield,
+        record: Box::new(record.clone()),
+    });
+    Some(record)
+}
+
 /// CR 601.2 + CR 733.1: Restore an object while reversing an incomplete action.
 /// This intentionally uses the raw mover rather than the replacement-consulting
 /// pipeline: an undone action does not apply replacement effects, but preserves
@@ -1298,6 +1455,17 @@ pub(crate) fn restore_after_rollback(
     events: &mut Vec<GameEvent>,
 ) {
     move_to_zone(state, object_id, to, events);
+    // CR 601.2 + CR 733.1: reversing an incomplete action needs full
+    // reconciliation regardless of which mark move_to_zone's own
+    // axis-gated internal logic picked — an undone action is rare
+    // (not gameplay-hot) and can leave board state in a shape the
+    // entry-only incremental-flush safety classifier was never designed to
+    // reason about, so there is no perf case for trusting it here. This is
+    // conservatively at-or-above today's marking, not byte-for-byte
+    // identical to it: some rollback transitions `move_to_zone` marks
+    // nothing for today (e.g. Stack->Library) become `Full` here, which is
+    // strictly safe, never a behavior change a test could observe as wrong.
+    crate::game::layers::mark_layers_full(state);
 }
 
 /// CR 603.10a: Record that every member of `group` left the battlefield in the
@@ -1409,6 +1577,18 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
     mark_simultaneous_departures(slice, &departed);
 }
 
+/// CR 406.6 + CR 607.2a (issue #6437): Snapshot `source_id`'s linked exiles at
+/// the moment it leaves the battlefield, for a leaves-the-battlefield
+/// trigger's later `ExiledBySource` lookup (`filter.rs`'s `trigger_source.
+/// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
+/// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
+/// comments say so explicitly) and the LIVE lookup
+/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// this snapshot must match that surface exactly, or a card whose "play the
+/// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
+/// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
+/// ability) silently finds nothing: Hideaway's link is `HideawayLookable`, and
+/// a `TrackedBySource`-only filter here dropped it before the previous fix.
 pub(crate) fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
@@ -1421,13 +1601,7 @@ pub(crate) fn capture_linked_exile_snapshot(
     state
         .exile_links
         .iter()
-        .filter(|link| {
-            link.source_id == source_id
-                && matches!(
-                    link.kind,
-                    crate::types::game_state::ExileLinkKind::TrackedBySource
-                )
-        })
+        .filter(|link| link.source_id == source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
@@ -1505,12 +1679,13 @@ pub(crate) fn capture_combat_status(
 }
 
 /// Reorder objects that remain in one player's library without performing a
-/// zone change. `ordered` is placed at `start_index` in the supplied order.
+/// zone change. `ordered` is placed at `index` in the supplied order, or
+/// appended when `index` is `None`.
 pub(crate) fn reorder_within_library(
     state: &mut GameState,
     player: PlayerId,
     ordered: &[ObjectId],
-    start_index: usize,
+    index: Option<usize>,
 ) {
     let player_state = state
         .players
@@ -1518,9 +1693,15 @@ pub(crate) fn reorder_within_library(
         .find(|candidate| candidate.id == player)
         .expect("player exists");
     player_state.library.retain(|id| !ordered.contains(id));
+    let insert_index = index
+        .unwrap_or(player_state.library.len())
+        .min(player_state.library.len());
     for (offset, &object_id) in ordered.iter().enumerate() {
-        player_state.library.insert(start_index + offset, object_id);
+        player_state
+            .library
+            .insert(insert_index + offset, object_id);
     }
+    state.advance_library_knowledge_epoch(player);
 
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
@@ -1571,17 +1752,21 @@ pub fn move_to_library_at_index(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
+        return;
+    }
+
+    let obj = state.objects.get(&object_id).expect("object exists");
+    let from = obj.zone;
+    let owner = obj.owner;
+    if from == Zone::Library {
+        reorder_within_library(state, owner, &[object_id], index);
         return;
     }
 
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
     state.commander_declined_zone_return.remove(&object_id);
-
-    let obj = state.objects.get(&object_id).expect("object exists");
-    let from = obj.zone;
-    let owner = obj.owner;
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -1632,6 +1817,7 @@ pub fn move_to_library_at_index(
         }
         None => player.library.push_back(object_id),
     }
+    state.advance_library_knowledge_epoch(owner);
 
     let mut bump: Option<(u64, u64)> = None;
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
@@ -1649,9 +1835,7 @@ pub fn move_to_library_at_index(
         record_resolution_source_relatch(state, object_id, pre, new);
     }
 
-    let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, zone_change_record.clone());
-    zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    super::restrictions::record_zone_change(state, &mut zone_change_record);
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {
@@ -1691,8 +1875,19 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
         }
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
         Zone::Stack => {
-            state.stack.retain(|e| e.id != object_id);
-            state.stack_paid_facts.remove(&object_id);
+            // A unique id, so at most ONE entry matches. Routed through the
+            // shared stack-removal authority, which journals it and drops BOTH
+            // per-entry side tables (this arm previously dropped only
+            // `stack_paid_facts`). A miss is normal: the resolution pop already
+            // removed the entry before the card is routed to its next zone.
+            if let Some(idx) = state.stack.iter().position(|e| e.id == object_id) {
+                crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Removed,
+                )
+                .expect("position yielded a live stack index");
+            }
         }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
         Zone::Command => {
@@ -1735,8 +1930,63 @@ pub(crate) fn cease_object(
     zone: Zone,
     owner: PlayerId,
 ) {
-    remove_from_zone(state, object_id, zone, owner);
+    // CR 733: capture the occurrence BEFORE the removal — after it there is no
+    // object left to reference. A caller that passes an already-absent object
+    // keeps the prior silent behavior and journals nothing.
+    let Some(object) = state.objects.get(&object_id) else {
+        remove_from_zone(state, object_id, zone, owner);
+        return;
+    };
+    let command = ResolvedObjectCeaseCommand {
+        object: ObjectIncarnationRef::from_object(object),
+        expected_zone: zone,
+        owner,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_object_cease(state, &command)
+        .expect("the freshly read object must satisfy its own cease precondition");
+    state
+        .resolved_rules_journal
+        .record_object_cease(command)
+        .expect("resolved cease-to-exist must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 704.5d cease-to-exist removal verbatim.
+///
+/// Deliberately re-runs none of the CR 704.5d/e eligibility scan: whether this
+/// object was a token outside the battlefield was settled by the SBA sweep that
+/// recorded the command.
+pub fn apply_resolved_object_cease(
+    state: &mut GameState,
+    command: &ResolvedObjectCeaseCommand,
+) -> Result<(), ResolvedObjectCeaseReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state.objects.get(&object_id).ok_or(
+        ResolvedObjectCeaseReplayInvariantError::UnknownObject(object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedObjectCeaseReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.zone != command.expected_zone {
+        return Err(ResolvedObjectCeaseReplayInvariantError::ZoneMismatch {
+            expected: command.expected_zone,
+            found: object.zone,
+        });
+    }
+    if object.owner != command.owner {
+        return Err(ResolvedObjectCeaseReplayInvariantError::OwnerMismatch {
+            expected: command.owner,
+            found: object.owner,
+        });
+    }
+
+    remove_from_zone(state, object_id, command.expected_zone, command.owner);
     state.objects.remove(&object_id);
+    Ok(())
 }
 
 /// Add an ObjectId to the appropriate zone collection.
@@ -1852,28 +2102,51 @@ pub(crate) fn apply_battlefield_entry_controller_override(
     object_id: ObjectId,
     controller: PlayerId,
 ) {
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.base_controller = Some(controller);
-        obj.controller = controller;
-    }
+    // Read the pre-override identity and controllers once: they are the CR 733
+    // command's occurrence reference and preconditions. An absent object still
+    // retags the snapshots below, exactly as before, and simply journals nothing.
+    let object_snapshot = state.objects.get(&object_id);
+    let reference = object_snapshot.map(ObjectIncarnationRef::from_object);
+    let expected_old_base_controller = object_snapshot.and_then(|obj| obj.base_controller);
+    let expected_old_controller = object_snapshot.map(|obj| obj.controller);
 
-    if let Some(record) = state
+    // Resolve the snapshot POSITIONS rather than mutating through a scan: the
+    // position is what the CR 733 command records, so replay retags the same
+    // record instead of re-running a last-match scan (CR 400.7 permits the same
+    // object to hold several entries in one turn).
+    let zone_change_index = state
         .zone_changes_this_turn
-        .iter_mut()
-        .rev()
-        .find(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield)
-    {
-        record.controller = controller;
-        record.sync_trigger_source_context();
-    }
-
-    if let Some(record) = state
+        .iter()
+        .rposition(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield);
+    let battlefield_entry_index = state
         .battlefield_entries_this_turn
-        .iter_mut()
-        .rev()
-        .find(|record| record.object_id == object_id)
-    {
-        record.controller = controller;
+        .iter()
+        .rposition(|record| record.object_id == object_id);
+
+    // CR 733: the retag itself is performed by the command applier, so resolve and
+    // replay install through one body instead of two copies that can drift. An
+    // absent object has nothing to retag on the object side but still retags its
+    // snapshots, exactly as before.
+    let command = reference.zip(expected_old_controller).map(|(object, old)| {
+        ResolvedControllerOverrideCommand {
+            object,
+            expected_old_base_controller,
+            expected_old_controller: old,
+            resulting_controller: controller,
+            zone_change_index,
+            battlefield_entry_index,
+            cause: state.current_or_begin_rules_execution_node(),
+        }
+    });
+    match &command {
+        Some(command) => apply_resolved_controller_override(state, command)
+            .expect("the freshly read object must satisfy its own override precondition"),
+        None => retag_battlefield_entry_snapshots(
+            state,
+            zone_change_index,
+            battlefield_entry_index,
+            controller,
+        ),
     }
 
     if let Some(GameEvent::ZoneChanged { record, .. }) = events.iter_mut().rev().find(|event| {
@@ -1889,6 +2162,193 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         record.controller = controller;
         record.sync_trigger_source_context();
     }
+
+    // CR 733: journal the settled override. The event fix-up above is deliberately
+    // NOT part of the command — events are transient carriers consumed by the same
+    // resolution, not persistent state a replay reconstructs.
+    // CR 110.2a: an override onto the controller the object already had, with the
+    // base controller already pinned there, retagged nothing and is not recorded.
+    let Some(command) = command else {
+        return;
+    };
+    if command.expected_old_base_controller == Some(controller)
+        && command.expected_old_controller == controller
+    {
+        return;
+    }
+    state
+        .resolved_rules_journal
+        .record_controller_override(command)
+        .expect("resolved controller override must have a live journal cause");
+}
+
+/// Retags the CR 400.7 zone-change and CR 608.2i battlefield-entry snapshots at
+/// the exact recorded positions. Shared by the resolve-time authority and the
+/// replay applier so both install the same retag.
+///
+/// CR 608.2i, not CR 403.3: `battlefield_entries_this_turn` is an entry-time
+/// characteristics snapshot kept so later effects can look back at a previous
+/// game state. CR 403.3 ("Permanents exist only on the battlefield") is
+/// definitional and describes no such record.
+fn retag_battlefield_entry_snapshots(
+    state: &mut GameState,
+    zone_change_index: Option<usize>,
+    battlefield_entry_index: Option<usize>,
+    controller: PlayerId,
+) {
+    if let Some(record) =
+        zone_change_index.and_then(|index| state.zone_changes_this_turn.get_mut(index))
+    {
+        record.controller = controller;
+        record.sync_trigger_source_context();
+    }
+    if let Some(record) =
+        battlefield_entry_index.and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
+    {
+        record.controller = controller;
+    }
+}
+
+/// Installs one already-resolved CR 110.2a controller override verbatim.
+///
+/// Deliberately re-runs none of the entry-time decision that produced the
+/// override: whether the permanent enters under another player's control was
+/// settled when the command was recorded. The applier verifies the state it is
+/// installing into, then retags the object and the exact snapshots the authority
+/// retagged.
+pub fn apply_resolved_controller_override(
+    state: &mut GameState,
+    command: &ResolvedControllerOverrideCommand,
+) -> Result<(), ResolvedControllerOverrideReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state
+        .objects
+        .get(&object_id)
+        .ok_or(ResolvedControllerOverrideReplayInvariantError::UnknownObject(object_id))?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(
+            ResolvedControllerOverrideReplayInvariantError::StaleObject {
+                expected: command.object,
+                found,
+            },
+        );
+    }
+    if object.base_controller != command.expected_old_base_controller {
+        return Err(
+            ResolvedControllerOverrideReplayInvariantError::BaseControllerPreconditionMismatch {
+                expected: command.expected_old_base_controller,
+                found: object.base_controller,
+            },
+        );
+    }
+    if object.controller != command.expected_old_controller {
+        return Err(
+            ResolvedControllerOverrideReplayInvariantError::ControllerPreconditionMismatch {
+                expected: command.expected_old_controller,
+                found: object.controller,
+            },
+        );
+    }
+    // Both recorded snapshot positions are checked before any mutation so a
+    // rejected command leaves no partial retag.
+    if let Some(index) = command.zone_change_index {
+        if index >= state.zone_changes_this_turn.len() {
+            return Err(
+                ResolvedControllerOverrideReplayInvariantError::MissingZoneChangeRecord(index),
+            );
+        }
+    }
+    if let Some(index) = command.battlefield_entry_index {
+        if index >= state.battlefield_entries_this_turn.len() {
+            return Err(
+                ResolvedControllerOverrideReplayInvariantError::MissingBattlefieldEntryRecord(
+                    index,
+                ),
+            );
+        }
+    }
+
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.base_controller = Some(command.resulting_controller);
+        obj.controller = command.resulting_controller;
+    }
+    retag_battlefield_entry_snapshots(
+        state,
+        command.zone_change_index,
+        command.battlefield_entry_index,
+        command.resulting_controller,
+    );
+    Ok(())
+}
+
+/// CR 603.6a: Stamps the entering permanent with the ability that put it onto
+/// the battlefield, so anti-recursion intervening-ifs ("if it wasn't put onto
+/// the battlefield with this ability") can exclude the permanents that very
+/// ability placed.
+///
+/// This is the single authority for the stamp: the delivery tail wrote the field
+/// raw, leaving a CR 733 replay with no record that the permanent's entry was
+/// ability-driven.
+pub(crate) fn stamp_battlefield_entry_provenance(
+    state: &mut GameState,
+    object_id: ObjectId,
+    source_id: ObjectId,
+) {
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let reference = ObjectIncarnationRef::from_object(object);
+    let expected_old_source = object.entered_via_ability_source;
+    // CR 603.6a: re-stamping the source already recorded changes nothing.
+    if expected_old_source == Some(source_id) {
+        return;
+    }
+
+    let command = ResolvedEntryProvenanceCommand {
+        object: reference,
+        expected_old_source,
+        resulting_source: source_id,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_entry_provenance(state, &command)
+        .expect("the freshly read object must satisfy its own provenance precondition");
+    state
+        .resolved_rules_journal
+        .record_entry_provenance(command)
+        .expect("resolved entry provenance must have a live journal cause");
+}
+
+/// Installs one already-resolved CR 603.6a provenance stamp verbatim.
+pub fn apply_resolved_entry_provenance(
+    state: &mut GameState,
+    command: &ResolvedEntryProvenanceCommand,
+) -> Result<(), ResolvedEntryProvenanceReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state.objects.get(&object_id).ok_or(
+        ResolvedEntryProvenanceReplayInvariantError::UnknownObject(object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedEntryProvenanceReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.entered_via_ability_source != command.expected_old_source {
+        return Err(
+            ResolvedEntryProvenanceReplayInvariantError::SourcePreconditionMismatch {
+                expected: command.expected_old_source,
+                found: object.entered_via_ability_source,
+            },
+        );
+    }
+    state
+        .objects
+        .get_mut(&object_id)
+        .expect("the validated object must remain present")
+        .entered_via_ability_source = Some(command.resulting_source);
+    Ok(())
 }
 
 /// CR 614.1d: Check if any active CantEnterBattlefieldFrom static prevents this
@@ -2791,6 +3251,89 @@ mod tests {
     }
 
     #[test]
+    fn within_library_reposition_does_not_create_a_zone_change() {
+        let mut state = setup();
+        let filler = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Filler".to_string(),
+            Zone::Library,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+
+        let incarnation_before = state.objects[&card].incarnation;
+        state.commander_declined_zone_return.insert(card);
+        let mut events = Vec::new();
+        move_to_library_at_index(&mut state, card, Some(0), &mut events); // to top
+        move_to_library_at_index(&mut state, card, None, &mut events); // to bottom
+
+        assert_eq!(
+            state.objects[&card].incarnation, incarnation_before,
+            "a within-library reposition must preserve object identity"
+        );
+        assert!(
+            state.players[0].library.contains(&filler) && state.players[0].library.contains(&card)
+        );
+        assert!(
+            events.is_empty(),
+            "repositioning within a library emits no events"
+        );
+        assert!(
+            state.zone_changes_this_turn.is_empty(),
+            "repositioning within a library does not enter the zone-change ledger"
+        );
+        assert!(
+            state.commander_declined_zone_return.contains(&card),
+            "without a zone change, the commander marker must be preserved"
+        );
+    }
+
+    #[test]
+    fn reorder_within_library_clamps_after_removal_and_appends_when_unspecified() {
+        let mut state = setup();
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+
+        reorder_within_library(&mut state, PlayerId(0), &[first, third], Some(99));
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, first, third]
+        );
+
+        reorder_within_library(&mut state, PlayerId(0), &[first], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, third, first]
+        );
+    }
+
+    #[test]
     fn player_zones_are_per_player() {
         let mut state = setup();
         let id1 = create_object(
@@ -3459,6 +4002,7 @@ mod tests {
                 power: Some(6),
                 toughness: Some(6),
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],
@@ -3623,6 +4167,7 @@ mod tests {
                 power: Some(6),
                 toughness: Some(6),
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],
@@ -3786,6 +4331,43 @@ mod tests {
                 )
             }),
             "SBA zone movement must still publish the unattach event for triggers"
+        );
+    }
+
+    /// pod-lab loop-3 Q5, row 5: `restore_after_rollback` targeting the
+    /// battlefield must still force a full layers re-evaluation
+    /// unconditionally — CR 601.2 + CR 733.1, reversing an incomplete action
+    /// is rare (not gameplay-hot) and can leave board state in a shape the
+    /// entry-only incremental-flush safety classifier was never designed to
+    /// reason about, so there is no perf case for trusting `move_to_zone`'s
+    /// own (now axis-gated) internal decision here. Today's only production
+    /// caller targets Graveyard, not Battlefield, so this exercises the
+    /// function's general contract directly rather than replaying an
+    /// existing call site.
+    #[test]
+    fn restore_after_rollback_to_battlefield_marks_full() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rolled Back Spell".to_string(),
+            Zone::Stack,
+        );
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        restore_after_rollback(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full
+            ),
+            "restore_after_rollback targeting the battlefield must \
+             unconditionally force a full re-evaluation, got {:?}",
+            state.layers_dirty
         );
     }
 }

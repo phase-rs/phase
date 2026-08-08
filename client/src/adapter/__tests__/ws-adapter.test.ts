@@ -5,7 +5,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError } from "../types";
+import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
 import type { GameState } from "../types";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
@@ -27,13 +27,28 @@ class MockWebSocket extends EventTarget {
     super();
     MockWebSocket.last = this;
   }
-  // `openPhaseSocket` calls `addEventListener("close", ...)` / ("message", ...)
-  // in addition to the legacy `onXxx` assignments. Route both channels:
-  // legacy `onXxx` fires first, EventTarget listeners fire after.
+  // Deliver a frame the way production does — which is asymmetric between
+  // the two event types, so this routes them differently.
+  //
+  // `"message"`: `onmessage` ONLY. Both `openPhaseSocket`
+  // (`openPhaseSocket.ts:190`) and the adapter (`ws-adapter.ts:528`) assign
+  // the `onmessage` IDL attribute, and neither registers an
+  // `addEventListener("message", ...)` — `PhaseSocketTransport` types
+  // `addEventListener` for `"close"` alone (`openPhaseSocket.ts:20-25`), so
+  // a message listener is not even expressible through the interface. This
+  // previously also called `dispatchEvent(new MessageEvent(...))` under a
+  // comment claiming `openPhaseSocket` registered a message listener; it
+  // does not, and happy-dom routes `dispatchEvent` back through the
+  // `onmessage` attribute, so every frame in this file was handled TWICE.
+  // Harmless for idempotent handlers, but it silently defeats any negative
+  // that depends on state the first delivery consumes.
+  //
+  // `"close"`: both channels, because production genuinely uses both —
+  // `openPhaseSocket.ts:366` registers `addEventListener("close", ...)`
+  // alongside the `onclose` assignment.
   dispatchSynthetic(type: "message" | "close", data?: string) {
     if (type === "message" && data !== undefined) {
       this.onmessage?.({ data });
-      this.dispatchEvent(new MessageEvent("message", { data }));
     } else if (type === "close") {
       this.onclose?.();
       this.dispatchEvent(new Event("close"));
@@ -128,6 +143,129 @@ describe("WebSocketAdapter", () => {
     await initPromise;
   });
 
+  it("sends the payload-free authenticated whole-match concession intent", () => {
+    expect(supportsMatchConcede(adapter)).toBe(true);
+
+    adapter.sendMatchConcede();
+
+    expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
+  });
+
+  describe("server rewind capability (F2)", () => {
+    it("declares the capability through the standalone type guard", () => {
+      expect(supportsServerRewind(adapter)).toBe(true);
+    });
+
+    // The reverse-skew guard. The last-action frame must carry NO `data` key —
+    // byte-identical to the frame every already-deployed server accepts, and
+    // the reason `ClientMessage::RequestTakeback` is a newtype over
+    // `Option<RewindTarget>` rather than a struct variant (which would reject
+    // this exact frame with `missing field \`data\``).
+    it("sends a data-free frame for a last-action undo", () => {
+      adapter.sendRequestTakeback();
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+      });
+
+      adapter.sendRequestTakeback({ kind: "last_action" });
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+      });
+    });
+
+    it("sends the data-bearing frame for a turn rewind", () => {
+      adapter.sendRequestTakeback({ kind: "turn_start", turn_number: 3 });
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+        data: { kind: "turn_start", turn_number: 3 },
+      });
+    });
+
+    it("emits rewindTargets from a StateUpdate that carries them", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "StateUpdate",
+          data: {
+            state: createMockState(),
+            events: [],
+            rewind_targets: [{ turn_number: 3, active_player: 1 }],
+          },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "stateChanged",
+          rewindTargets: [{ turn_number: 3, active_player: 1 }],
+        }),
+      );
+    });
+
+    // Forward-skew hostile: an omitted field must become `[]`, never
+    // `undefined`. On this transport `undefined` means "does not publish",
+    // which is false here — and `dispatch.ts` treats the two differently, so
+    // collapsing them would leave a stale list on screen forever.
+    it("emits an empty array when a StateUpdate omits rewind_targets", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "StateUpdate",
+          data: { state: createMockState(), events: [] },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "stateChanged", rewindTargets: [] }),
+      );
+    });
+
+    // The reconnect path: a mid-game reattach must see the list immediately
+    // rather than waiting for the next action.
+    it("emits rewindTargets from a reconnect GameStarted", async () => {
+      MockWebSocket.last = null;
+      const reconnected = new WebSocketAdapter(
+        "ws://localhost:9374/ws",
+        "join",
+        { main_deck: [], sideboard: [] },
+        "ABC123",
+      );
+      const listener = vi.fn();
+      reconnected.onEvent(listener);
+      const initPromise = reconnected.initialize();
+      const ws2 = await completeHandshake(reconnected);
+      // Resolve init with a first GameStarted, then deliver the reconnect one.
+      ws2.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+      listener.mockClear();
+      ws2.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state: createMockState(),
+            your_player: 0,
+            rewind_targets: [{ turn_number: 5, active_player: 0 }],
+          },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "stateChanged",
+          rewindTargets: [{ turn_number: 5, active_player: 0 }],
+        }),
+      );
+    });
+  });
+
   describe("native AI transport", () => {
     const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
       nativeAi: {
@@ -203,6 +341,118 @@ describe("WebSocketAdapter", () => {
       await initPromise;
     });
 
+    // A dropped socket used to be instantly fatal for desktop solo:
+    // `maxReconnectAttempts` was 0, and `attemptReconnect` compares
+    // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 short-circuits to
+    // `reconnectFailed` before the `reconnecting` emit at all. The sidecar
+    // runs `--single-user`, so its reconnect window is effectively unbounded
+    // and the session is still there to reconnect to.
+    it("retries a dropped native-ai socket instead of failing on first drop", async () => {
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(
+          () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+        ),
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      await Promise.resolve();
+      const nativeSocket = MockWebSocket.last!;
+      nativeSocket.dispatchSynthetic("message", SERVER_HELLO);
+      await Promise.resolve();
+      await Promise.resolve();
+      // A live session is the first branch `attemptReconnect` reaches: with no
+      // game code / player token it short-circuits to `reconnectFailed`
+      // regardless of the cap, so the fixture must establish one or the test
+      // measures the wrong branch.
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "ABCD", player_token: "tok", full_key: { game_code: "ABCD", generation: 1 } },
+        }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      nativeSocket.dispatchSynthetic("close");
+
+      // Presently unsatisfiable on the old code: `attemptReconnect` returned
+      // before the `reconnecting` emit, so this event was NEVER produced for
+      // a native-ai adapter.
+      expect(listener).toHaveBeenCalledWith({
+        type: "reconnecting",
+        attempt: 1,
+        maxAttempts: 8,
+      });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "reconnectFailed" }),
+      );
+
+      nativeAdapter.dispose();
+    });
+
+    // Scope guard: this asserts a property of the DIFF (the change was scoped
+    // to `nativeAi` and did not widen to both options), not that 0 is the
+    // right answer for pregame — that path is explicitly not analysed.
+    it("leaves the native pregame transport failing on first drop", async () => {
+      MockWebSocket.last = null;
+      const pregameAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = pregameAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(pregameAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "WXYZ", player_id: 0, player_token: "tok", full_key: { game_code: "WXYZ", generation: 1 } },
+        }),
+      );
+      await attached;
+
+      const listener = vi.fn();
+      pregameAdapter.onEvent(listener);
+      nativeSocket.dispatchSynthetic("close");
+
+      expect(listener).toHaveBeenCalledWith({ type: "reconnectFailed" });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "reconnecting" }),
+      );
+
+      pregameAdapter.dispose();
+    });
+
     it("rejects a release version mismatch before creating a game", async () => {
       MockWebSocket.last = null;
       const nativeAdapter = new WebSocketAdapter(
@@ -237,6 +487,39 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("native P2P pregame transport", () => {
+    it("rejects a native seat attachment without a Full session key", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+        }),
+      );
+
+      await expect(attached).rejects.toMatchObject({ message: "Server omitted a valid Full session identity" });
+      nativeAdapter.dispose();
+    });
+
     it("waits for the server-issued seat attachment and slot confirmation", async () => {
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
@@ -266,13 +549,14 @@ describe("WebSocketAdapter", () => {
         "message",
         JSON.stringify({
           type: "SessionAttached",
-          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token", full_key: { game_code: "NATIVE", generation: 1 } },
         }),
       );
       await expect(attached).resolves.toEqual({
         gameCode: "NATIVE",
         playerId: 0,
         playerToken: "host-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
       });
 
       const confirmed = nativeAdapter.sendSeatMutation({ type: "Start" });
@@ -302,6 +586,7 @@ describe("WebSocketAdapter", () => {
             gameCode: "NATIVE",
             playerId: 1,
             playerToken: "guest-token",
+            fullKey: { game_code: "NATIVE", generation: 1 },
           },
         },
       );
@@ -311,7 +596,11 @@ describe("WebSocketAdapter", () => {
       expect(nativeSocket.send).toHaveBeenLastCalledWith(
         JSON.stringify({
           type: "Reconnect",
-          data: { game_code: "NATIVE", player_token: "guest-token" },
+          data: {
+            game_code: "NATIVE",
+            player_token: "guest-token",
+            full_key: { game_code: "NATIVE", generation: 1 },
+          },
         }),
       );
       nativeSocket.dispatchSynthetic(
@@ -325,6 +614,7 @@ describe("WebSocketAdapter", () => {
         gameCode: "NATIVE",
         playerId: 1,
         playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
       });
     });
 
@@ -497,13 +787,6 @@ describe("WebSocketAdapter", () => {
     });
   });
 
-  describe("Bug D: getAiAction no-op", () => {
-    it("getAiAction returns null without throwing", () => {
-      const result = adapter.getAiAction("easy", 1);
-      expect(result).toBeNull();
-    });
-  });
-
   describe("GameStarted identity event", () => {
     it("emits playerIdentity when GameStarted arrives", async () => {
       MockWebSocket.last = null;
@@ -552,6 +835,7 @@ describe("WebSocketAdapter", () => {
             state: createMockState(),
             your_player: 1,
             player_token: "player-token",
+            full_key: { game_code: "ABC123", generation: 1 },
           },
         }),
       );
@@ -574,6 +858,7 @@ describe("WebSocketAdapter", () => {
             data: {
               game_code: "ABC123",
               player_token: "player-token",
+              full_key: { game_code: "ABC123", generation: 1 },
             },
           }),
         );
@@ -641,6 +926,64 @@ describe("WebSocketAdapter", () => {
         code: "ACTION_REJECTED",
         recoverable: true,
       });
+    });
+
+    // A refused takeback answers a fire-and-forget request, so no promise owns
+    // the rejection. Before this branch the whole `if (this.pendingReject)`
+    // body was skipped and the refusal was dropped on the floor — which is why
+    // the server had been reaching for `ServerMessage::error` instead, the
+    // event `handleNativeEvent` treats as terminal.
+    it("emits requestRejected when an ActionRejected has no in-flight action", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+
+      adapter.sendRequestTakeback();
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "There is no previous action of yours to take back" },
+        }),
+      );
+
+      expect(listener).toHaveBeenCalledWith({
+        type: "requestRejected",
+        reason: "There is no previous action of yours to take back",
+      });
+      // The survivability property: no terminal `error` event, which is what
+      // tears down a native session.
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "error" }),
+      );
+    });
+
+    // Guards the new `else` against swallowing the normal path.
+    //
+    // This test is why the double delivery in `dispatchSynthetic` had to be
+    // fixed rather than worked around: a second delivery of the same frame
+    // finds `pendingReject` already cleared by the first, takes the `else`,
+    // and makes the negative below unpassable no matter what the adapter
+    // does. It now goes through `dispatchSynthetic` like every other frame
+    // in this file.
+    it("does not emit requestRejected when an action IS in flight", async () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: Something genuinely wrong" },
+        }),
+      );
+
+      // Reach-guard: the frame really was delivered and handled — without this
+      // the negative below would pass for a message that never arrived.
+      await expect(pending).rejects.toMatchObject({ code: "ACTION_REJECTED" });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "requestRejected" }),
+      );
     });
 
     it("sends the action frame and keeps the promise pending on a healthy socket", () => {

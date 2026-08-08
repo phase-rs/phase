@@ -5,6 +5,9 @@ use crate::types::game_state::{ActiveSearchDecisionAuthority, GameState, Waiting
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::players;
@@ -135,10 +138,29 @@ pub fn eliminate_players_simultaneously(
     if let Some(winner) = game_over_winner {
         // Terminal: drop trigger scaffolding the client would otherwise show as
         // a stuck stack / ordering prompt.
-        state.pending_trigger_order = None;
-        state.deferred_triggers.clear();
+        let mut terminal_firings = state
+            .pending_trigger_order
+            .take()
+            .into_iter()
+            .flat_map(|order| order.groups)
+            .flat_map(|group| group.triggers)
+            .map(|context| context.firing())
+            .collect::<Vec<_>>();
+        terminal_firings.extend(
+            std::mem::take(&mut state.deferred_triggers)
+                .into_iter()
+                .map(|context| context.firing()),
+        );
+        terminal_firings.extend(state.pending_trigger_firing.take());
         state.pending_trigger = None;
         state.pending_trigger_entry = None;
+        state.pending_trigger_event_batch.clear();
+        for firing in terminal_firings {
+            crate::game::lifecycle::record_delayed_terminal(
+                firing,
+                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+            );
+        }
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 603.3b: If prune collapsed an ordering pass into
@@ -298,6 +320,8 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         return;
     };
 
+    let mut terminal_firings = Vec::new();
+
     // Drop triggers controlled by eliminated players and auto-resolve
     // eliminated controllers' groups with identity order.
     for group in order.groups.iter_mut() {
@@ -309,9 +333,14 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         // triggers whose own controller is now eliminated (delayed-trigger
         // re-attribution corner case — pre-elimination snapshot may have
         // triggers whose `pending.controller` belongs to a now-dead player).
-        group
-            .triggers
-            .retain(|ctx| living_players.contains(&ctx.pending.controller));
+        let triggers = std::mem::take(&mut group.triggers);
+        for context in triggers {
+            if living_players.contains(&context.pending.controller) {
+                group.triggers.push(context);
+            } else {
+                terminal_firings.push(context.firing());
+            }
+        }
         if group.triggers.len() <= 1 {
             group.ordered = true;
         }
@@ -329,26 +358,45 @@ fn prune_pending_trigger_order(state: &mut GameState) {
         // The waiting_for caller below (`acting_player()` is_alive check) will
         // re-point to a living player's Priority since OrderTriggers no longer
         // matches.
-        return;
+    } else {
+        // Some groups still need a choice — refresh the OrderTriggers prompt so
+        // it points at the next-most-AP unordered group (possibly the same one
+        // if its controller is alive).
+        if let Some(wf) = super::triggers::build_next_order_triggers_prompt_public(state) {
+            state.waiting_for = wf;
+        }
     }
 
-    // Some groups still need a choice — refresh the OrderTriggers prompt so
-    // it points at the next-most-AP unordered group (possibly the same one
-    // if its controller is alive).
-    if let Some(wf) = super::triggers::build_next_order_triggers_prompt_public(state) {
-        state.waiting_for = wf;
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
     }
 }
 
 /// CR 800.4a: Remove deferred triggers controlled by eliminated players.
 fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
-    state.deferred_triggers.retain(|ctx| {
-        state
+    let deferred = std::mem::take(&mut state.deferred_triggers);
+    let mut terminal_firings = Vec::new();
+    for context in deferred {
+        if state
             .players
             .iter()
-            .find(|player| player.id == ctx.pending.controller)
+            .find(|player| player.id == context.pending.controller)
             .is_some_and(|player| !player.is_eliminated)
-    });
+        {
+            state.deferred_triggers.push(context);
+        } else {
+            terminal_firings.push(context.firing());
+        }
+    }
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
 }
 
 /// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
@@ -578,13 +626,23 @@ fn do_eliminate(
     let planar_handoff =
         crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
 
-    // Mark as eliminated
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-        p.is_eliminated = true;
-    }
-    if !state.eliminated_players.contains(&player) {
-        state.eliminated_players.push(player);
-    }
+    // CR 733 + CR 800.4: open the leave's own execution node BEFORE the sweep, so
+    // every command it settles below — the owned-object exiles, the control
+    // reversions — is attributed to the departure rather than to whatever rules
+    // work happened to be live when the state-based action fired. The node stays
+    // active for the remainder of this function.
+    let leave_node = state.begin_player_leave_journal_node();
+    let enclosing_node = state.active_rules_execution_node.replace(leave_node);
+    let command = ResolvedPlayerLeaveCommand {
+        player,
+        cause: leave_node,
+    };
+    apply_resolved_player_leave(state, &command)
+        .expect("a living player must satisfy their own departure precondition");
+    state
+        .resolved_rules_journal
+        .record_player_leave(command)
+        .expect("resolved player leave must have a live journal cause");
 
     abandon_source_bound_resolution_prompt(state, player);
     retire_pending_zone_change_contexts_owned_by(state, player);
@@ -592,8 +650,24 @@ fn do_eliminate(
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
-    // CR 800.4a: Remove spells they control from the stack
-    state.stack.retain(|entry| entry.controller != player);
+    // CR 800.4a: Remove spells they control from the stack, one at a time
+    // through the shared stack-removal authority — the same shape as the
+    // scheduled-control release below. A `retain` would drop several entries in
+    // one unjournalable mutation; removing by position instead records each
+    // entry with the index it occupied at the moment IT was removed, so a replay
+    // reproduces both the count and the surviving entries' relative order.
+    while let Some(idx) = state
+        .stack
+        .iter()
+        .position(|entry| entry.controller == player)
+    {
+        super::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            super::lifecycle::DelayedTerminalDisposition::Eliminated,
+        )
+        .expect("position yielded a live stack index");
+    }
 
     // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
     // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
@@ -735,6 +809,12 @@ fn do_eliminate(
         .pending_trigger_entry
         .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
     {
+        if let Some(firing) = state.pending_trigger_firing.take() {
+            crate::game::lifecycle::record_delayed_terminal(
+                firing,
+                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+            );
+        }
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
         state.pending_trigger_event_batch.clear();
@@ -910,7 +990,7 @@ fn do_eliminate(
                     source_id,
                     controller: new_holder,
                     condition: None,
-                    ability: venture_ability,
+                    ability: Box::new(venture_ability),
                     timestamp: 0,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -923,6 +1003,7 @@ fn do_eliminate(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
                 events,
             );
@@ -948,6 +1029,38 @@ fn do_eliminate(
     }
 
     events.push(GameEvent::PlayerEliminated { player_id: player });
+
+    // The leave node covers this sweep only. Restoring the enclosing scope keeps
+    // a later, unrelated command from being attributed to the departure.
+    state.active_rules_execution_node = enclosing_node;
+}
+
+/// CR 800.4 + CR 104.3a: Installs one already-resolved player departure verbatim.
+///
+/// Deliberately re-runs none of the CR 104 loss conditions that produced the
+/// departure: whether this player lost was settled when the command was
+/// recorded.
+pub fn apply_resolved_player_leave(
+    state: &mut GameState,
+    command: &ResolvedPlayerLeaveCommand,
+) -> Result<(), ResolvedPlayerLeaveReplayInvariantError> {
+    let player = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == command.player)
+        .ok_or(ResolvedPlayerLeaveReplayInvariantError::UnknownPlayer(
+            command.player,
+        ))?;
+    if player.is_eliminated {
+        return Err(ResolvedPlayerLeaveReplayInvariantError::AlreadyEliminated(
+            command.player,
+        ));
+    }
+    player.is_eliminated = true;
+    if !state.eliminated_players.contains(&command.player) {
+        state.eliminated_players.push(command.player);
+    }
+    Ok(())
 }
 
 /// CR 800.4a: A paused carrier retains trigger-source contexts from the
@@ -1008,9 +1121,20 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
+    // The prompt and its ability continuation are abandoned, so no realization point will ever be
+    // reached for a token battlefield entry parked by this resolution. Leaving the `Option` live
+    // would let a later token's park trip the fail-loud overwrite assert, and would let the
+    // action-boundary convergence write a CR 400.7 row and run a CR 603.6a trigger pass for a
+    // resolution that no longer exists. If the token itself survives the abandonment its entry row
+    // is lost — the same loss the `deferred_entry_events.clear()` above already accepts for that
+    // entry's trigger replay.
+    state.pending_token_battlefield_entry = None;
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
     };
@@ -1038,9 +1162,15 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     let _ = state
         .clear_active_ability_continuation()
         .expect("elimination cannot clear a buried ability continuation");
-    state.resolving_stack_entry = None;
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
+    // Same reasoning as `abandon_source_bound_resolution_prompt`: the owning resolution is gone,
+    // so a parked token battlefield entry has no realization point left.
+    state.pending_token_battlefield_entry = None;
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
     };
@@ -1369,6 +1499,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: surviving,
@@ -1384,6 +1515,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
             ],
             attempted: vec![leaving, surviving],

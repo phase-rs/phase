@@ -6,6 +6,7 @@ import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
 import { UnimplementedMechanicsBadge } from "./UnimplementedMechanicsBadge.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
@@ -130,6 +131,7 @@ export function CardImage({
       ) : (
         <img
           src={renderedSrc}
+          {...getCardImageSrcSetProps(renderedSrc)}
           alt={renderedAlt}
           draggable={false}
           onError={() => setImageError(true)}

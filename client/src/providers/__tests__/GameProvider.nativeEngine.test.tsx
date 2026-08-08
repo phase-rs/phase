@@ -5,7 +5,11 @@ import { useMultiplayerStore } from "../../stores/multiplayerStore";
 
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  // Non-terminal: the server refused a fire-and-forget request. Listed here
+  // alongside the two terminal events precisely because `handleNativeEvent`
+  // must treat it differently from both.
+  | { type: "requestRejected"; reason: string };
 
 const {
   NativeEngineVersionMismatchError,
@@ -424,7 +428,7 @@ describe("GameProvider native AI routing", () => {
       id: "native-resume-read",
       mode: "ai",
       difficulty: "Medium",
-      nativeSession: { gameCode: "GAME-XYZ", playerId: 0, playerToken: "tok-xyz" },
+      nativeSession: { gameCode: "GAME-XYZ", playerId: 0, playerToken: "tok-xyz", fullKey: { game_code: "GAME-XYZ", generation: 1 } },
     });
 
     render(
@@ -460,7 +464,7 @@ describe("GameProvider native AI routing", () => {
       id: "native-resume-fail",
       mode: "ai",
       difficulty: "Medium",
-      nativeSession: { gameCode: "GONE", playerId: 0, playerToken: "tok" },
+      nativeSession: { gameCode: "GONE", playerId: 0, playerToken: "tok", fullKey: { game_code: "GONE", generation: 1 } },
     });
     // The reconnect handshake fails (e.g. the server no longer holds the game).
     nativeAdapterInitialize.mockRejectedValue(new Error("Reconnect grace period expired"));
@@ -613,6 +617,44 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces reconnect failure as terminal", async () => {
     await expectNativeTerminalEvent({ type: "reconnectFailed" });
+  });
+
+  // `requestRejected` needs its OWN forwarding branch, not a place in an
+  // existing group: `stateChanged` and `gameOver` are handled inline and are
+  // never forwarded, so before this change the only `onWsEvent` call in
+  // `handleNativeEvent` was the terminal one. Adding the event to that branch
+  // would have forwarded it AND destroyed the session — the opposite of the
+  // point.
+  it("forwards a refused request without disposing the native session", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-request-rejected" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = {
+      type: "requestRejected" as const,
+      reason: "There is no previous action of yours to take back",
+    };
+    nativeAdapter.emit(event);
+
+    // Forwarded, so GamePage can toast it. This is the assertion that fails
+    // if the new branch is omitted, and it is what the GamePage-level test
+    // (which mocks GameProvider) cannot cover.
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    // …and the session survives. `expectNativeTerminalEvent` above asserts
+    // the exact opposite of these two for `error`/`reconnectFailed` against
+    // the same fixture, which is what makes them a real discrimination
+    // rather than a property the harness has anyway.
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+    expect(gameStoreState.adapter).not.toBeNull();
   });
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {

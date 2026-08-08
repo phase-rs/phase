@@ -68,8 +68,9 @@
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::combinator::{opt, value};
+use nom::sequence::delimited;
 use nom::Parser;
 
 use super::oracle_effect::conditions::{
@@ -515,6 +516,15 @@ pub(crate) fn is_specialized_you_may_retarget_phrase(rest_lower: &str) -> bool {
 /// Accepts either the post-optional-strip body (`pay {U} to end this effect`) or
 /// the full clause surface (`you may pay {U} to end this effect`) so chunk-loop
 /// and full-clause carve-out call sites share one detector.
+///
+/// Deliberately BROADER than [`parse_pay_to_end_effect_mana_cost`] below. This
+/// recognizer accepts ANY cost body (`take_until`) because its job is the
+/// `YouMayBlocklist::ChunkLoop` peel blocklist, which must keep working for a
+/// shape the extractor cannot model — a hypothetical "pay 2 life to end this
+/// effect". Absorption into `Effect::GenericEffect.end_cost` is gated on the
+/// NARROW extractor, so an unmodellable shape falls through to its existing
+/// lowering rather than being silently accepted with dropped semantics. That
+/// asymmetry is the fail-closed boundary; do not collapse the two detectors.
 pub(crate) fn is_you_may_pay_to_end_effect_phrase(text_lower: &str) -> bool {
     value(
         (),
@@ -527,6 +537,43 @@ pub(crate) fn is_you_may_pay_to_end_effect_phrase(text_lower: &str) -> bool {
     )
     .parse(text_lower)
     .is_ok()
+}
+
+/// CR 116.2c + CR 118.1: extract the MANA cost from a Licid-class termination
+/// clause — `[you may ]pay <mana cost> to end this effect[.]`.
+///
+/// > 116.2c Some effects allow a player to take an action at a later time,
+/// > usually to end a continuous effect [...]. Doing so is a special action.
+///
+/// Runs on ORIGINAL-CASE input: `nom_primitives::parse_mana_cost` is
+/// case-sensitive (its shard arms are `tag("W")`, `tag("W/U")`, &c.), so the
+/// English words use `tag_no_case` rather than lowering the whole input and
+/// destroying the symbols.
+///
+/// Deliberately NARROWER than [`is_you_may_pay_to_end_effect_phrase`] above —
+/// see that function's doc for the two-detector asymmetry. This one is the
+/// ABSORPTION gate: it must reject anything whose cost the engine cannot model
+/// as a `ManaCost`, because `types::mana::SpecialAction` admits only payments
+/// made through the mana pool.
+///
+/// Anchored on `eof` so a trailing clause ("… to end this effect and draw a
+/// card") is not absorbed with its tail silently dropped.
+pub(crate) fn parse_pay_to_end_effect_mana_cost(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, crate::types::mana::ManaCost> {
+    delimited(
+        (
+            opt(tag_no_case::<_, _, OracleError<'_>>("you may ")),
+            tag_no_case("pay "),
+        ),
+        crate::parser::oracle_nom::primitives::parse_mana_cost,
+        (
+            tag_no_case(" to end this effect"),
+            opt(tag(".")),
+            nom::combinator::eof,
+        ),
+    )
+    .parse(input)
 }
 
 pub(crate) fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
@@ -904,6 +951,74 @@ mod tests {
         ));
         assert!(!is_you_may_pay_to_end_effect_phrase(
             "you may pay {u} rather than pay this spell's mana cost"
+        ));
+    }
+
+    /// CR 116.2c + CR 118.1: the NARROW absorption gate. Only a body the
+    /// `SpecialAction` mana-pool contract can model is extracted; everything
+    /// else must fall through to its existing lowering.
+    #[test]
+    fn parse_pay_to_end_effect_mana_cost_accepts_only_mana_bodies() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        for (text, expected) in [
+            (
+                "You may pay {W} to end this effect.",
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                },
+            ),
+            (
+                "pay {1} to end this effect",
+                ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            ),
+            (
+                "You may pay {1}{U}{U} to end this effect.",
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 1,
+                },
+            ),
+        ] {
+            let (rest, cost) = parse_pay_to_end_effect_mana_cost(text)
+                .unwrap_or_else(|e| panic!("{text:?} must be absorbed: {e:?}"));
+            assert!(rest.is_empty(), "{text:?} must be consumed to eof");
+            assert_eq!(cost, expected, "{text:?} must extract {expected:?}");
+        }
+
+        // Adjacent grammar: "this turn" is not "this effect".
+        assert!(
+            parse_pay_to_end_effect_mana_cost("you may pay {W} to end this turn").is_err(),
+            "\"to end this turn\" is not the CR 116.2c termination clause"
+        );
+        // A non-mana cost the mana-pool contract cannot model.
+        assert!(
+            parse_pay_to_end_effect_mana_cost("you may pay 2 life to end this effect").is_err(),
+            "CR 118.1: a life payment is not a `ManaCost` and must not be absorbed"
+        );
+    }
+
+    /// The fail-closed asymmetry: the BROAD peel-blocklist recognizer must keep
+    /// accepting the very body the NARROW extractor rejects, or the
+    /// `YouMayBlocklist::ChunkLoop` carve-out stops firing for that shape and
+    /// the clause is silently peeled into a generic optional effect.
+    #[test]
+    fn broad_recognizer_still_accepts_a_body_the_narrow_extractor_rejects() {
+        let non_mana = "you may pay 2 life to end this effect";
+        assert!(
+            is_you_may_pay_to_end_effect_phrase(non_mana),
+            "the peel blocklist must still recognize a non-mana termination cost"
+        );
+        assert!(
+            parse_pay_to_end_effect_mana_cost(non_mana).is_err(),
+            "…while absorption stays gated on the narrow extractor"
+        );
+        // N2: adjacent grammar is rejected by BOTH detectors.
+        assert!(!is_you_may_pay_to_end_effect_phrase(
+            "you may pay {w} to end this turn"
         ));
     }
 

@@ -48,7 +48,7 @@ Adding a new variant to `engine::types::ability::*`, `engine::types::keywords::*
 - The variant covers a **category** of cards, not one card. Build for the class.
 - It's not redundant with an existing primitive. Search before extending. Past mistake to avoid: don't add `DamageModification::Foo` when `DamageModification::Bar` + a parameter already covers it.
 - It carries a **CR annotation grep-verified against `docs/MagicCompRules.txt`** before commit. Fabricated CR numbers are worse than no annotation. If a keyword is genuinely absent from the rules text (e.g., recent un-set mechanics), annotate `// CR ???: needs manual verification (not in CR text)` — that's honest.
-- All exhaustive `match` statements in the engine that the new variant breaks are extended. Use `cargo check -p engine` to find them. **No wildcard fallback arms** to silence the compiler.
+- All exhaustive `match` statements in the engine that the new variant breaks are extended. Use `cargo check -p phase-engine` to find them. **No wildcard fallback arms** to silence the compiler.
 - A runtime stub in the engine is acceptable (this crate widens types ahead of runtime), but the stub must be **explicitly marked**: `// RUNTIME: TODO — converter accepts this; engine handler is a no-op stub. CR <X>` on the variant doc-comment.
 
 Each engine extension ships in **one commit** paired with the converter arm that uses it. Don't batch unrelated engine extensions.

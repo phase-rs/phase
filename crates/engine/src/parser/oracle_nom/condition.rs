@@ -12,9 +12,11 @@ use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
+use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
+    parse_property_keyword, parse_superlative_adjective,
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
@@ -658,6 +660,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
         parse_colors_of_mana_spent_threshold,
+        parse_color_mana_spent_threshold,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_put_onto_battlefield_this_way,
@@ -1184,9 +1187,9 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         map(tag("it's not your turn"), |_| StaticCondition::Not {
             condition: Box::new(StaticCondition::DuringYourTurn),
         }),
-        // CR 102.1 + CR 102.2: there is always exactly one active player, so
-        // "it's an opponent's turn" is exactly "it's not your turn" — the active
-        // player is any non-controller. Maps to the same Not(DuringYourTurn).
+        // CR 102.3 + CR 805.4a: "it's an opponent's turn" names an opponent
+        // relation, not merely a non-controller active seat. In team games a
+        // teammate can be active while the controller's team still has the turn.
         // Both apostrophe forms are accepted at each position (U+0027 straight
         // and U+2019 curly — Scryfall English oracle text uses the curly form).
         // The surface permutations are composed from two small `alt`s rather than
@@ -1198,9 +1201,7 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
                 alt((tag("'s"), tag("\u{2019}s"))),
                 tag(" turn"),
             ),
-            |_| StaticCondition::Not {
-                condition: Box::new(StaticCondition::DuringYourTurn),
-            },
+            |_| StaticCondition::DuringOpponentsTurn,
         ),
         parse_day_night_condition,
     ))
@@ -1246,6 +1247,11 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         value(
             StaticCondition::HasCityBlessing,
             tag("you have the city's blessing"),
+        ),
+        // CR 702.195a-b: Storied grants the enduring story player designation.
+        value(
+            StaticCondition::HasEnduringStory,
+            tag("you have an enduring story"),
         ),
         // CR 702.178a / CR 702.179f: Speed conditions.
         value(
@@ -2221,6 +2227,20 @@ fn parse_has_counters_axes(
     Ok((rest, (subject, counters, minimum, maximum)))
 }
 
+/// CR 122.1 + CR 608.2c: identifies only a leading `if it has … counter on it,`
+/// condition. The generic counter-condition parser resolves bare `it` to the
+/// source by default; effect-chain parsing uses this narrow lexical fact to
+/// rebind that condition when an earlier clause established a typed referent.
+/// Explicit source subjects (`~`, `this creature`, `this land`) deliberately do
+/// not match and retain their source scope.
+pub(crate) fn is_leading_if_bare_recipient_counter_condition(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    nom_on_lower(input, &lower, |i| {
+        terminated(preceded(tag("if "), parse_has_counters_axes), tag(",")).parse(i)
+    })
+    .is_some_and(|((subject, ..), _)| matches!(subject, CounterConditionSubject::RecipientPronoun))
+}
+
 /// Subject axis for counter-has conditions. Accepts the canonical
 /// source-referential subjects, the bound pronoun `"it "`, and the
 /// demonstrative anaphor `"that creature/land/permanent "` used in
@@ -2920,27 +2940,6 @@ fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCon
     ))
 }
 
-/// Parse a superlative adjective into its corresponding `AggregateFunction`.
-pub(crate) fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
-    alt((
-        value(AggregateFunction::Max, tag("greatest")),
-        value(AggregateFunction::Max, tag("highest")),
-        value(AggregateFunction::Min, tag("lowest")),
-        value(AggregateFunction::Min, tag("least")),
-    ))
-    .parse(input)
-}
-
-/// Property keyword parser — used by both LHS and RHS of the comparison.
-pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
-    alt((
-        value(ObjectProperty::Power, tag("power")),
-        value(ObjectProperty::Toughness, tag("toughness")),
-        value(ObjectProperty::ManaValue, tag("mana value")),
-    ))
-    .parse(input)
-}
-
 /// Parse the comparator phrase between "is " and "each other ...".
 ///
 /// The aggregate function is coupled to the comparator direction by the
@@ -3353,6 +3352,12 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     }
 
     if let Ok((after_or_more, _)) = tag::<_, _, OracleError<'_>>(" or more ").parse(rest) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("unspent mana").parse(after_or_more) {
+            return Ok((
+                rest,
+                make_quantity_ge(QuantityRef::UnspentMana { color: None }, n),
+            ));
+        }
         // CR 603.4 + CR 404.2: Oversold Cemetery's intervening-if predicate
         // counts face-up creature cards in its controller's graveyard.
         if let Ok((rest, type_filters)) =
@@ -6625,6 +6630,39 @@ fn parse_colors_of_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticC
     ))
 }
 
+/// CR 106.3 + CR 601.2h: Parse "{at least N | N or more | N or fewer | N or
+/// less} <color> mana {was|were} spent to cast <self>" — the Adamant threshold
+/// (CR 207.2c ability word; the label itself carries no rules meaning and is
+/// peeled by the caller). Measures `CastManaSpentMetric::OfColor` — how much
+/// mana of exactly one color paid the cost — against a fixed threshold.
+///
+/// Sibling of `parse_colors_of_mana_spent_threshold` (distinct colors) and
+/// `parse_mana_spent_threshold` (total): all three share
+/// `parse_amount_threshold` and `parse_mana_spent_self_subject`, differing only
+/// in the aggregate leaf. CR 400.7d: the subject anaphora selects the scope.
+fn parse_color_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (n, comparator)) = parse_amount_threshold(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, color) = parse_color(rest)?;
+    let (rest, _) = tag(" mana ").parse(rest)?;
+    let (rest, _) = alt((tag("was "), tag("were "))).parse(rest)?;
+    let (rest, _) = tag("spent to cast ").parse(rest)?;
+    let (rest, scope) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope,
+                    metric: CastManaSpentMetric::OfColor { color },
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 /// CR 509.1b + CR 506.5: Parse combat-context conditions.
 ///
 /// Handles "defending player controls a/an [type]" and "it's attacking alone".
@@ -7923,6 +7961,26 @@ fn parse_entered_this_turn_under_opponent_control(
 /// continuous "as long as" gates), both of which re-read the condition against
 /// live game state at check time.
 fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(input, nom_quantity::parse_quantity_ref)
+}
+
+/// Narrow fallback for a caller that owns the comma separating an
+/// intervening-if from its trigger effect. The caller first tries the complete
+/// generic condition grammar; this only handles the strict battlefield-count
+/// noun phrase followed by that clause boundary.
+pub(crate) fn parse_there_are_battlefield_count_clause(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    parse_there_are_conditions_with_quantity(
+        input,
+        nom_quantity::parse_type_count_on_battlefield_clause,
+    )
+}
+
+fn parse_there_are_conditions_with_quantity(
+    input: &str,
+    parse_quantity: for<'a> fn(&'a str) -> OracleResult<'a, QuantityRef>,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
     let (rest, prefix) = opt(parse_strict_comparator_prefix).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
@@ -7954,7 +8012,7 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             ),
         ));
     }
-    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, qty) = parse_quantity(rest)?;
     Ok((
         rest,
         make_quantity_comparison(
@@ -7979,11 +8037,31 @@ fn parse_exiled_with_source_self_ref(input: &str) -> OracleResult<'_, &str> {
     .parse(input)
 }
 
+/// CR 406.6 + CR 607.2a + CR 603.4: presence/absence gate over the source's
+/// linked-exile pool. Two grammatical surfaces, one axis:
+///   subject-first  — "a card is exiled with ~" / "one or more cards are exiled with ~"  → count >= 1
+///   existential    — "there are cards exiled with ~"                                    → count >= 1
+///                    "there are no cards exiled with ~"                                 → count == 0
+/// The bare plural existential reads as "one or more" (GE 1); the "no" pole is
+/// the exact-absence check (EQ 0). Counted existentials ("there are three or
+/// more cards exiled with ~") are NOT handled here — they parse via
+/// `parse_there_are_conditions`' number path, which this arm cannot shadow
+/// (its "there are cards " / "there are no cards " tags require the literal
+/// noun immediately after "there are ").
 fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, (comparator, n)) = alt((
+        value((Comparator::GE, 1u32), tag("a card is ")),
+        value((Comparator::GE, 1u32), tag("one or more cards are ")),
+        value((Comparator::EQ, 0u32), tag("there are no cards ")),
+        value((Comparator::GE, 1u32), tag("there are cards ")),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("exiled with ").parse(rest)?;
     let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+    Ok((
+        rest,
+        make_quantity_comparison(QuantityRef::CardsExiledBySource, comparator, n),
+    ))
 }
 
 /// CR 202.3 + CR 607.2a: Parse
@@ -9369,6 +9447,44 @@ pub(crate) fn parse_affirmative_reflexive_connector(
             tag("if the player does, "),
         ),
         value(AbilityCondition::effect_performed(), tag("if you do, ")),
+        parse_discard_this_way_affirmative_connector,
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 701.9a: the echoed-verb affirmative form — "if [subject]
+/// discard(s) a card this way, " (Chains of Mephistopheles / Magus of the
+/// Chains: "If the player discards a card this way, they draw a card."). This
+/// is the untyped-object sibling of `parse_you_discard_this_way_clause` (which
+/// requires a typed filter and lowers to `ZoneChangedThisWay`): an unqualified
+/// "a card" carries no type information to check, so the condition collapses
+/// to the same "did the preceding discard occur" gate as the bare "if you
+/// do, " connector. The controller-specific "if you discard ..." form shares
+/// that gate: its preceding optional discard publishes `OptionalEffectPerformed`,
+/// so the follow-up stays attached to the discard outcome rather than executing
+/// after the sacrifice alternative.
+fn parse_discard_this_way_affirmative_connector(input: &str) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if you discard a card this way, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if a player discards a card this way, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if they discard a card this way, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if that player discards a card this way, "),
+        ),
+        value(
+            AbilityCondition::effect_performed(),
+            tag("if the player discards a card this way, "),
+        ),
     ))
     .parse(input)
 }
@@ -9398,6 +9514,36 @@ fn parse_negated_reflexive_connector(input: &str) -> OracleResult<'_, AbilityCon
                 condition: Box::new(AbilityCondition::effect_performed()),
             },
             tag("if they don't, "),
+        ),
+        parse_discard_this_way_negated_connector,
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 701.9a: the echoed-verb negated form — "if [subject]
+/// doesn't/don't discard a card this way, " (Chains of Mephistopheles / Magus
+/// of the Chains: "If the player doesn't discard a card this way, they mill a
+/// card."). Untyped-object sibling of the affirmative echoed connector above;
+/// mirrors the same subject set already covered by the bare negated connector.
+fn parse_discard_this_way_negated_connector(input: &str) -> OracleResult<'_, AbilityCondition> {
+    alt((
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if that player doesn't discard a card this way, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if the player doesn't discard a card this way, "),
+        ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if they don't discard a card this way, "),
         ),
     ))
     .parse(input)
@@ -9759,15 +9905,11 @@ mod tests {
 
     #[test]
     fn test_parse_condition_opponents_turn() {
-        // CR 102.1 + CR 102.2: there is always exactly one active player, so
-        // "it's an opponent's turn" is exactly "it's not your turn" — the active
-        // player is any non-controller. Represented as `Not(DuringYourTurn)`,
-        // mirroring the existing "it's not your turn" arm. Both apostrophe forms
-        // (U+0027 straight, U+2019 curly — Scryfall uses the curly form) parse at
-        // each position, so the contraction/possessive permutations all hold.
-        let expected = StaticCondition::Not {
-            condition: Box::new(StaticCondition::DuringYourTurn),
-        };
+        // CR 102.3 + CR 805.4a: an opponent's turn excludes the active
+        // controller's teammate in a team game. Both apostrophe forms (U+0027
+        // straight, U+2019 curly — Scryfall uses the curly form) parse at each
+        // position, so the contraction/possessive permutations all hold.
+        let expected = StaticCondition::DuringOpponentsTurn;
         for input in [
             "if it's an opponent's turn, do",
             "if it is an opponent's turn, do",
@@ -12149,6 +12291,86 @@ mod tests {
         }
     }
 
+    // CR 406.6 + CR 607.2a + CR 603.4: bare existential-there surface of the
+    // linked-exile presence gate (Valakut Exploration, Evercoat Ursine) —
+    // "there are cards exiled with ~" reads as "one or more" (GE 1).
+    #[test]
+    fn test_there_are_cards_exiled_with_source_bare_existential() {
+        let (rest, c) = parse_inner_condition("there are cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 1, got {other:?}"),
+        }
+        // Negative sibling (reach-guarded by the positive parse above): a
+        // NON-self source is outside the linked-exile self-reference family
+        // (CR 607.2a links the pool to the source object itself).
+        assert!(
+            parse_inner_condition("there are cards exiled with that creature").is_err(),
+            "non-self source must not parse via the exiled-with-source arm"
+        );
+    }
+
+    // CR 406.6 + CR 607.2a: the "no" pole — exact absence, EQ 0 (Search the
+    // City's "Then if there are no cards exiled with this enchantment, ...").
+    #[test]
+    fn test_there_are_no_cards_exiled_with_source() {
+        let (rest, c) = parse_inner_condition("there are no cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected CardsExiledBySource EQ 0, got {other:?}"),
+        }
+        // Negative siblings (reach-guarded by the positive parse above): the
+        // different-zone existential family "there are no cards in your
+        // graveyard/library" (Gorilla Titan, Immortal Coil, Living Conundrum)
+        // shares the "there are no cards " prefix but fails the "exiled with "
+        // anchor, so nom backtracks and the phrase stays coverage-honest
+        // (unparsed) instead of being silently mis-claimed.
+        assert!(
+            parse_inner_condition("there are no cards in your graveyard").is_err(),
+            "graveyard-zone existential must not be claimed by the exiled-with arm"
+        );
+        assert!(
+            parse_inner_condition("there are no cards in your library").is_err(),
+            "library-zone existential must not be claimed by the exiled-with arm"
+        );
+    }
+
+    // Adjacent-grammar sibling guard: "there are no <type>s on the
+    // battlefield" still routes to `parse_no_on_battlefield` (ObjectCount
+    // EQ 0), untouched by the exiled-with prefix axis.
+    #[test]
+    fn test_there_are_no_zombies_on_battlefield_still_routes_to_no_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no zombies on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected ObjectCount EQ 0 via parse_no_on_battlefield, got {other:?}"),
+        }
+    }
+
     // -- Combat-state predicate tests (CR 508.1k / CR 509.1g / CR 509.1h) --
 
     #[test]
@@ -13744,6 +13966,13 @@ mod tests {
     }
 
     #[test]
+    fn test_enduring_story() {
+        let (rest, condition) = parse_inner_condition("you have an enduring story").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::HasEnduringStory);
+    }
+
+    #[test]
     fn test_was_starting_player() {
         // CR 103.1: affirmative form.
         let (rest, c) = parse_inner_condition("you were the starting player").unwrap();
@@ -14046,6 +14275,29 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 5 },
             },
         );
+    }
+
+    #[test]
+    fn you_have_or_more_unspent_mana_parses_word_and_digit_thresholds() {
+        for (text, expected) in [
+            ("you have six or more unspent mana", 6),
+            ("you have 6 or more unspent mana", 6),
+            ("you have five or more unspent mana", 5),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::UnspentMana { color: None },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: expected },
+                },
+                "expected total unspent mana threshold for {text:?}",
+            );
+        }
     }
 
     #[test]
@@ -15700,6 +15952,50 @@ mod tests {
         }
     }
 
+    /// CR 603.4 + CR 109.2: Deathbringer Regent's threshold counts any
+    /// player's other creatures on the battlefield when given its complete
+    /// condition clause.
+    #[test]
+    fn deathbringer_regent_noun_clause_is_battlefield_scoped() {
+        let (rest, c) =
+            parse_inner_condition("there are five or more other creatures on the battlefield")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "expected creature filter, got {:?}",
+                        tf.type_filters
+                    );
+                    assert_eq!(tf.controller, None);
+                    assert!(
+                        tf.properties.contains(&FilterProp::Another),
+                        "expected Another prop, got {:?}",
+                        tf.properties
+                    );
+                    assert!(
+                        tf.properties.contains(&FilterProp::InZone {
+                            zone: Zone::Battlefield
+                        }),
+                        "expected battlefield-only count, got {:?}",
+                        tf.properties
+                    );
+                }
+                other => panic!("expected typed creature filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 5, got {other:?}"),
+        }
+    }
+
     /// SEMANTIC CORRECTNESS: the there-form scopes to exactly the stated
     /// objects. "there are no Zombies on the battlefield" (Sarcomancy) counts
     /// only the Zombie subtype, NOT all creatures.
@@ -16732,6 +17028,235 @@ mod tests {
         assert!(
             !is_colors_metric,
             "activate-ability text must not parse as colors-spent-to-cast"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 106.3 + CR 601.2h: per-color mana-spent threshold (Adamant grammar).
+    // Group A — accepted forms across every axis of the composed combinator.
+    // -----------------------------------------------------------------------
+
+    fn color_mana_spent(
+        text: &str,
+    ) -> (
+        CastManaObjectScope,
+        crate::types::mana::ManaColor,
+        Comparator,
+        i32,
+    ) {
+        let (rest, c) = parse_inner_condition(text)
+            .unwrap_or_else(|e| panic!("expected {text:?} to parse, got {e:?}"));
+        assert_eq!(rest, "", "combinator must self-delimit for {text:?}");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope,
+                                metric: CastManaSpentMetric::OfColor { color },
+                            },
+                    },
+                comparator,
+                rhs: QuantityExpr::Fixed { value },
+            } => (scope, color, comparator, value),
+            other => panic!("expected OfColor QuantityComparison for {text:?}, got {other:?}"),
+        }
+    }
+
+    /// All five colors route through the shared `parse_color` leaf — the arm is
+    /// not hardcoded to white (the color of the first Adamant card fixed).
+    #[test]
+    fn color_mana_spent_threshold_all_five_colors() {
+        use crate::types::mana::ManaColor;
+        for (text, expected) in [
+            (
+                "at least three white mana was spent to cast this spell",
+                ManaColor::White,
+            ),
+            (
+                "at least three blue mana was spent to cast this spell",
+                ManaColor::Blue,
+            ),
+            (
+                "at least three black mana was spent to cast this spell",
+                ManaColor::Black,
+            ),
+            (
+                "at least three red mana was spent to cast this spell",
+                ManaColor::Red,
+            ),
+            (
+                "at least three green mana was spent to cast this spell",
+                ManaColor::Green,
+            ),
+        ] {
+            let (scope, color, comparator, value) = color_mana_spent(text);
+            assert_eq!(scope, CastManaObjectScope::SelfObject);
+            assert_eq!(color, expected);
+            assert_eq!(comparator, Comparator::GE);
+            assert_eq!(value, 3);
+        }
+    }
+
+    /// The comparator axis is threaded from the shared `parse_amount_threshold`,
+    /// not pinned to the single `at least` surface form Adamant happens to use.
+    #[test]
+    fn color_mana_spent_threshold_comparator_axis() {
+        for (text, cmp, n) in [
+            (
+                "at least two red mana was spent to cast this spell",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "two or more red mana was spent to cast this spell",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "two or fewer red mana was spent to cast this spell",
+                Comparator::LE,
+                2,
+            ),
+            (
+                "two or less red mana was spent to cast this spell",
+                Comparator::LE,
+                2,
+            ),
+        ] {
+            let (_, _, comparator, value) = color_mana_spent(text);
+            assert_eq!(comparator, cmp, "for {text:?}");
+            assert_eq!(value, n, "for {text:?}");
+        }
+    }
+
+    /// CR 400.7d: the subject anaphora selects the scope, and the "was"/"were"
+    /// number axis is accepted on both surfaces.
+    #[test]
+    fn color_mana_spent_threshold_subject_and_number_axes() {
+        for (text, expected) in [
+            (
+                "at least three red mana was spent to cast this spell",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast this creature",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast it",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana were spent to cast ~",
+                CastManaObjectScope::SelfObject,
+            ),
+            (
+                "at least three red mana was spent to cast that spell",
+                CastManaObjectScope::TriggeringSpell,
+            ),
+        ] {
+            let (scope, _, _, _) = color_mana_spent(text);
+            assert_eq!(scope, expected, "for {text:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hostile rows U1-U3: the new arm must not STEAL its siblings' phrases.
+    // Reach-guard: `color_mana_spent_threshold_all_five_colors` above proves the
+    // arm is live, so these negatives are not vacuous.
+    // -----------------------------------------------------------------------
+
+    /// U1/U2/U3: the sibling phrases must NOT produce an `OfColor` metric.
+    /// Henge Walker's max-over-colors ("mana of the same color") is explicitly
+    /// out of scope and must fail closed; the `DistinctColors` and `Total`
+    /// siblings must keep their own arms.
+    #[test]
+    fn color_mana_spent_threshold_does_not_steal_sibling_phrases() {
+        for text in [
+            // U1 — Henge Walker (out of scope, must fail closed entirely).
+            "at least three mana of the same color was spent to cast this spell",
+            // U2 — Steel Exemplar's DistinctColors form.
+            "two or more colors of mana were spent to cast it",
+            // U3 — the bare Total form, and the source-qualified form.
+            "at least three mana was spent to cast this spell",
+            "at least three mana from a treasure was spent to cast this spell",
+        ] {
+            let produced_of_color = matches!(
+                parse_inner_condition(text),
+                Ok((
+                    _,
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                metric: CastManaSpentMetric::OfColor { .. },
+                                ..
+                            },
+                        },
+                        ..
+                    }
+                ))
+            );
+            assert!(!produced_of_color, "new arm stole sibling phrase {text:?}");
+        }
+        // U1 specifically must not parse AT ALL — a silent success would gate
+        // Henge Walker on the wrong metric instead of failing closed.
+        assert!(
+            parse_inner_condition(
+                "at least three mana of the same color was spent to cast this spell"
+            )
+            .is_err(),
+            "max-over-colors is out of scope and must fail closed"
+        );
+    }
+
+    /// Group B — sibling non-regression: the three incumbent metrics keep their
+    /// exact pre-change output now that a fourth arm sits between them in the
+    /// `parse_resolution_context_conditions` alt.
+    #[test]
+    fn color_mana_spent_threshold_siblings_unchanged() {
+        let metric_of = |text: &str| match parse_inner_condition(text) {
+            Ok((
+                "",
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast { scope, metric },
+                        },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+            )) => (scope, metric, comparator, value),
+            other => panic!("expected mana-spent comparison for {text:?}, got {other:?}"),
+        };
+
+        assert_eq!(
+            metric_of("two or more colors of mana were spent to cast it"),
+            (
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::DistinctColors,
+                Comparator::GE,
+                2
+            )
+        );
+        assert_eq!(
+            metric_of("at least three mana was spent to cast this spell"),
+            (
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::Total,
+                Comparator::GE,
+                3
+            )
+        );
+        assert_eq!(
+            metric_of("five or more mana was spent to cast that spell"),
+            (
+                CastManaObjectScope::TriggeringSpell,
+                CastManaSpentMetric::Total,
+                Comparator::GE,
+                5
+            )
         );
     }
 
@@ -17853,36 +18378,19 @@ mod tests {
     /// directly into the test surface.
     struct AggregateProperty(crate::types::ability::ObjectProperty);
 
-    /// CR 208.1 + CR 107.3e: Betor's first tier — "if creatures you control
-    /// have total toughness 10 or greater" must parse to a Sum-Toughness
-    /// QuantityComparison so the trigger-level intervening-if hoist works.
+    /// CR 208.1 + CR 107.3e: Betor's three tiers — "if creatures you control have
+    /// total toughness N or greater" must parse to a Sum-Toughness
+    /// QuantityComparison at every threshold, so the trigger-level intervening-if
+    /// hoist works for each tier.
     #[test]
-    fn test_creatures_you_control_have_total_toughness_ge() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 10 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            10,
-        );
-    }
-
-    /// CR 208.1: Betor's second tier — same shape with threshold 20.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_20() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 20 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            20,
-        );
-    }
-
-    /// CR 208.1: Betor's third tier — same shape with threshold 40.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_40() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 40 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            40,
-        );
+    fn test_creatures_you_control_have_total_toughness_ge_tiers() {
+        for threshold in [10, 20, 40] {
+            assert_total_property_ge(
+                &format!("creatures you control have total toughness {threshold} or greater"),
+                AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+                threshold,
+            );
+        }
     }
 
     /// CR 208.1: Building-block coverage — total power must parse via the same
@@ -18714,6 +19222,25 @@ mod tests {
             parse_recipient_has_counters("it has a shield counter on the battlefield").is_err(),
             "non-pronoun suffix must not match the counter axis"
         );
+    }
+
+    /// CR 122.1 + CR 608.2c: effect-chain parsing may rebind only the bare
+    /// recipient-pronoun form after an earlier typed target. Explicit source
+    /// and demonstrative-recipient subjects must remain distinguishable.
+    #[test]
+    fn leading_if_bare_recipient_counter_condition_is_narrow() {
+        assert!(is_leading_if_bare_recipient_counter_condition(
+            "If it has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If this creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If that creature has a counter on it, it gains flying"
+        ));
+        assert!(!is_leading_if_bare_recipient_counter_condition(
+            "If it is tapped, it gains flying"
+        ));
     }
 
     /// CR 611.3a: the bound pronoun "it" in a self-referential combat-state gate

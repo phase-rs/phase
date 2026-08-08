@@ -29,6 +29,11 @@
     "logDefault": "Log Default",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",
+    "spellPaymentOptions": {
+      "auto": "Automatic",
+      "autoExceptSacrificialMana": "Ask before sacrificing",
+      "manual": "Manual"
+    },
     "nativeEngine": "Use native engine for local games and hosted multiplayer",
     "nativeEngineDescription": "Use the downloaded engine for local AI games and games you host through a lobby. Guests still connect through the lobby's peer-to-peer connection. Falls back to the built-in engine when unavailable.",
     "boardBackground": "Board Background",

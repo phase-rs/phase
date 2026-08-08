@@ -100,6 +100,7 @@ pub fn apply_resolved_library_shuffle(
     // calls `shuffle_vector`, so retained-prefix replay cannot consume entropy
     // or choose a different permutation.
     state.players[player_index].library = im::Vector::from(command.resulting_order.clone());
+    state.advance_library_knowledge_epoch(command.player);
     state
         .advance_rng_high_water(command.post_word_pos)
         .expect("validated library entropy receipt cannot rewind the RNG");
@@ -113,6 +114,8 @@ pub fn apply_resolved_library_shuffle(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: command.player,
         action: PlayerActionKind::ShuffledLibrary,
+        look_count: None,
+        scry_bottom_count: None,
     });
     Ok(())
 }
@@ -172,6 +175,8 @@ mod tests {
             vec![GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::ShuffledLibrary,
+                look_count: None,
+                scry_bottom_count: None,
             }]
         );
     }

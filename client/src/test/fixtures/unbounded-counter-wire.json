@@ -1,0 +1,28 @@
+{
+  "unbounded_counters": {
+    "405": [
+      "charge"
+    ]
+  },
+  "unbounded_families": [
+    {
+      "family": "counters",
+      "player": 0,
+      "state": {
+        "data": "Committed",
+        "type": "Scheduled"
+      }
+    }
+  ],
+  "unbounded_resources": [
+    {
+      "axis": {
+        "Counter": [
+          "Other",
+          "Other"
+        ]
+      },
+      "player": 0
+    }
+  ]
+}

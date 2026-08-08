@@ -19,9 +19,10 @@ import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
+import type { CardHoverInfo } from "../card/CardPreview";
 
 interface DeckBuilderProps {
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: (card: CardHoverInfo | null) => void;
   format: GameFormat;
   onFormatChange: (format: GameFormat) => void;
   initialDeckName?: string | null;
@@ -85,6 +86,8 @@ export function DeckBuilder({
     handleAddCard,
     handleAddCardByName,
     handleRemoveCard,
+    handleIncrementCard,
+    canIncrement,
     handleMoveCard,
     handleImport,
     handleSave,
@@ -423,6 +426,8 @@ export function DeckBuilder({
                       <DeckList
                         deck={currentDeck}
                         onRemoveCard={handleRemoveCard}
+                        onIncrementCard={handleIncrementCard}
+                        canIncrementCard={canIncrement}
                         onMoveCard={handleMoveCard}
                         onImport={handleImport}
                         onCardHover={onCardHover}
@@ -445,6 +450,7 @@ export function DeckBuilder({
                       cardDataCache={cardDataCache}
                       groupMode={groupMode}
                       onAddCard={handleAddCardByName}
+                      canAddCard={canIncrement}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}
                       onRemoveCommander={handleRemoveCommander}

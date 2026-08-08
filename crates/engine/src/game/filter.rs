@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use crate::game::combat;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::{
-    counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
+    counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
+    resolve_quantity_with_targets,
 };
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope,
@@ -30,6 +31,104 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+/// CR 613.1: The set of layer-writable characteristic kinds that a filter,
+/// quantity expression or static condition READS — one bit per CR 613 sublayer
+/// that can rewrite that kind, plus the copy-only mana cost.
+///
+/// This is the shared currency of the entry-incremental flush gate's
+/// read/write-kind relation (see `game::layers`): a live modification whose
+/// write kinds are disjoint from every live read kind cannot flip any live
+/// verdict, so the entry fast path stays sound. Both surfaces classify into
+/// this one lattice, which is what makes the intersection meaningful.
+///
+/// Granularity is exactly one CR 613 sublayer per kind, so the parameterization
+/// axis stays inside CR 613's own taxonomy (no cross-section unification):
+/// - [`Self::CONTROLLER`] — CR 613.1b (layer 2). CR 109.3 does not list
+///   controller among an object's characteristics, but a control change moves
+///   an object between controller-keyed populations, so the relation must track
+///   it alongside the true characteristics.
+/// - [`Self::NAME_TEXT`] — CR 613.1c (layer 3) + CR 612.8 (an effect that sets
+///   an object's name is a text-changing effect).
+/// - [`Self::CARD_TYPES`] — CR 613.1d (layer 4), which is card type, subtype
+///   AND supertype; all three fold into one kind because CR 613.1d is one
+///   sublayer.
+/// - [`Self::COLOR`] — CR 613.1e (layer 5).
+/// - [`Self::ABILITIES`] — CR 613.1f (layer 6).
+/// - [`Self::POWER_TOUGHNESS`] — CR 613.1g (layer 7), sublayers CR 613.4a-d.
+/// - [`Self::MANA_COST`] — no layer of its own; only copy effects rewrite it
+///   (CR 707.9b). It is tracked because devotion (CR 700.5) and mana-value
+///   populations key on it, so All-writers (copies) must intersect those reads.
+///
+/// CRITICAL — this is NOT the question that
+/// [`filter_prop_uses_object_population`] answers. That classifier answers
+/// MEMBERSHIP-perturbation ("can another object entering the battlefield change
+/// this verdict or this count"). This one answers CHARACTERISTIC-dependence
+/// ("which layer-writable kinds does this verdict read"). They are siblings,
+/// not duplicates: "the number of tapped permanents" USES the object population
+/// but reads NO layer-writable kind, and this relation correctly ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CharacteristicKinds(u8);
+
+impl CharacteristicKinds {
+    /// Reads (or writes) nothing that a continuous effect can rewrite.
+    pub(crate) const EMPTY: Self = Self(0);
+    /// CR 613.1b: layer 2, control-changing effects.
+    pub(crate) const CONTROLLER: Self = Self(1 << 0);
+    /// CR 613.1c + CR 612.8: layer 3, text-changing effects (names).
+    pub(crate) const NAME_TEXT: Self = Self(1 << 1);
+    /// CR 613.1d: layer 4, card type / subtype / supertype.
+    pub(crate) const CARD_TYPES: Self = Self(1 << 2);
+    /// CR 613.1e: layer 5, color-changing effects.
+    pub(crate) const COLOR: Self = Self(1 << 3);
+    /// CR 613.1f: layer 6, ability-adding and ability-removing effects.
+    pub(crate) const ABILITIES: Self = Self(1 << 4);
+    /// CR 613.1g + CR 613.4a-d: layer 7, power and/or toughness.
+    pub(crate) const POWER_TOUGHNESS: Self = Self(1 << 5);
+    /// CR 707.9b: copy-writable only; no layer of its own.
+    pub(crate) const MANA_COST: Self = Self(1 << 6);
+    /// Every kind — the conservative answer for any form whose reads or writes
+    /// cannot be determined structurally. Over-approximating here can only
+    /// over-escalate (a full re-evaluation is slower, never wrong).
+    pub(crate) const ALL: Self = Self(0b0111_1111);
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub(crate) const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// The kinds in `self` that are not in `other`.
+    pub(crate) const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    pub(crate) const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) const fn is_all(self) -> bool {
+        self.contains(Self::ALL)
+    }
+}
+
+/// Recursion budget for the characteristic-read walkers.
+///
+/// Filters, quantity expressions and conditions form a finite OWNED tree (no
+/// cycles are representable), so the walk always terminates; this cap only
+/// bounds stack depth on pathologically nested hand-authored data. Overflow
+/// yields [`CharacteristicKinds::ALL`], the conservative answer.
+pub(crate) const CHARACTERISTIC_READ_DEPTH: u32 = 8;
 
 /// True when the filter's matched SET depends on the population of objects on
 /// the battlefield — i.e. another object entering or leaving the battlefield can
@@ -255,6 +354,412 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // another object entering or leaving cannot change the commander's types.
         | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => false,
+    }
+}
+
+/// CR 613.1: Which layer-writable characteristic kinds does this filter's
+/// verdict read?
+///
+/// EXHAUSTIVE and wildcard-free over `TargetFilter`, deliberately living beside
+/// [`affected_filter_uses_object_population`] so that adding a variant forces
+/// BOTH the membership decision and the characteristic decision at one seam.
+/// See [`CharacteristicKinds`] for why these are two questions, not one.
+pub(crate) fn target_filter_characteristic_reads(filter: &TargetFilter) -> CharacteristicKinds {
+    target_filter_characteristic_reads_at(filter, CHARACTERISTIC_READ_DEPTH)
+}
+
+pub(crate) fn target_filter_characteristic_reads_at(
+    filter: &TargetFilter,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match filter {
+        TargetFilter::Not { filter: inner } => target_filter_characteristic_reads_at(inner, depth),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().fold(CharacteristicKinds::EMPTY, |acc, f| {
+                acc.union(target_filter_characteristic_reads_at(f, depth))
+            })
+        }
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) => {
+            let mut kinds = CharacteristicKinds::EMPTY;
+            // CR 613.1d: every type constraint reads the layer-4 typeline.
+            for tf in type_filters {
+                kinds = kinds.union(type_filter_characteristic_reads(tf));
+            }
+            // CR 613.1b: a controller-scoped filter gains and loses members when
+            // layer 2 rewrites control.
+            if controller.is_some() {
+                kinds = kinds.union(CharacteristicKinds::CONTROLLER);
+            }
+            for prop in properties {
+                if kinds.is_all() {
+                    break;
+                }
+                kinds = kinds.union(filter_prop_characteristic_reads_at(prop, depth));
+            }
+            kinds
+        }
+        // Payload-bearing object references: recurse into the embedded filter.
+        TargetFilter::TrackedSetFiltered { filter: inner, .. } => {
+            target_filter_characteristic_reads_at(inner, depth)
+        }
+        TargetFilter::ChosenDamageSource { filter: inner, .. } => {
+            inner.as_ref().map_or(CharacteristicKinds::EMPTY, |f| {
+                target_filter_characteristic_reads_at(f, depth)
+            })
+        }
+        // CR 613.1b: stack-ability reference scoped by controller.
+        TargetFilter::StackAbility { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 613.1b + CR 613.1d: parse-layer sugar for "that player and the
+        // permanents of this type they control"; lowered before object matching,
+        // but classified truthfully.
+        TargetFilter::ControllerAndControlledPermanents { .. } => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 201.2: compares the live `name` field, which layer 3 writes.
+        TargetFilter::Named { .. } => CharacteristicKinds::NAME_TEXT,
+        // Fixed object / player references, zone anchors and ledger lookups: the
+        // referent is picked by identity, not by any layer-written
+        // characteristic. Enumerated explicitly (no wildcard) so a future variant
+        // is forced through this classification. CR 108.3: `Owner` is fixed at
+        // game start and is not layer-writable.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Owner
+        | TargetFilter::GrantingObject
+        | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
+    }
+}
+
+/// CR 613.1d + CR 613.1f: a type constraint reads the layer-4 typeline; a
+/// SUBTYPE constraint additionally reads layer-6 abilities, because Changeling
+/// (CR 702.73a) makes an object every creature type and the live check reads the
+/// keyword set (`subtype_matches_with_changeling`).
+fn type_filter_characteristic_reads(tf: &TypeFilter) -> CharacteristicKinds {
+    match tf {
+        TypeFilter::Subtype(_) => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        TypeFilter::Non(inner) => type_filter_characteristic_reads(inner),
+        TypeFilter::AnyOf(inners) => inners.iter().fold(CharacteristicKinds::EMPTY, |acc, t| {
+            acc.union(type_filter_characteristic_reads(t))
+        }),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any => CharacteristicKinds::CARD_TYPES,
+    }
+}
+
+/// CR 603.4: Which characteristic a "shares a quality with" comparison reads.
+/// Shared by the `FilterProp::SharesQuality` arm and by
+/// `QuantityRef::ObjectCountBySharedQuality` / `ObjectCountDistinct`, which
+/// group objects on the same quality vocabulary.
+pub(crate) fn shared_quality_characteristic_reads(quality: &SharedQuality) -> CharacteristicKinds {
+    match quality {
+        // CR 201.2: name comparison.
+        SharedQuality::Name => CharacteristicKinds::NAME_TEXT,
+        // CR 202.3: mana value is derived from the mana cost.
+        SharedQuality::ManaValue => CharacteristicKinds::MANA_COST,
+        // CR 208.1 / CR 209.1.
+        SharedQuality::Power | SharedQuality::Toughness | SharedQuality::TotalPowerToughness => {
+            CharacteristicKinds::POWER_TOUGHNESS
+        }
+        // CR 105.1.
+        SharedQuality::Color => CharacteristicKinds::COLOR,
+        // CR 205.3m + CR 702.73a: creature types see through Changeling, which
+        // is a layer-6 ability.
+        SharedQuality::CreatureType => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 205.2 / CR 205.3.
+        SharedQuality::CardType | SharedQuality::LandType | SharedQuality::PermanentType => {
+            CharacteristicKinds::CARD_TYPES
+        }
+    }
+}
+
+/// CR 613.1: EXHAUSTIVE, wildcard-free leaf classifier for
+/// [`target_filter_characteristic_reads`] — the characteristic-dependence twin
+/// of [`filter_prop_uses_object_population`]. Adding a `FilterProp` variant
+/// forces a decision here.
+///
+/// A prop that carries a nested `TargetFilter` or `QuantityExpr` unions the
+/// payload's kinds ON TOP of its own intrinsic reads; a prop that carries a
+/// `ControllerRef` unions [`CharacteristicKinds::CONTROLLER`], because layer 2
+/// can move objects across the scope the prop is asking about.
+fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match prop {
+        // ---- CR 613.1f (layer 6): keyword and ability reads. ----
+        FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        // CR 605.1 + CR 113.1: both read the live ability set.
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        // CR 602.1: activation costs live on the object's abilities.
+        | FilterProp::HasXInActivationCost => CharacteristicKinds::ABILITIES,
+        // CR 303.4 + CR 702.5: "could enchant" reads the source's own Enchant
+        // ability (layer 6) and the referenced object through the inner filter.
+        FilterProp::CanEnchant { target } => CharacteristicKinds::ABILITIES
+            .union(target_filter_characteristic_reads_at(target, depth)),
+        // CR 302.6 + CR 702.10: haste is a keyword read; the creature check is a
+        // typeline read; and the `summoning_sick` continuity fallback is re-armed
+        // by every layer-2 control change (CR 613.1b).
+        FilterProp::HasHasteOrControlledSinceTurnBegan => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
+
+        // ---- CR 613.1d (layer 4): typeline reads. ----
+        FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::IsChosenCardType
+        // CR 303.4 + CR 301.5: both read the attachment's subtype (Aura /
+        // Equipment) to decide the relationship.
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy => CharacteristicKinds::CARD_TYPES,
+        // CR 205.3m + CR 702.73a: creature-type reads see through Changeling, so
+        // they read layer 6 as well as layer 4.
+        FilterProp::IsChosenCreatureType | FilterProp::SharesCreatureTypeWithCommander => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 205.3m + CR 701.23a: whole-zone creature-type tally, scoped to a
+        // player (CR 613.1b).
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
+        // CR 310 + CR 613.1b: the Battle's protector is read by type and by
+        // controller scope.
+        FilterProp::ProtectorMatches { .. }
+        // CR 303.4 + CR 301.5: attachment subtype plus the attachment's
+        // controller scope.
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        // CR 700.9: "modified" reads counters, Equipment and Auras controlled by
+        // the permanent's controller.
+        | FilterProp::Modified => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+
+        // ---- CR 613.1e (layer 5): color reads. ----
+        FilterProp::HasColor { .. }
+        | FilterProp::NotColor { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::ColorCount { .. } => CharacteristicKinds::COLOR,
+        // CR 205.2 + CR 608.2c: the transient card predicate is matched on both
+        // the card types and the color of the candidate.
+        FilterProp::MatchesLastChosenCardPredicate => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::COLOR)
+        }
+
+        // ---- CR 613.1c (layer 3): name reads. ----
+        FilterProp::SameName | FilterProp::SameNameAsParentTarget => CharacteristicKinds::NAME_TEXT,
+        // CR 201.2 + CR 613.1f: `Named` also matches through the live
+        // `StaticMode::CountsAsNamed` aliases, which are layer-6 statics.
+        FilterProp::Named { .. } => {
+            CharacteristicKinds::NAME_TEXT.union(CharacteristicKinds::ABILITIES)
+        }
+        // CR 201.2a: whole-board name tally, optionally scoped by controller.
+        FilterProp::NameMatchesAnyPermanent { .. } => {
+            CharacteristicKinds::NAME_TEXT.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 201.2: names of the permanents the evaluating controller controls
+        // that match the inner filter — name, controller scope, and the inner
+        // filter's own kinds.
+        FilterProp::DifferentNameFrom { filter } => CharacteristicKinds::NAME_TEXT
+            .union(CharacteristicKinds::CONTROLLER)
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+
+        // ---- CR 613.1g (layer 7): power/toughness reads. ----
+        // CR 208 + CR 613.4b: `Base` scope reads base P/T, which layers 7a/7b
+        // still write, so both scopes read this kind.
+        FilterProp::PtComparison { value, .. } => CharacteristicKinds::POWER_TOUGHNESS
+            .union(quantity_expr_characteristic_reads_at(value, depth)),
+        FilterProp::PowerGTSource
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase => CharacteristicKinds::POWER_TOUGHNESS,
+
+        // ---- CR 707.9b: mana-cost reads (copy-writable only). ----
+        FilterProp::Cmc { value, .. } => CharacteristicKinds::MANA_COST
+            .union(quantity_expr_characteristic_reads_at(value, depth)),
+        FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::HasXInManaCost => CharacteristicKinds::MANA_COST,
+
+        // ---- Structural recursion. ----
+        // CR 122.1: the counter count itself is not layer-written; only the
+        // threshold expression can read characteristics.
+        FilterProp::Counters { count, .. } => quantity_expr_characteristic_reads_at(count, depth),
+        FilterProp::AnyOf { props } => props.iter().fold(CharacteristicKinds::EMPTY, |acc, p| {
+            if acc.is_all() {
+                acc
+            } else {
+                acc.union(filter_prop_characteristic_reads_at(p, depth))
+            }
+        }),
+        // CR 608.2c: negation does not change WHICH state the inner prop reads.
+        FilterProp::Not { prop } => filter_prop_characteristic_reads_at(prop, depth),
+        // CR 115.9b/c: the stack entry's targets are matched by the inner filter.
+        FilterProp::TargetsOnly { filter } | FilterProp::Targets { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 603.4: the shared quality names exactly which characteristic is
+        // compared; the reference set contributes its own filter's kinds.
+        FilterProp::SharesQuality {
+            quality, reference, ..
+        } => {
+            let quality_kinds = shared_quality_characteristic_reads(quality);
+            reference.as_ref().map_or(quality_kinds, |r| {
+                quality_kinds.union(target_filter_characteristic_reads_at(r, depth))
+            })
+        }
+
+        // ---- CR 613.1b (layer 2): controller-scoped predicates. ----
+        // Each reads the matched object's live controller, or scopes a ledger
+        // lookup by a `ControllerRef` that layer 2 can move objects across.
+        FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        // CR 108.3 fixes the RIGHT operand (the matched object's owner) at game
+        // start, but this prop is a two-operand relation: the `ControllerRef`
+        // LEFT operand resolves against the effect source's live controller
+        // (CR 109.5 — "you" on a static ability is the current controller of the
+        // object it is on), and layer 2 rewrites that (CR 613.1b). An immutable
+        // right operand does not make the relation immutable.
+        | FilterProp::Owned { .. }
+        // CR 302.6: reads the `summoning_sick` continuity flag, which layer 2
+        // re-arms for every permanent whose controller changed (CR 613.1b).
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::CountersPutOnThisTurn { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 702.95e: a pair breaks when either half changes controller (layer 2,
+        // CR 613.1b) or stops being a creature (layer 4, CR 613.1d), so the
+        // unpaired verdict reads both kinds.
+        FilterProp::Unpaired => {
+            CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES)
+        }
+
+        // ---- Undeterminable: conservatively every kind. ----
+        // CR 109.4: an arbitrary player predicate over the object's controller
+        // can read anything about the boards those players control.
+        FilterProp::ControllerMatches { .. }
+        // CR 115.1 + CR 707.10: evaluates the triggering spell's OWN target
+        // filter, which is not reachable from this AST node.
+        | FilterProp::CouldBeTargetedByTriggeringSpell => CharacteristicKinds::ALL,
+        // CR 109.1: identity exclusion. Against the ability's own parent target
+        // this is pure object identity and reads nothing; against any other
+        // reference the excluded set is filter-derived and could be anything.
+        FilterProp::DistinctFrom { reference } => match reference.as_ref() {
+            TargetFilter::ParentTarget => CharacteristicKinds::EMPTY,
+            _ => CharacteristicKinds::ALL,
+        },
+
+        // ---- Reads no layer-writable characteristic. ----
+        // Token identity, zone, combat state, per-object designations, per-turn
+        // ledgers, stack shape, and the fail-closed unparsed leaf. Enumerated
+        // explicitly (no wildcard).
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::WasKicked
+        | FilterProp::InZone { .. }
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        // CR 903.3: commander designation is set at deck construction.
+        | FilterProp::IsCommander
+        // Unparsed leaf: evaluates fail-closed `false` for every object, so its
+        // verdict can never be flipped by any layer.
+        | FilterProp::Other { .. } => CharacteristicKinds::EMPTY,
     }
 }
 
@@ -759,6 +1264,22 @@ impl<'a> FilterContext<'a> {
         }
     }
 
+    /// CR 608.2c: Full ability context with an explicit object chosen by an
+    /// earlier instruction as the recipient-relative authority for "other."
+    pub fn from_ability_with_recipient(
+        ability: &'a ResolvedAbility,
+        recipient_id: ObjectId,
+    ) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(ability.controller),
+            ability: Some(ability),
+            trigger_source: ability.trigger_source.as_ref(),
+            recipient_id: Some(recipient_id),
+            scoped_iteration_player: None,
+        }
+    }
+
     /// CR 109.4: Full ability context with an explicit controller override.
     /// Use when the filter controller differs from `ability.controller`
     /// (e.g., "creature that player controls" mass-move dispatched to a target
@@ -1253,35 +1774,258 @@ pub fn matches_target_filter_including_phased_out(
 /// face and yields `false`. Use the object-based `matches_target_filter` family
 /// instead whenever an `ObjectId` exists.
 pub(crate) fn matches_target_filter_against_face(face: &CardFace, filter: &TargetFilter) -> bool {
+    matches_target_filter_against_face_scoped(face, filter, FaceControllerScope::Reject)
+}
+
+/// CR 109.5: how a bare-`CardFace` match treats a filter's controller axis.
+///
+/// A face has no controller, so a controller-scoped filter is normally
+/// unanswerable. Some callers do know the answer out of band — deck analysis
+/// asks only about the analyzing player's own list, and a cost modifier's
+/// "spells YOU cast" scope is carried on `StaticDefinition.affected` and settled
+/// before the spell filter is consulted (see
+/// [`crate::types::ability::cost_modifier_caster_scope`]). This names which of
+/// those two situations the caller is in instead of leaving it implicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceControllerScope {
+    /// The controller is genuinely unknown: any controller-scoped filter fails.
+    Reject,
+    /// The face is known to be the querying player's own card, so
+    /// `ControllerRef::You` is satisfied and `ControllerRef::Opponent` is not.
+    /// Any other `ControllerRef` remains unanswerable and fails.
+    AssumeOwn,
+}
+
+/// CR 205: Evaluate a `TargetFilter`'s STATIC characteristics against a bare
+/// `CardFace`, resolving the controller axis per `scope`.
+///
+/// `pub` so deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) can match a static's `spell_filter` against a
+/// bare face through this authority rather than re-deriving CR 205 semantics.
+pub fn matches_target_filter_against_face_scoped(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> bool {
+    // Only a DEFINITE match admits the face. `None` (unknown) collapses to
+    // `false` here and nowhere earlier — collapsing it inside the recursion is
+    // what let an outer `Not` invert "unanswerable" into "matches".
+    target_filter_face_state(face, filter, scope) == Some(true)
+}
+
+/// Three-state evaluation of a `TargetFilter` against a bare `CardFace`.
+///
+/// `Some(true)`/`Some(false)` = definitely matches / definitely does not.
+/// `None` = the filter's answer depends on a live object that does not exist
+/// here, so there IS no answer.
+///
+/// The distinction is load-bearing under negation. Collapsing unknown to `false`
+/// before recursing means `Not(<unknown>)` reads as `true`, so a face would be
+/// admitted by a filter whose only predicate needs a live object. Threading the
+/// third state through `Typed`/`Or`/`And`/`Not` and collapsing once, at the
+/// boolean boundary, keeps the fail-closed contract intact at every depth.
+fn target_filter_face_state(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> Option<bool> {
     match filter {
-        TargetFilter::Any => true,
-        TargetFilter::None => false,
+        TargetFilter::Any => Some(true),
+        TargetFilter::None => Some(false),
         TargetFilter::Typed(typed) => {
-            typed.controller.is_none()
-                && typed
+            let mut terms = vec![controller_ref_face_state(typed.controller.as_ref(), scope)];
+            terms.extend(
+                typed
                     .type_filters
                     .iter()
-                    .all(|type_filter| matches_type_filter_against_face(face, type_filter))
-                && typed.properties.iter().all(|property| match property {
-                    FilterProp::HasSupertype { value } => face.card_type.supertypes.contains(value),
-                    _ => false,
-                })
+                    // CR 205: the printed type line is always readable from a face.
+                    .map(|tf| Some(matches_type_filter_against_face(face, tf))),
+            );
+            terms.extend(
+                typed
+                    .properties
+                    .iter()
+                    .map(|property| context_free_prop_matches_face(face, property)),
+            );
+            kleene_and(terms)
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| matches_target_filter_against_face(face, inner)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| matches_target_filter_against_face(face, inner)),
-        TargetFilter::Not { filter } => !matches_target_filter_against_face(face, filter),
-        _ => false,
+        TargetFilter::Or { filters } => kleene_or(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        TargetFilter::And { filters } => kleene_and(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        // Negating an unknown stays unknown — never `true`.
+        TargetFilter::Not { filter } => {
+            target_filter_face_state(face, filter, scope).map(|matched| !matched)
+        }
+        // Every remaining variant (`SelfRef`, player-scoped forms, event/LKI
+        // references) needs a live object or resolution context, so a bare face
+        // yields no answer rather than a definite `false` — otherwise an outer
+        // `Not` would turn "cannot tell" into "matches".
+        _ => None,
     }
+}
+
+/// Three-valued AND: any definite `false` wins; otherwise unknown poisons.
+fn kleene_and(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(true)
+}
+
+/// Three-valued OR: any definite `true` wins; otherwise unknown poisons.
+fn kleene_or(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(false)
+}
+
+/// CR 109.5: how a filter's controller scope reads against a bare face.
+///
+/// Unscoped is a definite match. Under `AssumeOwn` the caller has told us the
+/// face is the querying player's own card, so `You` is definitely satisfied and
+/// `Opponent` is definitely not. Everything else — a controller scope with no
+/// declared answer, or any scope at all under `Reject` — is genuinely unknown,
+/// NOT false, so that a surrounding `Not` cannot invert it into a match.
+fn controller_ref_face_state(
+    controller: Option<&ControllerRef>,
+    scope: FaceControllerScope,
+) -> Option<bool> {
+    match (controller, scope) {
+        (None, _) => Some(true),
+        (Some(ControllerRef::You), FaceControllerScope::AssumeOwn) => Some(true),
+        (Some(ControllerRef::Opponent), FaceControllerScope::AssumeOwn) => Some(false),
+        _ => None,
+    }
+}
+
+/// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
+///
+/// `Some(true)` / `Some(false)` = the property has a context-free reading and
+/// this is it. `None` = the property needs a live object (battlefield state,
+/// counters, combat, zone, a value chosen earlier in a resolution) and therefore
+/// has NO answer for a face — callers must fail closed rather than guess.
+///
+/// Kept as an explicit allowlist, not a wildcard `_ => true`: a newly added
+/// `FilterProp` lands in the `None` arm and fails closed until someone decides
+/// whether it is context-free, which is the safe direction.
+pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Option<bool> {
+    match prop {
+        // CR 205.4a: printed supertype line.
+        FilterProp::HasSupertype { value } => Some(face.card_type.supertypes.contains(value)),
+        FilterProp::NotSupertype { value } => Some(!face.card_type.supertypes.contains(value)),
+        // CR 202.3: mana value is printed on the face. Only a fixed comparison
+        // is context-free — a dynamic quantity needs game state.
+        FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed { value },
+        } => Some(comparator.evaluate(
+            i32::try_from(face.mana_cost.mana_value()).unwrap_or(i32::MAX),
+            *value,
+        )),
+        // A dynamic mana-value comparison needs game state to resolve.
+        FilterProp::Cmc { .. } => None,
+        // CR 105.2 + CR 202.2: printed color, via the face's own color authority.
+        FilterProp::HasColor { color } => Some(face_colors(face).contains(color)),
+        FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
+        FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
+            i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 702: printed keyword line. The keyword authorities in
+        // `game/keywords.rs` all take a `GameObject`; this function's entire
+        // contract is that NO object exists (a bare `CardFace` outside the
+        // game), so there is no zone, no grant and no `off_zone_characteristics`
+        // to consult — the printed line IS the complete truth here. A caller
+        // holding an `ObjectId` must use the object-based `matches_target_filter`
+        // family instead, as the module doc says.
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
+        FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
+        FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
+        FilterProp::Token => Some(false),
+        FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
+        // Recursive combinators inherit their operands' answerability. Negation
+        // of an unknown stays unknown.
+        FilterProp::Not { prop } => context_free_prop_matches_face(face, prop).map(|m| !m),
+        // Three-valued (Kleene) OR — ordinary Boolean semantics over the
+        // `Option<bool>` answer, not a rules behavior, so no CR governs it.
+        // A definite `true` in ANY branch makes the disjunction true even when a
+        // sibling branch is unknowable from a face, so this must NOT
+        // short-circuit on the first `None`: the caller admits only `Some(true)`,
+        // and collapsing `[true, unknown]` to unknown would reject a spell filter
+        // that definitely matches. `None` is returned only when nothing is true
+        // AND something is unknown.
+        FilterProp::AnyOf { props } => {
+            let mut saw_unknown = false;
+            for inner in props {
+                match context_free_prop_matches_face(face, inner) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(false)
+        }
+        // Everything else reads live state and has no face-level answer.
+        _ => None,
+    }
+}
+
+/// CR 105.2 + CR 202.2: the colors of a bare face — an explicit color-defining
+/// override when present (CR 604.3), otherwise the printed mana cost.
+fn face_colors(face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &face.color_override {
+        return colors.clone();
+    }
+    [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
+    .into_iter()
+    .filter(|color| match &face.mana_cost {
+        ManaCost::Cost { shards, .. } => shards.iter().any(|shard| shard.contributes_to(*color)),
+        // CR 202.1: no printed mana cost, so no color from one. The `Self*`
+        // forms are cost REFERENCES resolved against a live object (CR 202.3b),
+        // not a printed cost, so a bare face has no colors to read from them.
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => false,
+    })
+    .collect()
 }
 
 /// CR 205: Evaluate a single `TypeFilter` against a bare `CardFace`'s printed
 /// card type line (core types, subtypes, supertypes). Context-free counterpart
 /// to the object-based type checks in `filter_inner_for_object`.
-pub(crate) fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
+///
+/// `pub` because deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) classifies bare `CardFace`s against a static's
+/// `spell_filter` before any `GameObject` exists, and must use this authority
+/// for the type axis rather than re-deriving CR 205 type semantics.
+pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
     match filter {
         TypeFilter::Creature => face.card_type.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => face.card_type.core_types.contains(&CoreType::Land),
@@ -1676,6 +2420,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        recorded_turn_number: 0,
         // CR 701.60b: Carry suspected status from the LKI snapshot so
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
@@ -1940,9 +2685,17 @@ fn filter_inner_for_object(
                         if source_controller == Some(obj_ctrl) {
                             return false;
                         }
-                        // CR 102.3 + CR 800.4a: A player who has left the game is
-                        // not an opponent; cards in their zones are not legal
-                        // targets (Captain N'ghathrod class).
+                        // Two claims, two authorities — kept apart deliberately.
+                        // SEAT: CR 800.4 + CR 102.1 — a player who has left the game is
+                        // no longer one of the people in the game, so they are not an
+                        // opponent. (CR 102.3 is scoped to games BETWEEN TEAMS and does
+                        // not define "opponent" in a free-for-all, which is the board
+                        // this seam serves; the engine's free-for-all authority is
+                        // `topology::is_opponent`.)
+                        // OBJECTS: CR 800.4a — "all objects owned by that player leave
+                        // the game" — so cards in their zones are not legal targets
+                        // (Captain N'ghathrod class). This is the half CR 800.4a really
+                        // governs.
                         if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }
@@ -2000,13 +2753,25 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 508.5a: "defending player controls" — match the object's
+                    // controller against the defending player. Routed through the
+                    // single-authority `source_defending_player` so an attachment
+                    // source (Equipment/Aura), whose own captured combat status has
+                    // no defending player, still resolves the defender of the
+                    // *attacking creature* via the triggering event rather than
+                    // fizzling (issue #6678). A bespoke `.map().unwrap_or_else()`
+                    // here collapsed the captured `None` into `Some(None)` and
+                    // suppressed that fallback.
                     ControllerRef::DefendingPlayer => {
-                        let defending_player = trigger_source
-                            .map(|source| source.combat_status.defending_player)
-                            .unwrap_or_else(|| {
-                                crate::game::combat::resolve_defending_player(state, source_id)
-                            });
-                        match defending_player {
+                        let source_ctx = source_context_from_filter(
+                            state,
+                            source_id,
+                            source_controller,
+                            ability,
+                            trigger_source,
+                            recipient_id,
+                        );
+                        match source_defending_player(state, &source_ctx) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -3753,14 +4518,27 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// Source-relative controller references must use the triggered source's
-/// captured facts. Falling back to `source.id` after that object has changed
-/// zones would let a recycled storage id answer a different ability's filter.
+/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
+/// the triggered source's captured combat facts — an attacking creature's own
+/// attack trigger snapshots its defending player, and that captured fact must
+/// answer even after the source changes zones (a recycled storage id must never
+/// answer a different ability's filter).
+///
+/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
+/// `capture_combat_status` finds it absent from `combat.attackers` and records
+/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
+/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
+/// of that class) must then resolve the defender of the *attacking creature*,
+/// carried by the triggering event. So a captured `None` is "no answer here",
+/// not "no defender" — fall through to `resolve_defending_player`, which reads
+/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
+/// that captured `None` into a spurious `Some(None)` and suppressed the
+/// fallback, silently fizzling the ability (issue #6678).
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
     source
         .trigger_source
-        .map(|context| context.combat_status.defending_player)
-        .unwrap_or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+        .and_then(|context| context.combat_status.defending_player)
+        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {
@@ -6542,6 +7320,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -12046,6 +12825,7 @@ mod tests {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             is_suspected: false,
         };
         let goblin_filter = make_subtype_filter("Goblin");
@@ -12602,6 +13382,641 @@ mod tests {
         assert_eq!(
             *prop, back,
             "ControllerMatches must round-trip through serde"
+        );
+    }
+
+    // ─── three-valued OR in `context_free_prop_matches_face` ─────────────────
+    //
+    // Review #6743: `try_fold` short-circuited on the first `None`, so a
+    // definite `Some(true)` alternative was collapsed to unknown and the typed
+    // caller (which admits only `Some(true)`) rejected a filter that matches.
+
+    /// A face with a printed white mana cost, so color props are answerable.
+    fn tri_state_face() -> CardFace {
+        CardFace {
+            name: "Tri State Probe".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Instant],
+                subtypes: Vec::new(),
+            },
+            mana_cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 1,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Context-free and TRUE for `tri_state_face`.
+    fn known_true() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::White,
+        }
+    }
+
+    /// Context-free and FALSE for `tri_state_face`.
+    fn known_false() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::Red,
+        }
+    }
+
+    /// Live-state-only: unanswerable from a bare face.
+    fn unknown() -> FilterProp {
+        FilterProp::Tapped
+    }
+
+    #[test]
+    fn any_of_true_then_unknown_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_true(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a definite match must survive a later unknowable alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_unknown_then_true_is_true() {
+        // Order-sensitive twin: the old `try_fold` stopped at the leading `None`.
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a leading unknown must not mask a definite later match"
+        );
+    }
+
+    #[test]
+    fn any_of_all_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "nothing true and something unknown ⇒ unknown"
+        );
+    }
+
+    #[test]
+    fn any_of_false_plus_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "a definite false does not resolve the unknown alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_all_false_is_false() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_false()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(false),
+            "every alternative definitely false ⇒ definitely false"
+        );
+    }
+
+    #[test]
+    fn any_of_true_plus_false_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tri_state_or_reaches_the_typed_filter_caller() {
+        // End-to-end through the production entry point: the typed caller admits
+        // only `Some(true)`, so the tri-state fix is what makes this match.
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: vec![FilterProp::AnyOf {
+                props: vec![known_true(), unknown()],
+            }],
+            ..Default::default()
+        });
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative must admit the face"
+        );
+    }
+
+    #[test]
+    fn negation_of_unknown_stays_unknown() {
+        let prop = FilterProp::Not {
+            prop: Box::new(unknown()),
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "negating an unknowable property cannot invent an answer"
+        );
+    }
+
+    // ─── unknown must survive outer negation (fail-closed at every depth) ────
+    //
+    // Review #6743: the recursion collapsed unknown to `false` inside `Typed`,
+    // so an outer `Not` inverted "cannot tell" into "matches" and admitted the
+    // wrong card class. These drive the production entry point.
+
+    fn typed_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: props,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn not_around_live_only_property_does_not_admit_a_face() {
+        // `Tapped` needs a battlefield object; `Not(Tapped)` must NOT be a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![unknown()])),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating an unanswerable property must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_unknown_controller_scope_does_not_admit_a_face() {
+        // Under `Reject` the controller is unknown, so `Not(controller-scoped)`
+        // is unknown too — not a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Instant],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            })),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::Reject
+            ),
+            "negating an unanswerable controller scope must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_false_still_admits() {
+        // The fix must not over-correct: a DEFINITELY false inner filter still
+        // negates to a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_false()])),
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating a definite non-match must still admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_true_rejects() {
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_true()])),
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn not_around_an_unanswerable_filter_variant_does_not_admit() {
+        // `SelfRef` needs a resolution context; unknown, so `Not` is unknown.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "an unanswerable filter variant must stay unknown under negation"
+        );
+    }
+
+    #[test]
+    fn opponent_scope_under_assume_own_is_definitely_false_not_unknown() {
+        // `AssumeOwn` states the face is the querying player's own card, so
+        // "controlled by an opponent" is definitely FALSE — and its negation is
+        // therefore a definite match.
+        let opponent = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &opponent,
+            FaceControllerScope::AssumeOwn
+        ));
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &TargetFilter::Not {
+                    filter: Box::new(opponent)
+                },
+                FaceControllerScope::AssumeOwn
+            ),
+            "own-face knowledge makes the opponent scope definitely false, so \
+             its negation is a definite match"
+        );
+    }
+
+    #[test]
+    fn and_with_an_unknown_branch_does_not_admit() {
+        let filter = TargetFilter::And {
+            filters: vec![typed_with(vec![known_true()]), typed_with(vec![unknown()])],
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn or_with_a_definite_true_admits_despite_an_unknown_branch() {
+        let filter = TargetFilter::Or {
+            filters: vec![typed_with(vec![unknown()]), typed_with(vec![known_true()])],
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative admits even beside an unknown"
+        );
+    }
+}
+
+/// Building-block coverage for the characteristic-dependence classifier
+/// (`filter_prop_characteristic_reads_at`). These pin the invariants the
+/// classifier documents in prose, at the level of the primitive rather than of
+/// any one card, so a future variant cannot drift into the wrong kind group.
+#[cfg(test)]
+mod characteristic_read_classification_tests {
+    use super::*;
+    use crate::types::ability::{AttachmentKind, SourceExclusion};
+
+    /// Wraps a single prop in the minimal `Typed` filter: no type filters and no
+    /// controller scope, so the reported kinds come from the prop alone.
+    fn only(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![prop],
+            ..TypedFilter::default()
+        })
+    }
+
+    /// CR 613.1b: does this `FilterProp` scope its verdict by a `ControllerRef`?
+    ///
+    /// EXHAUSTIVE and wildcard-free, which is the whole point: adding a
+    /// `FilterProp` variant fails to compile here until it is classified, and a
+    /// variant classified as a carrier must also get a sample in
+    /// `every_controller_ref_carrying_prop_reads_the_controller_kind` below —
+    /// which then proves the classifier reports a CONTROLLER read for it. The
+    /// compiler pins the classification; the roster/`carries_controller_ref`
+    /// cross-check below pins that the roster does not drift the other way.
+    fn carries_controller_ref(prop: &FilterProp) -> bool {
+        match prop {
+            // The `ControllerRef`-carrying roster. Layer 2 can move an object
+            // across any scope these name (CR 613.1b), so
+            // `filter_prop_characteristic_reads_at` must report CONTROLLER for
+            // every one of them.
+            FilterProp::Attacking { .. }
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::NameMatchesAnyPermanent { .. } => true,
+            // Everything else carries no `ControllerRef` of its own. Several
+            // still read CONTROLLER for other reasons (`Unpaired` via CR
+            // 702.95e, the CR 302.6 continuity props, the nested-filter
+            // recursers); this classifier answers only "does the variant carry
+            // the field", never "does it read the kind".
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::ControllerMatches { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::Unblocked
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::ConvokedSource
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::CanEnchant { .. }
+            | FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedToSource
+            | FilterProp::AttachedToRecipient
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PtComparison { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::AnyOf { .. }
+            | FilterProp::Not { .. }
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+    }
+
+    /// The `ControllerRef`-carrying roster read out of the `FilterProp`
+    /// DECLARATION, so the roster below cannot silently fall behind the enum.
+    ///
+    /// Source-scanned rather than hand-counted on purpose: a hand-maintained
+    /// count can only ever restate the list standing next to it, which is what
+    /// the previous `assert_eq!(props.len(), 8)` did. Scanning `ability.rs`
+    /// gives an authority the test cannot edit, so adding a variant with a
+    /// `ControllerRef` field turns the roster assertion RED until a sample for
+    /// it is added — and `carries_controller_ref` then forces the sample to be
+    /// classified, and the CONTROLLER assertion forces the classifier to be
+    /// right about it.
+    ///
+    /// CEILING: the scan is TEXTUAL, so it only sees `ControllerRef` named
+    /// directly in a variant's own field list. A future `NewProp { spec:
+    /// Box<AttackSpec> }` whose `AttackSpec` holds a `ControllerRef` stays
+    /// invisible here — the roster does not grow, no sample is forced, and this
+    /// test stays green while the classifier goes unverified for it. The
+    /// `!carriers.is_empty()` tripwire below only catches total scan failure
+    /// (declaration moved or reformatted), not an indirect carrier. Reaching
+    /// through a nested type needs a real type walk, which is not available
+    /// without a reflection dependency; classify such a variant by hand.
+    fn declared_controller_ref_carriers() -> Vec<String> {
+        let src = include_str!("../types/ability.rs");
+        let decl = "pub enum FilterProp {";
+        let start = src.find(decl).expect("FilterProp declaration");
+        let body = &src[start + decl.len()..];
+        let body = &body[..body.find("\n}").expect("end of FilterProp")];
+
+        let mut carriers = Vec::new();
+        let mut current: Option<&str> = None;
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            // Doc comments name `ControllerRef` in prose; they declare nothing.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // A variant header is the only thing at one indent level that opens
+            // with an uppercase letter; its fields sit one level deeper.
+            if let Some(header) = line
+                .strip_prefix("    ")
+                .filter(|l| l.starts_with(char::is_uppercase))
+            {
+                current = Some(header.trim_end_matches([' ', '{', ',', '(']));
+            }
+            if let (true, Some(name)) = (trimmed.contains("ControllerRef"), current) {
+                carriers.push(name.to_string());
+            }
+        }
+        carriers.sort_unstable();
+        carriers.dedup();
+        assert!(
+            !carriers.is_empty(),
+            "scanned zero carriers — the FilterProp declaration moved or its \
+             formatting changed, so this gate is no longer scanning anything"
+        );
+        carriers
+    }
+
+    /// The variant name of a `FilterProp` sample, which is what `Debug` prints
+    /// first and is the only handle a value gives onto its own variant.
+    fn variant_name(prop: &FilterProp) -> String {
+        let debug = format!("{prop:?}");
+        debug
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .expect("Debug output opens with the variant name")
+            .to_string()
+    }
+
+    /// CR 613.1b: layer 2 can move an object across any controller scope a
+    /// `ControllerRef` names, so every `FilterProp` that carries one reads the
+    /// CONTROLLER kind. The classifier states this invariant in prose; this test
+    /// is what makes the next `ControllerRef`-carrying variant fail loudly if it
+    /// is filed under a group that omits CONTROLLER.
+    #[test]
+    fn every_controller_ref_carrying_prop_reads_the_controller_kind() {
+        let props = [
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::ProtectorMatches {
+                controller: ControllerRef::You,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+                exclude_source: SourceExclusion::Include,
+            },
+            FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura],
+                controller: Some(ControllerRef::You),
+            },
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::NameMatchesAnyPermanent {
+                controller: Some(ControllerRef::You),
+            },
+        ];
+        let mut sampled: Vec<String> = props.iter().map(variant_name).collect();
+        sampled.sort_unstable();
+        sampled.dedup();
+        assert_eq!(
+            sampled,
+            declared_controller_ref_carriers(),
+            "the sampled roster and the `ControllerRef`-carrying variants declared \
+             in `types/ability.rs` have diverged — add a sample for every new \
+             carrier so the CR 613.1b invariant below stays fully covered"
+        );
+        for prop in &props {
+            assert!(
+                carries_controller_ref(prop),
+                "{prop:?} is in the ControllerRef roster but `carries_controller_ref` \
+                 classifies it as a non-carrier — one of the two is wrong"
+            );
+        }
+        for prop in props {
+            assert!(
+                target_filter_characteristic_reads(&only(prop.clone()))
+                    .contains(CharacteristicKinds::CONTROLLER),
+                "{prop:?} scopes its verdict by a ControllerRef, which CR 613.1b \
+                 lets layer 2 rewrite — it must report a CONTROLLER read"
+            );
+        }
+    }
+
+    /// CR 108.3 fixes the owner, but `Owned` is a two-operand relation and only
+    /// its right operand is immutable; the left operand is the source's live
+    /// controller (CR 109.5), which layer 2 rewrites (CR 613.1b).
+    #[test]
+    fn owned_reads_the_controller_kind_despite_an_immutable_owner() {
+        for controller in [
+            ControllerRef::You,
+            ControllerRef::Opponent,
+            ControllerRef::ScopedPlayer,
+        ] {
+            assert!(
+                target_filter_characteristic_reads(&only(FilterProp::Owned { controller }))
+                    .contains(CharacteristicKinds::CONTROLLER),
+                "an immutable owner operand does not make the owner-vs-controller \
+                 relation immutable"
+            );
+        }
+    }
+
+    /// CR 702.95e: a soulbond pair breaks when either half changes controller
+    /// (layer 2, CR 613.1b) or stops being a creature (layer 4, CR 613.1d).
+    #[test]
+    fn unpaired_reads_the_controller_and_card_type_kinds() {
+        let kinds = target_filter_characteristic_reads(&only(FilterProp::Unpaired));
+        assert!(
+            kinds.contains(CharacteristicKinds::CONTROLLER),
+            "CR 702.95e: gaining control of either half breaks the pair"
+        );
+        assert!(
+            kinds.contains(CharacteristicKinds::CARD_TYPES),
+            "CR 702.95e: either half ceasing to be a creature breaks the pair"
+        );
+    }
+
+    /// CR 302.6: the summoning-sickness continuity flag is re-armed for every
+    /// permanent whose controller changed, so both props that read it depend on
+    /// layer 2 (CR 613.1b).
+    #[test]
+    fn continuity_props_read_the_controller_kind() {
+        assert!(
+            target_filter_characteristic_reads(&only(
+                FilterProp::ControlledContinuouslySinceTurnBegan
+            ))
+            .contains(CharacteristicKinds::CONTROLLER),
+            "a control change re-arms the continuity flag this prop reads"
+        );
+
+        let enlist = target_filter_characteristic_reads(&only(
+            FilterProp::HasHasteOrControlledSinceTurnBegan,
+        ));
+        assert!(
+            enlist.contains(CharacteristicKinds::CONTROLLER),
+            "the continuity fallback of the haste-or-continuity prop is layer-2 movable"
+        );
+        assert!(
+            enlist.contains(CharacteristicKinds::ABILITIES),
+            "CR 702.10: the haste branch is a keyword read"
+        );
+        assert!(
+            enlist.contains(CharacteristicKinds::CARD_TYPES),
+            "CR 302.6: the creature-typeline guard is a layer-4 read"
         );
     }
 }

@@ -1,12 +1,21 @@
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
-    VoteSubject,
+    AbilityDefinition, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    StaticDefinition, TargetFilter, TriggerDefinition,
 };
-use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+// `VoteSubject` is NOT re-imported here: `mod tests`'s only use of it
+// (`crate::types::ability::VoteSubject::Named`) is fully qualified, so a gated
+// import would be an `unused_imports` error.
+#[cfg(test)]
+use crate::types::ability::CounterSourceRider;
+#[cfg(test)]
+use crate::types::ability_visit::visit_effect;
+use crate::types::ability_visit::{
+    visit_ability_def, visit_replacement, visit_static, visit_trigger,
+};
+use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, PrintedLoyalty};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{GameState, MeldPairRecord};
@@ -16,6 +25,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use super::game_object::{BackFaceData, GameObject};
@@ -100,10 +110,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
     let defense = card_face
         .defense
@@ -120,6 +128,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // enters the battlefield, through the CR 614.1c intrinsic replacement
     // channel (`enter_with_counters` on the ZoneChange ProposedEvent).
     obj.loyalty = loyalty;
+    obj.printed_loyalty = printed_loyalty;
     // CR 310.4a: `obj.defense` is the face's printed defense, stored as base
     // data. Defense counters are seeded through the CR 614.1c intrinsic
     // replacement when the battle enters the battlefield.
@@ -146,6 +155,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_toughness = toughness;
     obj.base_name = card_face.name.clone();
     obj.base_loyalty = loyalty;
+    obj.base_printed_loyalty = printed_loyalty;
     obj.base_defense = defense;
     obj.base_card_types = card_face.card_type.clone();
     obj.base_mana_cost = card_face.mana_cost.clone();
@@ -253,10 +263,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
     let defense = card_face
         .defense
@@ -268,6 +276,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.power = power;
     back_face.toughness = toughness;
     back_face.loyalty = loyalty;
+    back_face.printed_loyalty = printed_loyalty;
     back_face.defense = defense;
     back_face.card_types = card_face.card_type.clone();
     back_face.mana_cost = card_face.mana_cost.clone();
@@ -290,6 +299,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.power = back_face.power;
     obj.toughness = back_face.toughness;
     obj.loyalty = back_face.loyalty;
+    obj.printed_loyalty = back_face.printed_loyalty;
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
@@ -302,6 +312,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_toughness = back_face.toughness;
     obj.base_name = back_face.name.clone();
     obj.base_loyalty = back_face.loyalty;
+    obj.base_printed_loyalty = back_face.printed_loyalty;
     obj.base_defense = back_face.defense;
     obj.base_card_types = back_face.card_types;
     obj.base_mana_cost = back_face.mana_cost.clone();
@@ -385,10 +396,20 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
 /// the Saga lore counter when the entering face is a Saga (CR 712.14a
 /// transformed entry reads the back face here before the physical swap).
 pub fn intrinsic_entry_counters_for_face(
-    loyalty: Option<u32>,
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
+    // `printed_loyalty` is authoritative when present: in particular, an
+    // explicit printed X must remain zero outside the resolving-spell path.
+    // Older serialized objects and lightweight engine constructors predate that
+    // provenance field, but their fixed `loyalty` baseline is still the printed
+    // loyalty number required by CR 306.5b.
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
     let mut counters = intrinsic_face_counters(loyalty, defense);
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
@@ -396,8 +417,15 @@ pub fn intrinsic_entry_counters_for_face(
     counters
 }
 
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
-    let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
+pub fn intrinsic_etb_counters(
+    obj: &GameObject,
+    resolving_spell_x: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = obj
+        .printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(obj.loyalty);
+    let mut counters = intrinsic_face_counters(loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
     // effect. The paid X is stamped on the object when the spell leaves the
     // stack, before the ZoneChange replacement pipeline applies counters.
@@ -471,6 +499,7 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         keywords: obj.base_keywords.clone(),
         // CopiableValues now shares `Arc<Vec<_>>` with the source object —
         // a copy-effect never mutates the ability set, so refcount sharing
@@ -581,10 +610,9 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         card_types: result_face.card_type.clone(),
         power: parse_pt(&result_face.power),
         toughness: parse_pt(&result_face.toughness),
-        loyalty: result_face
-            .loyalty
-            .as_ref()
-            .and_then(|value| value.parse::<u32>().ok()),
+        loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
+        printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
         keywords: result_face.keywords.clone(),
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
@@ -629,6 +657,7 @@ pub fn apply_copiable_values(
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
@@ -663,6 +692,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     obj.abilities = Arc::clone(&values.abilities);
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
@@ -675,6 +705,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.base_power = values.power;
     obj.base_toughness = values.toughness;
     obj.base_loyalty = values.loyalty;
+    obj.base_printed_loyalty = values.printed_loyalty;
     obj.base_keywords = values.keywords.clone();
     obj.base_abilities = Arc::clone(&values.abilities);
     obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
@@ -690,6 +721,7 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         power: obj.power,
         toughness: obj.toughness,
         loyalty: obj.loyalty,
+        printed_loyalty: obj.printed_loyalty,
         defense: obj.defense,
         card_types: obj.card_types.clone(),
         mana_cost: obj.mana_cost.clone(),
@@ -737,6 +769,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         defense: obj.base_defense,
         card_types: obj.base_card_types.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -770,14 +803,19 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // game can reach as Conjure targets: the transitive closure of conjure names
 // over the seed faces present in the game (objects + deck pools).
 //
-// These walkers yield every conjure name reachable from a `CardFace`. They
-// traverse every nested ability/effect/cost carrier. The core `walk_effect`
-// match is wildcard-free so any future `Effect` variant that carries a nested
-// `Box<Effect>` / `Box<AbilityDefinition>` must be handled here at compile time.
+// These wrappers yield every conjure name reachable from a `CardFace`. The
+// traversal itself lives in `crate::types::ability_visit`, which owns the
+// wildcard-free `Effect` / `ContinuousModification` / `AbilityCost` matches: a
+// future variant carrying a nested `Box<Effect>` / `Box<AbilityDefinition>` is a
+// compile error there. These wrappers supply only the conjure/meld
+// name-extraction leaf (`collect_conjure_names`).
 //
-// TODO: consolidate with coverage traversal (`game/coverage.rs`). The coverage
-// pass builds `ParsedItem` trees rather than yielding `Effect`s, so no reusable
-// visitor exists today; extracting one is out of scope for this memory fix.
+// The reusable visitor this file's TODO asked for now exists:
+// `crate::types::ability_visit`. `game/coverage.rs` is still NOT migrated — its
+// pass builds `ParsedItem` trees rather than yielding `Effect`s, and
+// `coverage::ability_tree_any` is deliberately narrower (it has a `_ => {}`
+// wildcard); broadening it would change the coverage report. See the
+// `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------
 
 /// Collect every conjure name reachable from a single card face's ability set.
@@ -799,218 +837,10 @@ fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
     out.extend(face.metadata.spellbook.iter().cloned());
 }
 
-fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
-    walk_effect(&def.effect, out);
-    if let Some(cost) = &def.cost {
-        walk_cost(cost, out);
-    }
-    if let Some(sub) = &def.sub_ability {
-        walk_ability_def(sub, out);
-    }
-    if let Some(else_ability) = &def.else_ability {
-        walk_ability_def(else_ability, out);
-    }
-    for mode in &def.mode_abilities {
-        walk_ability_def(mode, out);
-    }
-    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
-    if let Some(unless_pay) = &def.unless_pay {
-        walk_cost(&unless_pay.cost, out);
-    }
-}
-
-fn walk_trigger(trigger: &TriggerDefinition, out: &mut Vec<String>) {
-    if let Some(execute) = &trigger.execute {
-        walk_ability_def(execute, out);
-    }
-    if let Some(unless_pay) = &trigger.unless_pay {
-        walk_cost(&unless_pay.cost, out);
-    }
-}
-
-fn walk_replacement(replacement: &ReplacementDefinition, out: &mut Vec<String>) {
-    if let Some(execute) = &replacement.execute {
-        walk_ability_def(execute, out);
-    }
-    // The mode carries the decline continuation (and, for MayCost, a cost),
-    // either of which may conjure. Descend into both.
-    match &replacement.mode {
-        ReplacementMode::MayCost { cost, decline } => {
-            walk_cost(cost, out);
-            if let Some(decline) = decline {
-                walk_ability_def(decline, out);
-            }
-        }
-        ReplacementMode::Optional { decline } => {
-            if let Some(decline) = decline {
-                walk_ability_def(decline, out);
-            }
-        }
-        ReplacementMode::Mandatory => {}
-    }
-    // `runtime_execute` holds a resolution-time continuation that is never
-    // present on a printed/static `CardFace`; skipped intentionally.
-}
-
-fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
-    for modification in &static_def.modifications {
-        walk_continuous_mod(modification, out);
-    }
-}
-
-fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<String>) {
-    match modification {
-        ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
-        ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
-        ContinuousModification::GrantReplacement { replacement } => {
-            walk_replacement(replacement, out)
-        }
-        ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
-        ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
-        // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
-        // source `TargetFilter`; the granted abilities/triggers are pulled live
-        // from the provider objects at layer collection time, not nested here.
-        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
-        // nested ability/effect carrier to walk (the copy grant is the runtime TCE).
-        | ContinuousModification::CopyChosen
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::SetTextName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::AddKeywordWithDerivedCost { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::SetDynamicPower { .. }
-        | ContinuousModification::SetDynamicToughness { .. }
-        | ContinuousModification::SetPowerDynamic { .. }
-        | ContinuousModification::SetToughnessDynamic { .. }
-        | ContinuousModification::AddDynamicPower { .. }
-        | ContinuousModification::AddDynamicToughness { .. }
-        | ContinuousModification::AddDynamicKeyword { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor { .. }
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::SetChosenName
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::RetainAllOtherAbilitiesFromSource
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost => {}
-    }
-}
-
-fn walk_copiable_values(values: &CopiableValues, out: &mut Vec<String>) {
-    for ability in values.abilities.iter() {
-        walk_ability_def(ability, out);
-    }
-    for trigger in values.trigger_definitions.iter() {
-        walk_trigger(trigger, out);
-    }
-    for static_def in values.static_definitions.iter() {
-        walk_static(static_def, out);
-    }
-    for replacement in values.replacement_definitions.iter() {
-        walk_replacement(replacement, out);
-    }
-}
-
-fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
-    match cost {
-        AbilityCost::EffectCost { effect } => walk_effect(effect, out),
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            for sub in costs {
-                walk_cost(sub, out);
-            }
-        }
-        AbilityCost::PerCounter { base, .. } => walk_cost(base, out),
-        // Remaining costs carry no nested effect/cost carriers.
-        AbilityCost::Mana { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::Discard { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        // CR 118.9: a borrowed keyword cost carries no nested effect/cost carrier.
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::Unimplemented { .. } => {}
-    }
-}
-
-/// Yield every conjure name carried by `effect` and its nested ability/effect
-/// carriers. The match is wildcard-free, so a new `Effect` variant forces a
-/// decision here (compile error until handled). That guarantee is necessary but
-/// not sufficient: a variant wrongly added to the leaf arm, or a new nested
-/// *struct field* (which is field access, not a match arm), compiles silently.
-/// `walker_covers_every_nested_carrier` is the complementary safety net for
-/// those cases — extend it whenever a carrier is added.
-fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
+/// The conjure/meld name extraction that `visit_effect` used to inline. Split
+/// out so the traversal itself is reusable (see `types::ability_visit`).
+fn collect_conjure_names(effect: &Effect, out: &mut Vec<String>) {
     match effect {
-        Effect::Intensify { .. } => {}
-        Effect::ApplyPerpetual { .. } => {}
-        // CR 614.11: A one-shot draw replacement nests its substitute Effect
-        // (Words of Worship/Wilding). Walk it so any conjure name it carries is
-        // surfaced (GainLife/Token carry none today, but it is a nested carrier).
-        Effect::CreateDrawReplacement { replacement_effect } => {
-            walk_effect(replacement_effect, out)
-        }
-        // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
-        // Point in Time: chaos ensues). Walk it so any conjure name it carries is
-        // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
-        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
-            walk_effect(replacement_effect, out)
-        }
-        // Heist exiles a card from an opponent's library at random; it does not
-        // name a conjure card, so there is no static face to preload.
-        Effect::Heist { .. } | Effect::HeistExile => {}
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
             // registry. Duplicate-conjure copies a card already in play (its face
@@ -1028,335 +858,44 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // objects the resolver finds by printed identity — they need no registry
         // seeding.
         Effect::Meld { result, .. } => out.push(result.clone()),
-        // A spellbook draft conjures the chosen card, but the list lives on the
-        // card face (`metadata.spellbook`), not in the effect — the registry
-        // seed collects it directly from the face (see
-        // `collect_conjure_names_from_face`), so nothing to gather here.
-        Effect::DraftFromSpellbook { .. } => {}
-        Effect::TurnFaceUp { .. } => {}
-        Effect::TurnFaceDown { .. } => {}
-        // Nested-ability carriers — descend.
-        Effect::Vote {
-            per_choice_effect,
-            subject,
-            ..
-        } => {
-            for sub in per_choice_effect {
-                walk_ability_def(sub, out);
-            }
-            // CR 701.38b: object-pool votes (Council's Judgment, Prime
-            // Minister's Cabinet Room) leave `per_choice_effect` empty and
-            // carry the sole nested AbilityDefinition in `outcome_template`.
-            // Walk it so any conjure name a future object-vote outcome names is
-            // surfaced (the current exile-only class carries none).
-            if let VoteSubject::Objects {
-                outcome_template, ..
-            } = subject
-            {
-                walk_ability_def(outcome_template, out);
-            }
-        }
-        Effect::SeparateIntoPiles {
-            chosen_pile_effect,
-            unchosen_pile_effect,
-            ..
-        } => {
-            walk_ability_def(chosen_pile_effect, out);
-            if let Some(unchosen) = unchosen_pile_effect {
-                walk_ability_def(unchosen, out);
-            }
-        }
-        Effect::RevealFromHand { on_decline, .. } => {
-            if let Some(sub) = on_decline {
-                walk_ability_def(sub, out);
-            }
-        }
-        // Only the delayed `effect` is walked; the `condition`'s embedded
-        // TriggerDefinition has `execute: None` by construction (it is a matcher,
-        // not a payload), so it carries no conjure name.
-        Effect::CreateDelayedTrigger { effect, .. } => walk_ability_def(effect, out),
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(sub) = win_effect {
-                walk_ability_def(sub, out);
-            }
-            if let Some(sub) = lose_effect {
-                walk_ability_def(sub, out);
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => walk_ability_def(win_effect, out),
-        Effect::RollDie { results, .. } => {
-            for branch in results {
-                walk_ability_def(&branch.effect, out);
-            }
-        }
-        Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                walk_ability_def(branch, out);
-            }
-        }
-        // GenericEffect applies static abilities at resolution; their
-        // modifications can grant abilities/triggers that themselves conjure.
-        // Descend into the granted definitions rather than treating it as a leaf.
-        Effect::GenericEffect {
-            static_abilities, ..
-        } => {
-            for static_def in static_abilities {
-                walk_static(static_def, out);
-            }
-        }
-        // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
-        Effect::AddTargetReplacement { replacement, .. } => walk_replacement(replacement, out),
-        // Counter's `source_rider` may apply a static to the countered source
-        // (LosesAbilities) that grants an ability that conjures. The Destroy
-        // rider carries no static.
-        Effect::Counter { source_rider, .. } => {
-            if let Some(CounterSourceRider::LosesAbilities { static_def, .. }) = source_rider {
-                walk_static(static_def, out);
-            }
-        }
-        // Tokens and emblems can host granted static/triggered abilities that conjure.
-        Effect::Token {
-            static_abilities, ..
-        } => {
-            for static_def in static_abilities {
-                walk_static(static_def, out);
-            }
-        }
-        Effect::CreateEmblem { statics, triggers } => {
-            for static_def in statics {
-                walk_static(static_def, out);
-            }
-            for trigger in triggers {
-                walk_trigger(trigger, out);
-            }
-        }
-        // Leaf effects with no nested ability/effect carrier.
-        Effect::StartYourEngines { .. }
-        | Effect::ChangeSpeed { .. }
-        | Effect::DealDamage { .. }
-        | Effect::ApplyPostReplacementDamage { .. }
-        // CR 120.1: leaf effect — the source/recipient filters carry no nested
-        // ability or effect to walk.
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::Pump { .. }
-        | Effect::PairWith { .. }
-        | Effect::Destroy { .. }
-        | Effect::Regenerate { .. }
-        | Effect::RemoveAllDamage { .. }
-        | Effect::CounterAll { .. }
-        | Effect::GainLife { .. }
-        | Effect::LoseLife { .. }
-        | Effect::ExchangeLifeWithStat { .. }
-        | Effect::ExchangeLifeTotals { .. }
-        // CR 701.26a/b: all tap/untap scopes are leaf effects here.
-        | Effect::SetTapState { .. }
-        | Effect::RemoveCounter { .. }
-        | Effect::Sacrifice { .. }
-        | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DamageEachPlayer { .. }
-        | Effect::DestroyAll { .. }
-        | Effect::ChangeZone { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
-        | Effect::GainControl { .. }
-        | Effect::GainControlAll { .. }
-        | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
-        | Effect::Bounce { .. }
-        | Effect::BounceAll { .. }
-        | Effect::Explore
-        | Effect::ExploreAll { .. }
-        | Effect::Investigate
-        | Effect::Tribute { .. }
-        | Effect::TimeTravel
-        | Effect::BecomeMonarch
-        | Effect::NoOp
-        | Effect::Proliferate
-        | Effect::ProliferateTarget { .. }
-        | Effect::EndTheTurn
-        | Effect::EndCombatPhase
-        | Effect::Populate
-        | Effect::Clash
-        | Effect::Behold { .. }
-        | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
-        | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
-        // owner/type_filter are TargetFilters; no nested ability carrier and the
-        // copy source comes from the format pool, so this is a leaf for conjure
-        // collection.
-        | Effect::CreateTokenCopyFromPool { .. }
-        | Effect::Myriad
-        | Effect::Encore
-        | Effect::ExileHaunting { .. }
-        | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        // CR 707.2c (Metamorphic Alteration): filter-only copy choice; no nested
-        // ability carrier to walk — a leaf for printed-card collection.
-        | Effect::ChoosePermanent { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
-        | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
-        | Effect::PutCounterAll { .. }
-        | Effect::MultiplyCounter { .. }
-        // Builds its PutCounter/RemoveCounter branches at resolution — carries no
-        // static conjure name to preload.
-        | Effect::ChooseCounterAdjustment { .. }
-        | Effect::DoublePT { .. }
-        | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::RegisterBending { .. }
-        | Effect::Cleanup { .. }
-        | Effect::Mana { .. }
-        | Effect::Discard { .. }
-        | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        // CR 710.4: no nested ability carrier and no conjured card name.
-        | Effect::FlipPermanent { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        | Effect::RevealHand { .. }
-        | Effect::Reveal { .. }
-        | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
-        | Effect::TargetOnly { .. }
-        | Effect::Choose { .. }
-        | Effect::OpponentGuess { .. }
-        | Effect::SwapChosenLabels { .. }
-        | Effect::ChooseDamageSource { .. }
-        | Effect::Suspect { .. }
-        | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
-        | Effect::PhaseOut { .. }
-        | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
-        | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
-        | Effect::BecomeSaddled { .. }
-        | Effect::BecomeBlocked { .. }
-        | Effect::SetClassLevel { .. }
-        | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-        | Effect::PreventDamage { .. }
-        | Effect::LoseTheGame { .. }
-        | Effect::WinTheGame { .. }
-        | Effect::RingTemptsYou
-        | Effect::VentureIntoDungeon
-        | Effect::VentureInto { .. }
-        | Effect::TakeTheInitiative
-        | Effect::ArrangePlanarDeckTop { .. }
-        | Effect::Planeswalk
-        | Effect::ChaosEnsues
-        | Effect::RedistributeLifeTotals
-        | Effect::ReverseTurnOrder
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
-        | Effect::AssembleContraptionsFromRollDifference
-        | Effect::CrankContraptions { .. }
-        | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
-        | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
-        | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
-        | Effect::RememberCard { .. }
-        | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::GainEnergy { .. }
-        | Effect::GivePlayerCounter { .. }
-        | Effect::LoseAllPlayerCounters { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
-        | Effect::Cascade
-        | Effect::Ripple { .. }
-        | Effect::MiracleCast { .. }
-        | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-        | Effect::PutOnTopOrBottom { .. }
-        | Effect::GiftDelivery { .. }
-        | Effect::Goad { .. }
-        | Effect::GoadAll { .. }
-        | Effect::Detain { .. }
-        | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
-        | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::ExtraTurn { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextTurn { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
-        | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::Monstrosity { .. }
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
-        | Effect::Learn
-        | Effect::Forage
-        | Effect::Harness
-        | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
-        | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::SetLifeTotal { .. }
-        | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
-        | Effect::RemoveFromCombat { .. }
-        | Effect::CreateDamageReplacement { .. }
-        | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
-        // ContinuousModifications, never conjured card names.
-        | Effect::ReturnAsAura { .. }
-        | Effect::Specialize
-        // CR 608.2d + CR 122.1: counter-kind choice / consume carry no conjure names.
-        | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::Unimplemented { .. } => {}
+        _ => {}
     }
+}
+
+fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
+    let _ = visit_ability_def(def, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_trigger(trigger: &TriggerDefinition, out: &mut Vec<String>) {
+    let _ = visit_trigger(trigger, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_replacement(replacement: &ReplacementDefinition, out: &mut Vec<String>) {
+    let _ = visit_replacement(replacement, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
+    let _ = visit_static(static_def, &mut |effect| {
+        collect_conjure_names(effect, out);
+        ControlFlow::Continue(())
+    });
+}
+
+#[cfg(test)]
+fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
+    let _ = visit_effect(effect, &mut |e| {
+        collect_conjure_names(e, out);
+        ControlFlow::Continue(())
+    });
 }
 
 /// Collect every conjure name seeded by the faces present in the game: each
@@ -1485,6 +1024,7 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -2332,6 +1872,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: normal_half.card_type.clone(),
             mana_cost: normal_cost.clone(),
@@ -2729,8 +2270,51 @@ mod tests {
         obj.cost_x_paid = Some(4);
 
         assert_eq!(
-            intrinsic_etb_counters(&obj),
+            intrinsic_etb_counters(&obj, None),
             vec![(CounterType::Plus1Plus1, 4)]
+        );
+    }
+
+    #[test]
+    fn x_loyalty_uses_the_resolving_spell_x_and_survives_copying() {
+        let resolving = intrinsic_entry_counters_for_face(
+            Some(PrintedLoyalty::X),
+            Some(0),
+            Some(3),
+            None,
+            &CardType::default(),
+        );
+        assert_eq!(resolving, vec![(CounterType::Loyalty, 3)]);
+
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "X Walker".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_printed_loyalty = Some(PrintedLoyalty::X);
+        source.printed_loyalty = Some(PrintedLoyalty::X);
+        source.base_loyalty = Some(0);
+        source.loyalty = Some(0);
+
+        let values = intrinsic_copiable_values(&source);
+        assert_eq!(values.printed_loyalty, Some(PrintedLoyalty::X));
+
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(2),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(copy.base_printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(
+            intrinsic_etb_counters(&copy, None),
+            Vec::new(),
+            "CR 107.3g: a copied X-loyalty permanent that is not resolving a spell has X=0"
         );
     }
 
@@ -3662,6 +3246,7 @@ mod tests {
             static_abilities: vec![generic_static],
             duration: None,
             target: None,
+            end_cost: None,
         };
         walk_effect(&generic, &mut names);
 

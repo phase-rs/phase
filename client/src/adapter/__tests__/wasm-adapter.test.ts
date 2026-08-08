@@ -1,15 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WasmAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
-import type { EngineAdapter, SubmitResult } from "../types";
+import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  EngineAdapter,
+  SubmitResult,
+} from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+}));
+
+vi.mock("@wasm/engine", () => ({
+  resume_multiplayer_host_state: resumeMultiplayerHostState,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -29,14 +39,18 @@ const mockWorkerClient = {
   submitAction: vi
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  getAiActionProposal: vi.fn(),
+  getAiActionProposalWithDiagnostics: vi.fn(),
+  submitAiActionProposal: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-  getAiAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
+  resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -54,6 +68,83 @@ describe("WasmAdapter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     adapter = new WasmAdapter();
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(null);
+    mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.submitAiActionProposal.mockResolvedValue({
+      status: "stale",
+      reason: "test",
+    });
+  });
+
+  describe("AI decision diagnostics", () => {
+    const proposal: AiActionProposal = {
+      token: "diagnostic-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: { type: "PassPriority" },
+      status: "direct",
+      selectionExplanation: "A direct AI policy selected this action; no scored distribution was used.",
+      samplingTemperature: null,
+      candidates: [{
+        action: { type: "PassPriority" },
+        objectName: null,
+        details: [],
+        rank: null,
+        isTopRanked: false,
+        isSelected: true,
+        score: null,
+        weight: null,
+        probability: null,
+      }],
+    };
+
+    it("uses the legacy proposal endpoint while capture is disabled", async () => {
+      mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+      await adapter.initialize();
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledWith("Medium", 0);
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+    });
+
+    it("publishes only after apply and retains a rejected proposal for retry", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal
+        .mockResolvedValueOnce({ status: "rejected", reason: "retry" })
+        .mockResolvedValueOnce({ status: "applied", result: { events: [], log_entries: [] } });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "rejected" });
+      expect(listener).not.toHaveBeenCalled();
+
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "applied" });
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith(receipt);
+    });
+
+    it("suppresses stale proposal receipts", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal.mockResolvedValue({ status: "stale", reason: "old" });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await adapter.getAiActionProposal("Medium", 0);
+      await adapter.submitAiActionProposal(proposal);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
   });
 
   it("implements EngineAdapter interface", () => {
@@ -306,6 +397,72 @@ describe("WasmAdapter", () => {
       const mockState = buildGameState();
       await expect(adapter.restoreState(mockState)).rejects.toThrow(AdapterError);
     });
+
+    it("throws when the card database fails to load and does not restore", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.restoreState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resumeMultiplayerHostState", () => {
+    it("loads the card database then resumes on the worker", async () => {
+      await adapter.initialize();
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await adapter.resumeMultiplayerHostState(mockState);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
+        JSON.stringify(mockState),
+      );
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(
+          mockWorkerClient.resumeMultiplayerHostState.mock.invocationCallOrder[0],
+        );
+    });
+
+    it("throws when the card database fails to load and does not resume", async () => {
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      const mockState = buildGameState({
+        turn_number: 3,
+        phase: "PreCombatMain",
+        players: [],
+      });
+
+      await expect(adapter.resumeMultiplayerHostState(mockState)).rejects.toThrow(
+        "Card database failed to load",
+      );
+      expect(adapter.cardDbLoaded).toBe(false);
+      expect(mockWorkerClient.resumeMultiplayerHostState).not.toHaveBeenCalled();
+    });
+
+    it("propagates a queued main-thread fallback resume failure", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      resumeMultiplayerHostState.mockImplementationOnce(() => {
+        throw new Error("resume failed");
+      });
+      await adapter.initialize();
+
+      await expect(adapter.resumeMultiplayerHostState(buildGameState())).rejects.toThrow(
+        "resume failed",
+      );
+      expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
   });
 
   describe("initializeGame", () => {
@@ -320,37 +477,6 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initializeGame({ decks: [] });
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiAction("Medium", 1);
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
-    });
-  });
-
-  describe("getAiActionForSeats", () => {
-    it("delegates to getAiAction for the active seat", async () => {
-      await adapter.initialize();
-      await adapter.getAiActionForSeats(
-        [
-          { playerId: 0, difficulty: "Easy" },
-          { playerId: 1, difficulty: "Hard" },
-        ],
-        1,
-      );
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Hard", 1);
-    });
-
-    it("returns null if no matching seat", async () => {
-      await adapter.initialize();
-      const result = await adapter.getAiActionForSeats(
-        [{ playerId: 0, difficulty: "Easy" }],
-        1,
-      );
-      expect(result).toBeNull();
     });
   });
 

@@ -590,7 +590,7 @@ fn exile_return_after_destroy_resolution_via_apply() {
         source_id: spell_obj,
         controller: PlayerId(1),
         kind: crate::types::game_state::StackEntryKind::Spell {
-            ability: Some(destroy_ability),
+            ability: Some(Box::new(destroy_ability)),
             card_id: CardId(99),
             casting_variant: crate::types::game_state::CastingVariant::Normal,
             actual_mana_spent: 0,
@@ -836,6 +836,7 @@ fn white_auracite_real_oracle_text_returns_exiled_card() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -988,6 +989,7 @@ fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -1108,6 +1110,7 @@ fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 
@@ -1352,15 +1355,16 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
         condition: DelayedTriggerCondition::WhenEntersBattlefield {
             filter: TargetFilter::Any,
         },
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             *gain_life_definition("Delayed watcher gains 1 life").effect,
             vec![],
             delayed_source,
             PlayerId(0),
-        ),
+        )),
         controller: PlayerId(0),
         source_id: delayed_source,
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     });
     state.exile_links.push(ExileLink {
         exiled_id: returned_id,
@@ -1423,7 +1427,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
 // ---------------------------------------------------------------------------
 
 /// Verbatim Animate Dead Oracle text (matches the repo's canonical corpus form
-/// in `crates/engine/tests/fixtures/integration_cards.json`, mirroring the
+/// in `crates/engine/tests/fixtures/integration_cards.json.gz`, mirroring the
 /// `casting_tests.rs` reanimation fixtures).
 const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
 

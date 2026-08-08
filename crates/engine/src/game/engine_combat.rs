@@ -355,15 +355,7 @@ pub(super) fn finish_declare_attackers(
     }
 
     if attacks_empty {
-        state.phase = Phase::EndCombat;
-        events.push(GameEvent::PhaseChanged {
-            phase: Phase::EndCombat,
-        });
-        state.combat = None;
-        super::layers::prune_end_of_combat_effects(state);
-        super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-        turns::advance_phase(state, events);
-        Ok(turns::auto_advance(state, events))
+        Ok(turns::advance_after_empty_attackers(state, events))
     } else {
         priority::reset_priority(state);
         Ok(WaitingFor::Priority {
@@ -757,9 +749,7 @@ pub(super) fn handle_assign_combat_damage(
 /// and every target must be an attacker the blocker is actually blocking. There
 /// is NO lethal requirement — a blocker divides its damage freely (CR 510.1d).
 ///
-/// The server bypasses its legality-enumeration gate for this state
-/// (`accepts_freeform_blocker_damage_assignment`), so this handler is the real
-/// validation boundary.
+/// This handler is the validation boundary for submitted assignments.
 pub(super) fn handle_assign_blocker_damage(
     state: &mut GameState,
     _player: PlayerId,
@@ -852,15 +842,7 @@ pub(super) fn handle_empty_attackers(
         return Ok(waiting_for);
     }
 
-    state.phase = Phase::EndCombat;
-    events.push(GameEvent::PhaseChanged {
-        phase: Phase::EndCombat,
-    });
-    state.combat = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    turns::advance_phase(state, events);
-    Ok(turns::auto_advance(state, events))
+    Ok(turns::advance_after_empty_attackers(state, events))
 }
 
 pub(super) fn handle_empty_blockers(

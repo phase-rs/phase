@@ -199,7 +199,7 @@ describe("Discard cost modal", () => {
     expect(screen.getByText("Discard for mana ability")).toBeInTheDocument();
   });
 
-  it("describes untap selection without saying sacrifice", () => {
+  it("defers battlefield untap selection to the native board layer", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({
           player: 0,
@@ -219,9 +219,7 @@ describe("Discard cost modal", () => {
 
     render(<CardChoiceModal />);
 
-    expect(screen.getByText("Untap")).toBeInTheDocument();
-    expect(screen.getByText("Choose up to 5 permanents to untap")).toBeInTheDocument();
-    expect(screen.queryByText(/sacrifice/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading")).toBeNull();
   });
 
   it("describes optional attach selection without saying sacrifice and allows decline", () => {

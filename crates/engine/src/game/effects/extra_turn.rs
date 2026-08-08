@@ -36,8 +36,8 @@ pub fn resolve(
     // that player's team; store the team's seat-order representative as anchor.
     let player = crate::game::topology::normalize_shared_turn_recipient(state, player);
 
-    // CR 500.7: Push to end of Vec (LIFO — pop from end takes most recent first)
-    state.extra_turns.push(player);
+    // CR 500.7: Queue after the *specified* turn (current active player), LIFO.
+    crate::game::turns::enqueue_extra_turn(state, player, state.active_player);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExtraTurn,
@@ -53,8 +53,16 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, SpellContext, TargetRef};
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::ExtraTurn;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
+
+    fn et(player: u8, anchor: u8) -> ExtraTurn {
+        ExtraTurn {
+            player: PlayerId(player),
+            anchor: PlayerId(anchor),
+        }
+    }
 
     fn make_ability(target: TargetFilter, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
@@ -68,6 +76,7 @@ mod tests {
             trigger_source: None,
             trigger_definition_ref: None,
             force_block_attacker: None,
+            target_incarnations: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -87,6 +96,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
             cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
@@ -120,7 +130,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![PlayerId(0)]);
+        assert_eq!(state.extra_turns, vec![et(0, 0)]);
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {
@@ -143,11 +153,11 @@ mod tests {
         let ability_b = make_ability(TargetFilter::Controller, PlayerId(1));
         resolve(&mut state, &ability_b, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![PlayerId(0), PlayerId(1)]);
+        assert_eq!(state.extra_turns, vec![et(0, 0), et(1, 0)]);
 
         // CR 500.7: Pop from end → most recent (Player B) first
-        assert_eq!(state.extra_turns.pop(), Some(PlayerId(1)));
-        assert_eq!(state.extra_turns.pop(), Some(PlayerId(0)));
+        assert_eq!(state.extra_turns.pop().map(|e| e.player), Some(PlayerId(1)));
+        assert_eq!(state.extra_turns.pop().map(|e| e.player), Some(PlayerId(0)));
     }
 
     #[test]
@@ -159,7 +169,25 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![PlayerId(1)]);
+        assert_eq!(state.extra_turns, vec![et(1, 0)]);
+    }
+
+    #[test]
+    fn extra_turn_stores_active_player_as_anchor() {
+        let mut state = GameState {
+            active_player: PlayerId(2),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability(TargetFilter::Controller, PlayerId(0));
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_turns,
+            vec![et(0, 2)],
+            "CR 500.7: anchor is the specified (active) turn, not the beneficiary"
+        );
     }
 
     #[test]
@@ -171,7 +199,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![PlayerId(0)]);
+        assert_eq!(state.extra_turns, vec![et(0, 0)]);
     }
 
     #[test]
@@ -183,6 +211,6 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![PlayerId(1)]);
+        assert_eq!(state.extra_turns, vec![et(1, 0)]);
     }
 }

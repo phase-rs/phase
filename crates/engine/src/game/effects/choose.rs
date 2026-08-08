@@ -2,8 +2,8 @@ use rand::Rng;
 
 use crate::game::players;
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
-    SeatDirection, TargetSelectionMode,
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectError, EffectKind,
+    PlayerChoiceDistinctness, ResolvedAbility, SeatDirection, TargetSelectionMode,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -180,7 +180,7 @@ pub(crate) fn resolve_random_in_chain(
     // it to the sub via `apply_parent_chain_context`.
     if matches!(
         choice_type,
-        ChoiceType::Player | ChoiceType::Opponent { .. }
+        ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
     ) {
         if let Ok(pid) = chosen.parse::<u8>() {
             let mut updated = ability.chosen_players.clone();
@@ -306,7 +306,7 @@ pub(crate) fn bind_named_choice(
                         | ChoiceType::BasicLandType
                         | ChoiceType::Color { .. }
                         | ChoiceType::Keyword { .. }
-                        | ChoiceType::Player
+                        | ChoiceType::Player { .. }
                         | ChoiceType::Opponent { .. }
                         // CR 613.1: A persisted `Label` gates `ChosenLabelIs`
                         // continuous statics — anchor-word modal permanents
@@ -505,12 +505,16 @@ const LAND_TYPES: &[&str] = &[
 /// casting or resolution. If an option would be illegal, it can't be chosen.
 ///
 /// `already_chosen` is the resolution-scoped list of players picked by earlier
-/// `Choose(Player)` instructions in this chain. CR 608.2c + the Gluntch card
-/// ruling ("three distinct players") require each successive "choose a player"
-/// to exclude players already chosen — `ChoiceType::Player` and
-/// `ChoiceType::Opponent` filter them out. When fewer eligible players remain
-/// than the card asks for, the options list is empty and the choice (and its
-/// dependent effect) does nothing — the standard empty-options path.
+/// `Choose(Player)` instructions in this chain. `ChoiceType::Player` and
+/// `ChoiceType::Opponent` only consult it when their `distinctness` is
+/// `DistinctFromPriorChoices` (CR 608.2c + the Gluntch ordinal-cued "choose a
+/// second/third player" ruling, "three distinct players"). The default
+/// `Independent` distinctness never filters on it — the "Offering" cycle
+/// ruling (Benevolent/Infernal/Intellectual/Sylvan Offering) confirms a
+/// repeated "Choose an opponent." may pick the same player again. When
+/// `DistinctFromPriorChoices` narrows the eligible set below what the card
+/// asks for, the options list is empty and the choice (and its dependent
+/// effect) does nothing — the standard empty-options path.
 fn compute_options(
     state: &GameState,
     choice_type: &ChoiceType,
@@ -612,15 +616,26 @@ fn compute_options(
         // (in a free-for-all game, every other player). `players::opponents`
         // already drops eliminated players (CR 104.3a — a player who loses
         // leaves the game and is no longer an opponent).
-        // CR 608.2c: Exclude players already chosen earlier in this resolution.
+        // CR 608.2c: `DistinctFromPriorChoices` excludes players already chosen
+        // earlier in this resolution; the default `Independent` does not (the
+        // "Offering" cycle may repeat the same opponent).
         // CR 102.3 + CR 608.2d: When a `restriction` is present ("with the most
         // life among your opponents"), narrow the eligible set to opponents
         // satisfying that `PlayerFilter` — the controller then picks ONE of the
         // qualifying opponents (CR 608.2d handles ties), keeping it a single
         // pick rather than fanning the effect out to every tied opponent.
-        ChoiceType::Opponent { restriction } => players::opponents(state, controller)
+        // CR 608.2d: "The player can't choose an option that's illegal or impossible" —
+        // a CHOICE, not a target (CR 115.10a), so the option list is the CHOOSABLE
+        // opponents. The distinctness and restriction filters below are untouched.
+        ChoiceType::Opponent {
+            restriction,
+            distinctness,
+        } => players::choosable_opponents(state, controller)
             .iter()
-            .filter(|id| !already_chosen.contains(id))
+            .filter(|id| {
+                *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
+                    || !already_chosen.contains(id)
+            })
             .filter(|id| {
                 restriction.as_ref().is_none_or(|filter| {
                     super::matches_player_scope(state, **id, filter, controller, source_id)
@@ -628,12 +643,24 @@ fn compute_options(
             })
             .map(|id| id.0.to_string())
             .collect(),
-        // CR 102.1: A player is one of the people in the game.
-        // CR 608.2c: Exclude players already chosen earlier in this resolution.
-        ChoiceType::Player => state
+        // CR 102.1: A player is one of the people in the game — so a seat that has LEFT
+        // the game (CR 800.4) is not one of the people to choose among, and neither is a
+        // phased-out seat (per the CR 702.26b MIRROR). CR 608.2d: the player can't choose
+        // an illegal option. `state.seat_order` is NOT pruned on elimination by any
+        // production writer, so without this conjunct the arm offers eliminated seats —
+        // a defect independent of phasing, and one every sibling choice seam already
+        // avoids.
+        // CR 608.2c: `DistinctFromPriorChoices` (Gluntch's "choose a
+        // second/third player") excludes players already chosen earlier in
+        // this resolution; the default `Independent` does not.
+        ChoiceType::Player { distinctness } => state
             .seat_order
             .iter()
-            .filter(|id| !already_chosen.contains(id))
+            .filter(|&&id| players::player_exists_for_choice(state, id))
+            .filter(|id| {
+                *distinctness != PlayerChoiceDistinctness::DistinctFromPriorChoices
+                    || !already_chosen.contains(id)
+            })
             .map(|id| id.0.to_string())
             .collect(),
         ChoiceType::TwoColors => two_color_options(),
@@ -1266,7 +1293,7 @@ mod tests {
     #[test]
     fn choose_opponent_lists_opponents() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Opponent { restriction: None });
+        let ability = make_choose_ability(ChoiceType::opponent());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1278,10 +1305,132 @@ mod tests {
         }
     }
 
+    /// Issue #6381 (Benevolent Offering): the "Offering" cycle ruling —
+    /// "You may choose the same opponent for each of the effects, or you may
+    /// choose different opponents" — means the default `Independent`
+    /// distinctness must NOT exclude an opponent chosen by an earlier
+    /// `Choose(Opponent)` in the same resolution. In a two-player game this is
+    /// the difference between a legal repeat pick (correct) and an impossible
+    /// no-op second choice (the reported bug).
+    #[test]
+    fn choose_opponent_independent_by_default_allows_repeat_choice() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::opponent());
+        ability.chosen_players = vec![PlayerId(1)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["1"],
+                    "the previously-chosen opponent must remain a legal repeat pick"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    /// The shared 5-seat choice-legality board: P0 controller, **P1 phased out** through
+    /// the production API, **P2 eliminated**, P3/P4 valid.
+    ///
+    /// FIVE seats, not three, and that is a reach-guard rather than padding: `resolve`
+    /// early-returns when `options.is_empty()` and never publishes `NamedChoice` at all,
+    /// so a board narrow enough to empty the list would make every exclusion assertion
+    /// below pass vacuously.
+    fn choice_legality_board() -> GameState {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::standard(), 5, 42);
+        let mut events = Vec::new();
+
+        // Anti-vacuity on the SETUP, asserted before anything is measured:
+        // `phase_out_player` returns the ids it transitioned, so a setup that silently
+        // no-opped fails loudly here instead of quietly weakening the row.
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "phase_out_player must actually transition P1"
+        );
+        assert!(
+            state.players[1].is_phased_out(),
+            "P1 must read as phased out after the production call"
+        );
+
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "P2 must read as eliminated after the production call"
+        );
+        state
+    }
+
+    /// CR 102.1 ("a player is one of the people in the game") + CR 608.2d ("the player
+    /// can't choose an option that's illegal or impossible"): "choose a player" must offer
+    /// neither an eliminated nor a phased-out seat.
+    ///
+    /// TWO INDEPENDENT BEHAVIOUR CHANGES, and this row asserts both. The eliminated seat
+    /// `"2"` was offered at HEAD — a strictly-live CR 102.1 defect with nothing to do with
+    /// phasing, because `state.seat_order` is not pruned on elimination and this arm
+    /// filtered only on `already_chosen`. The phased-out seat `"1"` is the phasing half.
+    ///
+    /// Total equality, never `!contains`: exclusion AND identity in one assertion.
+    ///
+    /// REVERT-PROBE: restore the raw `state.seat_order.iter()` ⇒ `"1"` and `"2"` both
+    /// reappear ⇒ FAILS. SECOND, NARROWER REVERT-PROBE: replace `player_exists_for_choice`
+    /// with bare `is_alive` ⇒ `"1"` reappears while `"2"` stays out ⇒ FAILS. The second
+    /// probe is what stops either behaviour change being credited to the other.
+    #[test]
+    fn choose_a_player_offers_neither_an_eliminated_nor_a_phased_out_seat() {
+        let mut state = choice_legality_board();
+        let ability = make_choose_ability(ChoiceType::player());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["0", "3", "4"],
+                    "phased-out P1 and eliminated P2 are out; the controller and both \
+                     valid seats are in"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d: "choose an opponent" must offer neither an eliminated nor a phased-out
+    /// seat.
+    ///
+    /// R4n and R4m are each other's ATTRIBUTION CONTROL: same board, same resolver, same
+    /// `compute_options` call, differing only in the `ChoiceType` arm — so a green pair
+    /// proves each fix landed on the arm it claims to rather than on shared machinery.
+    ///
+    /// REVERT-PROBE: restore `players::opponents` at the `ChoiceType::Opponent` arm ⇒
+    /// `"1"` reappears ⇒ FAILS.
+    #[test]
+    fn choose_an_opponent_offers_neither_an_eliminated_nor_a_phased_out_seat() {
+        let mut state = choice_legality_board();
+        let ability = make_choose_ability(ChoiceType::opponent());
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(
+                    options,
+                    &["3", "4"],
+                    "phased-out P1 and eliminated P2 are out; both valid opponents are in"
+                );
+            }
+            other => panic!("Expected NamedChoice, got {other:?}"),
+        }
+    }
+
     #[test]
     fn choose_player_lists_all_players() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Player);
+        let ability = make_choose_ability(ChoiceType::player());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
@@ -1295,11 +1444,32 @@ mod tests {
     }
 
     #[test]
-    fn choose_player_excludes_already_chosen_players() {
-        // CR 608.2c + Gluntch ruling: a successive "choose a player" omits
-        // players already chosen earlier in the same resolution.
+    fn choose_player_independent_by_default_allows_repeat_choice() {
+        // The default `Independent` distinctness (bare "choose a player") does
+        // NOT exclude a player already chosen earlier in this resolution —
+        // only the ordinal-cued `DistinctFromPriorChoices` (Gluntch) does.
         let mut state = GameState::new_two_player(42);
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player());
+        ability.chosen_players = vec![PlayerId(0)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&"0".to_string()));
+                assert!(options.contains(&"1".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_player_distinct_from_prior_excludes_already_chosen_players() {
+        // CR 608.2c + Gluntch ruling ("choose a second/third player"): a
+        // successive `DistinctFromPriorChoices` pick omits players already
+        // chosen earlier in the same resolution.
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
         ability.chosen_players = vec![PlayerId(0)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1312,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_player_with_all_players_chosen_resolves_as_no_op() {
+    fn choose_player_distinct_from_prior_with_all_players_chosen_resolves_as_no_op() {
         // CR 609.3 (issue #3040): when every eligible player is already chosen,
         // the engine-enumerated option set is empty — choosing is impossible, so
         // the choice does nothing and resolution continues. It must NOT raise a
@@ -1324,7 +1494,7 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player_distinct_from_prior());
         ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
@@ -1425,7 +1595,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::player(),
                 persist: false,
                 selection: TargetSelectionMode::Random,
             },
@@ -1454,7 +1624,7 @@ mod tests {
         // Building-block regression: a Chosen Choose is left to the interactive
         // `resolve` path (returns false; raises nothing here).
         let mut state = GameState::new_two_player(42);
-        let mut ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::player());
         let mut events = Vec::new();
         assert!(!resolve_random_in_chain(
             &mut state,

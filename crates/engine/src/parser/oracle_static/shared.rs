@@ -5834,6 +5834,10 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             AttackTargetFilter::PlayerOrPlaneswalker,
             tag(" you or planeswalkers you control"),
         ),
+        value(
+            AttackTargetFilter::Planeswalker,
+            tag(" planeswalkers you control"),
+        ),
         value(AttackTargetFilter::Player, tag(" you")),
     )))
     .parse(input)

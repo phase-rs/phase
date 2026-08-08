@@ -124,22 +124,29 @@ pub fn resolve(
                 .iter()
                 .rposition(|e| e.id == obj_id || e.source_id == obj_id);
             if let Some(idx) = stack_idx {
-                let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+                // CR 701.6a: the removal IS the counter, so it goes through the
+                // single CR 405.2 removal authority, which journals it and drops
+                // both per-entry side tables.
+                let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+                    state,
+                    idx,
+                    crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+                )
+                .expect("rposition yielded a live stack index")
+                .entry;
+                let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let casting_variant = match &state.stack[idx].kind {
+                let casting_variant = match &removed.kind {
                     StackEntryKind::Spell {
                         casting_variant, ..
                     } => *casting_variant,
                     _ => CastingVariant::Normal,
                 };
                 let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-                let source_permanent_id = state.stack[idx].source_id;
-                let removed_entry_id = state.stack[idx].id;
-                state.stack.remove(idx);
-                state.stack_paid_facts.remove(&removed_entry_id);
+                let source_permanent_id = removed.source_id;
 
                 // CR 701.6a: removal from the stack IS the counter; emit the
                 // event now (before the consequent zone move) so a pause on a
@@ -358,20 +365,27 @@ pub fn resolve_all(
         let stack_idx = state.stack.iter().position(|e| e.id == obj_id);
         let Some(idx) = stack_idx else { continue };
 
-        let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
+        // CR 701.6a: the removal IS the counter, so it goes through the single
+        // CR 405.2 removal authority, which journals it and drops both
+        // per-entry side tables.
+        let removed = crate::game::stack::remove_nonresolving_stack_entry_at(
+            state,
+            idx,
+            crate::game::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("position yielded a live stack index")
+        .entry;
+        let is_spell = matches!(removed.kind, StackEntryKind::Spell { .. });
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let casting_variant = match &state.stack[idx].kind {
+        let casting_variant = match &removed.kind {
             StackEntryKind::Spell {
                 casting_variant, ..
             } => *casting_variant,
             _ => CastingVariant::Normal,
         };
         let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
-        let removed_entry_id = state.stack[idx].id;
-        state.stack.remove(idx);
-        state.stack_paid_facts.remove(&removed_entry_id);
 
         // CR 701.6a: removal from the stack IS the counter; emit the event
         // before any consequent zone move.
@@ -828,6 +842,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -934,6 +949,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1083,6 +1099,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1429,6 +1446,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -1613,6 +1631,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }
@@ -1622,7 +1641,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: perm,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Act".to_string(),
                         description: None,
@@ -1630,7 +1649,7 @@ mod tests {
                     vec![],
                     perm,
                     PlayerId(1),
-                ),
+                )),
             },
         });
         state.stack.push_back(StackEntry {
@@ -1731,6 +1750,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             });
         }

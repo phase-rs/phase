@@ -69,7 +69,10 @@ const ENABLER_BONUS_CAP: f32 = 0.20;
 /// CR 205.3 / CR 301.7: the artifact subtype a reanimation target/payoff can be
 /// besides a creature. Compared case-insensitively against `TypeFilter::Subtype`
 /// and `CardType.subtypes`.
-const VEHICLE_SUBTYPE: &str = "Vehicle";
+/// `pub(crate)` so `features::vehicles` matches on the SAME string rather than
+/// redefining it — two features disagreeing about what a Vehicle is would be a
+/// silent classification split.
+pub(crate) const VEHICLE_SUBTYPE: &str = "Vehicle";
 
 /// Per-deck reanimator classification.
 ///

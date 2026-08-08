@@ -560,6 +560,28 @@ impl GameScenario {
         }
     }
 
+    /// Add a land card to a player's graveyard (CR 404). Returns a `CardBuilder`
+    /// for fluent chaining. Mirrors [`Self::add_creature_to_graveyard`] — used to
+    /// stage `nonland`/type-restricted graveyard-exile controls.
+    pub fn add_land_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a creature card to a player's exile. Returns a `CardBuilder` for
     /// fluent chaining. Used to stage cards tracked by source-linked exile
     /// effects.
@@ -634,6 +656,43 @@ impl GameScenario {
         // CR 302.6 note: summoning sickness only gates creatures, but the
         // builder models a pre-existing permanent (entered on a prior turn),
         // matching `add_creature`'s override.
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a nonland, noncreature permanent (e.g. an enchantment) to the
+    /// battlefield with abilities parsed from Oracle text. Mirrors
+    /// `add_land_from_oracle`; needed for permanents whose own triggered/
+    /// static abilities (not a cast) are under test — e.g. a Hideaway
+    /// enchantment's beginning-of-combat trigger.
+    pub fn add_enchantment_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // CR 302.6 note: summoning sickness only gates creatures, but the
+        // builder models a pre-existing permanent (entered on a prior turn),
+        // matching `add_land_from_oracle`'s override.
         obj.summoning_sick = false;
 
         let mut builder = CardBuilder {
@@ -1251,6 +1310,29 @@ impl GameRunner {
 
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        // Test scenarios historically modelled the transition out of precombat
+        // main as directly reaching DeclareAttackers. CR 507.2 now exposes the
+        // intervening priority window, so preserve that test-driver shorthand
+        // by passing the window only when a scenario submits its declaration.
+        // Live callers use `engine::apply` and must act during that window.
+        if matches!(&action, GameAction::DeclareAttackers { .. })
+            && self.state.phase == Phase::BeginCombat
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+            && self.state.stack.is_empty()
+        {
+            let mut pass_events = Vec::new();
+            while self.state.phase == Phase::BeginCombat
+                && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+                && self.state.stack.is_empty()
+            {
+                pass_events
+                    .extend(apply_as_current(&mut self.state, GameAction::PassPriority)?.events);
+            }
+            let mut result = apply_as_current(&mut self.state, action)?;
+            pass_events.append(&mut result.events);
+            result.events = pass_events;
+            return Ok(result);
+        }
         apply_as_current(&mut self.state, action)
     }
 
@@ -1397,8 +1479,8 @@ impl GameRunner {
         self.advance_to_phase(Phase::Upkeep);
     }
 
-    /// Declare attackers (CR 508.1). Must be called when the engine is at
-    /// `WaitingFor::DeclareAttackers` (use [`GameRunner::advance_to_combat`]).
+    /// Declare attackers (CR 508.1). Accepts the scenario driver's established
+    /// shorthand for passing an empty beginning-of-combat priority window.
     /// Each entry is `(attacker, defender)` where `defender` is an
     /// [`AttackTarget`](crate::game::combat::AttackTarget) — a player,
     /// planeswalker, or battle (CR 508.1b).
@@ -1406,13 +1488,39 @@ impl GameRunner {
         &mut self,
         attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
     ) -> Result<ActionResult, EngineError> {
-        apply_as_current(
-            &mut self.state,
-            GameAction::DeclareAttackers {
-                attacks: attacks.to_vec(),
-                bands: vec![],
-            },
-        )
+        self.act(GameAction::DeclareAttackers {
+            attacks: attacks.to_vec(),
+            bands: vec![],
+        })
+    }
+
+    /// CR 702.103b: put `attachment` onto `host` in its BESTOWED AURA FORM —
+    /// the shape a real bestow cast produces.
+    ///
+    /// > 702.103b ... As a spell cast bestowed is put onto the stack, it becomes
+    /// > an Aura enchantment and gains enchant creature.
+    ///
+    /// Routes through `casting::apply_bestow_aura_form`, the engine's single
+    /// authority for that form, so a fixture cannot drift from production: it
+    /// removes the `Creature` core type, adds the `Aura` subtype, and grants
+    /// `enchant creature`.
+    ///
+    /// Hand-setting `attached_to` on a printed creature instead produces a state
+    /// production never creates, and CR 704.5p sentence 1
+    /// (`sba::check_illegal_attachment_unattach`) correctly sweeps it away on the
+    /// next state-based-action check — so a bestow fixture that skips this helper
+    /// silently loses its attachment.
+    pub fn attach_as_bestowed_aura(&mut self, attachment: ObjectId, host: ObjectId) {
+        if let Some(obj) = self.state.objects.get_mut(&attachment) {
+            super::casting::apply_bestow_aura_form(obj);
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(host));
+        }
+        if let Some(host_obj) = self.state.objects.get_mut(&host) {
+            if !host_obj.attachments.contains(&attachment) {
+                host_obj.attachments.push(attachment);
+            }
+        }
+        self.state.layers_dirty.mark_full();
     }
 
     /// Declare blockers (CR 509.1). Must be called when the engine is at
@@ -1638,6 +1746,7 @@ impl GameRunner {
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
             WaitingFor::TargetSelection { .. } => "TargetSelection",
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
@@ -2409,6 +2518,16 @@ impl<'a> SpellCast<'a> {
                     // CR 601.2h: finalize the (now fully convoke-paid) cost.
                     act_collect(runner, GameAction::PassPriority, &mut events)?;
                 }
+                WaitingFor::ManaSourceSelection { options, .. } => {
+                    let selection = options.first().cloned().unwrap_or_else(|| {
+                        panic!("ManaSourceSelection must offer at least one source")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ActivateManaSource { selection },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
                     pending_cast,
@@ -2658,6 +2777,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
     // borrow-free match. Kept in sync with `GameRunner::waiting_for_kind`.
     match waiting {
         WaitingFor::ManaPayment { .. } => "ManaPayment",
+        WaitingFor::ManaSourceSelection { .. } => "ManaSourceSelection",
         WaitingFor::ChooseXValue { .. } => "ChooseXValue",
         WaitingFor::TargetSelection { .. } => "TargetSelection",
         WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",

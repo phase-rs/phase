@@ -58,8 +58,12 @@ impl EvasionRemovalPriorityPolicy {
         let target_quality_bonus = removal_target_quality_score(target_value);
         let evasion_bonus = evasion_score(ctx, target, *target_id);
         let velocity_bonus = velocity_score(ctx, target, *target_id);
+        // #6582: threat value alone rewards the biggest body, so a damage spell
+        // gets pointed at a creature it can't kill. Fold in whether the pending
+        // damage is actually lethal (CR 704.5g) so a clean kill outranks a whiff.
+        let lethality_bonus = super::removal_lethality::lethality_bonus(ctx, *target_id, target);
 
-        target_quality_bonus + evasion_bonus + velocity_bonus
+        target_quality_bonus + evasion_bonus + velocity_bonus + lethality_bonus
     }
 }
 
@@ -133,6 +137,12 @@ fn evasion_score(
 /// signal and doesn't blow the user-visible turn-time budget for a
 /// nice-to-have bonus. The threshold comes from
 /// `SearchConfig::projection_min_budget_ms` so it's tunable per difficulty.
+///
+/// Measurement mode (`cargo ai-gate`, duel suite) passes a non-expiring
+/// projection deadline (`projection::projection_deadline`), so the simulation is
+/// bounded by `STEP_CAP` rather than by host speed — a wall-clock bail here
+/// scores `0.0` against a completed projection's up-to-`+3.0`, and this term
+/// selects the removal target.
 fn velocity_score(
     ctx: &PolicyContext<'_>,
     target: &engine::game::game_object::GameObject,
@@ -156,9 +166,13 @@ fn velocity_score(
                 if !ctx.can_afford_projection() {
                     return 0.0;
                 }
-                let Ok(fresh) =
-                    session.get_or_project(ctx.state, ctx.ai_player, target.controller, horizon)
-                else {
+                let Ok(fresh) = session.get_or_project(
+                    ctx.state,
+                    ctx.ai_player,
+                    target.controller,
+                    horizon,
+                    crate::projection::projection_deadline(ctx.config.execution_mode),
+                ) else {
                     return 0.0;
                 };
                 fresh
@@ -211,13 +225,13 @@ mod tests {
     use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, ResolvedAbility, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityDefinition, AbilityKind, Effect, EffectKind, PtValue, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
-        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetSelectionProgress,
-        TargetSelectionSlot, WaitingFor,
+        CastPaymentMode, CopyTargetSlot, GameState, PendingCast, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -227,9 +241,11 @@ mod tests {
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
     use rand::SeedableRng;
+    use web_time::{Duration, Instant};
 
     const BEAST_WITHIN_ORACLE: &str =
         "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.";
+    const LIGHTNING_BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
 
     fn add_creature(
         state: &mut GameState,
@@ -262,25 +278,54 @@ mod tests {
         }
     }
 
+    /// The `PolicyContext` the scoring helpers below run under. Exposed
+    /// separately so a test can also interrogate the context's own gates (e.g.
+    /// `can_afford_projection`) on the exact shape production would see, rather
+    /// than re-deriving the answer from config fields.
+    fn policy_ctx<'a>(
+        state: &'a GameState,
+        decision: &'a AiDecisionContext,
+        candidate: &'a CandidateAction,
+        config: &'a AiConfig,
+        context: &'a crate::context::AiContext,
+    ) -> PolicyContext<'a> {
+        PolicyContext {
+            state,
+            decision,
+            candidate,
+            ai_player: P0,
+            config,
+            context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        }
+    }
+
+    /// Score with a CALLER-OWNED `AiContext`, so the test retains a handle on
+    /// `context.session` (to inspect `projection_cache`) and on
+    /// `context.deadline` (to inject a pre-expired budget). Mirrors
+    /// `policies::context::deadline_test_ctx`. `policy_score` is the
+    /// don't-care-about-the-context wrapper.
+    fn policy_score_in_context(
+        state: &GameState,
+        decision: &AiDecisionContext,
+        target: ObjectId,
+        config: &AiConfig,
+        context: &crate::context::AiContext,
+    ) -> f64 {
+        let candidate = candidate_for(target);
+        EvasionRemovalPriorityPolicy
+            .score(&policy_ctx(state, decision, &candidate, config, context))
+    }
+
     fn policy_score(
         state: &GameState,
         decision: &AiDecisionContext,
         target: ObjectId,
         config: &AiConfig,
     ) -> f64 {
-        let candidate = candidate_for(target);
         let ai_context = crate::context::AiContext::empty(&config.weights);
-        let ctx = PolicyContext {
-            state,
-            decision,
-            candidate: &candidate,
-            ai_player: P0,
-            config,
-            context: &ai_context,
-            cast_facts: None,
-            search_depth: crate::policies::context::SearchDepth::Root,
-        };
-        EvasionRemovalPriorityPolicy.score(&ctx)
+        policy_score_in_context(state, decision, target, config, &ai_context)
     }
 
     fn registry_delta(
@@ -462,6 +507,468 @@ mod tests {
         );
     }
 
+    /// #6582 end-to-end: a real 3-damage burn spell must be aimed at the body it
+    /// can actually kill, not at the biggest threat on the board. This drives the
+    /// PRODUCTION path — a cast that reaches `TargetSelection`, the registered
+    /// `EvasionRemovalPriorityPolicy` verdict, and the full `score_candidates`
+    /// ranking — so the lethality term is proven to survive registry wiring, not
+    /// just to compute the right number in isolation.
+    #[test]
+    fn burn_prefers_the_killable_body_over_the_bigger_unkillable_threat() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        // The killable body is deliberately the LOWER threat, so threat value
+        // alone (the pre-#6582 ranking) would pick the 7/7 the Bolt can't kill.
+        let killable = scenario
+            .add_creature(PlayerId(1), "Scrappy Skirmisher", 2, 2)
+            .id();
+        let unkillable = scenario
+            .add_creature(PlayerId(1), "Looming Colossus", 7, 7)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Lightning Bolt fixture should reach target selection");
+
+        let (pending_cast, target_slots) = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                ..
+            } => (pending_cast, target_slots),
+            other => panic!("expected Lightning Bolt target selection, got {other:?}"),
+        };
+        let effects = crate::policies::context::collect_ability_effects(&pending_cast.ability);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    damage_source: None,
+                    ..
+                }
+            )),
+            "reach guard: Lightning Bolt must parse as 3 default-sourced damage"
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "the regression fixture must not silently drop an unsupported clause"
+        );
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(killable)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(unkillable)));
+
+        let state = runner.state();
+        let decision = build_decision_context(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native).into_measurement(42);
+
+        let killable_delta = registry_delta(state, &decision, killable, &config);
+        let unkillable_delta = registry_delta(state, &decision, unkillable, &config);
+        assert!(
+            killable_delta > unkillable_delta,
+            "the registered removal policy must prefer the body the Bolt kills: \
+             killable 2/2={killable_delta}, unkillable 7/7={unkillable_delta}"
+        );
+
+        let scores = crate::search::score_candidates(state, P0, &config);
+        assert!(
+            full_score_for_target(&scores, killable) > full_score_for_target(&scores, unkillable),
+            "the complete Very Hard scorer must carry the lethality preference through to the \
+             final target ranking"
+        );
+
+        // The #6582 misplay itself: whatever else Very Hard does with a Bolt
+        // ("any target" keeps the opponent's face on the table), it must not
+        // burn it on a 7/7 that survives.
+        let mut rng = SmallRng::seed_from_u64(42);
+        assert_ne!(
+            crate::choose_action(state, P0, &config, &mut rng),
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(unkillable)),
+            }),
+            "Very Hard must not spend a 3-damage burn spell on a 7/7 it cannot kill"
+        );
+    }
+
+    /// T7 — the evasion production wiring is live under a measurement config:
+    /// `velocity_score` reaches `get_or_project` and the projection is taken.
+    ///
+    /// Revert-failing: replacing the `get_or_project` call with a
+    /// `cached_projection`-only lookup, or deleting the fresh-projection arm,
+    /// leaves `projection_cache` empty and turns the positive arm red.
+    ///
+    /// The fixture is deliberately ALREADY AT `OpponentBeginCombat`, the horizon
+    /// `velocity_score` hardcodes. That horizon is not reachable by priority
+    /// passing at all: `auto_advance_once`'s `Phase::BeginCombat` arm opens a
+    /// priority window only when a begin-combat trigger fires, and otherwise
+    /// either advances to `DeclareAttackers` or, per CR 508.8, enters
+    /// `PostCombatMain`. A "natural" fixture here would fail its reach guard
+    /// essentially always.
+    #[test]
+    fn velocity_score_takes_projection_under_measurement_config() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let killable = scenario
+            .add_creature(PlayerId(1), "Scrappy Skirmisher", 2, 2)
+            .id();
+        scenario
+            .add_creature(PlayerId(1), "Looming Colossus", 7, 7)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Lightning Bolt fixture should reach target selection");
+
+        // `decision` is captured from the PRE-mutation state and carries the
+        // TargetSelection pending cast, which is what
+        // `EvasionRemovalPriorityPolicy::score`'s first gate and
+        // `effect_classify::effect_source_id` both read. Capturing it AFTER the
+        // mutation below can never work: the mutation sets `waiting_for` to
+        // `Priority`, which IS the OpponentBeginCombat horizon predicate, and
+        // `build_decision_context` copies `state.waiting_for` verbatim.
+        let decision = build_decision_context(runner.state());
+        assert!(
+            matches!(&decision.waiting_for, WaitingFor::TargetSelection { .. }),
+            "T7 fixture: `decision` must be captured BEFORE the horizon mutation"
+        );
+
+        // Mutate into the OpponentBeginCombat already-at-horizon shape: the
+        // predicate is active_player == target_opponent && phase == BeginCombat
+        // && stack empty && waiting_for == Priority { target_opponent }.
+        let mut state = runner.state().clone();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::BeginCombat;
+        state.stack.clear();
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        // The bolt leaves the STACK but must remain a live object, because
+        // `effect_source_id` resolves the impact chain's source through it.
+        assert!(state.objects.contains_key(&bolt));
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+
+        // Rung 1 — the policy's non-velocity gates still pass on the mutated
+        // state, AND this is the control arm. `Deadline::after(0)` is expired, so
+        // `can_afford_projection` returns false and `velocity_score` returns 0.0
+        // before reaching `get_or_project`. A non-zero total score therefore
+        // proves the other gates pass, while the empty cache proves the
+        // projection did not run.
+        let mut expired_ctx = crate::context::AiContext::empty(&config.weights);
+        expired_ctx.deadline = engine::util::Deadline::after(0);
+        let control = policy_score_in_context(&state, &decision, killable, &config, &expired_ctx);
+        assert_ne!(
+            control, 0.0,
+            "T7 rung 1: EvasionRemovalPriorityPolicy::score must reach velocity_score on this \
+             fixture — a 0.0 here means one of its gates rejected the mutated state, so the \
+             POSITIVE arm below would be red for a fixture reason, not a wiring reason. Stop \
+             and report; do not weaken the positive assertion."
+        );
+        assert!(
+            expired_ctx
+                .session
+                .projection_cache
+                .read()
+                .unwrap()
+                .is_empty(),
+            "T7 control arm: with can_afford_projection() false, velocity_score must not project"
+        );
+
+        // Rung 2 — the projection itself succeeds on this state.
+        crate::projection::projection_fixtures::assert_already_at_horizon(
+            &state,
+            P0,
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentBeginCombat,
+        );
+
+        // Positive arm. `AiContext::empty` initializes `deadline` to
+        // `Deadline::none()` — exactly what `PlannerServices::with_deadline`
+        // installs in measurement mode — so this reproduces the production
+        // deadline state rather than approximating it. Medium's
+        // `projection_min_budget_ms = 2000` would block the projection in
+        // interactive mode, so this arm also exercises the `is_none_or` bypass.
+        let ai_ctx = crate::context::AiContext::empty(&config.weights);
+        let _ = policy_score_in_context(&state, &decision, killable, &config, &ai_ctx);
+        assert_eq!(
+            ai_ctx.session.projection_cache.read().unwrap().len(),
+            1,
+            "velocity_score must take the fresh projection through get_or_project under a \
+             measurement config (revert-failing: cached_projection-only leaves this empty)"
+        );
+    }
+
+    /// T7b — the evasion production wiring passes an EXECUTION-MODE-DERIVED
+    /// deadline to `get_or_project`, on a fixture where that argument's value
+    /// decides the outcome.
+    ///
+    /// T7 above cannot see that argument at all, and adding an assertion there
+    /// would not help: its fixture is deliberately already at
+    /// `OpponentBeginCombat`, so `project_to` returns from the
+    /// `Confidence::Exact` short-circuit BEFORE the loop's only
+    /// `deadline.expired()` read. The deadline is structurally inert there, so
+    /// every possible value of that argument leaves T7 green. This test is the
+    /// traversing sibling; keep both, since T7 still guards the
+    /// already-at-horizon path and the cache interaction that this fixture does
+    /// not exercise.
+    ///
+    /// Both arms share one fixture and one target, and each is revert-failing
+    /// for a different wrong argument:
+    ///   * measurement arm — `projection_deadline` yields `Deadline::none()`,
+    ///     the traversal completes and the projection is cached. Red for
+    ///     `Deadline::after(0)` (bails at the loop head) and for the pre-change
+    ///     hardcoded `Deadline::after(TIME_CAP_MS)` (this traversal costs
+    ///     several times the 15 ms cap), both of which leave the cache empty.
+    ///   * interactive arm — the SAME fixture under `ExecutionMode::Interactive`
+    ///     must NOT complete: the 15 ms cap bails it and the cache stays empty.
+    ///     Red for passing `ctx.context.deadline` instead, which is
+    ///     `Deadline::none()` here — and in production is the planner's
+    ///     whole-turn budget — so the projection would complete and cache one
+    ///     entry. That substitution is invisible under measurement alone,
+    ///     because measurement mode installs `Deadline::none()` on the context
+    ///     too; only the interactive side can discriminate it.
+    ///
+    /// The interactive arm is therefore the one assertion here that compares a
+    /// real elapsed traversal against a wall-clock cap. It is written as a
+    /// negative (`is_empty`) so a drifted-faster traversal fails LOUDLY with a
+    /// populated cache rather than passing vacuously, and the fixture's measured
+    /// traversal is several times the cap in a debug build, which is the only
+    /// build `cargo test` produces.
+    #[test]
+    fn velocity_score_projection_deadline_is_live_on_a_traversing_fixture() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        // The grower is both the reachability mechanism for the
+        // `OpponentBeginCombat` horizon and the removal target under test: a
+        // creature that grows before the opponent's combat is precisely what
+        // `velocity_score` exists to prioritize.
+        let grower = crate::projection::projection_fixtures::seed_opponent_begin_combat_horizon(
+            &mut scenario,
+            P0,
+            PlayerId(1),
+        );
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&bolt].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the real Lightning Bolt fixture should reach target selection");
+
+        // No horizon mutation here: unlike T7, this state is used exactly as the
+        // engine produced it, so `decision` and `state` cannot disagree.
+        let state = runner.state().clone();
+        let decision = build_decision_context(&state);
+        assert!(
+            matches!(&decision.waiting_for, WaitingFor::TargetSelection { .. }),
+            "T7b fixture: the policy's first gate needs a live TargetSelection"
+        );
+
+        // Guard 1 — the begin-combat trigger still parses. Without it the
+        // horizon is unreachable from any state, and guard 2 would report a
+        // confusing GameOverDuringProjection instead.
+        crate::projection::projection_fixtures::assert_begin_combat_trigger_parsed(&state, grower);
+
+        // Guard 2 — and the state genuinely TRAVERSES `project_to`'s loop to
+        // the horizon `velocity_score` hardcodes. A `Confidence::Exact` result
+        // here would mean the fixture had drifted into the short-circuit class,
+        // which is what makes T7 blind to the deadline; both arms below would
+        // then be vacuous.
+        crate::projection::projection_fixtures::assert_traverses_to(
+            &state,
+            P0,
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentBeginCombat,
+        );
+
+        let measurement = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+
+        // Guard 3 — fixture-drift guard for the interactive arm. That arm discriminates
+        // by wall clock: it asserts the 15 ms cap BAILS this traversal, which is a claim
+        // about deadline wiring only while the traversal costs materially more than the
+        // cap. Should the fixture get cheaper (fewer filler cards in
+        // `seed_opponent_begin_combat_horizon`, a cheaper `auto_advance_once` or
+        // `project_to`) or the host get fast enough that it fits inside 15 ms, the arm
+        // silently stops testing anything and its `is_empty` assertion fails as though
+        // the wiring had broken. Fail here instead, naming the real cause.
+        //
+        // Timed on `get_or_project` DIRECTLY, with the same coordinates Guard 2 pinned
+        // and `velocity_score` passes, under an unbounded deadline. Timing
+        // `policy_score_in_context` instead would fold in `candidate_for` and the
+        // policy's other gates, so a slow wrapper could satisfy this guard while the
+        // projection — the only thing that actually reads the deadline — finished well
+        // inside the cap. The probe uses its own session so it cannot warm either arm's
+        // cache.
+        //
+        // MEASURED, and narrower than this test used to claim: the uncapped projection
+        // costs ~29 ms on an M-series debug build, i.e. it clears the 15 ms cap by about
+        // 1.9x — NOT the "several times" the measurement arm's message asserted before
+        // this guard existed. That is the whole reason to time the projection rather
+        // than the wrapper: the wrapper cleared 45 ms comfortably and hid how thin the
+        // real margin is. The threshold sits just above the cap because the arm's actual
+        // precondition is `uncapped > 15 ms` — anything less and it stops discriminating
+        // entirely. A host ~2x faster than this one will trip this guard, which is the
+        // intended outcome: it names the fixture, instead of the arm reporting a wiring
+        // regression that never happened.
+        let probe = crate::context::AiContext::empty(&measurement.weights);
+        let uncapped_start = Instant::now();
+        let uncapped = probe.session.get_or_project(
+            &state,
+            P0,
+            PlayerId(1),
+            crate::projection::ProjectionHorizon::OpponentBeginCombat,
+            engine::util::Deadline::none(),
+        );
+        let uncapped_cost = uncapped_start.elapsed();
+        assert!(
+            uncapped.is_ok(),
+            "reach-guard: the uncapped projection must complete, else this measures a bail \
+             rather than the traversal cost"
+        );
+        assert!(
+            uncapped_cost >= Duration::from_millis(20),
+            "T7b interactive arm can no longer discriminate: the uncapped projection costs \
+             {uncapped_cost:?}, which no longer clears the 15 ms interactive cap with any \
+             margin (it measured ~29 ms when this guard was written). Re-seed the fixture so \
+             the traversal is expensive again, or rewrite the arm to observe the deadline \
+             `velocity_score` hands `get_or_project` directly. Do NOT lower this threshold \
+             below the cap — under it the arm asserts nothing."
+        );
+
+        // Control — the policy's non-velocity gates pass on THIS fixture.
+        // `Deadline::after(0)` is expired, so `can_afford_projection` is false
+        // and `velocity_score` returns before `get_or_project`. A non-zero total
+        // therefore proves the other gates accept the fixture, so a red positive
+        // arm below is a wiring failure and not a fixture failure.
+        let mut expired_ctx = crate::context::AiContext::empty(&measurement.weights);
+        expired_ctx.deadline = engine::util::Deadline::after(0);
+        let control =
+            policy_score_in_context(&state, &decision, grower, &measurement, &expired_ctx);
+        assert_ne!(
+            control, 0.0,
+            "T7b control: EvasionRemovalPriorityPolicy::score must reach velocity_score on this \
+             fixture — a 0.0 means one of its gates rejected it. Stop and report; do not weaken \
+             the arms below."
+        );
+        assert!(
+            expired_ctx
+                .session
+                .projection_cache
+                .read()
+                .unwrap()
+                .is_empty(),
+            "T7b control: with can_afford_projection() false, velocity_score must not project"
+        );
+
+        // Measurement arm — kills `Deadline::after(0)` and `Deadline::after(15)`.
+        let ai_ctx = crate::context::AiContext::empty(&measurement.weights);
+        let _ = policy_score_in_context(&state, &decision, grower, &measurement, &ai_ctx);
+        assert_eq!(
+            ai_ctx.session.projection_cache.read().unwrap().len(),
+            1,
+            "under a measurement config the projection deadline must not expire, so this \
+             traversal completes and caches (revert-failing: any finite budget passed here bails \
+             a traversal Guard 3 measured at ~29 ms against the 15 ms interactive cap)"
+        );
+
+        // Interactive arm — kills `ctx.context.deadline`.
+        let interactive = create_config(AiDifficulty::Medium, Platform::Native);
+        assert!(
+            !interactive.execution_mode.is_measurement(),
+            "T7b interactive arm: create_config must default to ExecutionMode::Interactive"
+        );
+        let interactive_ctx = crate::context::AiContext::empty(&interactive.weights);
+        // Non-vacuity guard: the arm is only meaningful if the policy actually
+        // REACHES `get_or_project` in this context. `AiContext::empty` carries
+        // `Deadline::none()`, so `can_afford_projection`'s `is_none_or` floor
+        // bypass applies despite Medium's 2000 ms `projection_min_budget_ms`.
+        // Were that false, the cache would be empty because nothing projected,
+        // and the assertion below would pass no matter what deadline the
+        // production line passes.
+        let candidate = candidate_for(grower);
+        assert!(
+            policy_ctx(
+                &state,
+                &decision,
+                &candidate,
+                &interactive,
+                &interactive_ctx
+            )
+            .can_afford_projection(),
+            "T7b interactive arm would be vacuous: velocity_score never reaches get_or_project \
+             because can_afford_projection() is false"
+        );
+        let _ = policy_score_in_context(&state, &decision, grower, &interactive, &interactive_ctx);
+        assert!(
+            interactive_ctx
+                .session
+                .projection_cache
+                .read()
+                .unwrap()
+                .is_empty(),
+            "under an interactive config the 15 ms projection cap must bail this traversal, so \
+             nothing is cached (revert-failing: passing ctx.context.deadline here hands the \
+             projection the caller's whole-turn budget and it completes)"
+        );
+    }
+
     #[test]
     fn activated_removal_weights_controller_threat_but_beneficial_activation_is_neutral() {
         let destroy = Effect::Destroy {
@@ -495,11 +1002,11 @@ mod tests {
             add_creature(&mut state, PlayerId(2), &format!("Goblin {index}"), 1, 1);
         }
         let trigger_source = ObjectId(999);
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: trigger_source,
             controller: P0,
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Any,
                     cant_regenerate: false,
@@ -507,7 +1014,7 @@ mod tests {
                 Vec::new(),
                 trigger_source,
                 P0,
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -518,12 +1025,15 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+            provenance: None,
+        }));
         let config = AiConfig::default();
         let slot = TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],
             optional: false,
             chooser: None,
+            effect_kind: EffectKind::NoOp,
+            effect_detail: TargetEffectDetail::None,
         };
         let trigger = AiDecisionContext {
             waiting_for: WaitingFor::TriggerTargetSelection {
@@ -597,6 +1107,8 @@ mod tests {
                     ],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -663,6 +1175,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(flyer)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -729,6 +1243,8 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(ground_opp)],
                     optional: false,
                     chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),

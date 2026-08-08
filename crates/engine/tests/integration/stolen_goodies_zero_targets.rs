@@ -56,6 +56,7 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             core_types: vec![CoreType::Sorcery],

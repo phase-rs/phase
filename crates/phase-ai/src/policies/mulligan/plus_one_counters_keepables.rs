@@ -19,7 +19,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Cheap creature threshold — mana value ≤ 3 qualifies as an early counter target.
 const CHEAP_CREATURE_MV: u32 = 3;
@@ -59,8 +59,10 @@ impl MulliganPolicy for PlusOneCountersMulligan {
                 continue;
             };
 
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
+            }
+            if obj.card_types.core_types.contains(&CoreType::Land) {
                 continue;
             }
 

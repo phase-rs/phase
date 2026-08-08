@@ -22,60 +22,119 @@ expression: "&ir"
         "fragment": "Sacrifice a land: Target creature you control gains shroud until end of turn."
       },
       "node": {
-        "PreLoweredSpell": {
-          "kind": "Activated",
-          "effect": {
-            "type": "GenericEffect",
-            "static_abilities": [
+        "Spell": {
+          "source_text": "Target creature you control gains shroud until end of turn",
+          "body": {
+            "clauses": [
               {
-                "mode": "Continuous",
-                "affected": {
-                  "type": "ParentTarget"
+                "id": 0,
+                "source": {
+                  "id": {
+                    "item": 0,
+                    "ordinal": 1
+                  },
+                  "span": {
+                    "first_line": 0,
+                    "last_line": 0,
+                    "start_byte": 0,
+                    "end_byte": 58,
+                    "precision": "ChainRelative",
+                    "ordinal_within_span": 0
+                  },
+                  "fragment": "Target creature you control gains shroud until end of turn"
                 },
-                "modifications": [
-                  {
-                    "type": "AddKeyword",
-                    "keyword": "Shroud"
+                "disposition": {
+                  "Emit": {
+                    "followup": null,
+                    "intrinsic": null
                   }
-                ],
+                },
+                "parsed": {
+                  "effect": {
+                    "type": "GenericEffect",
+                    "static_abilities": [
+                      {
+                        "mode": "Continuous",
+                        "affected": {
+                          "type": "ParentTarget"
+                        },
+                        "modifications": [
+                          {
+                            "type": "AddKeyword",
+                            "keyword": "Shroud"
+                          }
+                        ],
+                        "condition": null,
+                        "affected_zone": null,
+                        "effect_zone": null,
+                        "active_zones": [],
+                        "characteristic_defining": false,
+                        "description": "gain shroud"
+                      }
+                    ],
+                    "duration": "UntilEndOfTurn",
+                    "target": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "You",
+                      "properties": []
+                    }
+                  },
+                  "duration": "UntilEndOfTurn",
+                  "sub_ability": null,
+                  "distribute": null,
+                  "multi_target": null,
+                  "condition": null,
+                  "optional": false,
+                  "unless_pay": null
+                },
+                "boundary": null,
                 "condition": null,
-                "affected_zone": null,
-                "effect_zone": null,
-                "active_zones": [],
-                "characteristic_defining": false,
-                "description": "gain shroud"
+                "is_optional": false,
+                "opponent_may_scope": null,
+                "repeat_for": null,
+                "player_scope": null,
+                "starting_with": null,
+                "delayed_condition": null,
+                "prefix_delayed_condition": null,
+                "multi_target": null,
+                "where_x_expression": null,
+                "unless_pay": null
               }
             ],
-            "duration": "UntilEndOfTurn",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": "You",
-              "properties": []
-            }
+            "kind": "Activated",
+            "continuation_kind": null,
+            "player_scope_rewrite": "Apply",
+            "chain_rounding": null,
+            "actor": null,
+            "in_trigger": false,
+            "repeat_until": null
           },
-          "cost": {
-            "type": "Sacrifice",
-            "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Land"
-              ],
-              "controller": null,
-              "properties": []
+          "shell": {
+            "sub_link": null,
+            "cost": {
+              "type": "Sacrifice",
+              "target": {
+                "type": "Typed",
+                "type_filters": [
+                  "Land"
+                ],
+                "controller": null,
+                "properties": []
+              },
+              "count": 1
             },
-            "count": 1
+            "description": "Sacrifice a land: Target creature you control gains shroud until end of turn.",
+            "stages": [
+              "NormalizeActivatedManaInstead",
+              "ExtractCostReduction",
+              "ExtractManaSpendTrigger"
+            ]
           },
-          "sub_ability": null,
-          "duration": "UntilEndOfTurn",
-          "description": "Sacrifice a land: Target creature you control gains shroud until end of turn.",
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
-          "optional": false,
-          "forward_result": false
+          "die_results": [],
+          "root_transforms": []
         }
       }
     }

@@ -5,7 +5,7 @@
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
     "quick": {
-      "step1": "You'll open 3 packs of 14 cards each",
+      "step1": "You'll open {{packCount}} packs of {{cardsPerPack}} cards each",
       "step2": "Pick one card per pack, then pass the rest to AI drafters",
       "step3": "Packs alternate direction each round — left, right, left",
       "step4": "After all picks, build a 40-card deck and play a match"
@@ -104,11 +104,14 @@
     "mainDeck": "Main Deck",
     "emptyDeckHint": "Click cards from the pool to add them to your deck.",
     "addableCards": "Addable Cards",
+    "searchAddableCards": "Search addable cards...",
     "autoLands": "Auto Lands",
     "suggestDeck": "Suggest Deck",
     "copyList": "Copy Deck List",
     "copied": "Copied!",
     "submitDeck": "Submit Deck",
+    "validationTitle": "Deck needs attention",
+    "submitFailed": "Unable to submit deck",
     "removeCard": "Remove {{name}}",
     "addCard": "Add {{name}}",
     "cardCount": "/ {{min}} cards",

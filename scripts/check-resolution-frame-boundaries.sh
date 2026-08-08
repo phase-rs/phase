@@ -22,6 +22,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 resolution_path = Path("crates/engine/src/types/resolution.rs")
+game_state_path = Path("crates/engine/src/types/game_state.rs")
 legacy_keys = {
     "pending_continuation",
     "search_continuation_attach_host",
@@ -292,6 +293,12 @@ for file_name in files:
     allowed_spans = test_spans[:]
     if path == resolution_path:
         allowed_spans.extend(allowed_legacy_spans)
+    if path == game_state_path:
+        # GameStateDecode owns the canonicalization shared by persisted-state
+        # and v1 resolution-wire reads. Its firing migration may inspect the
+        # v1 child continuation before ResolutionStateWire projects it into a
+        # typed resolution frame.
+        allowed_spans.append(function_span(source, "migrate_legacy_trigger_firing_carriers"))
 
     for offset, key in string_literals(source):
         if key not in legacy_keys or in_any_span(offset, allowed_spans):

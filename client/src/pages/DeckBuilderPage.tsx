@@ -3,7 +3,8 @@ import { useSearchParams } from "react-router";
 
 import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
-import { CardPreview } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
+import type { CardHoverInfo } from "../components/card/CardPreview";
 import { DeckBuilder } from "../components/deck-builder/DeckBuilder";
 import type { BrowserLegalityFilter, CardSearchFilters } from "../components/deck-builder/CardSearch";
 import { DECK_CONSTRUCTION_FORMATS } from "../data/formatRegistry";
@@ -57,7 +58,7 @@ export function DeckBuilderPage() {
   useAudioContext("deck_builder");
   useAltToggle();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [hoveredCard, setHoveredCard] = useState<{ name: string; scryfallId?: string } | null>(null);
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const format = parseDeckFormat(searchParams.get("format"));
   const initialDeckName = searchParams.get("create") === "1"
     ? null
@@ -121,9 +122,7 @@ export function DeckBuilderPage() {
   return (
     <div className="menu-scene deck-builder-shell flex flex-col overflow-hidden">
       <DeckBuilder
-        onCardHover={useCallback((name: string | null, scryfallId?: string) => {
-          setHoveredCard(name ? { name, scryfallId } : null);
-        }, [])}
+        onCardHover={setHoveredCard}
         format={format}
         onFormatChange={handleFormatChange}
         initialDeckName={initialDeckName}
@@ -132,9 +131,8 @@ export function DeckBuilderPage() {
         onSearchFiltersChange={handleSearchFiltersChange}
         onResetSearch={handleResetSearch}
       />
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        scryfallId={hoveredCard?.scryfallId}
+      <HoverCardPreview
+        card={hoveredCard}
         onDismiss={useCallback(() => setHoveredCard(null), [])}
         mobileLayout="compact"
       />

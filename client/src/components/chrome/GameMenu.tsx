@@ -12,6 +12,15 @@ import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
 
+/**
+ * Who a rollback request is addressed to. A string union rather than a boolean
+ * because the axis is *who the audience is*, not a yes/no: at a table the
+ * request is a proposal every other human votes on; solo vs. AI there is nobody
+ * to ask and it is simply an undo. Only the label differs — the wire request is
+ * the same either way.
+ */
+export type TakebackAudience = "table" | "solo";
+
 interface GameMenuProps {
   gameId: string;
   isAiMode: boolean;
@@ -26,6 +35,9 @@ interface GameMenuProps {
   /** GH #1507: ask every other human player to approve rolling the game
    * back to the state before this player's last action. Online-only. */
   onRequestTakeback?: () => void;
+  /** Label axis for the entry above. Defaults to `"table"`, which is the
+   *  pre-existing wording. */
+  takebackAudience?: TakebackAudience;
   /** Show the always-visible Sandbox Tools button. Gated by the caller to
    *  game modes where debug actions actually work (vs-AI, local, or a
    *  multiplayer sandbox). */
@@ -51,6 +63,7 @@ export function GameMenu({
   onHelpClick,
   onConcede,
   onRequestTakeback,
+  takebackAudience = "table",
   showSandboxTools,
   onSandboxToolsClick,
   debugClickModeButtonVisible = false,
@@ -218,9 +231,16 @@ export function GameMenu({
               }}
             />
           )}
-          {isOnlineMode && onRequestTakeback && (
+          {/* The prop's presence is the authority, matching `showSandboxTools`
+              two blocks above. A menu should not re-derive when an action is
+              legal — GamePage decides, from the transport that implements it. */}
+          {onRequestTakeback && (
             <MenuButton
-              label={t("gameMenu.requestTakeback")}
+              label={t(
+                takebackAudience === "solo"
+                  ? "gameMenu.undoLastAction"
+                  : "gameMenu.requestTakeback",
+              )}
               onClick={() => {
                 setOpen(false);
                 onRequestTakeback();

@@ -14,6 +14,10 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
+    ResolvedCombatMembershipReplayInvariantError,
+};
 use crate::types::statics::{
     AttackDefenderScope, BlockExceptionKind, CombatAloneAction, CombatAloneRequirement, StaticMode,
     StaticModeKind,
@@ -201,8 +205,10 @@ impl<'de> Deserialize<'de> for BlockRequirement {
 pub struct CombatState {
     pub attackers: Vec<AttackerInfo>,
     /// attacker_id -> list of blocker ids
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
     /// blocker_id -> attacker_ids (reverse lookup; Vec supports multi-blocking via ExtraBlockers)
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_to_attacker: HashMap<ObjectId, Vec<ObjectId>>,
     /// Defending players who have declared blockers this step.
     #[serde(default)]
@@ -215,23 +221,36 @@ pub struct CombatState {
     /// they attacked in this combat. Declaration history, not live attacker
     /// membership, so Melee counts remain stable if attackers leave combat
     /// before the trigger resolves.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set"
+    )]
     pub attacked_defenders_this_combat: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 702.121a: Source-specific current-combat counterpart to
     /// `attacked_defenders_this_combat`.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set"
+    )]
     pub creature_attacked_defenders_this_combat: HashMap<ObjectId, HashSet<PlayerId>>,
     /// CR 400.7 + CR 508.1: exact current-combat attack ledger for source
     /// intervening-if conditions. The raw-id defender map remains a display
     /// history; this identity ledger must not match a re-entered object.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub attacking_incarnations_this_combat: HashSet<ObjectIncarnationRef>,
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
     /// CR 510.4: Combatants that had first strike or double strike as the first
     /// combat-damage step began. `None` means the step has not been snapshotted;
     /// `Some(empty)` means combat has only a regular damage step.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
     pub first_strike_participants: Option<HashSet<ObjectId>>,
     /// Index into attacker list for resumable damage assignment iteration.
     pub damage_step_index: Option<usize>,
@@ -340,6 +359,115 @@ pub enum DamageTarget {
     Player(PlayerId),
 }
 
+/// CR 506.4: The exact combat roles one object held at a single moment.
+///
+/// Recorded by the CR 733 removal command so a replay can verify it is pruning
+/// the same edges the live removal pruned. `damage_assignments` is carried
+/// explicitly because `CombatState`'s hand-written `PartialEq` does NOT compare
+/// that field — a check that leaned on whole-struct equality would be blind to
+/// exactly the bookkeeping this authority prunes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombatParticipation {
+    /// The object's own attacker entry, when it was an attacking creature.
+    pub attacking: Option<AttackerInfo>,
+    /// CR 509.1g: attacking creatures this object was blocking.
+    pub blocking: Vec<ObjectId>,
+    /// CR 509.1h: blocking creatures assigned to this object as an attacker.
+    pub blocked_by: Vec<ObjectId>,
+    /// CR 510.1: combat damage this object had already been assigned to deal.
+    pub damage_assignments: Vec<DamageAssignment>,
+}
+
+impl CombatParticipation {
+    /// Reads every combat role `oid` currently holds.
+    pub fn capture(state: &GameState, oid: ObjectId) -> Self {
+        let Some(combat) = state.combat.as_ref() else {
+            return Self::default();
+        };
+        Self {
+            attacking: combat
+                .attackers
+                .iter()
+                .find(|a| a.object_id == oid)
+                .cloned(),
+            blocking: combat
+                .blocker_to_attacker
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+            blocked_by: combat
+                .blocker_assignments
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+            damage_assignments: combat
+                .damage_assignments
+                .get(&oid)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// CR 506.4: whether the object held no combat role at all, so removing it
+    /// would prune nothing.
+    pub fn is_empty(&self) -> bool {
+        self.attacking.is_none()
+            && self.blocking.is_empty()
+            && self.blocked_by.is_empty()
+            && self.damage_assignments.is_empty()
+    }
+}
+
+/// CR 506.4: Drops every combat edge that names `oid`, in the live authority's
+/// order. Returns whether `oid` was an attacking creature, which is the only
+/// case that can change a Layer 6 `FilterProp::Attacking` grant.
+///
+/// Single structural authority shared by the live `remove_object_from_combat`
+/// and the CR 733 replay applier, so a replayed prune cannot drift from the
+/// prune the game actually performed.
+pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> bool {
+    let Some(combat) = state.combat.as_mut() else {
+        return false;
+    };
+    let attackers_before = combat.attackers.len();
+    combat.attackers.retain(|a| a.object_id != oid);
+    let attacker_removed = combat.attackers.len() != attackers_before;
+    // Drop attacker-keyed forward assignments (oid was an attacker with blockers
+    // assigned to it).
+    combat.blocker_assignments.remove(&oid);
+    // Remove as blocker from all remaining attacker assignments.
+    for blockers in combat.blocker_assignments.values_mut() {
+        blockers.retain(|b| *b != oid);
+    }
+    // Remove reverse lookup when oid was a blocker.
+    combat.blocker_to_attacker.remove(&oid);
+    // Prune oid from every blocker's attacker list (oid was an attacker).
+    combat.blocker_to_attacker.retain(|_, attackers| {
+        attackers.retain(|id| *id != oid);
+        !attackers.is_empty()
+    });
+    // CR 510.1: remove any pending damage assignments for this object.
+    combat.damage_assignments.remove(&oid);
+    attacker_removed
+}
+
+/// CR 733: Journals one settled combat-membership edit through its owning family.
+fn record_combat_membership_edit(
+    state: &mut GameState,
+    object: ObjectIncarnationRef,
+    edit: ResolvedCombatMembershipEdit,
+) {
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_combat_membership(ResolvedCombatMembershipCommand {
+            object,
+            edit,
+            cause,
+        })
+        .expect("resolved combat membership must have a live journal cause");
+}
+
 /// CR 508.4: Place a permanent onto the battlefield attacking.
 /// The creature is not "declared as an attacker" — attack triggers do not fire.
 /// Determines the defending player from: (1) source creature's combat info,
@@ -355,6 +483,26 @@ pub fn enter_attacking(
     let (defending_player, attack_target) =
         defending_player_for_enters_attacking(state, source_id, controller);
 
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
+}
+
+/// CR 508.4 + CR 733: seat `object_id` as an attacking creature against an
+/// already-decided defender and journal the settled pair.
+///
+/// Shared by `enter_attacking` (which derives the pair from ambient state) and
+/// `place_attacking_alongside` (which is handed the pair by its caller), so both
+/// entry points record through one authority.
+fn push_attacker_and_journal(
+    state: &mut GameState,
+    object_id: ObjectId,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+) {
+    let reference = state
+        .objects
+        .get(&object_id)
+        .map(ObjectIncarnationRef::from_object);
+
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
             object_id,
@@ -365,6 +513,20 @@ pub fn enter_attacking(
         // attacking is an attacking creature; re-evaluate Layer 6
         // FilterProp::Attacking { defender: None } grants immediately.
         state.layers_dirty.mark_full();
+
+        // CR 733 + CR 508.4: the defending player and attack target are a CHOICE
+        // the rules assign to the controller; record the settled pair so replay
+        // installs it instead of re-deriving from ambient state.
+        if let Some(reference) = reference {
+            record_combat_membership_edit(
+                state,
+                reference,
+                ResolvedCombatMembershipEdit::Attack {
+                    resulting_defending_player: defending_player,
+                    resulting_attack_target: attack_target,
+                },
+            );
+        }
     }
 }
 
@@ -478,17 +640,12 @@ pub fn place_attacking_alongside(
         // at entry time, not re-entry).
         obj.summoning_sick = true;
     }
-    if let Some(combat) = state.combat.as_mut() {
-        combat.attackers.push(AttackerInfo::new(
-            object_id,
-            attack_target,
-            defending_player,
-        ));
-        // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
-        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
-        // grants.
-        state.layers_dirty.mark_full();
-    }
+    // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
+    // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking { defender: None }
+    // grants. CR 733: journals through the same attacker-seating authority as
+    // `enter_attacking` — the caller already chose the defender, so the recorded
+    // pair is its argument rather than an ambient derivation.
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
 }
 
 /// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a
@@ -504,9 +661,11 @@ pub fn place_attacking_alongside(
 /// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
 /// recorded assignments directly. Returns `true` when the block was established.
 pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
-    let Some(blocker_controller) = state.objects.get(&blocker_id).map(|o| o.controller) else {
+    let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
     };
+    let blocker_controller = blocker.controller;
+    let reference = ObjectIncarnationRef::from_object(blocker);
     let Some(combat) = state.combat.as_mut() else {
         return false;
     };
@@ -524,6 +683,8 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
         return false;
     }
     // CR 509.1h: an attacking creature with one or more blockers becomes blocked.
+    // The bit is sticky, so its prior value is recorded rather than recomputed.
+    let expected_attacker_blocked = info.blocked;
     info.blocked = true;
     // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
     combat
@@ -541,6 +702,18 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();
+    // CR 733: journal the settled block. All four writes above (the sticky
+    // blocked bit, both blocker maps, and the per-turn blocked set) follow
+    // structurally from this blocker/attacker pair, so the pair plus the prior
+    // blocked bit is the whole receipt.
+    record_combat_membership_edit(
+        state,
+        reference,
+        ResolvedCombatMembershipEdit::Block {
+            resulting_attacker: attacker_id,
+            expected_attacker_blocked,
+        },
+    );
     true
 }
 
@@ -551,21 +724,205 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
 /// damage. Emits no event (the caller decides whether the CR 509.3c precondition
 /// is met). Returns `false` if `oid` is not a current attacker.
 pub fn mark_attacker_blocked(state: &mut GameState, oid: ObjectId) -> bool {
+    let reference = state
+        .objects
+        .get(&oid)
+        .map(ObjectIncarnationRef::from_object);
     let Some(combat) = state.combat.as_mut() else {
         return false;
     };
     let Some(info) = combat.attackers.iter_mut().find(|a| a.object_id == oid) else {
         return false;
     };
+    // CR 509.1h: the bit is sticky, so re-marking an already-blocked attacker
+    // mutates nothing and is not journaled.
+    let already_blocked = info.blocked;
     info.blocked = true;
     // CR 613.1f: `FilterProp::Blocked` grants may now apply; re-evaluate layers.
     state.layers_dirty.mark_full();
+    // CR 733: journal only the false-to-true transition, so the applier can
+    // require the bit is still clear before installing it.
+    if let Some(reference) = reference.filter(|_| !already_blocked) {
+        record_combat_membership_edit(state, reference, ResolvedCombatMembershipEdit::MarkBlocked);
+    }
     true
+}
+
+/// Installs one already-resolved CR 506.3 / CR 506.4 combat-membership edit
+/// verbatim.
+///
+/// Deliberately re-runs NONE of the resolve-time derivation. In particular it
+/// never calls `enter_attacking`: that authority picks the defending player from
+/// ambient state (`state.current_trigger_event`, the source's attacker entry, a
+/// controller-scan of the live attacker list, then an opponent fallback), none
+/// of which is reconstructible during replay. CR 508.4 makes the defender a
+/// choice the controller owns, so re-deriving it would both desynchronize replay
+/// and re-decide a settled choice. The recorded pair is installed as-is.
+///
+/// Legality gates are likewise not re-run: CR 506.3b/c/e and CR 508.4a decided
+/// at resolve time whether the creature ever became attacking or blocking, and a
+/// recorded command exists only because it did.
+pub fn apply_resolved_combat_membership(
+    state: &mut GameState,
+    command: &ResolvedCombatMembershipCommand,
+) -> Result<(), ResolvedCombatMembershipReplayInvariantError> {
+    let object_id = command.object.object_id;
+    let object = state.objects.get(&object_id).ok_or(
+        ResolvedCombatMembershipReplayInvariantError::UnknownObject(object_id),
+    )?;
+    // CR 400.7: a re-entered object is a new object and must not satisfy a
+    // command recorded against its predecessor incarnation.
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedCombatMembershipReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+
+    // Every edit in this family reads the recorded expectation against live
+    // state BEFORE any mutation, so a rejected command leaves no partial edit.
+    match &command.edit {
+        ResolvedCombatMembershipEdit::Attack {
+            resulting_defending_player,
+            resulting_attack_target,
+        } => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            if combat.attackers.iter().any(|a| a.object_id == object_id) {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::AlreadyAttacking(object_id),
+                );
+            }
+            // CR 508.4: install the RECORDED defender and attack target.
+            combat.attackers.push(AttackerInfo::new(
+                object_id,
+                *resulting_attack_target,
+                *resulting_defending_player,
+            ));
+        }
+        ResolvedCombatMembershipEdit::Block {
+            resulting_attacker,
+            expected_attacker_blocked,
+        } => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            let info = combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == *resulting_attacker)
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NotAttacking(
+                    *resulting_attacker,
+                ))?;
+            if info.blocked != *expected_attacker_blocked {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::BlockedPreconditionMismatch {
+                        attacker: *resulting_attacker,
+                        expected: *expected_attacker_blocked,
+                        found: info.blocked,
+                    },
+                );
+            }
+            if combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| attackers.contains(resulting_attacker))
+            {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::DuplicateBlock {
+                        attacker: *resulting_attacker,
+                        blocker: object_id,
+                    },
+                );
+            }
+            // CR 509.1h then CR 509.1g: the same four writes the live authority
+            // performed, in the same order.
+            info.blocked = true;
+            combat
+                .blocker_to_attacker
+                .entry(object_id)
+                .or_default()
+                .push(*resulting_attacker);
+            combat
+                .blocker_assignments
+                .entry(*resulting_attacker)
+                .or_default()
+                .push(object_id);
+            state.creatures_blocked_this_turn.insert(object_id);
+        }
+        ResolvedCombatMembershipEdit::MarkBlocked => {
+            let combat = state
+                .combat
+                .as_mut()
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NoCombat)?;
+            let info = combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == object_id)
+                .ok_or(ResolvedCombatMembershipReplayInvariantError::NotAttacking(
+                    object_id,
+                ))?;
+            // CR 509.1h: recorded only on a false-to-true transition, so a
+            // still-unblocked attacker is the only state this can install into.
+            if info.blocked {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::BlockedPreconditionMismatch {
+                        attacker: object_id,
+                        expected: false,
+                        found: true,
+                    },
+                );
+            }
+            info.blocked = true;
+        }
+        ResolvedCombatMembershipEdit::Remove {
+            expected_participation,
+        } => {
+            let found = CombatParticipation::capture(state, object_id);
+            if found != *expected_participation {
+                return Err(
+                    ResolvedCombatMembershipReplayInvariantError::ParticipationMismatch {
+                        object: object_id,
+                        expected: Box::new(expected_participation.clone()),
+                        found: Box::new(found),
+                    },
+                );
+            }
+            // CR 506.4: the prune itself is a structural consequence of the
+            // verified participation, so it re-runs the live authority.
+            //
+            // CR 613.1f: mirror the live authority's narrower marking — only a
+            // removed ATTACKER can change a `FilterProp::Attacking` grant, so
+            // pruning a pure blocker leaves the layer system alone.
+            if prune_object_from_combat(state, object_id) {
+                state.layers_dirty.mark_full();
+            }
+            return Ok(());
+        }
+    }
+
+    // CR 506.4 + CR 613.1f: seating an attacker or establishing a block drives
+    // Layer 6 `FilterProp::Attacking` / `Blocking` / `Blocked` grants;
+    // re-evaluate exactly as the live authorities do.
+    state.layers_dirty.mark_full();
+    Ok(())
 }
 
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
+
+    // CR 508.1a: choosing a creature more than once cannot produce two
+    // attackers; reject duplicate declarations before checking their other
+    // individual restrictions.
+    let mut declared = HashSet::with_capacity(attacker_ids.len());
+    if attacker_ids.iter().any(|id| !declared.insert(*id)) {
+        return Err("A creature can't be declared as an attacker more than once".to_string());
+    }
 
     // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
     if let Some(max) = max_attackers_each_combat(state) {
@@ -935,37 +1292,61 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
 /// Yields `(&StaticDefinition, ObjectId)` — the source id re-resolves the
 /// controller for `FilterContext`, so no `GameObject` field beyond `.id` is read.
 fn block_restriction_statics_against_from_precomputed<'a>(
-    state: &'a GameState,
+    state: &GameState,
     attacker_id: ObjectId,
     precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (&'a StaticDefinition, ObjectId)> + 'a {
-    precomputed.iter().filter_map(move |(src_id, def)| {
-        let src = state.objects.get(src_id)?;
-        // CR 604.1: a static with no `affected` filter is implicitly about its
-        // own source (intrinsic SelfRef semantics).
-        let affected_ok = match def.affected.as_ref() {
-            None => src.id == attacker_id,
-            Some(filter) => matches_target_filter(
-                state,
-                attacker_id,
-                filter,
-                &FilterContext::from_source(state, src.id),
-            ),
-        };
-        if !affected_ok {
-            return None;
-        }
-        let condition_ok = def.condition.as_ref().is_none_or(|condition| {
-            crate::game::layers::evaluate_condition_with_recipient(
-                state,
-                condition,
-                src.controller,
-                src.id,
-                attacker_id,
-            )
-        });
-        condition_ok.then_some((def, *src_id))
-    })
+) -> Vec<(&'a StaticDefinition, ObjectId)> {
+    precomputed
+        .iter()
+        .filter_map(|(src_id, def)| {
+            let src = state.objects.get(src_id)?;
+            // CR 604.1: a static with no `affected` filter is implicitly about its
+            // own source (intrinsic SelfRef semantics).
+            let affected_ok = match def.affected.as_ref() {
+                None => src.id == attacker_id,
+                Some(filter) => matches_target_filter(
+                    state,
+                    attacker_id,
+                    filter,
+                    &FilterContext::from_source(state, src.id),
+                ),
+            };
+            if !affected_ok {
+                return None;
+            }
+            let condition_ok = def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    attacker_id,
+                )
+            });
+            condition_ok.then_some((def, *src_id))
+        })
+        .collect()
+}
+
+/// CR 509.1b: True when a bare, currently applicable `CantBeBlocked` static
+/// makes this creature unblockable. This shares the combat legality predicate's
+/// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
+/// restrictions intentionally remain distinct.
+pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
+    let restrictions = collect_block_restriction_statics(state);
+    has_cant_be_blocked_static_from_precomputed(state, attacker_id, &restrictions)
+}
+
+/// CR 509.1b: Precomputed counterpart of `has_cant_be_blocked_static` for
+/// callers deriving multiple battlefield-object views from one game state.
+pub fn has_cant_be_blocked_static_from_precomputed(
+    state: &GameState,
+    attacker_id: ObjectId,
+    restrictions: &[(ObjectId, StaticDefinition)],
+) -> bool {
+    block_restriction_statics_against_from_precomputed(state, attacker_id, restrictions)
+        .into_iter()
+        .any(|(definition, _)| definition.mode == StaticMode::CantBeBlocked)
 }
 
 /// CR 509.1b: Blocker-side restriction ("~ can't block").
@@ -2178,6 +2559,7 @@ fn validate_blockers_core(
             *attacker_id,
             &block_restriction,
         )
+        .into_iter()
         .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
         if !has_unless_all {
             continue;
@@ -3242,11 +3624,10 @@ struct AttackDeclarationConstraints {
     /// Eligible attacker ids (attacking team, all creature-level restrictions
     /// passed), ascending by `ObjectId` for determinism.
     candidates: Vec<ObjectId>,
-    /// Per-candidate legal `AttackTarget`s after all HARD target restrictions
+    /// Per-candidate `AttackTarget`s after all HARD target restrictions
     /// (requirements do NOT filter this). Ascending `AttackTarget` order.
+    /// This is the solver's full universe, not the UI's selectable-support map.
     legal_targets: HashMap<ObjectId, Vec<AttackTarget>>,
-    /// Union of `legal_targets` values (aggregate compat for `valid_attack_targets`).
-    aggregate_targets: Vec<AttackTarget>,
     /// CR 508.1d / CR 701.15c requirement multiset.
     requirements: Vec<AttackRequirement>,
     /// CR 508.1c global cap (`MaxAttackersEachCombat { defender: None }`).
@@ -3404,13 +3785,22 @@ fn attack_passes_temporary_prohibition(
         let crate::types::ability::GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+            activity:
+                crate::types::ability::ProhibitedActivity::Attack {
+                    defended,
+                    protected_player,
+                },
             ..
         } = restriction
         else {
             continue;
         };
-        let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+        // New restrictions snapshot the protected player on resolution. Legacy
+        // serialized restrictions have no snapshot and retain their historic
+        // source-controller lookup.
+        let Some(protected) = (*protected_player)
+            .or_else(|| state.objects.get(source).map(|object| object.controller))
+        else {
             continue;
         };
         let attacker_is_affected = match affected_players {
@@ -3495,7 +3885,6 @@ impl AttackDeclarationConstraints {
         let attackable_players = attackable_player_targets(state);
 
         let mut legal_targets: HashMap<ObjectId, Vec<AttackTarget>> = HashMap::new();
-        let mut aggregate: HashSet<AttackTarget> = HashSet::new();
         for &cid in &candidates {
             let mut targets: Vec<AttackTarget> = all_targets
                 .iter()
@@ -3503,13 +3892,8 @@ impl AttackDeclarationConstraints {
                 .filter(|&t| attacker_can_attack_target(state, cid, t, &gates, &active_team))
                 .collect();
             targets.sort_unstable();
-            for &t in &targets {
-                aggregate.insert(t);
-            }
             legal_targets.insert(cid, targets);
         }
-        let mut aggregate_targets: Vec<AttackTarget> = aggregate.into_iter().collect();
-        aggregate_targets.sort_unstable();
 
         // CR 508.1d / CR 701.15c: requirement multiset over eligible candidates.
         let mut requirements = Vec::new();
@@ -3580,7 +3964,6 @@ impl AttackDeclarationConstraints {
         AttackDeclarationConstraints {
             candidates,
             legal_targets,
-            aggregate_targets,
             requirements,
             global_cap: max_attackers_each_combat(state),
             per_defender_caps: per_defender_caps(state),
@@ -3591,15 +3974,65 @@ impl AttackDeclarationConstraints {
 
     /// Free (untaxed) legal targets for a candidate.
     fn free_targets(&self, state: &GameState, cid: ObjectId) -> Vec<AttackTarget> {
+        self.targets_in_universe(state, cid, AttackTargetUniverse::Free)
+    }
+
+    fn targets_in_universe(
+        &self,
+        state: &GameState,
+        cid: ObjectId,
+        universe: AttackTargetUniverse,
+    ) -> Vec<AttackTarget> {
         self.legal_targets
             .get(&cid)
             .map(|ts| {
                 ts.iter()
                     .copied()
-                    .filter(|&t| !attack_incurs_tax(state, cid, t))
+                    .filter(|&t| {
+                        matches!(universe, AttackTargetUniverse::HardLegal)
+                            || !attack_incurs_tax(state, cid, t)
+                    })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// CR 508.1d: Engine-owned selectable target support. A pair appears only
+    /// when a complete, no-band declaration containing it can meet the existing
+    /// free (`max_no_payment`) requirement bar. The solver's universe deliberately
+    /// includes taxed attacks: CR 508.1d does not require paying a tax to raise the
+    /// bar, but a player may voluntarily pay one in an otherwise legal declaration.
+    fn selectable_targets_by_attacker(
+        &self,
+        state: &GameState,
+    ) -> HashMap<ObjectId, Vec<AttackTarget>> {
+        let required = max_no_payment(self, state);
+        self.candidates
+            .iter()
+            .map(|&cid| {
+                let supported = self
+                    .legal_targets
+                    .get(&cid)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&target| {
+                        best_declaration(
+                            self,
+                            state,
+                            AttackTargetUniverse::HardLegal,
+                            Some((cid, target)),
+                        )
+                        .is_some_and(|(witness, score)| {
+                            score >= required
+                                && validate_declaration_core(state, &witness, &[], self, required)
+                                    .is_ok()
+                        })
+                    })
+                    .collect();
+                (cid, supported)
+            })
+            .collect()
     }
 }
 
@@ -3748,29 +4181,73 @@ fn max_no_payment(constraints: &AttackDeclarationConstraints, state: &GameState)
 /// A concrete attacker declaration: each chosen attacker paired with its target.
 type AttackAssignment = Vec<(ObjectId, AttackTarget)>;
 
+/// Which target universe the exact declaration solver may use. The CR 508.1d
+/// threshold is always calculated from free attacks; this only controls which
+/// targets a witness may voluntarily include.
+#[derive(Clone, Copy)]
+enum AttackTargetUniverse {
+    Free,
+    HardLegal,
+}
+
 /// Memo table for the CR 508.1d scenario-3 DP (`dp_best_suffix`): keyed by
 /// `(candidate index, attackers-used clamped, per-capped-defender counts)`,
-/// storing the best FREE suffix (`None` when no valid ≥2-attacker terminal is
-/// reachable from that state).
+/// storing the best target-universe suffix (`None` when no valid ≥2-attacker
+/// terminal is reachable from that state).
 type DpSuffixMemo = HashMap<(usize, u32, Vec<u32>), Option<AttackAssignment>>;
 
 fn best_free_declaration(
     constraints: &AttackDeclarationConstraints,
     state: &GameState,
 ) -> (AttackAssignment, u32) {
-    let free: Vec<(ObjectId, Vec<AttackTarget>)> = constraints
+    best_declaration(constraints, state, AttackTargetUniverse::Free, None)
+        .expect("the empty declaration is always a free witness")
+}
+
+/// Exact CR 508.1c/d declaration solver. In forced mode, returns `None` unless
+/// its witness contains that exact attacker/target pair; it never substitutes an
+/// empty declaration for an unsupported pair.
+fn best_declaration(
+    constraints: &AttackDeclarationConstraints,
+    state: &GameState,
+    universe: AttackTargetUniverse,
+    forced_pair: Option<(ObjectId, AttackTarget)>,
+) -> Option<(AttackAssignment, u32)> {
+    if let Some((forced_attacker, forced_target)) = forced_pair {
+        if !constraints.candidates.contains(&forced_attacker)
+            || !constraints
+                .targets_in_universe(state, forced_attacker, universe)
+                .contains(&forced_target)
+        {
+            return None;
+        }
+    }
+
+    let target_options: Vec<(ObjectId, Vec<AttackTarget>)> = constraints
         .candidates
         .iter()
-        .map(|&cid| (cid, constraints.free_targets(state, cid)))
+        .map(|&cid| {
+            let mut targets = constraints.targets_in_universe(state, cid, universe);
+            if let Some((forced_attacker, forced_target)) = forced_pair {
+                if forced_attacker == cid {
+                    targets = vec![forced_target];
+                }
+            }
+            (cid, targets)
+        })
         .collect();
 
     // Scenario 1: the empty declaration (score 0) is the baseline.
-    let mut best: (Vec<(ObjectId, AttackTarget)>, u32) = (Vec::new(), 0);
+    let mut best: Option<(Vec<(ObjectId, AttackTarget)>, u32)> =
+        forced_pair.is_none().then_some((Vec::new(), 0));
 
     // Scenario 2: exactly one attacker. `MustBeSole` allowed; `NeedsCompanion`
     // excluded (cannot attack alone). Caps are trivial for a single attacker but
     // still enforced (a `0` cap forbids attacking that defender at all).
-    for (cid, targets) in &free {
+    for (cid, targets) in &target_options {
+        if forced_pair.is_some_and(|(forced_attacker, _)| forced_attacker != *cid) {
+            continue;
+        }
         if constraints.needs_companion.contains(cid) {
             continue;
         }
@@ -3792,7 +4269,9 @@ fn best_free_declaration(
     }
 
     // Scenario 3: ≥2 attackers, memoized DP over non-`MustBeSole` candidates.
-    let dp_free: Vec<(ObjectId, Vec<AttackTarget>)> = free
+    // A forced `MustBeSole` pair can never occur in this shape, so skip the
+    // whole branch rather than ranking an unforced DP witness against it.
+    let dp_targets: Vec<(ObjectId, Vec<AttackTarget>)> = target_options
         .iter()
         .filter(|(cid, _)| !constraints.must_be_sole.contains(cid))
         .cloned()
@@ -3806,25 +4285,34 @@ fn best_free_declaration(
         Some(g) => Some(g),
         None => Some(2),
     };
-    if let Some(clamp) = clamp {
-        let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
-        let mut memo: DpSuffixMemo = HashMap::new();
-        if let Some(decl) = dp_best_suffix(
-            constraints,
-            &dp_free,
-            &capped,
-            constraints.global_cap,
-            clamp,
-            0,
-            0,
-            vec![0; capped.len()],
-            &mut memo,
-        ) {
-            consider_declaration(constraints, &mut best, decl);
+    let forced_must_be_sole = forced_pair
+        .is_some_and(|(forced_attacker, _)| constraints.must_be_sole.contains(&forced_attacker));
+    if !forced_must_be_sole {
+        if let Some(clamp) = clamp {
+            let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
+            let mut memo: DpSuffixMemo = HashMap::new();
+            if let Some(decl) = dp_best_suffix(
+                constraints,
+                &dp_targets,
+                &capped,
+                constraints.global_cap,
+                clamp,
+                0,
+                0,
+                vec![0; capped.len()],
+                forced_pair,
+                &mut memo,
+            ) {
+                consider_declaration(constraints, &mut best, decl);
+            }
         }
     }
 
-    best
+    let best = best?;
+    if forced_pair.is_some_and(|pair| !best.0.contains(&pair)) {
+        return None;
+    }
+    Some(best)
 }
 
 /// Replace `best` with `decl` when `decl` is strictly better under the
@@ -3832,20 +4320,22 @@ fn best_free_declaration(
 /// lexicographically smaller `(ObjectId, AttackTarget)` sequence.
 fn consider_declaration(
     constraints: &AttackDeclarationConstraints,
-    best: &mut (AttackAssignment, u32),
+    best: &mut Option<(AttackAssignment, u32)>,
     decl: AttackAssignment,
 ) {
     let score = score_declaration(constraints, &decl);
-    let better = score > best.1
-        || (score == best.1
-            && (decl.len() < best.0.len() || (decl.len() == best.0.len() && decl < best.0)));
+    let better = best.as_ref().is_none_or(|best| {
+        score > best.1
+            || (score == best.1
+                && (decl.len() < best.0.len() || (decl.len() == best.0.len() && decl < best.0)))
+    });
     if better {
-        *best = (decl, score);
+        *best = Some((decl, score));
     }
 }
 
 /// Decision 1 scenario-3 DP: the best (max-score, then fewest attackers, then
-/// lexicographically smallest) FREE suffix over `dp_free[idx..]` given that
+/// lexicographically smallest) suffix over `dp_targets[idx..]` given that
 /// `used` attackers (clamped) and `defender_counts` have already been committed by
 /// the prefix. Returns `None` when no completion reaches a valid ≥2-attacker
 /// terminal. Memoized on `(idx, used, defender_counts)` so each reachable resource
@@ -3854,16 +4344,17 @@ fn consider_declaration(
 #[allow(clippy::too_many_arguments)]
 fn dp_best_suffix(
     constraints: &AttackDeclarationConstraints,
-    dp_free: &[(ObjectId, Vec<AttackTarget>)],
+    dp_targets: &[(ObjectId, Vec<AttackTarget>)],
     capped: &[(PlayerId, u32)],
     global_cap: Option<u32>,
     clamp: u32,
     idx: usize,
     used: u32,
     defender_counts: Vec<u32>,
+    forced_pair: Option<(ObjectId, AttackTarget)>,
     memo: &mut DpSuffixMemo,
 ) -> Option<AttackAssignment> {
-    if idx == dp_free.len() {
+    if idx == dp_targets.len() {
         // Valid terminal iff the whole declaration has ≥2 attackers.
         return (used >= 2).then(Vec::new);
     }
@@ -3874,23 +4365,27 @@ fn dp_best_suffix(
 
     let mut best_suffix: Option<AttackAssignment> = None;
 
-    // Option A: this candidate does not attack.
-    if let Some(sub) = dp_best_suffix(
-        constraints,
-        dp_free,
-        capped,
-        global_cap,
-        clamp,
-        idx + 1,
-        used,
-        defender_counts.clone(),
-        memo,
-    ) {
-        consider_suffix(constraints, &mut best_suffix, sub);
+    // Option A: this candidate does not attack. A forced pair must be included,
+    // so its attacker cannot take this branch.
+    let (cid, targets) = &dp_targets[idx];
+    if forced_pair.is_none_or(|(forced_attacker, _)| forced_attacker != *cid) {
+        if let Some(sub) = dp_best_suffix(
+            constraints,
+            dp_targets,
+            capped,
+            global_cap,
+            clamp,
+            idx + 1,
+            used,
+            defender_counts.clone(),
+            forced_pair,
+            memo,
+        ) {
+            consider_suffix(constraints, &mut best_suffix, sub);
+        }
     }
 
-    // Option B: this candidate attacks each cap-respecting free target.
-    let (cid, targets) = &dp_free[idx];
+    // Option B: this candidate attacks each cap-respecting target.
     for &t in targets {
         // CR 508.1c: global cap (enforced only when one exists; no cap ⇒ `used`
         // is clamped at 2 and never gates).
@@ -3911,13 +4406,14 @@ fn dp_best_suffix(
         let new_used = (used + 1).min(clamp);
         if let Some(mut sub) = dp_best_suffix(
             constraints,
-            dp_free,
+            dp_targets,
             capped,
             global_cap,
             clamp,
             idx + 1,
             new_used,
             new_counts,
+            forced_pair,
             memo,
         ) {
             let mut cand = Vec::with_capacity(sub.len() + 1);
@@ -4867,21 +5363,31 @@ pub(crate) fn ordered_valid_blocker_ids(
 /// `turns.rs` declare-step arms so there is a single authority for the payload
 /// shape. A no-op for every non-declaration `WaitingFor` variant.
 /// CR 508.1a–d: build the `DeclareAttackers` waiting payload from the single live
-/// constraints model — the one authority for the eligible attacker ids, the
-/// aggregate compat targets, and the per-attacker legal map. `attacker_constraints`
+/// constraints model. The per-attacker map is selectable support (each pair has a
+/// complete accepted-declaration witness), not a hard-legality verdict. The
+/// aggregate compatibility list is its sorted union. `attacker_constraints`
 /// (display badges) reuse the same team-aware predicates. New prompts always emit
-/// `Some(map)` for the per-attacker map (never `None`, which is legacy-only).
+/// `Some(map)` (never `None`, which is legacy-only).
 pub fn build_declare_attackers_waiting_for(
     state: &GameState,
 ) -> crate::types::game_state::WaitingFor {
     let constraints = AttackDeclarationConstraints::build(state);
     let valid_attacker_ids = constraints.candidates.clone();
     let attacker_constraints = attacker_constraints_for_active_player(state, &valid_attacker_ids);
+    let valid_attack_targets_by_attacker = constraints.selectable_targets_by_attacker(state);
+    let mut valid_attack_targets: Vec<AttackTarget> = valid_attack_targets_by_attacker
+        .values()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    valid_attack_targets.sort_unstable();
     crate::types::game_state::WaitingFor::DeclareAttackers {
         player: state.active_player,
         valid_attacker_ids,
-        valid_attack_targets: constraints.aggregate_targets.clone(),
-        valid_attack_targets_by_attacker: Some(constraints.legal_targets.clone()),
+        valid_attack_targets,
+        valid_attack_targets_by_attacker: Some(valid_attack_targets_by_attacker),
         attacker_constraints,
     }
 }
@@ -5401,6 +5907,7 @@ pub fn max_blockers_allowed_from_precomputed(
     block_restriction: &[(ObjectId, StaticDefinition)],
 ) -> Option<u32> {
     block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
+        .into_iter()
         .filter_map(|(def, _src_id)| match def.mode {
             StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
             _ => None,
@@ -5921,27 +6428,137 @@ mod tests {
     ) -> AttackDeclarationConstraints {
         let candidates: Vec<ObjectId> = legal.iter().map(|(id, _)| ObjectId(*id)).collect();
         let mut legal_targets: HashMap<ObjectId, Vec<AttackTarget>> = HashMap::new();
-        let mut agg: std::collections::HashSet<AttackTarget> = std::collections::HashSet::new();
         for (id, ts) in &legal {
-            for &t in ts {
-                agg.insert(t);
-            }
             let mut sorted = ts.clone();
             sorted.sort_unstable();
             legal_targets.insert(ObjectId(*id), sorted);
         }
-        let mut aggregate_targets: Vec<AttackTarget> = agg.into_iter().collect();
-        aggregate_targets.sort_unstable();
         AttackDeclarationConstraints {
             candidates,
             legal_targets,
-            aggregate_targets,
             requirements,
             global_cap,
             per_defender_caps,
             needs_companion: needs_companion.into_iter().map(ObjectId).collect(),
             must_be_sole: must_be_sole.into_iter().map(ObjectId).collect(),
         }
+    }
+
+    #[test]
+    fn forced_hard_legal_solver_returns_none_without_a_complete_witness() {
+        let state = setup();
+        let constraints = mk_constraints(
+            vec![(1, vec![AttackTarget::Player(PlayerId(1))])],
+            vec![],
+            Some(1),
+            vec![],
+            vec![1],
+            vec![],
+        );
+
+        assert_eq!(
+            best_declaration(
+                &constraints,
+                &state,
+                AttackTargetUniverse::HardLegal,
+                Some((ObjectId(1), AttackTarget::Player(PlayerId(1)))),
+            ),
+            None,
+            "a forced companion-dependent pair cannot degrade to the empty declaration"
+        );
+    }
+
+    #[test]
+    fn forced_must_be_sole_pair_outranks_an_unforced_dp_witness() {
+        let state = setup();
+        let target = AttackTarget::Player(PlayerId(1));
+        let constraints = mk_constraints(
+            vec![(1, vec![target]), (2, vec![target]), (3, vec![target])],
+            vec![
+                AttackRequirement::MustAttackGeneric {
+                    creature: ObjectId(2),
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: ObjectId(3),
+                },
+            ],
+            None,
+            vec![],
+            vec![],
+            vec![1],
+        );
+
+        assert_eq!(
+            best_declaration(
+                &constraints,
+                &state,
+                AttackTargetUniverse::HardLegal,
+                Some((ObjectId(1), target)),
+            ),
+            Some((vec![(ObjectId(1), target)], 0)),
+            "the forced sole attacker must be ranked only against declarations that contain it"
+        );
+    }
+
+    #[test]
+    fn forced_sole_tax_free_witness_survives_higher_scoring_taxed_dp_witness() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let free_target = AttackTarget::Player(PlayerId(1));
+        let taxed_target = AttackTarget::Player(PlayerId(2));
+        let _prison = create_ghostly_prison(&mut state, PlayerId(2));
+        let forced_sole = create_creature(&mut state, PlayerId(0), "Forced Sole", 2, 2);
+        let taxed_one = create_creature(&mut state, PlayerId(0), "Taxed One", 2, 2);
+        let taxed_two = create_creature(&mut state, PlayerId(0), "Taxed Two", 2, 2);
+        let constraints = mk_constraints(
+            vec![
+                (forced_sole.0, vec![free_target]),
+                (taxed_one.0, vec![taxed_target]),
+                (taxed_two.0, vec![taxed_target]),
+            ],
+            vec![
+                AttackRequirement::MustAttackGeneric {
+                    creature: forced_sole,
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: taxed_one,
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: taxed_two,
+                },
+            ],
+            None,
+            vec![],
+            vec![],
+            vec![forced_sole.0],
+        );
+
+        assert!(!attack_incurs_tax(&state, forced_sole, free_target));
+        assert!(attack_incurs_tax(&state, taxed_one, taxed_target));
+        assert_eq!(
+            max_no_payment(&constraints, &state),
+            1,
+            "the threshold remains the best free score, not the higher taxed score"
+        );
+        assert_eq!(
+            best_declaration(&constraints, &state, AttackTargetUniverse::HardLegal, None),
+            Some((
+                vec![(taxed_one, taxed_target), (taxed_two, taxed_target)],
+                2,
+            )),
+            "the full hard universe prefers the higher-scoring taxed pair"
+        );
+        assert_eq!(
+            best_declaration(
+                &constraints,
+                &state,
+                AttackTargetUniverse::HardLegal,
+                Some((forced_sole, free_target)),
+            ),
+            Some((vec![(forced_sole, free_target)], 1)),
+            "a forced pair that meets the free threshold must retain its own complete witness"
+        );
     }
 
     /// Whether `attacks` obeys every HARD coupling constraint (caps + CombatAlone)
@@ -7001,6 +7618,15 @@ mod tests {
 
         // Non-sick, eligible creature (create_creature leaves summoning_sick false).
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // CR 508.1a: a SECOND eligible attacker keeps the refreshed snapshot
+        // non-empty after `id` goes sick. Without it the declaration becomes
+        // forced, and `run_auto_pass_loop` auto-submits the only legal (empty)
+        // declaration — the prompt is gone and this row can no longer observe
+        // the refresh at all. Keeping the set non-empty also makes the
+        // assertion strictly sharper: it proves the refresh dropped THAT
+        // creature while retaining the other, which an emptied set cannot
+        // distinguish from a snapshot that simply cleared everything.
+        let companion = create_creature(&mut state, PlayerId(0), "Ox", 3, 3);
 
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
@@ -7012,10 +7638,17 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                valid_attacker_ids.contains(&id),
-                "precondition: eligible creature must be a valid attacker"
-            ),
+            } => {
+                assert!(
+                    valid_attacker_ids.contains(&id),
+                    "precondition: eligible creature must be a valid attacker"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "precondition: the companion must also be a valid attacker, \
+                     or the post-refresh set would be empty for the wrong reason"
+                );
+            }
             other => panic!("expected DeclareAttackers, got {other:?}"),
         }
 
@@ -7032,10 +7665,17 @@ mod tests {
         match &result.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                !valid_attacker_ids.contains(&id),
-                "refreshed snapshot must drop the now-sick creature"
-            ),
+            } => {
+                assert!(
+                    !valid_attacker_ids.contains(&id),
+                    "refreshed snapshot must drop the now-sick creature"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "the refresh must be selective, not a wholesale clear: the \
+                     untouched companion is still an eligible attacker"
+                );
+            }
             other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
         }
     }
@@ -11283,6 +11923,7 @@ mod tests {
                 static_abilities: vec![static_def],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
+                end_cost: None,
             },
             vec![],
             attacker,
@@ -12250,19 +12891,6 @@ mod tests {
             "Error should cite the CR 508.1d maximum-requirement bar"
         );
         let _ = goaded;
-    }
-
-    #[test]
-    fn goad_enforcement_attacking_passes() {
-        let mut state = setup_combat_phase();
-        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
-        // Declare goaded creature as attacker attacking non-goading player.
-        let result = declare_attackers(
-            &mut state,
-            &[(goaded, AttackTarget::Player(PlayerId(1)))],
-            &mut vec![],
-        );
-        assert!(result.is_ok());
     }
 
     #[test]
