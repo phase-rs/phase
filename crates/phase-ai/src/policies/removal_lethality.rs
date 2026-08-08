@@ -47,6 +47,7 @@
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
+use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{DamageSource, Effect, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -54,7 +55,10 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 
 use super::context::PolicyContext;
-use super::effect_classify::effect_targets_object;
+use super::effect_classify::{
+    effect_polarity, effect_targets_object, extract_target_filter, targets_creatures_only,
+    EffectPolarity,
+};
 
 /// Reward for a target the removal spell actually kills — a clean kill is worth
 /// more than the marginal threat-value ranking that lured the AI to an
@@ -368,4 +372,330 @@ pub(crate) fn lethality_bonus(
     }
     let survived = reduced_toughness(target, &outcome).max(0);
     -(f64::from(survived) * WASTE_PENALTY_MULT).min(WASTE_PENALTY_MAX)
+}
+
+/// Cast-commit lethality guard: does the pending spell's targeted creature
+/// damage have ANY legal target it can actually kill?
+///
+/// The cast-commit dual of [`lethality_bonus`] (which ranks targets during
+/// selection). The AI layer bug this closes: a burn spell whose damage
+/// is provably non-lethal against every legal target gets cast and pointed
+/// at the biggest body, wasting the card. This gate tells the cast-commit
+/// whiff check ([`super::anti_self_harm::score_pre_cast`]) whether committing
+/// is ever worthwhile against the board.
+///
+/// **Conservative no-veto contract** — returns `true` (do not veto) whenever it
+/// cannot *prove* a total whiff:
+/// * no source object / no usable filter (cannot reason);
+/// * a `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
+///   value at announcement, so it is unknowable at cast-commit);
+/// * any legal target yields [`PendingDamage::Unresolved`] (damage source not
+///   knowable at cast-commit, CR 120.3) or [`PendingDamage::None`] (non-damage
+///   removal like Destroy/Exile — never a damage whiff);
+/// * there are zero legal object targets (empty set — never conclude a veto
+///   from a vacuous "all survived").
+///
+/// It returns `false` (veto) **only** when at least one legal object target was
+/// fully modelled as [`PendingDamage::Dealt`] and **every** modelled target is
+/// provably non-lethal per [`outcome_is_lethal`] (CR 704.5f / 704.5g / 704.5h).
+pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
+    // CR 120.3: to resolve a damage source the caster's source object must be
+    // known. Without it, no filter controller and no resolvable source — fail
+    // open rather than veto on something we cannot reason about.
+    let Some(source) = ctx.source_object() else {
+        return true;
+    };
+    let effects = ctx.effects();
+
+    let mut modelled_any_target = false;
+
+    for effect in effects.iter().copied().filter(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Harmful) && targets_creatures_only(effect)
+    }) {
+        // CR 107.3a: a damage amount that references a variable-X is chosen by
+        // the caster at announcement and cannot be known at the commit decision.
+        // Never veto such a spell — the caster may pick a lethal value.
+        if let Effect::DealDamage { amount, .. } = effect {
+            if amount.contains_x() {
+                return true;
+            }
+        }
+        // No usable target filter (or a filter this policy can't analyse) — fail
+        // open, mirroring `harmful_effect_has_opponent_creature_target`.
+        let Some(filter) = extract_target_filter(effect) else {
+            return true;
+        };
+        for target in find_legal_targets(ctx.state, filter, ctx.ai_player, source.id) {
+            let TargetRef::Object(object_id) = target else {
+                continue;
+            };
+            // A harmful removal spell is only useful against an OPPONENT's
+            // creature — a target the caster controls would be self-targeting
+            // (anti-self-harm, handled separately). Mirror the gating
+            // `has_targetable_opponent_creature` (`controller != ai_player`).
+            let Some(object) = ctx.state.objects.get(&object_id).filter(|object| {
+                object.controller != ctx.ai_player
+                    && object.card_types.core_types.contains(&CoreType::Creature)
+            }) else {
+                continue;
+            };
+            match pending_damage_to_object(ctx, object_id, object) {
+                // CR 120.3: source not resolvable at cast-commit, or this is
+                // non-damage removal — inconclusive, no veto.
+                PendingDamage::Unresolved | PendingDamage::None => return true,
+                PendingDamage::Dealt(outcome) => {
+                    modelled_any_target = true;
+                    // CR 704.5f/g/h: even one legal target this spell can kill
+                    // means the cast is not a total whiff.
+                    if outcome_is_lethal(object, &outcome) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Veto only when we fully modelled at least one legal target and every
+    // modelled target survived — i.e. `model_any_target && !any_escape`. The
+    // empty-set case (`!modelled_any_target`) fails open by contract.
+    !modelled_any_target
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::AiConfig;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    };
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+    use engine::types::identifiers::CardId;
+    use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
+
+    fn make_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state
+    }
+
+    fn add_creature(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        id
+    }
+
+    /// A damage spell that deals the given `amount` to "target creature", then
+    /// runs `f` with a `PolicyContext` for casting it. Constructed inline so the
+    /// borrowed temporaries (`decision`/`candidate`/`context`) live for the
+    /// duration of `f`.
+    fn with_damage_spell<R>(
+        state: &mut GameState,
+        amount: QuantityExpr,
+        f: impl FnOnce(&PolicyContext<'_>) -> R,
+    ) -> R {
+        let spell_id = create_object(
+            state,
+            CardId(90_000),
+            PlayerId(0),
+            "Predictable Burn".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+        )]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_000),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        f(&ctx)
+    }
+
+    /// Slash-of-Light-shaped whiff: 1 damage, an opponent 3/3 that survives.
+    /// Nothing to kill → `can_kill_any_legal_target` must return false (veto).
+    #[test]
+    fn can_kill_vetoes_when_every_legal_target_survives() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        // 1 damage, undamaged 3/3 survives (CR 704.5g) → veto.
+        with_damage_spell(&mut state, QuantityExpr::Fixed { value: 1 }, |ctx| {
+            assert!(
+                !can_kill_any_legal_target(ctx),
+                "1 damage with no lethal legal opponent target must veto the whiff"
+            );
+        });
+    }
+
+    /// Positive reach-guard: burn that kills a legal opponent target must NOT
+    /// veto. Model 4 damage against a 3/3 (lethal via CR 704.5g).
+    #[test]
+    fn can_kill_does_not_veto_when_a_legal_target_is_lethal() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        with_damage_spell(&mut state, QuantityExpr::Fixed { value: 4 }, |ctx| {
+            assert!(
+                can_kill_any_legal_target(ctx),
+                "4 damage killing the 3/3 must NOT veto the cast"
+            );
+        });
+    }
+
+    /// Multi-authority hostile fixture: opponent has a 2/2 and a 3/3, burn
+    /// deals 2. The 3/3 survives but the 2/2 is a legal lethal target → the
+    /// cast is NOT a total whiff, so no veto. Partial-whiff target choice is
+    /// deferred to the target-selection `lethality_bonus`.
+    #[test]
+    fn can_kill_does_not_veto_when_any_single_target_is_lethal() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Small Bear", 2, 2);
+        add_creature(&mut state, PlayerId(1), "Big Bear", 3, 3);
+
+        with_damage_spell(&mut state, QuantityExpr::Fixed { value: 2 }, |ctx| {
+            assert!(
+                can_kill_any_legal_target(ctx),
+                "2 damage that can kill the opponent 2/2 must NOT veto (partial whiff)"
+            );
+        });
+    }
+
+    /// Variable-X damage is chosen by the caster at announcement — never veto.
+    #[test]
+    fn can_kill_never_vetoes_variable_x_damage() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let amount = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        with_damage_spell(&mut state, amount, |ctx| {
+            assert!(can_kill_any_legal_target(ctx));
+        });
+    }
+
+    /// Self-controlled targets are not "useful" removal targets. The
+    /// empty/self-only target set is covered by the sibling `:396` branch in
+    /// `anti_self_harm::score_pre_cast` (no targetable opponent creature),
+    /// which fires before this gate is consulted — so this gate's contract
+    /// fails open on it (never veto from a vacuous "all survived").
+    #[test]
+    fn can_kill_fails_open_on_self_only_targets() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
+
+        with_damage_spell(&mut state, QuantityExpr::Fixed { value: 1 }, |ctx| {
+            // Empty opponent-target set → fail open (no veto); the whiff is
+            // handled by the sibling no-opponent-target branch instead.
+            assert!(can_kill_any_legal_target(ctx));
+        });
+    }
+
+    /// Non-damage removal (e.g. Destroy) is never a damage whiff — never veto.
+    #[test]
+    fn can_kill_never_vetoes_non_damage_removal() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        // Build a `Destroy` spell — no DealDamage in the effect set, so
+        // `pending_damage_to_object` returns `PendingDamage::None` (never a
+        // damage whiff). Override the ability to a Destroy.
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_001),
+            PlayerId(0),
+            "Murder".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        )]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_001),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(can_kill_any_legal_target(&ctx));
+    }
 }
