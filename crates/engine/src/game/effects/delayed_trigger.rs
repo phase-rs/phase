@@ -1413,6 +1413,112 @@ mod tests {
         }
     }
 
+    /// CR 603.7c + CR 608.2k: an event-delayed TriggeringSource reads the
+    /// event that fires it, rather than retaining the unrelated creation event.
+    #[test]
+    fn when_next_event_uses_firing_event_triggering_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Delayed source".to_string(),
+            Zone::Battlefield,
+        );
+        let creation_subject = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creation subject".to_string(),
+            Zone::Graveyard,
+        );
+        let firing_subject = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Firing subject".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: creation_subject,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                creation_subject,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(trigger),
+                    or_trigger: None,
+                    lifetime: Default::default(),
+                },
+                effect: Box::new(effect),
+                uses_tracked_set: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("install delayed trigger");
+
+        match &state.delayed_triggers[0].ability.effect {
+            Effect::ChangeZone { origin, target, .. } => {
+                assert_eq!(
+                    *origin, None,
+                    "event-delayed origin is not creation-stamped"
+                );
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        assert!(
+            state.delayed_triggers[0].ability.targets.is_empty(),
+            "event-delayed TriggeringSource must not snapshot the creation subject"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, firing_subject, Zone::Graveyard, &mut events);
+        crate::game::triggers::check_delayed_triggers(&mut state, &events);
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&creation_subject].zone,
+            Zone::Graveyard,
+            "the creation event's subject must remain untouched"
+        );
+        assert_eq!(
+            state.objects[&firing_subject].zone,
+            Zone::Battlefield,
+            "the firing event's subject must be returned"
+        );
+    }
+
     /// CR 603.7c + CR 608.2c: the `parent_target_snapshot` path freezes a
     /// MULTI-target parent selection into the delayed ability at creation, exactly
     /// as it does for The Pandorica's single target. This is the building-block
