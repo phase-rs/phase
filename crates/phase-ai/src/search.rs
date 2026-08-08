@@ -7,8 +7,6 @@ use rand_chacha::ChaCha20Rng;
 use std::fs::File;
 #[cfg(test)]
 use std::io::BufReader;
-#[cfg(test)]
-use std::path::Path;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
