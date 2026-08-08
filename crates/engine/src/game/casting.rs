@@ -14629,8 +14629,11 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
     player: PlayerId,
     pending: &PendingCast,
 ) -> bool {
-    if pending.activation_ability_index.is_some()
-        || casting_costs::cost_has_x(&pending.cost)
+    if pending.activation_ability_index.is_some() {
+        return true;
+    }
+
+    if casting_costs::cost_has_x(&pending.cost)
         || pending.additional_cost_flow.is_some()
         || pending.deferred_required_additional_cost.is_some()
         || !pending.additional_cost_queue.is_empty()
