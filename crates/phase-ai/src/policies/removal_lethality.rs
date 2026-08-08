@@ -387,8 +387,13 @@ pub(crate) fn lethality_bonus(
 /// **Conservative no-veto contract** — returns `true` (do not veto) whenever it
 /// cannot *prove* a total whiff:
 /// * no source object / no usable filter (cannot reason);
-/// * a `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
-///   value at announcement, so it is unknowable at cast-commit);
+/// * ANY harmful creature-only effect is not a `DealDamage` (e.g. a mixed
+///   "deal damage + destroy" spell — the non-damage half is an independent,
+///   useful removal line, CR 701.8a, so the spell is never a total *damage*
+///   whiff);
+/// * ANY `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
+///   value at announcement, so it is unknowable at cast-commit), including a
+///   `DealDamage` whose target filter is not creature-only;
 /// * any legal target yields [`PendingDamage::Unresolved`] (damage source not
 ///   knowable at cast-commit, CR 120.3) or [`PendingDamage::None`] (non-damage
 ///   removal like Destroy/Exile — never a damage whiff);
@@ -407,19 +412,37 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     };
     let effects = ctx.effects();
 
+    // FAIL OPEN on any harmful creature-only effect that is NOT a `DealDamage`
+    // (e.g. a mixed "deal 1 damage to target creature; destroy target creature"
+    // spell). `pending_damage_to_object` aggregates the spell's `DealDamage`
+    // halves only, but a non-damage removal effect like `Destroy` is an
+    // independent, useful removal line (CR 701.8a). The spell must never read
+    // as a total *damage* whiff through its damage half alone.
+    if effects.iter().any(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Harmful)
+            && targets_creatures_only(effect)
+            && !matches!(effect, Effect::DealDamage { .. })
+    }) {
+        return true;
+    }
+
+    // FAIL OPEN when ANY `DealDamage` effect on the spell references a
+    // variable-X — including one whose target filter is not creature-only.
+    // CR 107.3a: X is chosen by the caster at announcement and cannot be
+    // known at the commit decision. Therefore, no damage-only X spell is
+    // ever a provable total whiff. Scan every `DealDamage`.
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::DealDamage { amount, .. } if amount.contains_x()))
+    {
+        return true;
+    }
+
     let mut modelled_any_target = false;
 
     for effect in effects.iter().copied().filter(|effect| {
         matches!(effect_polarity(effect), EffectPolarity::Harmful) && targets_creatures_only(effect)
     }) {
-        // CR 107.3a: a damage amount that references a variable-X is chosen by
-        // the caster at announcement and cannot be known at the commit decision.
-        // Never veto such a spell — the caster may pick a lethal value.
-        if let Effect::DealDamage { amount, .. } = effect {
-            if amount.contains_x() {
-                return true;
-            }
-        }
         // No usable target filter (or a filter this policy can't analyse) — fail
         // open, mirroring `harmful_effect_has_opponent_creature_target`.
         let Some(filter) = extract_target_filter(effect) else {
@@ -697,5 +720,160 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert!(can_kill_any_legal_target(&ctx));
+    }
+
+    /// Mixed removal spell: "deal 1 damage to target creature; destroy target
+    /// creature". The 1-damage half is a whiff on the 3/3, but the Destroy half
+    /// is independently useful (CR 701.8a). The cast-commit gate must FAIL OPEN
+    /// (not veto), otherwise it reports a false *damage* whiff for a spell that
+    /// still has a genuine removal line.
+    ///
+    /// `pending_damage_to_object` aggregates the spell's `DealDamage` halves
+    /// only. Without the non-`DealDamage` fail-open guard, the Destroy half
+    /// reads as a surviving 1-damage target and the whole spell is wrongly vetoed.
+    #[test]
+    fn can_kill_fails_open_on_mixed_damage_and_destroy() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_002),
+            PlayerId(0),
+            "Charred Murder".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_002),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + destroy must fail open: the Destroy half is a useful \
+             removal line, so the spell is not a total damage whiff even though \
+             1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Variable-X damage found anywhere in the spell — including a `DealDamage`
+    /// whose target filter is NOT creature-only — must fail open. The X-scan
+    /// covers every `DealDamage`, not just the creature-only ones. Here, a
+    /// creature-only fixed-damage spell carries a sibling `DealDamage` to "any
+    /// target" with X. The caster could choose X at announcement (CR 107.3a) to
+    /// make the spell lethal, so even though the creature-only half is a provable
+    /// whiff on the 3/3, the spell as a whole must not be vetoed.
+    #[test]
+    fn can_kill_fails_open_when_non_creature_deal_x_present() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let x_amount = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_003),
+            PlayerId(0),
+            "X-Blast".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: x_amount,
+                    // ANY target (player/planeswalker/creature) — NOT creature-only.
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_003),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "a sibling non-creature-only deal-X means X is castable-lethal; the \
+             spell must fail open despite the creature-only half being a whiff"
+        );
     }
 }

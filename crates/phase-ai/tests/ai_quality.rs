@@ -10,7 +10,10 @@ use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, TargetFilter,
+    TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -465,6 +468,108 @@ fn slash_of_light_commits_when_a_legal_target_is_lethal() {
         "partial whiff must NOT be vetoed: a legal lethal target (the opponent 1/1) \
          exists, so the cast ({cast:.3}) should rank above passing ({pass:.3}) — \
          the gate must only block total whiffs"
+    );
+}
+
+/// Differential test for mixed-removal spells: a spell with TWO creature-only
+/// effects — "deal 1 damage to target creature; destroy target creature" —
+/// must NOT be penalized as a damage whiff when it still has a useful Destroy
+/// line. Without the non-`DealDamage` fail-open guard, `can_kill_any_legal_target`
+/// aggregates only the spell's `DealDamage` half, sees the 1 damage survive the
+/// 3/3, and wrongly vetoes the cast.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1), matching
+/// spells where `lethal_to_creature` fails open and the `can_kill_any_legal_target`
+/// gate determines lethality.
+///
+/// This test isolates the whiff penalty. A second, otherwise-identical spell
+/// deals only the dynamic 1 damage ("pure burn"): on the same board it is a
+/// provable total damage whiff and receives the -8 `wasted_cast_penalty`,
+/// while the mixed spell must not. Both are driven through the real cast
+/// pipeline to ensure the cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_destroy_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but Destroy
+    // kills it (CR 701.8a).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage + destroy target creature".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Murder", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's Destroy line makes it strictly more castable than the
+    // identical pure-damage whiff. Without the non-`DealDamage` fail-open guard,
+    // `can_kill_any_legal_target` penalizes the mixed spell with the same -8
+    // whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + 1.0,
+        "mixed deal-1 + destroy ({mixed_score:.3}) must outrank the identical pure \
+         burn whiff ({pure_score:.3}): Destroy is a useful removal line the gate \
+         must not penalize as a damage whiff"
     );
 }
 
