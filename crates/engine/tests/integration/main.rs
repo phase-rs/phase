@@ -54,6 +54,7 @@ mod blessed_orator_other_anthem;
 mod bolas_citadel_regression;
 mod boneyard_parley_pile_separation;
 mod boon_reflection_gain_life_drain;
+mod borg_queen_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod braids_arisen_nightmare_decline;

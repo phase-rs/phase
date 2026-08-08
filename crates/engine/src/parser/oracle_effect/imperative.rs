@@ -9756,6 +9756,37 @@ fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
+/// `assimilate <target phrase>` keyword action and return the phrase's target
+/// filter.
+///
+/// Anchored on `tag("assimilate ")` — the trailing space IS the word boundary,
+/// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. The
+/// target phrase itself is delegated to `parse_target_with_ctx`, the shared
+/// target-phrase authority, so "from an opponent's graveyard" resolves through
+/// `parse_zone_suffix` to `Owned{Opponent}` + `InZone{Graveyard}` exactly as it
+/// does for Ashen Powder and Puppeteer Clique.
+///
+/// Fails closed (returns `None`, so the caller falls through to the imperative
+/// `Effect::Unimplemented` fallback and coverage stays red) when either:
+///   * the target phrase leaves an unconsumed remainder, or
+///   * CR 115.2: the phrase does not name a graveyard zone. This second guard
+///     exists for COVERAGE HONESTY, not to license an `origin` value: the
+///     lowering emits `ChangeZone { origin: None }` (the zone constraint travels
+///     on the target filter), and a non-graveyard `assimilate` phrasing is a
+///     shape this production does not model, so it must keep reporting as
+///     unsupported rather than be silently lowered into a reanimation.
+fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("assimilate ")
+        .parse(lower.trim())
+        .ok()?;
+    let (target, remainder) = parse_target_with_ctx(rest, ctx);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -9793,6 +9824,16 @@ pub(super) fn parse_imperative_family_ast(
     .is_ok()
     {
         return Some(ImperativeFamilyAst::Recruit);
+    }
+
+    // CR 205.1a + CR 205.1b + CR 613.1d: `assimilate <target phrase>` is a
+    // standalone keyword action whose definition lives in reminder text the
+    // parser never sees. Probe it here, as an anchored nom production alongside
+    // `recruit`, rather than as a `match first_word` arm: a new string-literal
+    // match arm is exactly what `scripts/check-parser-combinators.sh` family (B)
+    // forbids.
+    if let Some(target) = parse_assimilate_target(lower, ctx) {
+        return Some(ImperativeFamilyAst::Assimilate { target });
     }
 
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
@@ -11951,6 +11992,127 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.sub_ability = Some(Box::new(discard));
             clause
         }
+        // CR 205.1a + CR 205.1b + CR 613.1d + CR 110.2a + CR 122.1: `assimilate`
+        // expands to the same two-step chain the reanimate-then-retype class
+        // already produces from spelled-out Oracle text (Ashen Powder's move,
+        // Rise from the Grave's / Grave Betrayal's type rider): move the
+        // targeted graveyard card to the battlefield under the instruction's
+        // controller with a +1/+1 counter, then install a Duration::Permanent
+        // layer-4 type override on that same object.
+        ImperativeFamilyAst::Assimilate { target } => {
+            // CR 205.1b: "becomes a '[creature type or types] artifact
+            // creature'" RETAINS every prior card type, supertype, and
+            // non-creature subtype and REPLACES only the creature types.
+            // `SetCardTypes` would replace the whole card-type set and is
+            // therefore rules-WRONG here.
+            //
+            // WRITTEN ORDER IS LOAD-BEARING and all four modifications must ride
+            // ONE StaticDefinition: they are all layer 4 (CR 613.1d), so list
+            // order decides. The CR 613.8 intra-static dependency edge
+            // RemoveAllSubtypes -> AddSubtype is deliberately suppressed in
+            // layers.rs so the written pre-sort wins (guarded by
+            // layers.rs::same_static_modifications_apply_in_written_order);
+            // splitting these into separate StaticDefinitions would create
+            // separate transient effects ordered by CR 613.7 timestamp instead,
+            // and the wipe could erase Borg.
+            let retype = StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![
+                    // CR 205.1a: the new creature subtype replaces the existing
+                    // creature-type set. Wipe first.
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: crate::types::card_type::SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Borg".to_string(),
+                    },
+                    // CR 205.1b: additive card types — prior card types and all
+                    // supertypes (e.g. Legendary) are retained.
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Artifact,
+                    },
+                    // CR 205.1b + CR 613.7: the phrase asserts the object IS a
+                    // creature. The filter's creature guarantee was checked once
+                    // in the graveyard at target selection (CR 601.2c), not
+                    // continuously, so a lower-timestamped type-removal effect
+                    // must be overridden here. Idempotent when already present.
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ])
+                .description(
+                    "It's a Borg artifact creature and loses all other creature types.".to_string(),
+                );
+
+            // CR 611.2a: no stated duration on a keyword-action definition means
+            // "until the end of the game" — Duration::Permanent. Setting this
+            // explicitly is REQUIRED: effects/effect.rs's
+            // `ability.duration.or(duration).unwrap_or(Duration::UntilEndOfTurn)`
+            // would otherwise let layers.rs::prune_end_of_turn_effects drop the
+            // override at the next cleanup.
+            // CR 611.2c: the affected set freezes to the resolved parent target
+            // at install.
+            let override_step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![retype],
+                    duration: Some(Duration::Permanent),
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+            )
+            .duration(Duration::Permanent);
+
+            // CR 110.2a: enters under the instruction's controller, not its
+            // owner (CR 108.3: ownership is unchanged).
+            // CR 122.1: the +1/+1 counter is placed as part of the entry event;
+            // it modifies P/T in layer 7c (CR 613.4c), never in the layer-4
+            // modification list above.
+            // CR 115.2: `origin` stays None — the graveyard constraint travels
+            // on the target filter (FilterProp::InZone{Graveyard} +
+            // FilterProp::Owned{Opponent}), which is what both target
+            // enumeration and resolution-time re-legality consult. This matches
+            // every shipped card with this exact phrase ("from an opponent's
+            // graveyard"): Ashen Powder, Puppeteer Clique, Macabre Mockery all
+            // store origin: None. (Cards phrased "from A graveyard" — Rise from
+            // the Grave, Reanimate — store Some(Graveyard); that is a different
+            // phrase and not this card's.)
+            let mut clause = parsed_clause(Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 1 },
+                )],
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            });
+            // CR 608.2c: the type override is a resolution STEP of the single
+            // `assimilate` instruction, not a following independent instruction,
+            // so the link stays the default `ContinuationStep` (mirroring
+            // Recruit). `forward_result` is intentionally NOT hand-set: the sub
+            // binds via `ParentTarget`, not `SelfRef`, and
+            // `lower::rewire_result_anchored_subchain` already stamps the flag
+            // for this shape.
+            //
+            // CR 611.2e DEVIATION (pre-existing, class-wide): the definition's
+            // "It's a Borg artifact creature" is the "is [characteristic]" form,
+            // which the rule says must apply SIMULTANEOUSLY with the permanent
+            // entering the battlefield. This continuation applies it AFTER
+            // entry, so an ETB trigger keying on the new types does not see
+            // them. Same behavior as Rise from the Grave / Grave Betrayal (both
+            // also the "is" form); NOT fixed here.
+            clause.sub_ability = Some(Box::new(override_step));
+            clause
+        }
         // CR 118.12: A Counter with an "unless [player] pays [cost]" modifier
         // — intercepted here so the modifier propagates to
         // `ParsedEffectClause.unless_pay`. The Effect itself becomes the
@@ -12651,6 +12813,9 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::Recruit => {
             unreachable!("Recruit lowering constructs a sub-ability chain")
+        }
+        ImperativeFamilyAst::Assimilate { .. } => {
+            unreachable!("Assimilate lowering constructs a sub-ability chain")
         }
         ImperativeFamilyAst::ForceBlock { attacker, duration } => Effect::ForceBlock {
             target: TargetFilter::Any,
@@ -22125,6 +22290,38 @@ mod tests {
             parse_imperative_family_ast("recruiter", "recruiter", &mut ParseContext::default())
                 .is_none(),
             "the anchored Recruit grammar must not accept a longer word"
+        );
+    }
+
+    /// The `tag("assimilate ")` word boundary. Mirrors
+    /// `recruiter_is_not_recruit`: the trailing space in the tag IS the boundary,
+    /// so no longer word beginning "assimilat…" may reach the Assimilate node.
+    /// Positive reach-guard included so the negatives cannot pass vacuously.
+    #[test]
+    fn assimilation_is_not_assimilate() {
+        for text in [
+            "assimilation",
+            "assimilates target creature card from an opponent's graveyard",
+            "assimilation aegis target creature card from an opponent's graveyard",
+        ] {
+            assert!(
+                !matches!(
+                    parse_imperative_family_ast(text, text, &mut ParseContext::default()),
+                    Some(ImperativeFamilyAst::Assimilate { .. })
+                ),
+                "the anchored Assimilate grammar must not accept {text:?}"
+            );
+        }
+        // Positive reach-guard: the real phrase DOES reach the node, so the
+        // negatives above are about the word boundary and not about a
+        // production that never fires.
+        let real = "assimilate target creature card from an opponent's graveyard";
+        assert!(
+            matches!(
+                parse_imperative_family_ast(real, real, &mut ParseContext::default()),
+                Some(ImperativeFamilyAst::Assimilate { .. })
+            ),
+            "reach-guard: the printed assimilate phrase must produce the Assimilate node"
         );
     }
 }
