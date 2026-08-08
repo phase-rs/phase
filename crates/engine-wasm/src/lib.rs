@@ -1796,6 +1796,29 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
     })?
 }
 
+fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), JsValue> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref().ok_or_else(|| {
+            JsValue::from_str(
+                "Cannot restore game state: card database is not loaded. Call load_card_database first.",
+            )
+        })?;
+        rehydrate_game_from_card_db(state, db);
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn load_minimal_test_card_database() {
+    CARD_DB.with(|cell| {
+        *cell.borrow_mut() = Some(
+            CardDatabase::from_json_str("{}")
+                .expect("an empty test card database must deserialize"),
+        );
+    });
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -1818,11 +1841,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     // and reproduce the previous rewind-to-origin behavior.
     state.rehydrate_rng();
     state.debug_mode = true;
-    CARD_DB.with(|cell| {
-        if let Some(db) = cell.borrow().as_ref() {
-            rehydrate_game_from_card_db(&mut state, db);
-        }
-    });
+    rehydrate_restored_state_from_card_db(&mut state)?;
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
@@ -1888,11 +1907,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
     state.rng_word_pos = 0;
 
-    CARD_DB.with(|cell| {
-        if let Some(db) = cell.borrow().as_ref() {
-            rehydrate_game_from_card_db(&mut state, db);
-        }
-    });
+    rehydrate_restored_state_from_card_db(&mut state)?;
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
 
@@ -1905,6 +1920,33 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
     Ok(())
+}
+
+#[cfg(test)]
+mod restored_card_db_requirements_tests {
+    use super::*;
+
+    #[test]
+    fn restore_and_resume_require_a_card_database_before_mutating_state() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+
+        let restore_error = restore_game_state(&json).expect_err("restore must require CARD_DB");
+        assert!(restore_error
+            .as_string()
+            .is_some_and(|message| message.contains("card database")));
+        assert!(GAME_STATE.with(|cell| cell.borrow().is_none()));
+
+        let resume_error =
+            resume_multiplayer_host_state(&json).expect_err("resume must require CARD_DB");
+        assert!(resume_error
+            .as_string()
+            .is_some_and(|message| message.contains("card database")));
+        assert!(GAME_STATE.with(|cell| cell.borrow().is_none()));
+        assert!(!is_multiplayer_mode());
+    }
 }
 
 // ── Replay system ───────────────────────────────────────────────────────
@@ -2644,6 +2686,7 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::create_object_from_card_face;
+    use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
@@ -2660,7 +2703,7 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
 
@@ -2736,6 +2779,93 @@ mod tests {
         let action = submit_public_proposal(&proposal);
         clear_game_state();
         action
+    }
+
+    fn load_disruptor_flute_database() {
+        load_card_database(
+            r#"{
+                "disruptor flute": {
+                    "name": "Disruptor Flute",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Artifact"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": "Flash\\nAs this artifact enters, choose a card name.",
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("Disruptor Flute fixture database must load");
+    }
+
+    fn disruptor_flute_card_name_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(880),
+            PlayerId(0),
+            "Disruptor Flute".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        state
+    }
+
+    fn fireball_target_selection_state() -> GameState {
+        const FIREBALL_ORACLE: &str =
+            "Fireball deals X damage divided evenly, rounded down, among any number of targets.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature(P1, "Fireball Target", 3, 3);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Fireball", false, FIREBALL_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            })
+            .with_strive_cost(ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 1,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..8)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+
+        let mut state = scenario.build().state().clone();
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("Fireball announcement must reach ChooseX");
+        engine::game::engine::apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
+            .expect("Fireball X announcement must reach target selection");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        state
     }
 
     /// The contract is only useful if every member can cross the public
@@ -2866,6 +2996,86 @@ mod tests {
             proposition_truth: Some(true),
         };
         state
+    }
+
+    #[test]
+    fn restored_disruptor_flute_card_name_proposal_applies_after_rehydration() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_disruptor_flute_database();
+        let json = serde_json::to_string(&disruptor_flute_card_name_state()).unwrap();
+
+        restore_game_state(&json).expect("restore must rehydrate CardName metadata");
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", PlayerId(0).0)
+                .expect("public issuer must answer restored Flute prompt"),
+        )
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "Disruptor Flute"
+        ));
+        submit_public_proposal(&proposal);
+        with_state(|state| assert!(matches!(state.waiting_for, WaitingFor::Priority { .. })))
+            .expect("applied card-name choice must leave a live successor");
+        clear_game_state();
+    }
+
+    #[test]
+    fn resumed_disruptor_flute_card_name_proposal_applies_after_rehydration() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_disruptor_flute_database();
+        let json = serde_json::to_string(&disruptor_flute_card_name_state()).unwrap();
+
+        resume_multiplayer_host_state(&json).expect("resume must rehydrate CardName metadata");
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", PlayerId(0).0)
+                .expect("public issuer must answer resumed Flute prompt"),
+        )
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "Disruptor Flute"
+        ));
+        submit_public_proposal(&proposal);
+        with_state(|state| assert!(matches!(state.waiting_for, WaitingFor::Priority { .. })))
+            .expect("applied card-name choice must leave a live successor");
+        assert!(is_multiplayer_mode());
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn public_fireball_x_target_and_payment_proposals_never_reject() {
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(fireball_target_selection_state())));
+
+        for step in 0..12 {
+            let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+                get_ai_action_proposal("Medium", P0.0)
+                    .expect("public issuer must answer Fireball continuation"),
+            )
+            .expect("proposal must serialize");
+            let action: GameAction = serde_json::from_value(proposal["action"].clone())
+                .expect("proposal action must deserialize");
+            if step == 0 {
+                assert!(
+                    matches!(action, GameAction::ChooseTarget { .. }),
+                    "the real X route must issue a public target proposal first, got {action:?}"
+                );
+            }
+            submit_public_proposal(&proposal);
+
+            let done = with_state(|state| matches!(state.waiting_for, WaitingFor::Priority { .. }))
+                .expect("successful public proposal must retain state");
+            if done {
+                clear_game_state();
+                return;
+            }
+        }
+
+        panic!("Fireball public continuation did not reach payment/priority within 12 proposals");
     }
 
     #[test]
@@ -3684,6 +3894,7 @@ mod tests {
 
     #[test]
     fn multiplayer_mode_refuses_restore_game_state() {
+        load_minimal_test_card_database();
         // Single-player baseline: restore succeeds.
         let state = GameState::new_two_player(7);
         let json = serde_json::to_string(&state).unwrap();
@@ -3713,6 +3924,7 @@ mod tests {
         // thread-local state.
         clear_game_state();
         set_multiplayer_mode(false);
+        load_minimal_test_card_database();
 
         // Seed a game so `resume_` sees it as "already initialized".
         let state = GameState::new_two_player(7);
@@ -3755,6 +3967,7 @@ mod tests {
     fn resume_multiplayer_host_state_stamps_fresh_rng_seed_and_enables_flag() {
         clear_game_state();
         set_multiplayer_mode(false);
+        load_minimal_test_card_database();
 
         let mut state = GameState::new_two_player(42);
         // Force a known "stale" seed so we can prove it was replaced.
@@ -3782,6 +3995,7 @@ mod tests {
 
     #[test]
     fn restore_keeps_legacy_state_without_printed_ref() {
+        load_minimal_test_card_database();
         let mut state = GameState::new_two_player(42);
         let object_id = ObjectId(1);
         state.objects.insert(
@@ -3888,6 +4102,7 @@ mod replay_bridge_tests {
     #[test]
     fn restore_game_state_invalidates_the_in_progress_recording() {
         clear_game_state();
+        load_minimal_test_card_database();
 
         let state = GameState::new_two_player(7);
         REPLAY_LOG.with(|cell| {
@@ -4057,6 +4272,7 @@ mod rng_restore_bridge_tests {
         // `state.rehydrate_rng()` in restore turns it red. Asserts on consumed
         // randomness, not the stored `rng_word_pos` integer.
         clear_game_state();
+        load_minimal_test_card_database();
 
         // Seed a live game and consume randomness as gameplay would.
         let mut state = GameState::new_two_player(0x51A7_C0DE);

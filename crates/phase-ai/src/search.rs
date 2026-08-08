@@ -1156,15 +1156,29 @@ pub fn fallback_action(
                 )
             });
     }
-    // CR 601.2c: A spell's target step must use the engine's current legal
-    // target list. `target_slots` is a historical snapshot and can be stale
-    // after earlier selections; if no current legal action remains, abort the
-    // in-flight cast rather than fabricating an illegal required-target skip.
-    if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
-        return engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
-            .or(Some(GameAction::CancelCast));
+    // Target prompts must answer from the exact domain that will gate the
+    // public proposal. The contract has already filtered current targets
+    // through the reducer; rebuilding an answer from prompt snapshots can
+    // reintroduce stale targets or an unpayable cast continuation.
+    if matches!(
+        state.waiting_for,
+        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        let target = contract
+            .candidates
+            .iter()
+            .find(|candidate| matches!(candidate.action, GameAction::ChooseTarget { .. }))
+            .map(|candidate| candidate.action.clone());
+        if target.is_some()
+            || matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. })
+        {
+            return target;
+        }
+        return contract
+            .candidates
+            .iter()
+            .find(|candidate| matches!(candidate.action, GameAction::CancelCast))
+            .map(|candidate| candidate.action.clone());
     }
 
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
