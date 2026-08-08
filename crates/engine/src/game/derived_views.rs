@@ -26,6 +26,7 @@ use crate::types::ability::{
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
@@ -891,6 +892,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
     // omits the field) when no Auras are enchanting any player, which is the
     // dominant case.
+    let block_restrictions = crate::game::combat::collect_block_restriction_statics(state);
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
@@ -910,7 +912,13 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
         }
-        if crate::game::combat::has_cant_be_blocked_static(state, obj_id) {
+        if obj.card_types.core_types.contains(&CoreType::Creature)
+            && crate::game::combat::has_cant_be_blocked_static_from_precomputed(
+                state,
+                obj_id,
+                &block_restrictions,
+            )
+        {
             views.cant_be_blocked.push(obj_id);
         }
         // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched

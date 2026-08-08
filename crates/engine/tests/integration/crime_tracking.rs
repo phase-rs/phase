@@ -1,10 +1,13 @@
 //! CR 700.13: committed crimes are durable only after a successful action and
 //! reset at the next turn boundary.
 
-use engine::game::ledger::record_crime_committed;
+use engine::game::ledger::{record_crime_committed, resolve_and_apply_ledger_edit};
 use engine::game::turns::start_next_turn;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedLedgerEdit, ResolvedLedgerEditReplayInvariantError,
+};
 
 #[test]
 fn crime_ledger_edit_is_turn_scoped() {
@@ -19,4 +22,22 @@ fn crime_ledger_edit_is_turn_scoped() {
         state.players[0].crimes_committed_this_turn, 0,
         "a new turn clears the CR 700.13 per-turn record"
     );
+}
+
+#[test]
+fn crime_ledger_replay_rejects_a_second_turn_record() {
+    let mut state = GameState::new_two_player(42);
+    record_crime_committed(&mut state, PlayerId(0)).expect("first crime records the turn fact");
+
+    assert_eq!(
+        resolve_and_apply_ledger_edit(
+            &mut state,
+            ResolvedLedgerEdit::CrimeCommitted {
+                player: PlayerId(0),
+                expected_turn_count: 1,
+            },
+        ),
+        Err(ResolvedLedgerEditReplayInvariantError::CrimeCommittedPreconditionMismatch),
+    );
+    assert_eq!(state.players[0].crimes_committed_this_turn, 1);
 }

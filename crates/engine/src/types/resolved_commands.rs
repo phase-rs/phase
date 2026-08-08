@@ -3197,7 +3197,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
         ResolvedLedgerEdit::CrimeCommitted {
             expected_turn_count,
             ..
-        } => *expected_turn_count == u32::MAX,
+        } => *expected_turn_count != 0,
         ResolvedLedgerEdit::CardsDrawn {
             drawn_object,
             attempted_empty_library,

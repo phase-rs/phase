@@ -662,7 +662,7 @@ pub(crate) fn targets_commit_crime(
                         Zone::Graveyard => {
                             super::players::is_opponent(state, controller, object.owner)
                         }
-                        _ => false,
+                        Zone::Library | Zone::Hand | Zone::Exile | Zone::Command => false,
                     })
         }
     })

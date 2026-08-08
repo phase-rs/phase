@@ -1334,7 +1334,17 @@ fn block_restriction_statics_against_from_precomputed<'a>(
 /// restrictions intentionally remain distinct.
 pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
     let restrictions = collect_block_restriction_statics(state);
-    block_restriction_statics_against_from_precomputed(state, attacker_id, &restrictions)
+    has_cant_be_blocked_static_from_precomputed(state, attacker_id, &restrictions)
+}
+
+/// CR 509.1b: Precomputed counterpart of `has_cant_be_blocked_static` for
+/// callers deriving multiple battlefield-object views from one game state.
+pub fn has_cant_be_blocked_static_from_precomputed(
+    state: &GameState,
+    attacker_id: ObjectId,
+    restrictions: &[(ObjectId, StaticDefinition)],
+) -> bool {
+    block_restriction_statics_against_from_precomputed(state, attacker_id, restrictions)
         .into_iter()
         .any(|(definition, _)| definition.mode == StaticMode::CantBeBlocked)
 }

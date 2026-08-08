@@ -334,7 +334,9 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
                     *player,
                 ))?;
-            if player_state.crimes_committed_this_turn != *expected_turn_count {
+            if *expected_turn_count != 0
+                || player_state.crimes_committed_this_turn != *expected_turn_count
+            {
                 return Err(
                     ResolvedLedgerEditReplayInvariantError::CrimeCommittedPreconditionMismatch,
                 );
