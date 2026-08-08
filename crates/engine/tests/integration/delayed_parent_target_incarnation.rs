@@ -155,10 +155,23 @@ fn advance_past_end_of_turn(runner: &mut engine::game::scenario::GameRunner) {
             },
             _ => GameAction::PassPriority,
         };
-        if runner.act(action).is_err() {
-            return;
+        // Never `return` on an error. A silent early exit means no game time
+        // passes, and every "the referent survived to end of turn" assertion
+        // downstream then holds trivially — the negative arm would pass for the
+        // wrong reason. Panic instead, matching
+        // `advance_until_delayed_triggers_resolve` above.
+        if let Err(e) = runner.act(action) {
+            panic!(
+                "advancing past end of turn failed: {e:?} (phase = {:?}, waiting_for = {:?})",
+                runner.state().phase,
+                runner.state().waiting_for,
+            );
         }
     }
+    assert!(
+        runner.state().turn_number > start_turn,
+        "reach-guard: the turn must actually have ended for a survival assertion to mean anything"
+    );
 }
 
 /// True when an `EffectResolved` event names this source — the observable proof
@@ -406,11 +419,24 @@ fn t_z1_saffi_eriksdotter_still_returns_the_creature() {
     );
 
     let killed = runner.cast(removal).target_object(victim).resolve();
-    // Reach-guard: the referent really is in the graveyard when the delayed
-    // trigger resolves, so "returned" below cannot pass vacuously.
+    // Reach-guard on the EVENT, not on the final zone. A zone snapshot cannot
+    // serve here: Saffi's trigger fires on the death and returns the card
+    // within this same resolution, so the victim legitimately ends on the
+    // battlefield — which is indistinguishable from "the removal never resolved
+    // and it never left". Asserting `Battlefield` as both the guard and the
+    // conclusion is what made this control vacuous. Prove the death happened
+    // instead.
     assert!(
-        matches!(killed.zone_of(victim), Zone::Graveyard | Zone::Battlefield),
-        "reach-guard: the victim must have been put into the graveyard"
+        killed.events().iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Graveyard,
+                ..
+            } if *object_id == victim
+        )),
+        "reach-guard: the victim must actually have been put into the graveyard \
+         for Saffi's delayed trigger to have anything to return"
     );
 
     advance_until_delayed_triggers_resolve(&mut runner);
