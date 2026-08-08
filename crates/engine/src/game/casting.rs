@@ -14691,6 +14691,17 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
         return false;
     }
 
+    // `static_mode_presence` is a post-flush superset of the two static
+    // families that can affect a spell's cost. Its absence proves the exact
+    // scan below cannot find a target-dependent axis, avoiding an O(board)
+    // scan at every ordinary target-selection prompt.
+    if !state.layers_dirty.is_dirty()
+        && !static_kind_present(state, StaticModeKind::ModifyCost)
+        && !static_kind_present(state, StaticModeKind::ImposeAdditionalCost)
+    {
+        return true;
+    }
+
     !super::functioning_abilities::game_functioning_statics(state).any(|(source, definition)| {
         let payment_axis_unstable = match &definition.mode {
             StaticMode::ModifyCost {
