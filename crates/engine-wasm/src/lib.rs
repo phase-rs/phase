@@ -1937,14 +1937,14 @@ mod restored_card_db_requirements_tests {
         assert!(restore_error
             .as_string()
             .is_some_and(|message| message.contains("card database")));
-        assert!(GAME_STATE.with(|cell| cell.borrow().is_none()));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
 
         let resume_error =
             resume_multiplayer_host_state(&json).expect_err("resume must require CARD_DB");
         assert!(resume_error
             .as_string()
             .is_some_and(|message| message.contains("card database")));
-        assert!(GAME_STATE.with(|cell| cell.borrow().is_none()));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
     }
 }
