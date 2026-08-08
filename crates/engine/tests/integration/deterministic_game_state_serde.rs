@@ -202,7 +202,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "modal_modes_chosen_this_turn",
         "modal_modes_chosen_this_game",
         "revealed_cards",
-        "public_revealed_cards",
         "player_actions_this_way",
         "city_blessing",
     ] {
@@ -216,6 +215,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "public_revealed_cards",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
     add_spec(
         &mut specs,
         game_state,

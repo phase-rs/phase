@@ -15921,8 +15921,9 @@ mod stage2_injector_tests {
                 // `WaitingForWithParkedObservers` match arm is the only hunk above this
                 // producer; it changes trigger-drain timing but does not add a prompt.
                 // The Ward continuation port independently inserts +13 lines above the same
-                // producer, so the combined tree is `:11828 - 7 + 13 = :11834`.
-                "game/engine.rs:11834".to_string(),
+                // producer, while this branch's durable-knowledge hooks add another 24, so the
+                // combined tree is `:11828 - 7 + 13 + 24 = :11858`.
+                "game/engine.rs:11858".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

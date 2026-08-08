@@ -388,7 +388,6 @@ mod tests {
         );
         let source = add(&mut state, PlayerId(0), "Observer", Zone::Battlefield);
         let known_hand = add(&mut state, PlayerId(1), "Known Hand", Zone::Hand);
-        let unknown_hand = add(&mut state, PlayerId(1), "Unknown Hand", Zone::Hand);
         let known_library = add(&mut state, PlayerId(1), "Known Library", Zone::Library);
 
         let private_hand_look = ResolvedAbility::new(
@@ -429,6 +428,7 @@ mod tests {
             .expect("private library look resolves");
         state.private_look_ids.clear();
         state.private_look_player = None;
+        let unknown_hand = add(&mut state, PlayerId(1), "Unknown Hand", Zone::Hand);
 
         let known = pinned_known_ids(&state, PlayerId(0));
         assert!(known.contains(&known_hand));
