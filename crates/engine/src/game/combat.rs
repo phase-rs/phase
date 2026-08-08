@@ -4269,6 +4269,8 @@ fn best_declaration(
     }
 
     // Scenario 3: ≥2 attackers, memoized DP over non-`MustBeSole` candidates.
+    // A forced `MustBeSole` pair can never occur in this shape, so skip the
+    // whole branch rather than ranking an unforced DP witness against it.
     let dp_targets: Vec<(ObjectId, Vec<AttackTarget>)> = target_options
         .iter()
         .filter(|(cid, _)| !constraints.must_be_sole.contains(cid))
@@ -4283,22 +4285,26 @@ fn best_declaration(
         Some(g) => Some(g),
         None => Some(2),
     };
-    if let Some(clamp) = clamp {
-        let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
-        let mut memo: DpSuffixMemo = HashMap::new();
-        if let Some(decl) = dp_best_suffix(
-            constraints,
-            &dp_targets,
-            &capped,
-            constraints.global_cap,
-            clamp,
-            0,
-            0,
-            vec![0; capped.len()],
-            forced_pair,
-            &mut memo,
-        ) {
-            consider_declaration(constraints, &mut best, decl);
+    let forced_must_be_sole = forced_pair
+        .is_some_and(|(forced_attacker, _)| constraints.must_be_sole.contains(&forced_attacker));
+    if !forced_must_be_sole {
+        if let Some(clamp) = clamp {
+            let capped: Vec<(PlayerId, u32)> = constraints.per_defender_caps.clone();
+            let mut memo: DpSuffixMemo = HashMap::new();
+            if let Some(decl) = dp_best_suffix(
+                constraints,
+                &dp_targets,
+                &capped,
+                constraints.global_cap,
+                clamp,
+                0,
+                0,
+                vec![0; capped.len()],
+                forced_pair,
+                &mut memo,
+            ) {
+                consider_declaration(constraints, &mut best, decl);
+            }
         }
     }
 
@@ -6463,7 +6469,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_must_be_sole_pair_cannot_use_an_unforced_dp_witness() {
+    fn forced_must_be_sole_pair_outranks_an_unforced_dp_witness() {
         let state = setup();
         let target = AttackTarget::Player(PlayerId(1));
         let constraints = mk_constraints(
@@ -6489,8 +6495,69 @@ mod tests {
                 AttackTargetUniverse::HardLegal,
                 Some((ObjectId(1), target)),
             ),
+            Some((vec![(ObjectId(1), target)], 0)),
+            "the forced sole attacker must be ranked only against declarations that contain it"
+        );
+    }
+
+    #[test]
+    fn forced_sole_tax_free_witness_survives_higher_scoring_taxed_dp_witness() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let free_target = AttackTarget::Player(PlayerId(1));
+        let taxed_target = AttackTarget::Player(PlayerId(2));
+        let _prison = create_ghostly_prison(&mut state, PlayerId(2));
+        let forced_sole = create_creature(&mut state, PlayerId(0), "Forced Sole", 2, 2);
+        let taxed_one = create_creature(&mut state, PlayerId(0), "Taxed One", 2, 2);
+        let taxed_two = create_creature(&mut state, PlayerId(0), "Taxed Two", 2, 2);
+        let constraints = mk_constraints(
+            vec![
+                (forced_sole.0, vec![free_target]),
+                (taxed_one.0, vec![taxed_target]),
+                (taxed_two.0, vec![taxed_target]),
+            ],
+            vec![
+                AttackRequirement::MustAttackGeneric {
+                    creature: forced_sole,
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: taxed_one,
+                },
+                AttackRequirement::MustAttackGeneric {
+                    creature: taxed_two,
+                },
+            ],
             None,
-            "the higher-scoring two-attacker DP witness excludes the forced sole attacker and must not create false support"
+            vec![],
+            vec![],
+            vec![forced_sole.0],
+        );
+
+        assert!(!attack_incurs_tax(&state, forced_sole, free_target));
+        assert!(attack_incurs_tax(&state, taxed_one, taxed_target));
+        assert_eq!(
+            max_no_payment(&constraints, &state),
+            1,
+            "the threshold remains the best free score, not the higher taxed score"
+        );
+        assert_eq!(
+            best_declaration(&constraints, &state, AttackTargetUniverse::HardLegal, None),
+            Some((
+                vec![(taxed_one, taxed_target), (taxed_two, taxed_target)],
+                2,
+            )),
+            "the full hard universe prefers the higher-scoring taxed pair"
+        );
+        assert_eq!(
+            best_declaration(
+                &constraints,
+                &state,
+                AttackTargetUniverse::HardLegal,
+                Some((forced_sole, free_target)),
+            ),
+            Some((vec![(forced_sole, free_target)], 1)),
+            "a forced pair that meets the free threshold must retain its own complete witness"
         );
     }
 
