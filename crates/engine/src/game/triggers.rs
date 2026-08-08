@@ -8505,7 +8505,7 @@ pub(crate) fn filter_consumed_trigger_events(
 /// NOT need this — a blanket `ZoneChanged` drop is equivalent there, and that is
 /// what `engine_resolution_choices::batch_or_drain_observer_triggers`
 /// (owner-bounded slice + `zone_changes_are_logically_owned`) and the resumed
-/// `ChangeZone` drain in `effects/mod.rs` do. `park_search_observer_triggers`'
+/// `ChangeZone` drain in `effects/mod.rs` do. `collect_search_observer_triggers`'
 /// slice spans a whole continuation drain and can hold zone changes no owner
 /// allocated a group for, so it must consult this instead.
 ///

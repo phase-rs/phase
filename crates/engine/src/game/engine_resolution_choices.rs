@@ -496,8 +496,7 @@ fn finish_search_found_batch(
             events,
         ) {
             ResolutionChoiceOutcome::WaitingFor(waiting)
-            | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(waiting)
-            | ResolutionChoiceOutcome::WaitingForWithParkedObservers(waiting) => waiting,
+            | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(waiting) => waiting,
             ResolutionChoiceOutcome::ActionResult(result) => result.waiting_for,
         },
     )
@@ -506,10 +505,6 @@ fn finish_search_found_batch(
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
     WaitingForWithInlineTriggers(WaitingFor),
-    /// CR 603.3b: observer triggers from a completed search put/shuffle were
-    /// collected into `deferred_triggers` but must not drain until the caller
-    /// receives priority again (issue #5336: Kodama + Nature's Lore).
-    WaitingForWithParkedObservers(WaitingFor),
     ActionResult(ActionResult),
 }
 
@@ -616,9 +611,9 @@ fn batch_or_drain_observer_triggers(
 }
 
 /// CR 603.2 + CR 603.3b + CR 701.23: after a search tutor's put/shuffle
-/// continuation drains, park ETB/dies/discards observers for the next priority
-/// checkpoint instead of dispatching them while the test harness (or UI) may
-/// still be inside the same `SelectCards` action (issue #5336).
+/// continuation drains, collect ETB/dies/discards observers before this
+/// `SelectCards` action reaches its priority checkpoint. The ordinary
+/// post-action drain then puts them on the stack before priority is returned.
 ///
 /// CR 603.2c: this slice spans the whole continuation drain, so it holds both
 /// the delivery's logical zone-change owner's occurrences (already collected by
@@ -629,7 +624,7 @@ fn batch_or_drain_observer_triggers(
 /// authority instead. That authority's ledger half applies to every event kind,
 /// matching the generic priority scan. Without it a fetched land's landfall/ETB
 /// observers fire twice.
-fn park_search_observer_triggers(
+fn collect_search_observer_triggers(
     state: &mut GameState,
     events: &[GameEvent],
     events_before_drain: usize,
@@ -651,7 +646,7 @@ fn park_search_observer_triggers(
     // shared carrier authority prove that every such frame has drained before
     // retiring the parent and releasing its CR 400.7j self-move link.
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
-    ResolutionChoiceOutcome::WaitingForWithParkedObservers(state.waiting_for.clone())
+    ResolutionChoiceOutcome::WaitingForWithInlineTriggers(state.waiting_for.clone())
 }
 
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
@@ -995,7 +990,7 @@ fn finalize_standard_search_selection(
     // before (and instead of stranding) the ordinary rider.
     super::engine::resume_pending_continuation_if_priority(state, events)
         .expect("a settled search choice must resume its continuation");
-    park_search_observer_triggers(state, events, events_before_drain)
+    collect_search_observer_triggers(state, events, events_before_drain)
 }
 
 /// CR 800.4a + CR 701.23a: If the exact hidden zone backing an ordinary
@@ -3902,7 +3897,7 @@ pub(super) fn handle_resolution_choice(
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled search choice must resume its continuation");
-                return Ok(park_search_observer_triggers(
+                return Ok(collect_search_observer_triggers(
                     state,
                     events,
                     events_before_drain,
@@ -3973,7 +3968,7 @@ pub(super) fn handle_resolution_choice(
             set_priority(state, player);
             super::engine::resume_pending_continuation_if_priority(state, events)
                 .expect("a settled search choice must resume its continuation");
-            park_search_observer_triggers(state, events, events_before_partition)
+            collect_search_observer_triggers(state, events, events_before_partition)
         }
         (
             WaitingFor::OutsideGameChoice {

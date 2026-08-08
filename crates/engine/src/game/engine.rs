@@ -6766,7 +6766,7 @@ fn apply_action(
 
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
-    let mut skip_deferred_trigger_drain = false;
+    let skip_deferred_trigger_drain = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -10400,13 +10400,6 @@ fn apply_action(
                     waiting_for,
                 ) => {
                     triggers_processed_inline = true;
-                    waiting_for
-                }
-                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithParkedObservers(
-                    waiting_for,
-                ) => {
-                    triggers_processed_inline = true;
-                    skip_deferred_trigger_drain = true;
                     waiting_for
                 }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
