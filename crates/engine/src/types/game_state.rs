@@ -9778,12 +9778,15 @@ pub enum WaitingFor {
         valid_attacker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
-        /// CR 508.1a–d: engine-authoritative per-attacker legal `AttackTarget`s.
+        /// CR 508.1a–d: engine-authoritative per-attacker selectable
+        /// `AttackTarget` support. Each listed pair occurs in at least one
+        /// complete declaration accepted by the engine; this is not a standalone
+        /// hard-legality verdict.
         /// `None` = legacy serialized state (consumers fall back to the aggregate
         /// `valid_attack_targets`). `Some(map)` = authoritative; a missing attacker
-        /// key means "no legal targets" (no fallback). New prompts always emit
-        /// `Some` — computed by the same engine constraints model that enforces
-        /// legality in `validate_attack_declaration`.
+        /// key means "no selectable targets" (no fallback). New prompts always
+        /// emit `Some` — computed by the same engine constraints model that
+        /// enforces legality in `validate_attack_declaration`.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

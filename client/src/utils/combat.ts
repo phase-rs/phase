@@ -49,7 +49,7 @@ export function getValidAttackTargets(
 }
 
 /**
- * The engine-authoritative per-attacker legal-target map from the current
+ * The engine-authoritative per-attacker selectable-target-support map from the current
  * `DeclareAttackers` prompt, or `undefined` for a legacy payload that predates
  * the field. `undefined` means "fall back to the aggregate list"; a present map
  * (even `{}`) is authoritative.
@@ -64,12 +64,13 @@ export function getValidAttackTargetsByAttacker(
 }
 
 /**
- * Legal attack targets for one attacker — presentation over engine choices only,
- * no client legality computed here. When the engine provides the per-attacker
- * map (`byAttacker` present, authoritative), a present key gives that attacker's
- * exact legal targets and a MISSING key means it has none (no fallback). Only a
- * legacy payload (`byAttacker === undefined`) falls back to the aggregate
- * compatibility list.
+ * Selectable attack targets for one attacker — presentation over engine choices
+ * only, with no client legality computed here. The map proves each pair belongs
+ * to at least one accepted full declaration; it is not a standalone legality
+ * check. When `byAttacker` is present (authoritative), a present key gives that
+ * attacker's exact selectable support and a MISSING key means it has none (no
+ * fallback). Only a legacy payload (`byAttacker === undefined`) falls back to
+ * the aggregate compatibility list.
  */
 export function attackTargetsForAttacker(
   attackerId: ObjectId,
@@ -81,11 +82,10 @@ export function attackTargetsForAttacker(
 }
 
 /**
- * The set of targets every one of `attackerIds` can legally attack — the
- * intersection of their per-attacker legal sets, in `aggregate` display order.
- * Drives "Attack All": a single target is offered only when all selected
- * attackers may legally attack it. With a legacy payload the intersection is the
- * aggregate list (every attacker shares it).
+ * The common selectable targets for every one of `attackerIds` — the intersection
+ * of their engine-provided support sets, in `aggregate` display order. Drives
+ * "Attack All" without attempting client-side rules evaluation. With a legacy
+ * payload the intersection is the aggregate list (every attacker shares it).
  */
 export function commonAttackTargets(
   attackerIds: ObjectId[],
@@ -122,8 +122,8 @@ export interface AttackerStack {
   /** Representative object for rendering P/T and counter chips (null only if state is missing). */
   representative: GameObject | null;
   /**
-   * The engine-provided legal attack targets shared by every member of this
-   * stack. All members have identical legal sets (that is the stack invariant),
+   * The engine-provided selectable attack targets shared by every member of this
+   * stack. All members have identical selectable sets (that is the stack invariant),
    * so distribution steppers only ever offer these targets. Empty when no
    * per-attacker map is supplied (legacy callers that don't distribute per
    * bucket).
@@ -146,10 +146,10 @@ export interface AttackerStack {
  * identical permanents — so the picker's grouping always matches the board's.
  *
  * When `targetsFor` is supplied, each name-group is further subdivided by its
- * members' engine-provided legal-target set: two identically-named attackers
- * with *different* legal options (CR 508.1c scoped restrictions) are NOT
+ * members' engine-provided selectable-target set: two identically-named attackers
+ * with *different* selectable options (CR 508.1c scoped restrictions) are NOT
  * interchangeable, so they land in separate stacks. Every member of a returned
- * stack shares one legal-target set, exposed as `stack.targets`.
+ * stack shares one selectable-target set, exposed as `stack.targets`.
  *
  * Ring-bearers (CR 701.54) are grouped solo by that building block, which is
  * the correct behavior here too. Stacks and their members are returned in
