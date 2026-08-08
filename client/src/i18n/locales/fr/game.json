@@ -2245,8 +2245,21 @@
     "heroCount": "{{count}} heroes"
   },
   "debugPanel": {
-    "aiDecisionCapture": "Capturer les décisions de l’IA",
+    "aiDecisionVisibility": "Afficher les décisions de l’IA",
     "aiDecisionUnavailable": "Les diagnostics de décision de l’IA ne sont pas disponibles pour cette partie."
+  },
+  "aiDecisionOverlay": {
+    "title": "Décision de l’IA",
+    "rankedSubtitle": "Échantillon softmax à la température {{temperature}}.",
+    "directSubtitle": "Choisie par une politique d’IA directe.",
+    "metrics": "S {{score}} · P {{weight}}",
+    "top": "MEILLEUR",
+    "chosen": "CHOISIE",
+    "legendTop": "Mieux classée",
+    "legendChosen": "Choisie",
+    "collapse": "Réduire les détails de la décision de l’IA",
+    "expand": "Développer les détails de la décision de l’IA",
+    "close": "Fermer la fenêtre de décision de l’IA"
   },
   "status": {
     "yourPriority": "Your priority",

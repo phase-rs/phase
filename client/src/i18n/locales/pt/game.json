@@ -2245,8 +2245,21 @@
     "heroCount": "{{count}} heroes"
   },
   "debugPanel": {
-    "aiDecisionCapture": "Capturar decisões da IA",
+    "aiDecisionVisibility": "Mostrar decisões da IA",
     "aiDecisionUnavailable": "Os diagnósticos de decisão da IA não estão disponíveis para este jogo."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisão da IA",
+    "rankedSubtitle": "Amostra softmax na temperatura {{temperature}}.",
+    "directSubtitle": "Selecionada por uma política direta de IA.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MELHOR",
+    "chosen": "ESCOLHIDA",
+    "legendTop": "Mais bem classificada",
+    "legendChosen": "Escolhida",
+    "collapse": "Recolher detalhes da decisão da IA",
+    "expand": "Expandir detalhes da decisão da IA",
+    "close": "Fechar sobreposição da decisão da IA"
   },
   "status": {
     "yourPriority": "Your priority",

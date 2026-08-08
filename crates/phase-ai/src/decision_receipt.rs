@@ -14,6 +14,11 @@ pub struct AiDecisionDiagnosticReceipt {
     pub authorized_actor: u8,
     pub selected_action: GameAction,
     pub status: AiDecisionReceiptStatus,
+    /// Engine-authored selection outcome; shown verbatim by local diagnostics.
+    pub selection_explanation: String,
+    /// Temperature used by the ranked softmax selector. `None` means a direct
+    /// policy chose the action without a scored candidate distribution.
+    pub sampling_temperature: Option<f64>,
     pub candidates: Vec<AiDecisionDiagnosticCandidate>,
 }
 
@@ -28,12 +33,25 @@ pub enum AiDecisionReceiptStatus {
 #[serde(rename_all = "camelCase")]
 pub struct AiDecisionDiagnosticCandidate {
     pub action: GameAction,
+    /// Engine-resolved name of the object this action operates on, when it has
+    /// one. WASM enriches this from the authoritative game state for display.
+    pub object_name: Option<String>,
+    /// Engine-authored display fields for the action payload. The frontend
+    /// renders these directly instead of exposing serialized JSON.
+    pub details: Vec<AiDecisionDiagnosticField>,
     pub rank: Option<usize>,
     pub is_top_ranked: bool,
     pub is_selected: bool,
     pub score: Option<f64>,
     pub weight: Option<f64>,
     pub probability: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiDecisionDiagnosticField {
+    pub label: String,
+    pub value: String,
 }
 
 fn finite(value: f64) -> Option<f64> {
@@ -89,16 +107,37 @@ pub fn ranked_receipt(
         ranks[index] = position + 1;
     }
 
+    let selection_explanation = match selected_index {
+        Some(index) if ranks[index] == 1 => format!(
+            "Softmax sampled the top-ranked action ({:.1}%) at temperature {temperature:.2}.",
+            probabilities.as_ref().map_or(0.0, |items| items[index] * 100.0),
+        ),
+        Some(index) => format!(
+            "Softmax sampled rank {} ({:.1}%) instead of rank 1 ({:.1}%) at temperature {temperature:.2}.",
+            ranks[index],
+            probabilities.as_ref().map_or(0.0, |items| items[index] * 100.0),
+            probabilities.as_ref().map_or(0.0, |items| {
+                let top_index = ranks.iter().position(|rank| *rank == 1).expect("rank one exists");
+                items[top_index] * 100.0
+            }),
+        ),
+        None => "No ranked action was selected.".to_string(),
+    };
+
     AiDecisionDiagnosticReceipt {
         semantic_owner: contract.semantic_owner.0,
         authorized_actor: contract.authorized_actor.0,
         selected_action,
         status: AiDecisionReceiptStatus::Ranked,
+        selection_explanation,
+        sampling_temperature: finite(temperature),
         candidates: scored
             .iter()
             .enumerate()
             .map(|(index, (action, score))| AiDecisionDiagnosticCandidate {
                 action: action.clone(),
+                object_name: None,
+                details: Vec::new(),
                 rank: Some(ranks[index]),
                 is_top_ranked: ranks[index] == 1,
                 is_selected: selected_index == Some(index),
@@ -122,6 +161,9 @@ pub fn direct_receipt(
         authorized_actor: contract.authorized_actor.0,
         selected_action: selected_action.clone(),
         status: AiDecisionReceiptStatus::Direct,
+        selection_explanation:
+            "A direct AI policy selected this action; no scored distribution was used.".to_string(),
+        sampling_temperature: None,
         candidates: contract
             .candidates
             .iter()
@@ -134,6 +176,8 @@ pub fn direct_receipt(
                 selected_row_found |= is_selected;
                 AiDecisionDiagnosticCandidate {
                     action: candidate.action.clone(),
+                    object_name: None,
+                    details: Vec::new(),
                     is_selected,
                     rank: None,
                     is_top_ranked: false,

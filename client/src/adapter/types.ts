@@ -3630,11 +3630,15 @@ export interface AiDecisionDiagnosticReceipt {
   authorizedActor: PlayerId;
   selectedAction: GameAction;
   status: "ranked" | "direct";
+  selectionExplanation: string;
+  samplingTemperature: number | null;
   candidates: AiDecisionDiagnosticCandidate[];
 }
 
 export interface AiDecisionDiagnosticCandidate {
   action: GameAction;
+  objectName: string | null;
+  details: { label: string; value: string }[];
   rank: number | null;
   isTopRanked: boolean;
   isSelected: boolean;

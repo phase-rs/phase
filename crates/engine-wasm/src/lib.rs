@@ -43,6 +43,88 @@ use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
+/// Enrich local diagnostic receipts with names already known to the engine.
+/// This remains at the WASM boundary: AI ranking stays state-agnostic, while
+/// the display receives the exact card/permanent an action refers to.
+fn attach_receipt_object_names(
+    state: &GameState,
+    receipt: &mut phase_ai::decision_receipt::AiDecisionDiagnosticReceipt,
+) {
+    for candidate in &mut receipt.candidates {
+        let object_id = match &candidate.action {
+            GameAction::CastSpell { object_id, .. }
+            | GameAction::PlayLand { object_id, .. }
+            | GameAction::Foretell { object_id, .. } => Some(*object_id),
+            GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
+            _ => None,
+        };
+        candidate.object_name = object_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|object| object.name.clone());
+        candidate.details = serde_json::to_value(&candidate.action)
+            .ok()
+            .and_then(|action| {
+                action
+                    .get("data")
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+            })
+            .map(|data| {
+                data.into_iter()
+                    .map(
+                        |(label, value)| phase_ai::decision_receipt::AiDecisionDiagnosticField {
+                            label: humanize_diagnostic_field(&label),
+                            value: format_diagnostic_value(&value),
+                        },
+                    )
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+}
+
+fn humanize_diagnostic_field(field: &str) -> String {
+    field
+        .split('_')
+        .map(|word| match word {
+            "id" => "ID".to_string(),
+            _ => {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_diagnostic_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(format_diagnostic_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(label, value)| {
+                format!(
+                    "{}: {}",
+                    humanize_diagnostic_field(label),
+                    format_diagnostic_value(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
     serde_json::from_str::<PersistedGameState>(json_str)
         .map(PersistedGameState::into_game_state)
@@ -2051,9 +2133,10 @@ pub fn get_ai_action_proposal_with_diagnostics(
             return Ok(JsValue::NULL);
         }
         let actor = contract.authorized_actor;
-        let receipt = selection
+        let mut receipt = selection
             .receipt
             .expect("diagnostic chooser must observe its selected action");
+        attach_receipt_object_names(state, &mut receipt);
         let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
         Ok(to_js(&serde_json::json!({
             "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
@@ -2185,13 +2268,14 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
         };
         let action = admissible_scores[selected_index].0.clone();
         let actor = contract.authorized_actor;
-        let receipt = phase_ai::decision_receipt::ranked_receipt(
+        let mut receipt = phase_ai::decision_receipt::ranked_receipt(
             &contract,
             &admissible_scores,
             Some(selected_index),
             config.temperature,
             action.clone(),
         );
+        attach_receipt_object_names(state, &mut receipt);
         let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
         Ok(to_js(&serde_json::json!({
             "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },

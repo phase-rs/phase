@@ -2245,8 +2245,21 @@
     "heroCount": "{{count}} heroes"
   },
   "debugPanel": {
-    "aiDecisionCapture": "Capturar decisiones de IA",
+    "aiDecisionVisibility": "Mostrar decisiones de IA",
     "aiDecisionUnavailable": "Los diagnósticos de decisiones de IA no están disponibles para esta partida."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisión de IA",
+    "rankedSubtitle": "Muestra softmax a temperatura {{temperature}}.",
+    "directSubtitle": "Seleccionada por una política de IA directa.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MEJOR",
+    "chosen": "ELEGIDA",
+    "legendTop": "Mejor clasificada",
+    "legendChosen": "Elegida",
+    "collapse": "Contraer detalles de la decisión de IA",
+    "expand": "Expandir detalles de la decisión de IA",
+    "close": "Cerrar la superposición de decisión de IA"
   },
   "status": {
     "yourPriority": "Your priority",

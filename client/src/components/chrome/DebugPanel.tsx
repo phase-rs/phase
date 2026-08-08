@@ -3,7 +3,7 @@ import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AiDecisionDiagnosticReceipt, GameState } from "../../adapter/types";
+import type { GameState } from "../../adapter/types";
 import { supportsServerRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
@@ -59,13 +59,11 @@ function patchConsole(): void {
 patchConsole();
 
 export function DebugPanel({
-  aiDecisionReceipt,
-  aiDecisionDiagnosticsAvailable,
+  aiDecisionDiagnosticsAvailable = false,
 }: {
-  aiDecisionReceipt: AiDecisionDiagnosticReceipt | null;
-  aiDecisionDiagnosticsAvailable: boolean;
+  aiDecisionDiagnosticsAvailable?: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common", "game"]);
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
   const rewindTargets = useGameStore((s) => s.rewindTargets);
@@ -358,7 +356,7 @@ export function DebugPanel({
 
       <section className="border-b border-gray-700 px-3 py-2">
         <label className="flex items-center justify-between gap-2 text-xs text-gray-300">
-          <span>{t("debugPanel.aiDecisionCapture")}</span>
+          <span>{t("game:debugPanel.aiDecisionVisibility")}</span>
           <input
             type="checkbox"
             disabled={!aiDecisionDiagnosticsAvailable}
@@ -367,20 +365,7 @@ export function DebugPanel({
           />
         </label>
         {!aiDecisionDiagnosticsAvailable ? (
-          <p className="mt-1 text-xs text-gray-500">{t("debugPanel.aiDecisionUnavailable")}</p>
-        ) : aiDecisionReceipt ? (
-          <div className="mt-2 font-mono text-[10px] text-gray-400">
-            <p>{JSON.stringify(aiDecisionReceipt.selectedAction)}</p>
-            <ol className="mt-1 space-y-1">
-              {aiDecisionReceipt.candidates.map((candidate, index) => (
-                <li key={index}>
-                  {candidate.rank ?? "—"} {candidate.isTopRanked ? "★" : ""}{" "}
-                  {candidate.isSelected ? "✓" : ""} {JSON.stringify(candidate.action)} {" "}
-                  {candidate.score ?? "—"} / {candidate.weight ?? "—"} / {candidate.probability ?? "—"}
-                </li>
-              ))}
-            </ol>
-          </div>
+          <p className="mt-1 text-xs text-gray-500">{t("game:debugPanel.aiDecisionUnavailable")}</p>
         ) : null}
       </section>
 

@@ -88,8 +88,12 @@ describe("WasmAdapter", () => {
       authorizedActor: 0,
       selectedAction: { type: "PassPriority" },
       status: "direct",
+      selectionExplanation: "A direct AI policy selected this action; no scored distribution was used.",
+      samplingTemperature: null,
       candidates: [{
         action: { type: "PassPriority" },
+        objectName: null,
+        details: [],
         rank: null,
         isTopRanked: false,
         isSelected: true,

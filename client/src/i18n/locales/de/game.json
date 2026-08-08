@@ -2245,8 +2245,21 @@
     "heroCount": "{{count}} heroes"
   },
   "debugPanel": {
-    "aiDecisionCapture": "KI-Entscheidungen erfassen",
+    "aiDecisionVisibility": "KI-Entscheidungen anzeigen",
     "aiDecisionUnavailable": "KI-Entscheidungsdiagnosen sind für dieses Spiel nicht verfügbar."
+  },
+  "aiDecisionOverlay": {
+    "title": "KI-Entscheidung",
+    "rankedSubtitle": "Softmax-Stichprobe bei Temperatur {{temperature}}.",
+    "directSubtitle": "Von einer direkten KI-Strategie ausgewählt.",
+    "metrics": "S {{score}} · G {{weight}}",
+    "top": "BESTE",
+    "chosen": "GEWÄHLT",
+    "legendTop": "Bestplatziert",
+    "legendChosen": "Gewählt",
+    "collapse": "Details der KI-Entscheidung einklappen",
+    "expand": "Details der KI-Entscheidung ausklappen",
+    "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
     "yourPriority": "Your priority",
