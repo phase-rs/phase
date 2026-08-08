@@ -1145,6 +1145,10 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
     // CR 500.1: Reset per-turn spell cast counters.
     state.spells_cast_this_turn = 0;
+    // CR 700.13: crimes are a per-turn player record.
+    for player in &mut state.players {
+        player.crimes_committed_this_turn = 0;
+    }
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.triggers_fired_this_turn_per_opponent.clear();

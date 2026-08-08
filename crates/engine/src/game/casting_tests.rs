@@ -10925,6 +10925,7 @@ fn undaunted_reduces_generic_by_living_opponent_count() {
         &mut mana_cost,
         None,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -10948,6 +10949,7 @@ fn undaunted_no_op_without_keyword() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
         None,
     );
@@ -11006,6 +11008,7 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
         &mut mana_cost,
         None,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -11045,6 +11048,7 @@ fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
         &mut mana_cost,
         None,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -11078,6 +11082,7 @@ fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
         None,
     );
@@ -11153,6 +11158,7 @@ fn undaunted_multiple_instances_scale_by_living_opponents() {
         &mut mana_cost,
         None,
         None,
+        None,
     );
     assert_eq!(
         mana_cost,
@@ -11192,6 +11198,7 @@ fn undaunted_does_not_count_eliminated_opponents() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
+        None,
         None,
         None,
     );
@@ -22364,7 +22371,7 @@ fn non_aura_enchantment_does_not_trigger_aura_targeting() {
 }
 
 #[test]
-fn emit_targeting_events_opponent_object_is_crime() {
+fn target_declaration_classifies_opponent_object_as_a_provisional_crime() {
     let mut state = setup_game_at_main_phase();
     let target = create_object(
         &mut state,
@@ -22388,9 +22395,17 @@ fn emit_targeting_events_opponent_object_is_crime() {
             ..
         } if *object_id == target
     )));
-    assert!(events.iter().any(
-        |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+    assert!(targets_commit_crime(
+        &state,
+        &[TargetRef::Object(target)],
+        PlayerId(0)
     ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CrimeCommitted { .. })),
+        "declaration is not a durable crime commitment"
+    );
 }
 
 #[test]
@@ -22420,7 +22435,7 @@ fn emit_targeting_events_own_object_no_crime() {
 }
 
 #[test]
-fn emit_targeting_events_opponent_player_is_crime() {
+fn target_declaration_classifies_opponent_player_as_a_provisional_crime() {
     let state = setup_game_at_main_phase();
     let mut events = Vec::new();
     emit_targeting_events(
@@ -22437,9 +22452,17 @@ fn emit_targeting_events_opponent_player_is_crime() {
             ..
         }
     )));
-    assert!(events.iter().any(
-        |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+    assert!(targets_commit_crime(
+        &state,
+        &[TargetRef::Player(PlayerId(1))],
+        PlayerId(0)
     ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CrimeCommitted { .. })),
+        "declaration is not a durable crime commitment"
+    );
 }
 
 #[test]

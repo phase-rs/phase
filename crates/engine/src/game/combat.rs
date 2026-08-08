@@ -1325,6 +1325,16 @@ fn block_restriction_statics_against_from_precomputed<'a>(
     })
 }
 
+/// CR 509.1b: True when a bare, currently applicable `CantBeBlocked` static
+/// makes this creature unblockable. This shares the combat legality predicate's
+/// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
+/// restrictions intentionally remain distinct.
+pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
+    let restrictions = collect_block_restriction_statics(state);
+    block_restriction_statics_against_from_precomputed(state, attacker_id, &restrictions)
+        .any(|(definition, _)| definition.mode == StaticMode::CantBeBlocked)
+}
+
 /// CR 509.1b: Blocker-side restriction ("~ can't block").
 /// Precomputed counterpart of `blocker_restriction_statics_for`.
 fn blocker_restriction_statics_for_from_precomputed<'a>(

@@ -121,6 +121,7 @@ mod cr733_resolved_trigger_removal;
 mod cr733_resolved_zone_change;
 mod cr_annotations;
 mod craft_tithing_blade_transform;
+mod crime_tracking;
 mod cross_line_instead_override_branch;
 mod crossway_troublemakers_attacking_keywords;
 mod culling_scales_lowest_mana_value_target;

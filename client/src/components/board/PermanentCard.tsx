@@ -293,6 +293,9 @@ export const PermanentCard = memo(function PermanentCard({
   const temporaryCantBeBlockedSourceId = useGameStore(
     (s) => s.gameState?.derived?.temporary_cant_be_blocked?.[String(objectId)],
   );
+  const cantBeBlocked = useGameStore((s) =>
+    (s.gameState?.derived?.cant_be_blocked ?? []).includes(objectId),
+  );
   // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
   // copiable values. Engine-classified because a copy of a permanent lives in a
   // Layer 1a continuous effect, not on the object — and the copy overrides
@@ -1082,7 +1085,7 @@ export const PermanentCard = memo(function PermanentCard({
         </div>
       )}
 
-      {temporaryCantBeBlockedSourceId !== undefined && (
+      {cantBeBlocked && (
         <CantBeBlockedBadge sourceName={temporaryCantBeBlockedSourceName} />
       )}
 

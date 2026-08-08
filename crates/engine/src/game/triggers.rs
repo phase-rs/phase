@@ -6913,6 +6913,11 @@ fn push_pending_trigger_to_stack_with_firing(
         .as_ref()
         .map(|source| source.source_read(state).lki().name)
         .unwrap_or_default();
+    let crime_candidate = super::casting::targets_commit_crime(
+        state,
+        &super::ability_utils::flatten_targets_in_chain(&ability),
+        controller,
+    );
     let entry = StackEntry {
         id: entry_id,
         source_id,
@@ -6930,6 +6935,7 @@ fn push_pending_trigger_to_stack_with_firing(
         },
     };
     stack::push_triggered_to_stack(state, entry, firing, events);
+    super::casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
     entry_id
 }
 

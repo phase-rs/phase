@@ -806,6 +806,12 @@ pub enum ResolvedLedgerEdit {
         expected_turn_count: u32,
         expected_game_count: u32,
     },
+    /// CR 700.13: Record one committed crime after its targeting action is
+    /// successfully placed on the stack.
+    CrimeCommitted {
+        player: PlayerId,
+        expected_turn_count: u32,
+    },
     /// CR 603.2c: Record one constrained trigger occurrence.
     TriggerFired {
         trigger: TriggerDefinitionRef,
@@ -1638,6 +1644,7 @@ pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
     AbilityActivationPreconditionMismatch,
+    CrimeCommittedPreconditionMismatch,
     CardsDrawnPreconditionMismatch,
     DrawnObjectMismatch {
         expected: ObjectIncarnationRef,
@@ -1667,6 +1674,9 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
             ),
+            Self::CrimeCommittedPreconditionMismatch => {
+                write!(f, "resolved crime command does not match its ledger prefix")
+            }
             Self::CardsDrawnPreconditionMismatch => write!(
                 f,
                 "resolved draw-bookkeeping command does not match its ledger prefix"
@@ -3184,6 +3194,10 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
             expected_game_count,
             ..
         } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::CrimeCommitted {
+            expected_turn_count,
+            ..
+        } => *expected_turn_count == u32::MAX,
         ResolvedLedgerEdit::CardsDrawn {
             drawn_object,
             attempted_empty_library,
