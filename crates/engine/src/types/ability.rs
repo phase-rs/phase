@@ -9181,6 +9181,156 @@ impl AbilityCost {
         }
     }
 
+    /// CR 605.1a (2026 amendment): does paying this cost move a card to or from
+    /// a **library**?
+    ///
+    /// **Recursive over the compositional forms.** `Composite` and `OneOf` are
+    /// `true` if any sub-cost is; `PerCounter` delegates to its `base`. Calling
+    /// this on a root node therefore already answers for the whole cost subtree,
+    /// which is why `ability_visit::visit_ability_def_costs_scoped` yields only
+    /// top-level cost nodes and does not descend compositions itself. A second
+    /// wildcard-free `AbilityCost` walk would be a drift hazard for no gain.
+    ///
+    /// `EffectCost` delegates ONE node to `Effect::moves_card_to_or_from_library`
+    /// without descending further: that keeps this method correct for standalone
+    /// callers, and it overlaps harmlessly (idempotent boolean OR) with the
+    /// effect walk's own surfacing of the same inner effect.
+    ///
+    /// **`mana_sources::cost_has_component` is deliberately NOT used and NOT
+    /// widened here.** Widening it would also alter the loyalty criterion and
+    /// `cost_removes_self_from_battlefield`, which are two different shipping
+    /// predicates; and it cannot see nested composition, which is exactly what
+    /// this criterion needs.
+    ///
+    /// **Which limb of CR 605.1a each application site falls under.** CR 602.1a
+    /// ("the activation cost is everything before the colon") scopes CR 605.1a's
+    /// *"its cost"* to the root activation cost. Every other position is reached
+    /// under *"its effect"*: CR 118.12a routes the "unless [a player does
+    /// something]" form into CR 118.12, which supplies "the action [do something]
+    /// is a cost, **paid when the spell or ability resolves**" — so an
+    /// `unless_pay` cost, and likewise any cost carried by a chain link (which is
+    /// never separately activated), is an instruction this ability follows during
+    /// its own resolution under CR 608.2c. Note CR 605.1a says "a library", not
+    /// "your library", so an opponent paying an `unless_pay` mill still counts.
+    ///
+    /// The match is **wildcard-free on purpose**: a new `AbilityCost` variant is
+    /// a compile error here, forcing a `true` / `false` / recursive decision.
+    pub fn moves_card_to_or_from_library(&self) -> bool {
+        match self {
+            // CR 701.17a: mill puts cards from the top of a library into a
+            // graveyard. Millikin and Deranged Assistant ("{T}, Mill a card: Add
+            // {C}") are the shipping cost-side cases.
+            AbilityCost::Mill { .. } => true,
+
+            // `AbilityCost::Exile { zone }` is true IFF `zone ==
+            // Some(Zone::Library)`, and `None` is deliberately FALSE.
+            //
+            // DO NOT widen this arm to inspect `filter`, and do not reach for a
+            // payability helper to resolve `None`. There are two payment paths and
+            // NEITHER is statically decidable:
+            // `game::cost_payability::exile_cost_effective_zone` is the authority
+            // for NON-SELF exile costs only — it resolves a missing zone to
+            // `Battlefield` (permanent-implying filter) or `Hand` (otherwise) —
+            // while the `TargetFilter::SelfRef` path short-circuits BEFORE it and
+            // treats a missing zone as the source's own CURRENT zone, which at
+            // runtime may be any zone including Library.
+            //
+            // `is_mana_ability` is a pure static classification over the printed
+            // AST and takes no `&GameState` (CR 605.2), so it can consult neither
+            // resolution. The explicit `Some(Zone::Library)` is therefore the only
+            // decidable test, and being the only one, it is the complete one. If
+            // that ever stops being true it is a parser-REPRESENTATION change, not
+            // a classifier change, and it would arrive as a new `zone` value
+            // rather than a new arm.
+            //
+            // ⚠️ 13 shipping mana abilities carry an `Exile` cost — Elvish Spirit
+            // Guide, Simian Spirit Guide, Food Chain, Black Tulip, Cadaverous
+            // Bloom, Ether, Jack-o'-Lantern, Mirrored Lotus, Molt Tender, Rubble
+            // Rouser, Sunken Palace, Thornvault Forager, Titans' Nest — and NONE
+            // carries `Library`. Writing `AbilityCost::Exile { .. } => true` here,
+            // dropping the zone read, strips mana-ability status from every one of
+            // them. `cost_axis_conditional_arms_read_their_typed_zone_fields` is
+            // the guard.
+            AbilityCost::Exile { zone, .. } => *zone == Some(Zone::Library),
+
+            // Non-optional `zone`, so there is no default to reason about.
+            AbilityCost::ExileWithAggregate { zone, .. } => *zone == Zone::Library,
+
+            // The field's own doc states the default: `from_zone: None` means
+            // BATTLEFIELD (the standard "return a permanent you control to its
+            // owner's hand" cost shape — Grinning Ignus is the one shipping mana
+            // ability using it). `Some(Zone::Graveyard)` is the Harvest Wurm
+            // unless-cost shape. Only an explicit `Library` counts.
+            AbilityCost::ReturnToHand { from_zone, .. } => *from_zone == Some(Zone::Library),
+
+            // Compositional forms — recurse. This recursion is the SOLE authority
+            // for cost composition; `cost_has_component` cannot express it.
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                costs.iter().any(AbilityCost::moves_card_to_or_from_library)
+            }
+            AbilityCost::PerCounter { base, .. } => base.moves_card_to_or_from_library(),
+
+            // CR 602.1a: "The activation cost is everything before the colon (:)"
+            // — an effect written there is performed as a cost. Delegate one node.
+            AbilityCost::EffectCost { effect } => effect.moves_card_to_or_from_library(),
+
+            // ---------- FALSE: no library endpoint ----------
+            // Mana, energy, speed, life, and loyalty payments move no card at all.
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::PayEnergy { .. }
+            // CR 702.179f: speed is a player designation, not a card.
+            | AbilityCost::PaySpeed { .. }
+            // CR 119.4: paying life moves no card.
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Loyalty { .. }
+            // CR 122.1: "A counter is a marker placed on an object or player ...
+            // Counters are not objects and have no characteristics." Giving the
+            // paying player counters (The Serpent Society's "Ward—Get five poison
+            // counters") places markers on a PLAYER — no card and no zone change,
+            // so no library can be an endpoint.
+            | AbilityCost::GetPlayerCounters { .. }
+            // CR 122.1 again: removing counters from a permanent is a marker
+            // change on an object already on the battlefield.
+            | AbilityCost::RemoveCounter { .. }
+            // Blight puts -1/-1 counters on a creature you control.
+            | AbilityCost::Blight { .. }
+            // CR 701.26a/b: tap/untap are status changes, not zone changes.
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::Exert
+            // CR 701.3d: unattaching leaves the object on the battlefield.
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            // Battlefield -> graveyard.
+            | AbilityCost::Sacrifice(_)
+            // Hand -> graveyard.
+            | AbilityCost::Discard { .. }
+            // CR 702.167a/b: craft materials come from the battlefield and/or your
+            // graveyard — a dual-zone union that never includes a library.
+            | AbilityCost::ExileMaterials { .. }
+            // CR 701.59a: collect evidence exiles from your GRAVEYARD.
+            | AbilityCost::CollectEvidence { .. }
+            // CR 701.20b: "Revealing a card doesn't cause it to leave the zone
+            // it's in."
+            | AbilityCost::Reveal { .. }
+            // CR 701.4a: behold is choose-or-reveal from hand/battlefield, with no
+            // zone change.
+            | AbilityCost::Behold { .. }
+            // CR 702.49a: ninjutsu returns an unblocked attacker to its owner's
+            // hand and puts the ninja onto the battlefield from hand.
+            | AbilityCost::NinjutsuFamily { .. }
+            // CR 118.9: a borrowed keyword mana cost is still a mana cost.
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            // The parser could not classify the cost fragment. Asserting `true`
+            // would strip mana-ability status on a guess; `false` is the honest
+            // answer, matching `Effect::Unimplemented`.
+            | AbilityCost::Unimplemented { .. } => false,
+        }
+    }
+
     /// CR 605.3a + CR 106.12 + CR 107.6: True iff every component of this cost is
     /// conclusively decided by the non-simulating mana-ability cheap gate
     /// (`mana_ability_ready_without_simulation`) — i.e. the cost is built solely
@@ -15573,6 +15723,644 @@ impl Effect {
                 other => other.as_ref(),
             },
             Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),
+        }
+    }
+
+    /// CR 605.1a (2026 amendment): does resolving this effect move a card to or
+    /// from a **library**?
+    ///
+    /// Returns `true` iff resolving this effect can cause at least one card to
+    /// change zones with a library as the origin or the destination. Reordering
+    /// *within* a library is not a move to or from it. Revealing or looking at a
+    /// card is not a move (CR 701.20b: "Revealing a card doesn't cause it to
+    /// leave the zone it's in").
+    ///
+    /// The answer must be decidable from the **static AST alone**, never from
+    /// game state — CR 605.1a is a static classification, and CR 605.2 ("A mana
+    /// ability remains a mana ability even if the game state doesn't allow it to
+    /// produce mana") forbids a state-dependent answer. Where a variant is
+    /// conditionally library-touching, decide from the variant's **own typed
+    /// fields**.
+    ///
+    /// This method answers for **THIS NODE ONLY**; nested payloads are the
+    /// walker's business (`ability_visit::visit_ability_def_scoped` under
+    /// `ResolutionScope::OwnResolutionOnly`).
+    ///
+    /// The match is **wildcard-free on purpose**: a new `Effect` variant is a
+    /// compile error here, forcing its author to answer "does this move a card
+    /// to or from a library?" at the one place that owns the answer. Do not add
+    /// an `_ =>` arm.
+    pub fn moves_card_to_or_from_library(&self) -> bool {
+        match self {
+            // ---------- Unconditionally TRUE: a library is always an endpoint ----------
+            // CR 121.1: "A player draws a card by putting the top card of their
+            // library into their hand."
+            Effect::Draw { .. }
+            // CR 701.17a: mill puts cards from the top of a library into a
+            // graveyard; the library is always the origin.
+            | Effect::Mill { .. }
+            // CR 701.25a: surveil looks at the top cards and may "put any number
+            // of them into your graveyard" — they can leave the library. This is
+            // exactly the axis on which surveil differs from scry (CR 701.22a),
+            // which is why the two must never share an arm.
+            | Effect::Surveil { .. }
+            // CR 701.44a: explore "reveals the top card of their library", then
+            // puts it into hand or (optionally) graveyard. CR 701.44a is the SOLE
+            // authority — do NOT cite CR 701.44d, which is the simultaneous-explore
+            // APNAP ordering rule and says nothing about card movement.
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            // Exiles the top N cards of a player's library.
+            | Effect::ExileTop { .. }
+            // Exiles one explicit object AND the top `count` cards of a library.
+            | Effect::ExileFaceDownPile { .. }
+            // CR 701.50a: connive "draws a card, then discards".
+            | Effect::Connive { .. }
+            // CR 728.1: a player with rad counters "mills a number of cards equal
+            // to the number of rad counters they have".
+            | Effect::ProcessRadCounters
+            // CR 701.13a: exiles from the top of a player's library.
+            | Effect::ExileFromTopUntil { .. }
+            // Reveal-until. TWO clauses, TWO authorities — do not collapse them.
+            // CR 701.20a is the authority for the REVEAL LOOP ONLY; per CR 701.20b
+            // revealing does NOT move a card. The movement is done by this
+            // variant's own `kept_destination` / `rest_destination` fields, which
+            // take the revealed cards out of the library.
+            | Effect::RevealUntil { .. }
+            // CR 701.57a: "Exile cards from the top of your library until ..."
+            | Effect::Discover { .. }
+            // CR 702.85a: cascade exiles from the top of your library, then
+            // bottoms the cards not cast.
+            | Effect::Cascade
+            // CR 702.60a: ripple reveals the top N and "put the rest on the bottom".
+            | Effect::Ripple { .. }
+            // Destination is a library position.
+            | Effect::PutAtLibraryPosition { .. }
+            // Hand -> top of library.
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            // Destination is a library.
+            | Effect::PutOnTopOrBottom { .. }
+            // CR 701.62a: manifest dread "Look at the top two cards of your
+            // library", then manifests one and bins the other.
+            | Effect::ManifestDread
+            // CR 701.48a: learn — "If you do, draw a card".
+            | Effect::Learn
+            // Randomly picks card(s) FROM a library matching a filter; the library
+            // is always the origin.
+            | Effect::Seek { .. } => true,
+
+            // `Effect::Manifest` is TRUE because the ENGINE's manifest is always
+            // top-of-library (all 8 shipping cards; Ghastly Conscription's
+            // manifest-from-a-graveyard-pile routes to `ChangeZoneAll` instead),
+            // NOT because CR 701.40a says so — CR 701.40a names no source zone
+            // ("Put that card onto the battlefield face down"), and CR 701.40e
+            // ("If an effect instructs a player to manifest multiple cards from
+            // their library ...") and CR 701.40f ("it remains in its previous
+            // zone") together imply non-library sources are legal. A CR-derived
+            // verdict would have to be conditional; there is no source field to
+            // condition on.
+            //
+            // THIS ARM BECOMES WRONG the moment a card manifests from hand,
+            // graveyard, or exile AND parses to this variant. That change arrives
+            // as a new nested/source STRUCT FIELD — field access, not a match arm
+            // — and therefore compiles silently. If you are adding a source field
+            // to `Effect::Manifest`, make this arm conditional in the same commit.
+            Effect::Manifest { .. } => true,
+
+            // No CR entry exists: "heist" does not appear anywhere in
+            // `docs/MagicCompRules.txt` (verified case-insensitively). Do not
+            // invent a CR number for this arm. The verdict is grounded in card
+            // Oracle text — "Heist target opponent's library" (Grave Expectations,
+            // Weave the Nightmare).
+            //
+            // `Heist` is TRUE even though the exile is performed by `HeistExile`,
+            // because `HeistExile` is an INTERNAL resolver continuation stashed by
+            // `Heist` rather than an AST chain sibling: the walker treats both as
+            // leaves and can never reach `HeistExile` from a `Heist` node. Marking
+            // `Heist` false "because the exile happens elsewhere" would under-narrow.
+            Effect::Heist { .. } | Effect::HeistExile => true,
+
+            // `DigSource` is NOT a library-vs-not axis, and this arm is
+            // unconditional for that reason. Under `DigSource::PriorLook` the
+            // cards are STILL in `player.library` — the look-only pass takes an
+            // iterator slice rather than a drain and returns without removing
+            // them (`game/effects/dig.rs`), stashing their ids in
+            // `private_look_ids` — so the library is the origin under BOTH
+            // variants. Do not re-introduce a `source ==` test here, and do not
+            // condition on `destination` / `rest_destination` either: under
+            // `PriorLook` the move is out of the library regardless of where the
+            // cards land. The one non-moving configuration (an empty library, or
+            // a keep count of zero with no rest destination) is state-dependent,
+            // and CR 605.2 forbids a state-dependent classification.
+            Effect::Dig { .. } => true,
+
+            // ---------- CONDITIONAL: decided from this variant's own typed fields ----------
+
+            // CR 614.15 + CR 701.6a: "put it on top of its owner's library
+            // INSTEAD of into its owner's graveyard" (Memory Lapse, Spell
+            // Crumple, Kylox's Voltstrider) is a SELF-replacement effect — an
+            // effect of this resolving ability replacing its own effect. CR 605.1a's
+            // closing sentence excludes replacement effects "other than
+            // self-replacement effects", so this one IS taken into account.
+            //
+            // CR 605.1a scopes the criterion to "ITS cost and effect" — whose
+            // resolution the movement happens in, not whether a field mentions a
+            // library. `SpellStackToGraveyardReplacement` has FOUR carriers and
+            // only this one is read, deliberately:
+            //  - `Counter.countered_spell_zone` IS read. CR 608.2c cites "Counter
+            //    target spell. If that spell is countered this way, put it on top
+            //    of its owner's library instead of into its owner's graveyard"
+            //    AS ITS OWN WORKED EXAMPLE of instructions this ability follows.
+            //    CR 701.6a puts the countered spell into the graveyard during this
+            //    resolution, and the rider redirects that same event.
+            //  - `FreeCastFromZones.graveyard_replacement` and
+            //    `CastingPermission::ExileWithAltCost.graveyard_replacement` are
+            //    NOT read. Each replaces the CAST SPELL'S OWN LATER RESOLUTION at
+            //    its CR 608.2n graveyard step ("as the final part of an instant or
+            //    sorcery spell's resolution"). The cast itself is not later — what
+            //    is later is the cast spell's own resolution, which belongs to a
+            //    different object. So the rider is not this ability's own effect,
+            //    hence not a self-replacement effect under CR 614.15, hence
+            //    excluded by CR 605.1a's closing sentence.
+            //
+            // THIS ASYMMETRY IS THE DESIGN, NOT A BUG. Do not "fix" it by making
+            // the arms symmetric. Pinned by
+            // `only_counter_reads_the_stack_to_graveyard_replacement`.
+            Effect::Counter {
+                countered_spell_zone,
+                ..
+            } => matches!(
+                countered_spell_zone,
+                Some(SpellStackToGraveyardReplacement::Library { .. })
+            ),
+
+            // Three legs, all required. `origin: None` means "derive the origin
+            // from the target", and the zone then lives in the filter's
+            // `InZone`/`InAnyZone` property — so the filter must be consulted.
+            // Use `extract_zones()`, NOT `extract_in_zone()`, which collapses
+            // multi-zone filters to a single answer.
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                *destination == Zone::Library
+                    || *origin == Some(Zone::Library)
+                    || target.extract_zones().contains(&Zone::Library)
+            }
+
+            // Same three-leg test as `ChangeZone`, plus: a `library_position` is
+            // only meaningful for a library destination, so its presence implies one.
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                library_position,
+                ..
+            } => {
+                *destination == Zone::Library
+                    || *origin == Some(Zone::Library)
+                    || library_position.is_some()
+                    || target.extract_zones().contains(&Zone::Library)
+            }
+
+            // `Some(Zone::Library)` is the top-of-library bounce class; the
+            // default (`None`) is the owner's hand.
+            Effect::Bounce { destination, .. } | Effect::BounceAll { destination, .. } => {
+                *destination == Some(Zone::Library)
+            }
+
+            // CR 701.23a: search. The default is library-only, so the ordinary
+            // tutor is true; the multi-zone class is true whenever a library is
+            // among the searched zones.
+            Effect::SearchLibrary { source_zones, .. } => source_zones.contains(&Zone::Library),
+
+            // CR 707.12 / CR 601.2a: casting moves the card to the stack, so a
+            // library among the source zones is a move out of a library.
+            Effect::CastCopyOfCard { target, .. } | Effect::CastFromZone { target, .. } => {
+                target.extract_zones().contains(&Zone::Library)
+            }
+
+            // The augment/host combination names its own source zones.
+            Effect::ChooseAugmentAndCombineWithHost { zones, .. } => zones.contains(&Zone::Library),
+
+            // CR 605.1a says "its cost AND effect"; a resolution-time `PayCost`
+            // carrying a library-moving cost is reached under the EFFECT limb
+            // (CR 608.2c), so delegate to the cost's own classification.
+            Effect::PayCost { cost, .. } => cost.moves_card_to_or_from_library(),
+
+            // `zones` is where the cards are cast FROM, during this resolution
+            // (CR 601.2a). `graveyard_replacement` is deliberately NOT read — see
+            // the `Effect::Counter` arm above for the full four-carrier rationale.
+            Effect::FreeCastFromZones { zones, .. } => zones.contains(&Zone::Library),
+
+            Effect::ChooseFromZone {
+                zone,
+                additional_zones,
+                ..
+            } => *zone == Zone::Library || additional_zones.contains(&Zone::Library),
+
+            // CR 608.2c: the per-member action runs inside THIS resolution, so it
+            // is an inline conditional rather than a boundary.
+            Effect::ForEachCategory { action, .. } => matches!(
+                action,
+                ForEachCategoryAction::ExileFromPool {
+                    zone: Zone::Library,
+                    ..
+                }
+            ),
+
+            // CR 121.1: only the `Card` gift is a draw ("Opponent draws a card").
+            // `Treasure` / `Food` / `TappedFish` create tokens (CR 111.1).
+            Effect::GiftDelivery { kind } => {
+                matches!(kind, crate::types::keywords::GiftKind::Card)
+            }
+
+            // `object_source: None` is TRUE because the ENGINE's default cloak
+            // source is the top of a library — the same empirical grounding as
+            // `Effect::Manifest`, NOT a CR derivation. CR 701.58a names no source
+            // zone ("Put that card onto the battlefield face down"), and CR 701.58e
+            // is the multi-cloak ORDERING rule ("If an effect instructs a player to
+            // cloak multiple cards from a single library, those cards are cloaked
+            // one at a time") — its conditional PRESUPPOSES a library source, it
+            // does not establish one, exactly as CR 701.40e does for manifest. No
+            // subrule in the CR 701.58 block names cloak's source zone. Cite
+            // CR 701.58a for "turn it face down / put onto the battlefield" and
+            // CR 701.58e only for the multi-cloak ordering it actually states;
+            // do not cite either as authority for the library source.
+            //
+            // `Some(filter)` is the good shape: the variant names its own source
+            // axis, so read it rather than assume it.
+            Effect::Cloak { object_source, .. } => match object_source {
+                None => true,
+                Some(filter) => filter.extract_zones().contains(&Zone::Library),
+            },
+
+            // A conjured card APPEARS IN a library it was not previously in —
+            // precisely the disruption CR 605.1a guards against. Digital-only
+            // keyword action with no CR entry, so the reasoning is carried inline
+            // rather than cited.
+            Effect::Conjure { destination, .. }
+            | Effect::DraftFromSpellbook { destination, .. } => *destination == Zone::Library,
+
+            // ---------- Reasoned FALSE: library-adjacent but not a move ----------
+
+            // CR 701.22a: scry looks at the top N cards, "then put any number of
+            // them on the BOTTOM of your library ... and the rest on TOP of your
+            // library." Every card starts and ends in the same library, so nothing
+            // moves to or from it. Contrast `Surveil` (CR 701.25a), which is true
+            // precisely because its cards can leave for the graveyard — the two
+            // keyword actions differ on exactly this axis. A real shipping card
+            // depends on this staying false: The Secret Lair.
+            Effect::Scry { .. } => false,
+
+            // CR 701.30a: "To clash, a player reveals the top card of their
+            // library. That player may then put that card on the bottom of their
+            // library." Either way the card stays in its own library.
+            Effect::Clash => false,
+
+            // CR 701.24a: shuffling randomizes "the cards within it" — a reorder,
+            // not a move. `Effect::Shuffle` carries a player filter and no
+            // zone-move field at all.
+            Effect::Shuffle { .. } => false,
+
+            // CR 701.20b: "Revealing a card doesn't cause it to leave the zone
+            // it's in." (`RevealFromHand`'s `on_decline` is an inline carrier the
+            // walker descends; the node itself moves nothing.)
+            Effect::RevealTop { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealHand { .. }
+            | Effect::RevealFromHand { .. } => false,
+
+            // CR 400.11: "Outside the game is not a zone" — so a sideboard/wish
+            // search moves nothing to or from a library. CR 701.23j covers the
+            // outside-the-game search itself.
+            Effect::SearchOutsideGame { .. } => false,
+
+            // CR 901.4: "All plane and phenomenon cards remain in the COMMAND ZONE
+            // throughout the game, both while they're part of a planar deck and
+            // while they're face up." CR 311.2 says the same for plane cards
+            // specifically. The planar deck lives in the command zone, so
+            // reordering its top moves nothing to or from a library. (Do NOT cite
+            // CR 901.15 here: that is the "Single Planar Deck Option", the
+            // shared-deck variant, and it states nothing about the deck's zone.)
+            Effect::ArrangePlanarDeckTop { .. } => false,
+
+            // CR 701.51b + CR 717.2: the Attraction deck exists in the command
+            // zone, not a library.
+            Effect::OpenAttractions { .. } => false,
+
+            // The Contraption deck likewise is not a library — exact siblings of
+            // `ArrangePlanarDeckTop`.
+            Effect::AssembleContraptions { .. } | Effect::AssembleContraptionsFromRollDifference => {
+                false
+            }
+
+            // The engine decomposes hideaway into `Effect::Dig` + this conceal
+            // step. This node turns the JUST-EXILED card face down — it acts on a
+            // card already in exile. The paired `Effect::Dig` is the library mover
+            // and is independently true above. Noted honestly: CR 702.75a DOES
+            // describe a library look, so this false rests on the engine's
+            // decomposition rather than on the CR denying a library move.
+            // Double-counting here would obscure which link is load-bearing.
+            Effect::HideawayConceal { .. } => false,
+
+            // Both variants carry `{ cost: ManaCost }` and nothing else — no zone
+            // field, no library reference. CR 702.94a casts the revealed card FROM
+            // HAND; CR 702.35a casts FROM EXILE. The preceding draw or discard is a
+            // separate effect that classifies on its own merits.
+            Effect::MiracleCast { .. } | Effect::MadnessCast { .. } => false,
+
+            // CR 701.4a: behold is the choose-or-reveal keyword action, with no
+            // zone change.
+            Effect::Behold { .. } => false,
+
+            // CR 701.61a: forage exiles from a graveyard or sacrifices a Food.
+            Effect::Forage => false,
+
+            // CR 701.59a: "To 'collect evidence N' means to exile any number of
+            // cards from your GRAVEYARD with total mana value N or greater."
+            Effect::CollectEvidence { .. } => false,
+
+            // The parser could not classify the fragment. Asserting `true` would
+            // reclassify unknown text on a guess, and this classifier must not
+            // double as a coverage signal — coverage already marks these cards
+            // unsupported, so `false` is the honest answer.
+            Effect::Unimplemented { .. } => false,
+
+            // Names a card from a list of strings; no zone move.
+            Effect::ChooseCard { .. } => false,
+
+            // CR 702.49a: ninjutsu returns an unblocked attacker to hand and puts
+            // the ninja from hand onto the battlefield. No library involved.
+            Effect::RuntimeHandled { .. } => false,
+
+            // CR 701.49: the dungeon is a command-zone object, not a library card.
+            Effect::VentureIntoDungeon | Effect::VentureInto { .. } => false,
+
+            // Granting a casting permission moves no card at THIS ability's
+            // resolution; the permitted cast happens later, as a separate object's
+            // cast (CR 601.2a) and resolution (CR 608.2n). Do NOT descend into
+            // `permission`. Three distinct limbs license this false, and they must
+            // not be collapsed into one sentence — the subtree is not homogeneous:
+            //
+            //  (A) RULES, covering only the two `graveyard_replacement` fields
+            //      (`CastingPermission::ExileWithAltCost` and
+            //      `ResolutionCastSuccessAction::FreeCastOfferRemaining`): each is a
+            //      rider on the CAST SPELL'S OWN LATER RESOLUTION at its CR 608.2n
+            //      graveyard step, so per CR 614.15 it is not a self-replacement
+            //      effect of this ability and CR 605.1a's closing sentence excludes
+            //      it. THIS LIMB DOES NOT REACH THE OTHER TWO VARIANTS.
+            //
+            //  (B) RULES, covering `ResolutionCastSuccessAction`'s other two
+            //      variants. `BottomMisses` (the `#[default]`) and
+            //      `RippleOfferRemaining` GENUINELY DO bottom cards to a library,
+            //      and per CR 702.85a / CR 701.57a / CR 702.60a that bottoming
+            //      happens inside the CASCADE / DISCOVER / RIPPLE ability's OWN
+            //      resolution — not a later object's. They are false HERE because
+            //      that ability's printed AST node is `Effect::Cascade` /
+            //      `Effect::Discover` / `Effect::Ripple`, each already
+            //      unconditionally true in this same match. `ResolutionCastCleanup`
+            //      is the runtime continuation those resolvers mint WHILE resolving
+            //      (`game/effects/cast_from_zone.rs`,
+            //      `game/engine_resolution_choices.rs`), not the printed
+            //      representation of the movement. Reading it here would
+            //      double-count a verdict already correct one node over.
+            //
+            //  (C) REACHABILITY FLOOR, empirical: the parser emits
+            //      `resolution_cleanup: None` at both of its construction sites
+            //      (`parser/oracle_effect/imperative.rs`,
+            //      `parser/oracle_effect/mod.rs`), and `data/card-data.json`
+            //      contains zero occurrences of `resolution_cleanup`,
+            //      `success_action`, `BottomMisses`, or `RippleOfferRemaining`.
+            //      Every `Some(..)` construction is a runtime resolver or a test.
+            //      No parsed `AbilityDefinition` — this classifier's only input —
+            //      reaches these variants at all.
+            //
+            // THIS ARM BECOMES WRONG the moment a parser production emits
+            // `resolution_cleanup: Some(..)`. That arrives as a CONSTRUCTION-SITE
+            // change, not a match arm, and COMPILES SILENTLY. If you are changing
+            // either parser site from `None`, re-derive this arm in the same commit:
+            // limb C is gone, and limb B holds only while the printed
+            // cascade/ripple/discover node carries the library verdict.
+            Effect::GrantCastingPermission { .. } => false,
+
+            // ---------- Boundary carriers: false AT THE NODE ----------
+            // Each registers a separate ability, replacement, or continuous effect
+            // rather than moving a card itself. Descent into their payloads is
+            // gated by `ResolutionScope` in `ability_visit`, not here.
+            //
+            // CR 603.3: `Effect::Mana`'s `grants` carry a `TriggerOnSpend`
+            // reflexive rider that fires when the mana is LATER spent — a separate
+            // triggered ability (Gilanra). `AddKeywordUntilEndOfTurn` is a CR 611.2
+            // continuous effect on another object; `CantBeCountered` is a fieldless
+            // leaf. Deliberately NOT descended — see `ability_visit`'s leaf arm.
+            Effect::Mana { .. }
+            // CR 603.7a: a delayed triggered ability, created now, resolving later
+            // as its own ability (CR 603.3).
+            | Effect::CreateDelayedTrigger { .. }
+            // CR 603.3 primary / CR 614.1 secondary: these register a replacement
+            // that applies to a later event or to another object, so none is a
+            // self-replacement effect (CR 614.15) and CR 605.1a's carve-out does
+            // not reach them.
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::CreateDamageReplacement { .. }
+            // CR 114.1: an emblem is a distinct object in the command zone; its
+            // abilities are the emblem's.
+            | Effect::CreateEmblem { .. }
+            // CR 611.2: a continuous effect; any `GrantAbility` inside belongs to
+            // the affected object.
+            | Effect::GenericEffect { .. }
+            // CR 111.1: the token is a distinct permanent; its granted abilities
+            // are the token's.
+            | Effect::Token { .. } => false,
+
+            // ---------- Inline branch carriers: false at the node ----------
+            // These are branches of THIS resolution (CR 608.2c), not separate
+            // abilities, so the walker always descends into them — but the node
+            // itself moves no card.
+            Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::RollDie { .. }
+            | Effect::ChooseOneOf { .. } => false,
+
+            // ---------- Other reasoned FALSE ----------
+            // CR 707.10: a copy of a spell is created on the stack.
+            Effect::CopySpell { .. } | Effect::EpicCopy { .. } => false,
+            // CR 707.2 governs the COPY SEMANTICS ("the copy acquires the copiable
+            // values of the original object's characteristics"). The token is
+            // created from a FORMAT CARD POOL, which is not a game zone at all, so
+            // no card changes zones — that point carries no CR, because CR 707.2
+            // addresses neither pools nor libraries.
+            Effect::CreateTokenCopyFromPool { .. } => false,
+            // CR 701.42: meld moves the two cards from exile to the battlefield.
+            Effect::Meld { .. } => false,
+            // CR 702.55a: haunt exiles from a graveyard.
+            Effect::ExileHaunting { .. } => false,
+            // Stack -> exile.
+            Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => false,
+            // Hand -> graveyard.
+            Effect::Discard { .. } | Effect::DiscardCard { .. } => false,
+            // Battlefield -> graveyard.
+            Effect::Sacrifice { .. } => false,
+            // Digital-only: mana plus a discard; no library endpoint.
+            Effect::Specialize => false,
+            // CR 701.16: investigate creates a Clue token (CR 111.1).
+            Effect::Investigate => false,
+            // CR 701.56a: time travel adjusts time counters (CR 122.1).
+            Effect::TimeTravel => false,
+            // CR 701.53a: incubate creates an Incubator token.
+            Effect::Incubate { .. } => false,
+            // CR 701.47a: amass creates an Army token and/or adds +1/+1 counters.
+            Effect::Amass { .. } => false,
+
+            // ---------- Bulk FALSE ----------
+            // Everything not named above. These move no card at all, or move cards
+            // between zones none of which is a library (battlefield, hand,
+            // graveyard, exile, stack, command). The match is wildcard-free, so a
+            // new variant omitted from every bucket is a COMPILE ERROR and a
+            // variant named twice is an unreachable-pattern warning — the compiler
+            // is the census, and this arm needs no hand-maintained list.
+            Effect::Adapt { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::Animate { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::Attach { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::BecomeMonarch
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Bolster { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::ChaosEnsues
+            | Effect::Choose { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::Cleanup { .. }
+            | Effect::CombineHost { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::CounterAll { .. }
+            | Effect::CrankContraptions { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DealDamage { .. }
+            | Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Detain { .. }
+            | Effect::Double { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::Encore
+            | Effect::EndCombatPhase
+            | Effect::EndTheTurn
+            | Effect::Endure { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::Exploit { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::Fight { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GainLife { .. }
+            | Effect::GiveControl { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::Harness
+            | Effect::Intensify { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::LoseLife { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::Myriad
+            | Effect::NoOp
+            | Effect::NoteManaSpent
+            | Effect::OpponentGuess { .. }
+            | Effect::PairWith { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::Planeswalk
+            | Effect::Populate
+            | Effect::PreventDamage { .. }
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Pump { .. }
+            | Effect::PumpAll { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::RedistributeLifeTotals
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::RememberCard { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::Renown { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::ReverseTurnOrder
+            | Effect::RingTemptsYou
+            | Effect::RollToVisitAttractions
+            | Effect::SetClassLevel { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::SetTapState { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SolveCase
+            | Effect::StartYourEngines { .. }
+            | Effect::Suspect { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::TakeTheInitiative
+            | Effect::TargetOnly { .. }
+            | Effect::Transform { .. }
+            | Effect::Tribute { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::WinTheGame { .. } => false,
         }
     }
 

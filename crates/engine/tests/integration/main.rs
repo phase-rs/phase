@@ -101,6 +101,7 @@ mod counter_anaphor_created_token_binding;
 mod counter_double_redirect_choice;
 mod counter_spell_zone_redirect;
 mod court_of_cunning_multi_target_mill;
+mod cr605_1a_library_criterion;
 mod cr733_resolved_attachment;
 mod cr733_resolved_combat_membership;
 mod cr733_resolved_commands_p0;
