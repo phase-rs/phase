@@ -146,25 +146,25 @@ pub struct ProductKnowledgeFact {
 /// hot `GameState` stack footprint. Its fields remain flattened in snapshots
 /// for backwards-compatible wire names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct ProductKnowledgeState {
+pub(crate) struct ProductKnowledgeState {
     #[serde(
         default,
         rename = "product_knowledge",
         skip_serializing_if = "Vec::is_empty"
     )]
-    facts: Vec<ProductKnowledgeFact>,
+    pub(crate) facts: Vec<ProductKnowledgeFact>,
     #[serde(
         default,
         rename = "library_knowledge_epochs",
         skip_serializing_if = "Vec::is_empty"
     )]
-    library_epochs: Vec<u64>,
+    pub(crate) library_epochs: Vec<u64>,
     #[serde(
         default,
         rename = "viewer_known_card_ids",
         skip_serializing_if = "Vec::is_empty"
     )]
-    viewer_known_card_ids: Vec<ObjectId>,
+    pub(crate) viewer_known_card_ids: Vec<ObjectId>,
 }
 
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
@@ -15054,7 +15054,7 @@ declare_game_state! {
     /// knowledge affects only viewer projection and AI determinization; it is
     /// never consulted by rules execution, legality, or prompts.
     #[serde(flatten)]
-    product_knowledge_state: Box<ProductKnowledgeState>,
+    pub(crate) product_knowledge_state: Box<ProductKnowledgeState>,
 
     /// Typed suspended-resolution authority. Families move here one at a
     /// time; an empty stack is omitted from raw live-state snapshots until the
