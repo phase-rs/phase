@@ -2244,6 +2244,23 @@
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
   },
+  "debugPanel": {
+    "aiDecisionVisibility": "Pokaż decyzje SI",
+    "aiDecisionUnavailable": "Diagnostyka decyzji SI jest niedostępna w tej grze."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decyzja SI",
+    "rankedSubtitle": "Próbka softmax przy temperaturze {{temperature}}.",
+    "directSubtitle": "Wybrano przez bezpośrednią strategię SI.",
+    "metrics": "W {{score}} · Waga {{weight}}",
+    "top": "NAJLEPSZA",
+    "chosen": "WYBRANA",
+    "legendTop": "Najwyżej oceniona",
+    "legendChosen": "Wybrana",
+    "collapse": "Zwiń szczegóły decyzji SI",
+    "expand": "Rozwiń szczegóły decyzji SI",
+    "close": "Zamknij nakładkę decyzji SI"
+  },
   "status": {
     "yourPriority": "Your priority",
     "yourPriorityReason": "Your priority — {{reason}}",

@@ -529,6 +529,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       type: "guest_deck",
       deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
     });
+    await flushPromises();
 
     expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
     expect(supportsAiDecisionDiagnostics(adapter)).toBe(true);
@@ -551,6 +552,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       type: "guest_deck",
       deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
     });
+    await flushPromises();
     expect(supportsAiDecisionDiagnostics(adapter)).toBe(false);
     guest.simulateClose();
     await flushPromises();
