@@ -554,7 +554,7 @@ fn heist_target_filter_round_trips_through_parse() {
 // Fixture: this test references "bear cub", "goblin arsonist", "elf
 // replica", and "forest" as quoted string literals so
 // `scripts/gen-test-fixture.py --check` keeps them in
-// `tests/fixtures/integration_cards.json`. Grenzo himself is built from
+// `tests/fixtures/integration_cards.json.gz`. Grenzo himself is built from
 // inline Oracle text via `add_creature_to_hand_from_oracle` (no fixture
 // entry needed), which is the cleanest way to exercise the production
 // parser path on this branch's Heist parser change before the card-data

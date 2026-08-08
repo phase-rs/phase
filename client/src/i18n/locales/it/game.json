@@ -269,6 +269,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Stappa",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -440,6 +441,8 @@
     "initiativeTooltip": "Ha l'Iniziativa — si avventura nella Città Bassa all'inizio del mantenimento",
     "cityBlessing": "Benedizione della Città",
     "cityBlessingTooltip": "Benedizione della Città — controlla dieci o più permanenti (Ascendere)",
+    "enduringStory": "Storia duratura",
+    "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
     "dungeonAriaLabel": "Avventura in {{name}}, stanza {{room}}",
     "dungeonTooltip": "Avventura in {{name}} — stanza {{room}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
@@ -481,6 +484,11 @@
     "pendingCheaper": "La prossima magia costa {{amount}} in meno",
     "companion": "Compagno",
     "unboundedTooltip": "{{resource}} illimitato (∞)",
+    "unboundedScheduledTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; verrà scelta una quantità finita",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato",
+    "unboundedMixedTooltip": "{{resource}} illimitato (∞) — parte di questo gruppo ha un collasso in sospeso; parte resta illimitata",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Mana illimitato (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "punti vita",
@@ -569,13 +577,15 @@
   "mana": {
     "free": "Gratis",
     "chooseXTitle": "Scegli un valore per X",
-    "chooseXAria": "Scegli il valore di X",
     "chooseXInputAria": "Inserisci il valore di X",
     "decreaseX": "Diminuisci il valore di X",
     "increaseX": "Aumenta il valore di X",
-    "xEquals": "X = {{value}}",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
+    "amountOutOfRange": "Inserisci un numero intero tra {{min}} e {{max}}",
+    "decreaseAmount": "Diminuisci la quantità",
+    "increaseAmount": "Aumenta la quantità",
+    "confirmAmount": "Conferma",
     "confirmX": "Conferma X = {{value}}",
     "payMana": "Paga il costo di mana",
     "convokeHint": "TAPpa le creature per aiutare a pagare.",
@@ -622,6 +632,10 @@
     "cardBack": "Retro della carta",
     "organizeLabel": "Organizza la mano",
     "reorderPausedHint": "Il trascinamento per riordinare è in pausa mentre la mano è ordinata o filtrata."
+  },
+  "storm": {
+    "copies_one": "Tempesta: {{count}} copia",
+    "copies_other": "Tempesta: {{count}} copie"
   },
   "opponentHud": {
     "ally": "Alleato",
@@ -1083,6 +1097,14 @@
       "returnToHand_one": "restituisci un permanente alla mano",
       "returnToHand_other": "restituisci {{count}} permanenti alla mano",
       "energy": "{{amount}} energia",
+      "playerCounters_one": "ottieni {{count}} segnalino {{kind}}",
+      "playerCounters_other": "ottieni {{count}} segnalini {{kind}}",
+      "playerCounterKind": {
+        "Poison": "veleno",
+        "Experience": "esperienza",
+        "Rad": "radiazione",
+        "Ticket": "ticket"
+      },
       "generic": "un costo",
       "pay": "Paga {{cost}}"
     },
@@ -2188,6 +2210,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Stappa",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -2228,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Mostra decisioni IA",
+    "aiDecisionUnavailable": "La diagnostica delle decisioni IA non è disponibile per questa partita."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decisione IA",
+    "rankedSubtitle": "Campione softmax alla temperatura {{temperature}}.",
+    "directSubtitle": "Selezionata da una politica IA diretta.",
+    "metrics": "P {{score}} · W {{weight}}",
+    "top": "MIGLIORE",
+    "chosen": "SCELTA",
+    "legendTop": "Più alta in classifica",
+    "legendChosen": "Scelta",
+    "collapse": "Comprimi i dettagli della decisione IA",
+    "expand": "Espandi i dettagli della decisione IA",
+    "close": "Chiudi la finestra della decisione IA"
   },
   "status": {
     "yourPriority": "Your priority",

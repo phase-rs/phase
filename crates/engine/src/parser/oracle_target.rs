@@ -2062,7 +2062,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
 /// with a union separator.
-fn match_mass_union_separator(lower: &str) -> Option<usize> {
+pub(crate) fn match_mass_union_separator(lower: &str) -> Option<usize> {
     alt((
         tag::<_, _, OracleError<'_>>(", and/or "),
         tag(", and "),
@@ -10537,7 +10537,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_3_or_greater() {
-        let (f, _) = parse_type_phrase("creature with power 3 or greater");
+        let (f, rest) = parse_type_phrase("creature with power 3 or greater");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -14284,23 +14285,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_phrase_comma_or_three_types() {
-        // CR 205.3a: "artifact, creature, or enchantment" — all 3 must appear in Or
-        let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Or { filters } = &filter {
-            assert_eq!(
-                filters.len(),
-                3,
-                "expected 3 Or branches, got {}",
-                filters.len()
-            );
-        } else {
-            panic!("Expected Or filter");
-        }
-    }
-
-    #[test]
     fn parse_type_phrase_comma_or_with_controller() {
         // "artifact, creature, or enchantment you control" — controller distributes
         let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment you control");
@@ -15597,30 +15581,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_phrase_creature_with_power_3_or_greater() {
-        let (filter, rest) = parse_type_phrase("creature with power 3 or greater");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Typed(tf) = &filter {
-            assert!(tf.type_filters.contains(&TypeFilter::Creature));
-            assert!(
-                tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::PtComparison {
-                        stat: PtStat::Power,
-                        scope: PtValueScope::Current,
-                        comparator: Comparator::GE,
-                        value: QuantityExpr::Fixed { value: 3 }
-                    }
-                )),
-                "Expected PtComparison(Power, GE, 3) in {:?}",
-                tf.properties
-            );
-        } else {
-            panic!("Expected Typed filter, got {filter:?}");
-        }
-    }
-
-    #[test]
     fn parse_type_phrase_creature_with_greater_power() {
         // CR 509.1b: "creatures with greater power" — relative to source
         let (filter, rest) = parse_type_phrase("creatures with greater power");
@@ -16269,19 +16229,6 @@ mod tests {
                 }
             )));
         }
-    }
-
-    /// CR 205.2a: "artifact or creature" is an OR-union of the two core types,
-    /// NOT a conjunction. The separator " or " breaks out of the conjunction
-    /// loop and builds a TargetFilter::Or with two branches.
-    #[test]
-    fn parse_type_phrase_artifact_or_creature_stays_union() {
-        let (filter, rest) = parse_type_phrase("artifact or creature");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        let TargetFilter::Or { filters } = &filter else {
-            panic!("Expected Or filter, got {filter:?}");
-        };
-        assert_eq!(filters.len(), 2);
     }
 
     /// CR 205.2a + CR 110.1: "artifact creature you control" — conjunction

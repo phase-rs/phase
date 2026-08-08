@@ -12,7 +12,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import { supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
@@ -155,8 +155,32 @@ const mocks = vi.hoisted(() => {
     })),
     initializeGame: vi.fn(async () => ({ events: [] })),
     setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
+    setAiDecisionDiagnosticsEnabled: vi.fn(),
+    subscribeAiDecisionDiagnostics: vi.fn(() => () => {}),
   };
 });
+
+const nativeWebSocketMocks = vi.hoisted(() => ({
+  initializePregame: vi.fn(),
+  waitForPlayerSlots: vi.fn(),
+  onEvent: vi.fn(),
+  sendAbandonGame: vi.fn(),
+  sendSeatMutation: vi.fn(),
+  dispose: vi.fn(),
+}));
+
+vi.mock("../ws-adapter", () => ({
+  WebSocketAdapter: vi.fn().mockImplementation(function () {
+    return {
+      initializePregame: nativeWebSocketMocks.initializePregame,
+      waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
+      onEvent: nativeWebSocketMocks.onEvent,
+      sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
+      sendSeatMutation: nativeWebSocketMocks.sendSeatMutation,
+      dispose: nativeWebSocketMocks.dispose,
+    };
+  }),
+}));
 const mockSubmitAction = mocks.submitAction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
@@ -246,6 +270,8 @@ vi.mock("../wasm-adapter", () => ({
       applySeatMutation: mocks.applySeatMutation,
       projectSeatView: mocks.projectSeatView,
       setMultiplayerMode: mocks.setMultiplayerMode,
+      setAiDecisionDiagnosticsEnabled: mocks.setAiDecisionDiagnosticsEnabled,
+      subscribeAiDecisionDiagnostics: mocks.subscribeAiDecisionDiagnostics,
       dispose: vi.fn(),
     };
   }),
@@ -269,6 +295,14 @@ beforeEach(() => {
   mockGetState.mockClear();
   mockGetAiActionProposal.mockClear();
   mockSubmitAiActionProposal.mockClear();
+  mocks.setAiDecisionDiagnosticsEnabled.mockClear();
+  mocks.subscribeAiDecisionDiagnostics.mockClear();
+  nativeWebSocketMocks.initializePregame.mockReset();
+  nativeWebSocketMocks.waitForPlayerSlots.mockReset();
+  nativeWebSocketMocks.onEvent.mockClear();
+  nativeWebSocketMocks.sendAbandonGame.mockReset();
+  nativeWebSocketMocks.sendSeatMutation.mockReset();
+  nativeWebSocketMocks.dispose.mockClear();
 });
 
 afterEach(() => {
@@ -378,6 +412,43 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: For
   return { adapter, emitConnection };
 }
 
+function makeNativeHost() {
+  const { peer, onGuestConnected, emitConnection } = createFakePeer();
+  const adapter = new P2PHostAdapter(
+    {
+      player: { main_deck: ["Mountain"], sideboard: [] },
+      opponent: { main_deck: ["Forest"], sideboard: [] },
+      ai_decks: [],
+    },
+    peer as unknown as Peer,
+    onGuestConnected,
+    2,
+    commanderConfig(),
+    undefined,
+    5_000,
+    undefined,
+    true,
+    undefined,
+    undefined,
+    {},
+  );
+  return { adapter, emitConnection };
+}
+
+const NATIVE_HOST_ATTACHMENT = {
+  playerId: 0,
+  playerToken: "native-host-token",
+  gameCode: "native-game",
+  fullKey: "native-full-key",
+};
+
+const NATIVE_GUEST_ATTACHMENT = {
+  playerId: 1,
+  playerToken: "native-guest-token",
+  gameCode: "native-game",
+  fullKey: "native-full-key",
+};
+
 async function joinGuest(
   emitConnection: (c: DataConnection) => void,
   msg: { type: "guest_deck"; deckData: unknown } | { type: "reconnect"; playerToken: string },
@@ -399,6 +470,99 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("exposes decision diagnostics only on the browser WASM host", () => {
+    const { adapter } = makeHost(2, 5_000, { ...commanderConfig(), allow_debug_actions: false });
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      createFakePeer().peer as unknown as Peer,
+      "host-peer",
+      new FakeDataConnection() as unknown as DataConnection,
+    );
+
+    expect(supportsAiDecisionDiagnostics(adapter)).toBe(true);
+    expect(supportsAiDecisionDiagnostics(guest)).toBe(false);
+    expect("setAiDecisionDiagnosticsEnabled" in P2PHostAdapter.prototype).toBe(false);
+    if (supportsAiDecisionDiagnostics(adapter)) {
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+    }
+    expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("exposes local diagnostics after native initialization falls back to WASM", async () => {
+    const { adapter: nativeHost } = makeNativeHost();
+    expect(supportsAiDecisionDiagnostics(nativeHost)).toBe(false);
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockRejectedValue(new Error("native unavailable"));
+
+    await nativeHost.initialize();
+
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledOnce();
+    expect(supportsAiDecisionDiagnostics(nativeHost)).toBe(true);
+    if (supportsAiDecisionDiagnostics(nativeHost)) {
+      nativeHost.setAiDecisionDiagnosticsEnabled(true);
+      const listener = vi.fn();
+      const unsubscribe = vi.fn();
+      mocks.subscribeAiDecisionDiagnostics.mockReturnValueOnce(unsubscribe);
+
+      const returnedUnsubscribe = nativeHost.subscribeAiDecisionDiagnostics(listener);
+
+      expect(mocks.subscribeAiDecisionDiagnostics).toHaveBeenCalledWith(listener);
+      expect(returnedUnsubscribe).toBe(unsubscribe);
+      returnedUnsubscribe();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    }
+    expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("exposes local diagnostics after native guest attachment falls back to WASM", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+      .mockRejectedValueOnce(new Error("native guest unavailable"));
+
+    await adapter.initialize();
+    expect(supportsAiDecisionDiagnostics(adapter)).toBe(false);
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises();
+
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
+    expect(supportsAiDecisionDiagnostics(adapter)).toBe(true);
+    if (supportsAiDecisionDiagnostics(adapter)) {
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+    }
+    expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("exposes local diagnostics after native pregame seat release falls back to WASM", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+      .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+    nativeWebSocketMocks.sendSeatMutation.mockRejectedValue(new Error("native seat sync unavailable"));
+
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises();
+    expect(supportsAiDecisionDiagnostics(adapter)).toBe(false);
+    guest.simulateClose();
+    await vi.waitFor(() => expect(supportsAiDecisionDiagnostics(adapter)).toBe(true));
+
+    expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledOnce();
+    expect(supportsAiDecisionDiagnostics(adapter)).toBe(true);
+    if (supportsAiDecisionDiagnostics(adapter)) {
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+    }
+    expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
   });
 
   it("rejects construction with playerCount outside 2-6", () => {

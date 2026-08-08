@@ -4960,12 +4960,12 @@ pub(crate) fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
 fn per_opponent_fanout_players(state: &GameState, controller: PlayerId) -> Vec<PlayerId> {
     players::apnap_order_from(state, None, controller)
         .into_iter()
-        .filter(|id| {
-            *id != controller
-                && state.players.iter().any(|player| {
-                    player.id == *id && !player.is_eliminated && !player.is_phased_out()
-                })
-        })
+        // Hygiene routing, behaviour-neutral BY CONSTRUCTION: the inline pair
+        // `!is_eliminated && !is_phased_out()` under a membership `any` is exactly what
+        // `players::player_exists_for_choice` spells (`is_alive` is itself membership ∧
+        // ¬eliminated). Routed so an existence fix propagates here rather than leaving a
+        // fifth hand-inlined copy of the predicate.
+        .filter(|&id| id != controller && players::player_exists_for_choice(state, id))
         .collect()
 }
 
@@ -14245,6 +14245,7 @@ mod tests {
                 source_name: "Stack Source".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         let by_entry_id = make_simple_ability(vec![TargetRef::Object(stack_id)], ObjectId(0));
@@ -14287,6 +14288,7 @@ mod tests {
                 source_name: "Stacked Spell".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -14353,6 +14355,7 @@ mod tests {
                 source_name: "Stacked Spell".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 

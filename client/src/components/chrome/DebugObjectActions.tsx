@@ -137,6 +137,7 @@ function RemoveObjectForm({ onDispatch }: Props) {
 function CreateTokenCopyForm({ onDispatch }: Props) {
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
+  const [nonlegendary, setNonlegendary] = useState(false);
 
   return (
     <>
@@ -149,11 +150,21 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label="Make nonlegendary"
+        />
+      </FieldRow>
       <SubmitButton
         disabled={sourceId == null}
         onClick={() =>
           sourceId != null &&
-          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } })
+          onDispatch({
+            type: "CreateTokenCopy",
+            data: { source_id: sourceId, owner, nonlegendary },
+          })
         }
       >
         Copy Object

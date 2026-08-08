@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! FIX-1 + FIX-2 + FIX-3 (CR 732.2a) acceptance — the Kilo, Apogee Mind + Freed from the Real +
 //! Relic of Legends + Pentad Prism proliferate loop, driven from the REAL 4-player playtest dump
 //! that failed to offer the ∞-charge shortcut.
@@ -19,12 +20,13 @@
 //! The `kilo_reinjected_pinless_history_suppresses_offer` test is the matched-pair proof that the
 //! migration is load-bearing (re-injecting the stale prefix flips the offer OFF).
 
+use engine::game::derived_views::{CollapseCertainty, FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
     GameState, LoopAction, LoopActionContext, LoopCollapseAxis, ManaChoice, PayCostKind,
-    PayableResource, PersistedGameState, WaitingFor,
+    PayableResource, PersistedGameState, PersistentAxisMaterialization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType;
@@ -62,9 +64,13 @@ fn load_migrated_dump() -> GameState {
     ));
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let raw: GameState = serde_json::from_value(envelope["gameState"].clone())
-        .expect("the real 4p gameState must deserialize into the current GameState");
-    PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    // Decode AS `PersistedGameState` rather than decoding a bare `GameState` and wrapping
+    // it in `Raw`: only the former runs `reject_legacy_raw_prompt_authority` and
+    // `decode_persisted_resolution_state`, which is the rest of the production chokepoint.
+    // `.expect(..)`, not `?`: `into_game_state` returns `GameState`, not `Result`.
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("gameState deserializes through the production decoder")
+        .into_game_state()
 }
 
 /// The acting player for the current beat (choice prompts carry their own `player`; a priority beat
@@ -165,6 +171,20 @@ fn drive_one_live_cycle(state: &mut GameState) {
 ///   unreplayable.
 /// - FIX-2 (counter-growth cover disjunct) — the completed drive's +1-charge frames fail
 ///   `loop_states_equal_modulo_resources`.
+///
+/// R4c — NAMED ACCEPTANCE ARM for the player-choice legality authority (CR 115.10a). Routing
+/// `resolve_target`'s `TargetPin::Player` arm through the CHOICE authority
+/// (`players::player_exists_for_choice`) rather than the TARGET one must not suppress a
+/// shipped offer on a REAL dump, and this row is what says so: if a later change routes that
+/// arm through `targeting::player_is_legal_target`, the over-veto class returns and this row
+/// must still pass — so it is the acceptance side of the pair whose refusal side is
+/// `analysis::decision_template::tests::a_shrouded_seat_is_untargetable_yet_still_choosable_
+/// at_the_pin_recheck`.
+///
+/// ⚠ WHAT THIS ROW DOES NOT WITNESS, stated so nobody credits it with more than it covers:
+/// this dump's pins are `ByIdentity` and `ManaColor`, NOT `TargetPin::Player`, so the Player
+/// arm is not on its path at all. It is an acceptance arm for the offer PIPELINE, not a
+/// witness for the Player-pin seam; that witness is R2b.
 #[test]
 fn kilo_migrated_dump_fires_object_growth_offer() {
     let mut state = load_migrated_dump();
@@ -416,44 +436,121 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
         "display-only: Pentad's REAL charge count is unchanged by the ∞ mark (CR 701.34a)"
     );
 
-    // (3a) R6a (CR 732.2c) — THE PER-SURFACE COUNTER-PILL GATE, on a REAL production fixture.
-    // This accept registers an observed-growth `DriveSequence` naming the charge-counter axis,
-    // so the collapse is already bounded at the accepted N and the pill must stop rendering ∞
-    // in lockstep with its resource badge — a HUD that hides one and shows the other is
-    // internally inconsistent. Filter the PROJECTION, never the store: (2) above (the store
-    // write) is unchanged and still passes.
+    // (3) THE PER-SURFACE COUNTER-PILL ROW, on a REAL production fixture. The accept registers an
+    // observed-growth `DriveSequence` naming the charge-counter axis, but the engine DEFERS
+    // applying it to the CR 500.5 boundary, while advancing to the proposal's ending point (CR 732.2c). The
+    // real charge count is unchanged (asserted just above) and the ∞ mark is live, so the pill
+    // stays ∞ throughout that window. Filter nothing: (2) above is unchanged and still passes.
     //
-    // REVERT-PROBE: delete the `collapse_scheduled(..)` guard in `derive_views`' counter-pill
-    // loop ⇒ the pill re-renders ⇒ THIS assertion FAILS while the pile and badge gates stay
-    // green (so a one-surface regression is visible).
+    // REVERT-PROBE (RP-1c, RUN): restore the `collapse_scheduled(..)` guard in `derive_views`'
+    // counter-pill loop ⇒ THIS `assert_eq!` fails (`left: None`) while (2) above and the pile
+    // and row channels stay green.
+    // PREMISE GUARD — the one deliberate exception to the WRITE-first ordering documented at the
+    // wire pin below (PART 1). This asserts the input FRAME, never `views`: if the stash shape is
+    // wrong the golden would be minted from the wrong frame, so it must abort BEFORE the write. It
+    // can never be the assertion a revert probe reds — `derive_views(&GameState, ..)` takes an
+    // IMMUTABLE borrow (cited by signature, not by line: this change moves `derived_views.rs`
+    // wholesale, so a line anchor into it goes stale on its own edit), so no change to it can move
+    // `pending_unbounded_materialization`.
     assert!(
-        derive_views(&state, None).unbounded_counters.is_empty(),
-        "CR 732.2c: a scheduled finite collapse hides the ∞ charge pill (the store keeps it)"
+        matches!(
+            state
+                .pending_unbounded_materialization
+                .get(&P0)
+                .map(Vec::as_slice),
+            Some([PersistentAxisMaterialization::DriveSequence { .. }])
+        ),
+        "premise: the observed kilo accept registers exactly ONE DriveSequence — the only stash \
+         shape that yields Scheduled(Committed); if this changes, the Committed witness below \
+         measures something else. got={:?}",
+        state.pending_unbounded_materialization.get(&P0)
     );
 
-    // (3b) DERIVED VIEW (FLIPS on revert): with nothing scheduled the projection surfaces
-    // Pentad's charge as ∞ for the FE, filtered to battlefield objects.
+    let views = derive_views(&state, None);
+
+    // Cross-seam wire pin, PART 1 — compute + (optionally) REGENERATE. Provenance: every
+    // key/value below is ENGINE-EMITTED (`serde_json::to_value(&derive_views(..))`). The four ∞
+    // keys are lifted BY NAME from the real serialized DerivedViews so unrelated derived-view churn
+    // cannot move this golden, while the field names and value encodings — the part the TS mirror
+    // must match — stay engine-authored.
     //
-    // NOT A SYNTHETIC STATE — "counter targets present, stash absent" is engine-reachable,
-    // and this is the production sequence (cited so the next auditor need not re-derive it):
-    // a CR 732.2b DECLINE of the batched counter axis. A counter OBSERVER drifts onto the
-    // board inside the accept→boundary window, so at `SubmitPayAmount` the handler's
-    // `take_pending_materialization` empties the stash FIRST, then the `Counters` arm hits
-    // `if counter_observed_now { continue; }` (`game::engine_resolution_choices`) and never
-    // pushes that item into `collapsed`. `clear_collapsed_materializations`' `surviving_
-    // targets` filter (`types::game_state`) therefore filters nothing ⇒ `unbounded_counter_
-    // targets` is preserved with the stash already gone.
-    // The shared "display channel survives a stash the submit already emptied" half is ASSERTED
-    // (not merely argued) by the sibling `combo_infinite_pile::med_tokens_boundary_mint_pause_
-    // preserves_replacement_choice`, whose closing two assertions measure exactly that shape on
-    // the pile channel after a real `SubmitPayAmount`.
-    let mut unscheduled = state.clone();
-    unscheduled.pending_unbounded_materialization.clear();
-    let views = derive_views(&unscheduled, None);
+    // The WRITE deliberately precedes every ∞ assertion in this fn, and the drift COMPARE
+    // deliberately follows them: a revert probe that reds one of those assertions must still be
+    // able to regenerate the client goldens with `UPDATE_WIRE_GOLDEN=1`, or the client-side half of
+    // that probe (RP-1b, RP-2) is unreachable. An assert panic aborts the test.
+    //
+    // ONE DELIBERATE EXCEPTION, above the `derive_views` call: the stash-shape PREMISE guard. It
+    // asserts the INPUT FRAME, not this projection's output, and its purpose is exactly to stop a
+    // golden being minted from a wrong frame — so it must abort before the write, not after it. It
+    // cannot be the assertion a revert probe reds, because `derive_views` takes `&GameState` and no
+    // change to it can move `pending_unbounded_materialization`.
+    //
+    // THE RULE FOR NEW ASSERTIONS, IN EVERY GOLDEN EMITTER: anything that reads `views` goes BELOW
+    // the WRITE. Anything that checks the state `derive_views` is about to be handed goes above it.
+    // Where a pre-WRITE frame must be asserted, CAPTURE it into a local above and assert the local
+    // below (see combo_infinite_pile.rs's declined-wire emitter).
+    //
+    // DETERMINISM: `unbounded_counters` is a std `HashMap` (derived_views.rs), but
+    // `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
+    // workspace — see Cargo.lock), so `to_value` re-sorts every map key. Measured byte-identical
+    // across independent test processes. No normalization needed.
+    let wire = serde_json::to_value(&views).expect("derived views serialize");
+    let golden: serde_json::Map<String, serde_json::Value> = [
+        "unbounded_pile",
+        "unbounded_resources",
+        "unbounded_counters",
+        "unbounded_families",
+    ]
+    .into_iter()
+    .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
+    .collect();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../client/src/test/fixtures/unbounded-counter-wire.json"
+    );
+    if std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
+        // `client/src/test/fixtures/` may not exist yet; `fs::write` does not create parents.
+        std::fs::create_dir_all(
+            std::path::Path::new(path)
+                .parent()
+                .expect("golden has a parent"),
+        )
+        .expect("create the client wire-golden directory");
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&golden).unwrap()),
+        )
+        .expect("write the wire golden");
+    }
+
     assert_eq!(
         views.unbounded_counters.get(&PENTAD),
         Some(&vec![charge.clone()]),
-        "derive_views projects (Pentad → [charge]) so the FE renders ∞ on the charge pill"
+        "the ∞ charge pill stays projected while the collapse is merely SCHEDULED"
+    );
+
+    assert!(
+        views.unbounded_families.iter().any(|f| f.player == P0
+            && f.family == UnboundedFamily::Counters
+            && f.state == FamilyCollapseState::Scheduled(CollapseCertainty::Committed)),
+        "the real kilo accept's single DriveSequence yields a Committed family on a REAL \
+         production dump — that is this witness's distinct property, NOT uniqueness: two other \
+         Committed witnesses exist on synthetic boards (combo_infinite_pile's grafted \
+         DriveSequence for Tokens, loop_shortcut_mana_engine's R4/agree Life), and neither is \
+         redundant with this one. This is the ∞→N matched positive the FE tests read out of \
+         unbounded-counter-wire.json; it sits AFTER the WRITE so a mutation that reds it can \
+         still regenerate the golden (M1-e(c), M2-d(b) depend on that). got={:?}",
+        views.unbounded_families
+    );
+
+    // Cross-seam wire pin, PART 2 — the drift COMPARE (see PART 1 for why it sits here).
+    let committed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("committed wire golden"))
+            .unwrap();
+    assert_eq!(
+        serde_json::Value::Object(golden),
+        committed,
+        "the client's wire golden drifted from engine output — re-run with UPDATE_WIRE_GOLDEN=1"
     );
 
     // (4) WIRE ROUND-TRIP (FLIPS on revert): the populated channel serializes, is present on

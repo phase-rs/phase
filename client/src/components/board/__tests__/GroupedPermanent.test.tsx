@@ -307,6 +307,28 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     });
   });
 
+  it("uses delegated untap authority for a collapsed group picker", () => {
+    const waitingFor: WaitingFor = {
+      type: "UntapChoice",
+      data: { player: 1, candidates: [1] },
+    };
+    const gameState = {
+      ...makeState(waitingFor),
+      turn_decision_controller: 0,
+      active_player: 1,
+    };
+    useGameStore.setState({ gameState, waitingFor });
+    renderGroup({ boardChoiceObjectIds: new Set([1]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+    fireEvent.click(screen.getByRole("button", { name: "Untap" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 1, untap: true },
+    });
+  });
+
   it("sacrifices one of many identical tokens with a single action (no #1-#N list) — #4375", () => {
     const waitingFor: WaitingFor = {
       type: "EffectZoneChoice",

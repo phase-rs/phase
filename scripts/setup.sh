@@ -121,10 +121,15 @@ else
   ./scripts/gen-scryfall-images.sh         & PID_IMAGES=$!
   ./scripts/gen-scryfall-token-images.sh   & PID_TOKEN_IMAGES=$!
   ./scripts/gen-scryfall-printings.sh      & PID_PRINTINGS=$!
+  # Locale card-art maps. Sourced from MTGJSON rather than Scryfall bulk, but
+  # the same category of artifact: runtime-only frontend image data, needed
+  # only when a non-English UI language is selected.
+  ./scripts/gen-scryfall-locale-images.sh  & PID_LOCALE_IMAGES=$!
 
   wait $PID_IMAGES        || FAIL=1
   wait $PID_TOKEN_IMAGES  || FAIL=1
   wait $PID_PRINTINGS     || FAIL=1
+  wait $PID_LOCALE_IMAGES || FAIL=1
   if [ $FAIL -ne 0 ]; then
     echo "ERROR: Scryfall sidecar fetch failed." >&2
     exit 1

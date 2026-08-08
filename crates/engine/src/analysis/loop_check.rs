@@ -134,6 +134,13 @@ pub struct LoopCertificate {
     /// paths require an identical battlefield); wired now so an object-growth path
     /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
+    /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
+    /// producer that narrowed the CR 704 repetition bound (the bounded cycle offer).
+    /// `None` for every other offer, and for every save written before this field existed
+    /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
+    /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 impl LoopCertificate {
@@ -173,12 +180,35 @@ pub struct ShortcutProposal {
     /// streams (skip-if-none), so this is a byte-preserving addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
+    /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
+    /// authority for what a conformant cycle looks like. `None` for every offer whose
+    /// producer states no per-period signature (see [`LoopCertificate::per_cycle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the
-/// shortcut proceed; `Shorten` names an earlier stopping point (Phase 3 realizes this
-/// conservatively as decline-to-manual — the opponent receives a real priority window
-/// instead of the loop being auto-taken; finite-K materialization is Phase 4).
+/// shortcut proceed; `Shorten` names an earlier stopping point.
+///
+/// CR 732.2b lets a shortening player name the PLACE now and the choice later — "the player
+/// doesn't need to specify at this time what the new choice will be" — which is why `Shorten`
+/// carries `at_iteration` and no choice payload.
+///
+/// DEFICIENCY NOTE — REALIZATION GAP vs THE DESIGN. This is a note, not a defense.
+///
+/// The design is stated at `types::game_state`'s `scheduled_collapse_axes` doc. Under CR 732.2b the
+/// place a responder names "becomes the new ending point", so the shortcut is still TAKEN up to
+/// there. This engine does not do that yet: every `Shorten` is realized as decline-to-manual —
+/// nothing is taken and the responder receives a real priority window, with `at_iteration` carried
+/// and honored as a stop signal rather than as a partial-advance instruction. Finite-K
+/// materialization at the named iteration is the remaining work.
+///
+/// The gap's direction is toward MORE responder agency than CR 732.2b grants (priority strictly
+/// earlier, proposer benefit strictly less), so it can never take a choice away from a player who
+/// asked to diverge — but the target is the rule, not a favorable direction. Closing it is tracked
+/// as the USER-AUTHORIZED follow-up "Shortcut-system rules-correctness completion — true all the
+/// way down" (`.deferred-backlog.md`), which exists to make the design true all the way down rather
+/// than to justify where it is not yet. Out of scope for the PR that wrote this note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ShortcutResponse {
     /// CR 732.2c: this player agrees to take the shortcut.
@@ -271,6 +301,9 @@ pub fn detect_loop(
         // Invariant pinned by `residual_empty_for_constant_depth` (T12). (No CR
         // annotation: this is an invariant/plumbing comment, not rule-implementing code.)
         residual_board_delta: crate::analysis::resource::board_delta(cycle_start, cycle_end),
+        // CR 732.2a: `detect_loop` states no CR 704 repetition bound, so it publishes no
+        // per-period signature either. Only the bounded-cycle offer does.
+        per_cycle: None,
     })
 }
 
@@ -932,6 +965,7 @@ mod tests {
             win_kind: WinKind::LethalDamage,
             mandatory: true,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         };
         assert!(cert.covers(&[ResourceAxis::DamageDealt(pid(1))]));
         assert!(cert.covers(&[
@@ -1461,6 +1495,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }

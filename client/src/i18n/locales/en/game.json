@@ -275,6 +275,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Untap",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -289,6 +290,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Untap",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -478,6 +480,8 @@
     "initiativeTooltip": "Has the Initiative — ventures into Undercity at start of upkeep",
     "cityBlessing": "City's Blessing",
     "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
+    "enduringStory": "Enduring Story",
+    "enduringStoryTooltip": "Enduring Story — gained by controlling a Storied permanent and three or more artifacts, legendary permanents, and/or Sagas; lasts for the rest of the game",
     "dungeonAriaLabel": "Venturing in {{name}}, room {{room}}",
     "dungeonTooltip": "Venturing in {{name}} — room {{room}}",
     "poisonAriaLabel_one": "{{count}} poison counter",
@@ -519,6 +523,11 @@
     "pendingCheaper": "Next spell costs {{amount}} less",
     "companion": "Companion",
     "unboundedTooltip": "Unbounded {{resource}} (∞)",
+    "unboundedScheduledTooltip": "Unbounded {{resource}} (∞) — collapse pending; a finite amount will be chosen",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded",
+    "unboundedMixedTooltip": "Unbounded {{resource}} (∞) — part of this group has a pending collapse; part remains unbounded",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Unbounded mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "life",
@@ -607,13 +616,15 @@
   "mana": {
     "free": "Free",
     "chooseXTitle": "Choose a value for X",
-    "chooseXAria": "Choose X value",
     "chooseXInputAria": "Enter X value",
     "decreaseX": "Decrease X value",
     "increaseX": "Increase X value",
-    "xEquals": "X = {{value}}",
     "minMax": "min {{min}} / max {{max}}",
     "maxOnly": "max {{max}}",
+    "amountOutOfRange": "Enter a whole number between {{min}} and {{max}}",
+    "decreaseAmount": "Decrease amount",
+    "increaseAmount": "Increase amount",
+    "confirmAmount": "Confirm",
     "confirmX": "Confirm X = {{value}}",
     "payMana": "Pay Mana Cost",
     "convokeHint": "Tap creatures to help pay.",
@@ -660,6 +671,10 @@
     "cardBack": "Card back",
     "organizeLabel": "Organize hand",
     "reorderPausedHint": "Drag-to-reorder is paused while the hand is sorted or filtered."
+  },
+  "storm": {
+    "copies_one": "Storm: {{count}} copy",
+    "copies_other": "Storm: {{count}} copies"
   },
   "opponentHud": {
     "ally": "Ally",
@@ -1121,6 +1136,14 @@
       "returnToHand_one": "return a permanent to hand",
       "returnToHand_other": "return {{count}} permanents to hand",
       "energy": "{{amount}} energy",
+      "playerCounters_one": "get {{count}} {{kind}} counter",
+      "playerCounters_other": "get {{count}} {{kind}} counters",
+      "playerCounterKind": {
+        "Poison": "poison",
+        "Experience": "experience",
+        "Rad": "rad",
+        "Ticket": "ticket"
+      },
       "generic": "a cost",
       "pay": "Pay {{cost}}"
     },
@@ -2234,6 +2257,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Show AI decisions",
+    "aiDecisionUnavailable": "AI decision diagnostics are unavailable for this game."
+  },
+  "aiDecisionOverlay": {
+    "title": "AI decision",
+    "rankedSubtitle": "Softmax sample at temperature {{temperature}}.",
+    "directSubtitle": "Selected by a direct AI policy.",
+    "metrics": "S {{score}} · W {{weight}}",
+    "top": "TOP",
+    "chosen": "CHOSEN",
+    "legendTop": "Top ranked",
+    "legendChosen": "Chosen",
+    "collapse": "Collapse AI decision details",
+    "expand": "Expand AI decision details",
+    "close": "Close AI decision overlay"
   },
   "status": {
     "yourPriority": "Your priority",

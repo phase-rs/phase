@@ -1,4 +1,4 @@
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{one_of, space0, space1};
@@ -33,14 +33,14 @@ use crate::parser::oracle_static::{
     parse_quoted_ability_modifications,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
-    CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
-    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
-    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection,
+    CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
+    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp,
+    Duration, Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
+    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
+    TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -49,15 +49,16 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    parse_anaphoric_target_ref, parse_event_context_ref, parse_fight_target, parse_mass_type_union,
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
-    parse_type_phrase_with_ctx, parse_word_bounded, resolve_pronoun_target,
-    resolve_singular_exiled_card_target, TargetSyntax,
+    match_mass_union_separator, parse_anaphoric_target_ref, parse_event_context_ref,
+    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_type_phrase, parse_type_phrase_with_ctx, parse_word_bounded,
+    resolve_pronoun_target, resolve_singular_exiled_card_target, starts_with_type_word,
+    TargetSyntax,
 };
 use super::super::oracle_util::{
-    contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding, split_around,
-    starts_with_possessive, TextPair,
+    contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
+    parse_mana_symbols, parse_ordinal, parse_rounding_suffix_only, rewrite_quantity_expr_rounding,
+    split_around, starts_with_possessive, TextPair,
 };
 
 /// CR 611.2 + CR 601.2f + CR 118.7: Parse the transient (this-turn)
@@ -2625,41 +2626,93 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
     run(lower).ok().map(|(_, result)| result)
 }
 
-/// Parse output of the multi-zone player-exile recognizer: remaining input paired
-/// with the owner axis and the origin-zone union. Named so the inner `nom`
-/// combinator signature stays under `clippy::type_complexity`.
-type MultiZonePlayerExileParse<'a> = (&'a str, (ControllerRef, Vec<Zone>));
-
-/// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from `<possessive>` `<zone>` and
-/// `<zone>`" — mass exile of every card a player owns across a *union* of zones
-/// (Identity Crisis: "target player's hand and graveyard"). Mirrors the
-/// multi-zone origin handling of [`try_parse_multi_zone_same_name_exile`]: the
-/// zone union is encoded on the target filter via `InAnyZone`, and the
-/// `ChangeZoneAll` resolver reads the multi-zone origin from the filter (so the
-/// lowering passes `origin: None`).
+/// CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1 + CR 406.2: map a single zone word to
+/// its [`Zone`] — the one lexical zone-word→`Zone` mapping shared by every
+/// zone-union recognizer in this module (`try_parse_multi_zone_player_exile`,
+/// `parse_trailing_zone_union`, and the `Choose`-a-zone parsers).
 ///
-/// Returns the owner axis and the origin zones (always `>= 2`). Declines
-/// (`None`) on a single zone so the generic single-origin `exile all` path keeps
-/// handling those, and on any trailing fragment so nothing is silently dropped.
-/// The leading noun is fixed to "cards"/"card" (CR 108.2 — every card, any
-/// type); a type-qualified variant ("all creature cards from …") is not claimed.
+/// The three per-player zones (CR 401.1 library, CR 402.1 hand, CR 404.1
+/// graveyard) each also match their plural form, which — with no possessive —
+/// denotes "every player's `<zone>`" (each player owns their own such zone,
+/// CR 400.1) in a whole-zone union. The plural arm precedes the singular so the
+/// longer form wins. Exile (CR 406.2) is a single zone shared by all players
+/// (CR 400.1), so it has no per-player instance and no plural form.
+fn parse_zone_word(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        value(
+            Zone::Graveyard,
+            alt((tag::<_, _, E>("graveyards"), tag("graveyard"))),
+        ),
+        value(Zone::Hand, alt((tag("hands"), tag("hand")))),
+        value(Zone::Library, alt((tag("libraries"), tag("library")))),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(input)
+}
+
+/// Parse output of the multi-zone player-exile recognizer: remaining input paired
+/// with the (optional) card-type restriction, the owner axis, and the origin-zone
+/// union. Named so the inner `nom` combinator signature stays under
+/// `clippy::type_complexity`.
+type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, Vec<Zone>));
+
+/// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
+/// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
+/// player owns across a *union* of zones. Two forms:
+///   - bare "cards"/"card" (CR 108.2 — every card, any type): Identity Crisis,
+///     "exile all cards from target player's hand and graveyard".
+///   - type-qualified "`<type restriction>` cards" (CR 205.2a): Thought
+///     Distortion, "exile all noncreature, nonland cards from that player's hand
+///     and graveyard".
+///
+/// Mirrors the multi-zone origin handling of
+/// [`try_parse_multi_zone_same_name_exile`]: the zone union is encoded on the
+/// target filter via `InAnyZone`, and the `ChangeZoneAll` resolver reads the
+/// multi-zone origin from the filter (so the lowering passes `origin: None`). The
+/// owner possessive is parsed into a `ControllerRef` here — the owner scope the
+/// filter carries, so the exile is confined to that player's zones.
+///
+/// Returns the card-type restriction (empty for the bare form — a semantic no-op
+/// preserving the pre-existing representation), the owner axis, and the origin
+/// zones (always `>= 2`). Declines (`None`) on a single zone so the generic
+/// single-origin `exile all` path keeps handling those, and on any trailing
+/// fragment so nothing is silently dropped.
 pub(super) fn try_parse_multi_zone_player_exile(
     rest_lower: &str,
-) -> Option<(ControllerRef, Vec<Zone>)> {
-    fn zone_word(input: &str) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
-        alt((
-            value(Zone::Graveyard, tag::<_, _, OracleError<'_>>("graveyard")),
-            value(Zone::Hand, tag("hand")),
-            value(Zone::Library, tag("library")),
-        ))
-        .parse(input)
-    }
+) -> Option<(Vec<TypeFilter>, ControllerRef, Vec<Zone>)> {
     fn run(input: &str) -> Result<MultiZonePlayerExileParse<'_>, nom::Err<OracleError<'_>>> {
-        let (input, _) = alt((
+        // CR 108.2 vs CR 205.2a: bare "card(s) from" is tried first so its filter
+        // stays type-restriction-free (byte-identical to before); only a genuine
+        // "<types> cards from" leading phrase takes the type-phrase branch.
+        let (input, type_filters) = if let Ok((after, _)) = alt((
             tag::<_, _, OracleError<'_>>("cards from "),
             tag("card from "),
         ))
-        .parse(input)?;
+        .parse(input)
+        {
+            (after, Vec::new())
+        } else {
+            // Type-qualified head "<types> card(s) from <owner> …" (CR 205.2a +
+            // CR 205.3a). Delimit the head noun phrase at the " from " that
+            // introduces the owner possessive, parse it as a full type phrase, and
+            // require it to be FULLY consumed — a malformed or non-type head (e.g.
+            // "creatures except X from …") leaves a remainder and is declined, so
+            // only a clean "<type restriction> card(s)" head is claimed. The
+            // owner-possessive + 2-zone-union structure parsed below is the rest of
+            // the discriminator (CR 108.2 — cards in a player's zones).
+            let (after_head, head) = take_until::<_, _, OracleError<'_>>(" from ").parse(input)?;
+            let (tf, head_rem) = parse_type_phrase(head);
+            let TargetFilter::Typed(tf) = tf else {
+                return Err(oracle_err(head));
+            };
+            if !head_rem.trim().is_empty() {
+                return Err(oracle_err(head_rem));
+            }
+            let (input, _) = tag::<_, _, OracleError<'_>>(" from ").parse(after_head)?;
+            (input, tf.type_filters)
+        };
         let (input, owner) = alt((
             value(
                 ControllerRef::ParentTargetOwner,
@@ -2677,7 +2730,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             value(ControllerRef::You, tag("your ")),
         ))
         .parse(input)?;
-        let (mut input, first) = zone_word(input)?;
+        let (mut input, first) = parse_zone_word(input)?;
         let mut zones = vec![first];
         // Additional zones joined by " and " / ", and " / ", " (oxford comma).
         loop {
@@ -2689,7 +2742,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             .parse(input) else {
                 break;
             };
-            let Ok((after_zone, zone)) = zone_word(after_sep) else {
+            let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
                 break;
             };
             if !zones.contains(&zone) {
@@ -2697,9 +2750,9 @@ pub(super) fn try_parse_multi_zone_player_exile(
             }
             input = after_zone;
         }
-        Ok((input, (owner, zones)))
+        Ok((input, (type_filters, owner, zones)))
     }
-    let (rem, (owner, zones)) = run(rest_lower).ok()?;
+    let (rem, (type_filters, owner, zones)) = run(rest_lower).ok()?;
     if zones.len() < 2 {
         return None;
     }
@@ -2709,7 +2762,144 @@ pub(super) fn try_parse_multi_zone_player_exile(
     if !tail.is_empty() {
         return None;
     }
-    Some((owner, zones))
+    Some((type_filters, owner, zones))
+}
+
+/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
+/// `<zone(s)>`" — a heterogeneous mass exile whose operand unions a battlefield
+/// permanent population with one or more whole-zone populations (every card in
+/// every player's graveyard / hand / library, keyed by owner per CR 400.3).
+/// Ultimate Nullification ("Exile all creatures and graveyards") is the
+/// exemplar. Generalizes to any permutation ("… creatures and artifacts and
+/// graveyards", "… creatures and graveyards and hands").
+///
+/// The permanent legs are parsed by [`parse_mass_type_union`] (CR 205.2a +
+/// CR 205.3a — a card-type/subtype union) and scoped to the battlefield via
+/// `InZone`; the trailing zone legs become an all-cards (`TypeFilter::Card`),
+/// all-owners (`controller: None`) leg carrying the zone union on `InAnyZone`.
+/// The two are merged into one `Or`, so the resolving `ChangeZoneAll` scans
+/// `extract_zones()` = Battlefield ∪ zone-union and moves every match to exile
+/// simultaneously (CR 608.2f) — one instruction, never a battlefield wipe plus
+/// an orphaned zone conjunct.
+///
+/// Declines (`None`) unless a permanent leg is followed by at least one zone leg
+/// AND the operand is fully consumed (only trailing punctuation may remain), so
+/// pure type unions ("all creatures and artifacts") keep the existing type-union
+/// path and no trailing fragment is ever silently dropped.
+pub(super) fn try_parse_mass_exile_permanents_and_zones(
+    rest: &str,
+    rest_lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    // The operand must LEAD with a permanent-type leg; pure-zone and zone-first
+    // forms are declined so existing behavior is untouched. Uses the shared
+    // type-word predicate combinator, never a raw-text dispatch.
+    if !starts_with_type_word(rest_lower) {
+        return None;
+    }
+    // CR 205.2a + CR 205.3a: consume the leading permanent-type union
+    // ("creatures", "creatures and artifacts", …); `rem` is the untyped tail
+    // (e.g. " and graveyards").
+    let (perm_filter, rem) = parse_mass_type_union(rest, ctx);
+    // The leading leg MUST be a bare battlefield permanent-type description. If
+    // `parse_mass_type_union` already consumed an explicit source zone or owner
+    // scope ("… cards from that player's hand", "… cards from all hands"), this
+    // form belongs to the owner-scoped multi-zone parser, not here — injecting
+    // `InZone(Battlefield)` below would make that zone leg unsatisfiable and the
+    // rebuilt zone leg would drop the parsed owner (CR 400.3) and type
+    // restriction (CR 205). Decline so Thought Distortion / Worldfire keep their
+    // existing owner-scoped parse.
+    if !is_bare_battlefield_permanent_leg(&perm_filter) {
+        return None;
+    }
+    // CR 404.1 + CR 108.2: the trailing whole-zone union — declines if absent.
+    let zones = parse_trailing_zone_union(&rem.to_lowercase())?;
+    // CR 109.2: a bare card-type description ("creatures", no zone word / "card")
+    // means permanents of that type on the battlefield — so scope the permanent
+    // legs to the battlefield. This also makes `ChangeZoneAll::extract_zones`
+    // yield Battlefield ∪ zone-union; without it the zone leg would shadow the
+    // scan and battlefield permanents would never be collected.
+    let perm_scoped = super::add_filter_props(
+        perm_filter,
+        &[FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }],
+    );
+    // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone word (no
+    // possessive) is every player's such zone, so the leg is `TypeFilter::Card`
+    // (CR 108.2) with `controller` left `None` (every owner).
+    let zone_leg =
+        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]));
+    Some(merge_or_filters(perm_scoped, zone_leg))
+}
+
+/// Whether every leg of `filter` is a BARE battlefield permanent-type
+/// description — no owner scope (`controller`) and no explicit source-zone
+/// property (`InZone` / `InAnyZone`). This is the discriminator that keeps
+/// [`try_parse_mass_exile_permanents_and_zones`] off owner-scoped / zone-scoped
+/// forms: Thought Distortion ("… noncreature, nonland cards from that player's
+/// hand and graveyard") and Worldfire ("… cards from all hands and graveyards")
+/// both have `parse_mass_type_union` consume a leg that already carries its own
+/// zone (CR 404.1 / CR 402.1) and, for Thought Distortion, owner (CR 400.3)
+/// scope. Scoping such a leg to the battlefield would make it unsatisfiable and
+/// the rebuilt all-owners zone leg would drop the parsed owner/type restriction,
+/// exiling the wrong cards. Only a leg with no zone and no owner scope denotes
+/// "permanents of that type on the battlefield" (CR 109.2), which is the sole
+/// shape this recognizer may battlefield-scope and union with whole zones.
+fn is_bare_battlefield_permanent_leg(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.controller.is_none()
+                && !tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(is_bare_battlefield_permanent_leg)
+        }
+        TargetFilter::Not { filter } => is_bare_battlefield_permanent_leg(filter),
+        // Any other filter shape is not a bare permanent-type union.
+        _ => false,
+    }
+}
+
+/// CR 404.1 + CR 108.2: parse a trailing whole-zone union tail after the
+/// permanent legs of a mass exile — a leading union separator, then one or more
+/// bare zone words ("graveyards", "hands", "libraries"), each optionally
+/// preceded by "all "/"each ". A bare zone word (no possessive) denotes every
+/// card in that zone across all owners. Returns the deduped zone list, or `None`
+/// when there is no leading separator, no zone word, or a trailing fragment that
+/// would be silently dropped. Mirrors the separator/consumption discipline of
+/// [`try_parse_multi_zone_player_exile`].
+fn parse_trailing_zone_union(rem_lower: &str) -> Option<Vec<Zone>> {
+    fn strip_leg_quantifier(input: &str) -> &str {
+        alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
+            .parse(input)
+            .map(|(rest, _)| rest)
+            .unwrap_or(input)
+    }
+    // Leading separator joining the permanent legs to the first zone leg.
+    let sep_len = match_mass_union_separator(rem_lower)?;
+    let (mut input, first) = parse_zone_word(strip_leg_quantifier(&rem_lower[sep_len..])).ok()?;
+    let mut zones = vec![first];
+    // Additional zone legs joined by the same mass-union separators.
+    while let Some(sep) = match_mass_union_separator(input) {
+        let Ok((next, zone)) = parse_zone_word(strip_leg_quantifier(&input[sep..])) else {
+            break;
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+        input = next;
+    }
+    // Full-consumption guard: nothing but sentence punctuation may remain, so no
+    // trailing fragment is orphaned into an unsupported child node.
+    let tail = input.trim_start().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
+    if !tail.is_empty() {
+        return None;
+    }
+    Some(zones)
 }
 
 pub(super) fn parse_search_and_creation_ast(
@@ -4560,25 +4750,13 @@ fn parse_choose_zone_connector(
 fn parse_choose_zone_list(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
     type E<'a> = OracleError<'a>;
 
-    let (rest, first) = parse_choose_zone(input)?;
-    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_choose_zone)).parse(rest)?;
+    let (rest, first) = parse_zone_word(input)?;
+    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_zone_word)).parse(rest)?;
     let mut zones = vec![first];
     if let Some(second) = second {
         zones.push(second);
     }
     Ok((rest, zones))
-}
-
-fn parse_choose_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
-    type E<'a> = OracleError<'a>;
-
-    alt((
-        value(Zone::Graveyard, tag::<_, _, E>("graveyard")),
-        value(Zone::Library, tag("library")),
-        value(Zone::Hand, tag("hand")),
-        value(Zone::Exile, tag("exile")),
-    ))
-    .parse(input)
 }
 
 /// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
@@ -8452,14 +8630,31 @@ pub(super) fn parse_exile_ast(
         // orphans the trailing " and <zone>" as an unsupported child clause. The
         // zone union rides on the target filter via `InAnyZone`; `origin: None`
         // defers to it, matching the `MultiZoneSameNameExile` lowering.
-        if let Some((owner, zones)) = try_parse_multi_zone_player_exile(rest_lower) {
+        if let Some((type_filters, owner, zones)) = try_parse_multi_zone_player_exile(rest_lower) {
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: None,
-                target: TargetFilter::Typed(
-                    TypedFilter::default()
-                        .controller(owner)
-                        .properties(vec![crate::types::ability::FilterProp::InAnyZone { zones }]),
-                ),
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(owner),
+                    properties: vec![crate::types::ability::FilterProp::InAnyZone { zones }],
+                }),
+                all: true,
+                enter_with_counters: vec![],
+                multi_target: None,
+            });
+        }
+        // CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all <permanent
+        // types> and <zone(s)>" — a heterogeneous union of a battlefield
+        // permanent population and whole-zone (graveyard/hand/library)
+        // populations (Ultimate Nullification: "Exile all creatures and
+        // graveyards"). Recognized before the type-only union path below, which
+        // parses only the permanent leg and orphans the trailing zone leg as an
+        // unsupported child clause. `origin: None` defers the multi-zone scan to
+        // `extract_zones()` (Battlefield ∪ zone-union) carried on the filter.
+        if let Some(target) = try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx) {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target,
                 all: true,
                 enter_with_counters: vec![],
                 multi_target: None,
@@ -9525,6 +9720,73 @@ fn parse_behold_effect_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAs
     Some(ImperativeFamilyAst::Behold(filter))
 }
 
+/// "Note [the] type of mana spent to pay this [activation] cost", composed
+/// from the instruction, subject, and cost-referent grammar axes. The
+/// type-and-amount wording remains unsupported because it needs a distinct
+/// durable value model.
+fn parse_note_mana_spent_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            parse_note_instruction_prefix,
+            parse_noted_mana_subject,
+            parse_activation_cost_referent,
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_note_instruction_prefix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(tag("note "), preceded(opt(tag("the ")), tag("type"))),
+    )
+    .parse(input)
+}
+
+fn parse_noted_mana_subject(input: &str) -> OracleResult<'_, ()> {
+    value((), tag(" of mana spent")).parse(input)
+}
+
+fn parse_activation_cost_referent(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        tag(" to pay this "),
+        value((), alt((tag("activation cost"), tag("cost")))),
+    )
+    .parse(input)
+}
+
+/// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
+/// `assimilate <target phrase>` keyword action and return the phrase's target
+/// filter.
+///
+/// Anchored on `tag("assimilate ")` — the trailing space IS the word boundary,
+/// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. The
+/// target phrase itself is delegated to `parse_target_with_ctx`, the shared
+/// target-phrase authority, so "from an opponent's graveyard" resolves through
+/// `parse_zone_suffix` to `Owned{Opponent}` + `InZone{Graveyard}` exactly as it
+/// does for Ashen Powder and Puppeteer Clique.
+///
+/// Fails closed (returns `None`, so the caller falls through to the imperative
+/// `Effect::Unimplemented` fallback and coverage stays red) when either:
+///   * the target phrase leaves an unconsumed remainder, or
+///   * CR 115.2: the phrase does not name a graveyard zone. This second guard
+///     exists for COVERAGE HONESTY, not to license an `origin` value: the
+///     lowering emits `ChangeZone { origin: None }` (the zone constraint travels
+///     on the target filter), and a non-graveyard `assimilate` phrasing is a
+///     shape this production does not model, so it must keep reporting as
+///     unsupported rather than be silently lowered into a reanimation.
+fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("assimilate ")
+        .parse(lower.trim())
+        .ok()?;
+    let (target, remainder) = parse_target_with_ctx(rest, ctx);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -9549,6 +9811,29 @@ pub(super) fn parse_imperative_family_ast(
 
     if let Some(ast) = parse_reassemble_contraption_imperative(text, lower, ctx) {
         return Some(ast);
+    }
+
+    // CR 701.9a + CR 608.2c: Recruit is a standalone keyword action. Keep this
+    // an anchored nom production so `recruiter` and compound text do not become
+    // an accidental Recruit instruction.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("recruit"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::Recruit);
+    }
+
+    // CR 205.1a + CR 205.1b + CR 613.1d: `assimilate <target phrase>` is a
+    // standalone keyword action whose definition lives in reminder text the
+    // parser never sees. Probe it here, as an anchored nom production alongside
+    // `recruit`, rather than as a `match first_word` arm: a new string-literal
+    // match arm is exactly what `scripts/check-parser-combinators.sh` family (B)
+    // forbids.
+    if let Some(target) = parse_assimilate_target(lower, ctx) {
+        return Some(ImperativeFamilyAst::Assimilate { target });
     }
 
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
@@ -9857,6 +10142,13 @@ pub(super) fn parse_imperative_family_ast(
     // `parse_oneshot_draw_replacement`; on failure it returns `None`.
     if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_draw_replacement(lower) {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
+    if all_consuming(terminated(parse_note_mana_spent_clause, opt(tag("."))))
+        .parse(lower.trim())
+        .is_ok()
+    {
+        return Some(ImperativeFamilyAst::NoteManaSpent);
     }
 
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
@@ -11650,6 +11942,177 @@ pub(crate) fn try_parse_reflexive_coin_flip_branch<'a>(
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
+        // CR 701.9a + CR 608.2c: Recruit's contingent token sees exactly the
+        // immediately preceding discard result. The typed condition is carried
+        // by the direct child, so no later chain step can consume stale discard
+        // provenance.
+        ImperativeFamilyAst::Recruit => {
+            let nonland = TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+            };
+            let token = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "Human Soldier".to_string(),
+                    power: PtValue::Fixed(1),
+                    toughness: PtValue::Fixed(1),
+                    types: vec![
+                        "Creature".to_string(),
+                        "Human".to_string(),
+                        "Soldier".to_string(),
+                    ],
+                    colors: vec![crate::types::mana::ManaColor::White],
+                    keywords: Vec::new(),
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: Vec::new(),
+                    static_abilities: Vec::new(),
+                    enter_with_counters: Vec::new(),
+                },
+            )
+            .condition(AbilityCondition::DiscardedCardMatchesFilter { filter: nonland });
+            let discard = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+            )
+            .sub_ability(token);
+            let mut clause = parsed_clause(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            });
+            clause.sub_ability = Some(Box::new(discard));
+            clause
+        }
+        // CR 205.1a + CR 205.1b + CR 613.1d + CR 110.2a + CR 122.1: `assimilate`
+        // expands to the same two-step chain the reanimate-then-retype class
+        // already produces from spelled-out Oracle text (Ashen Powder's move,
+        // Rise from the Grave's / Grave Betrayal's type rider): move the
+        // targeted graveyard card to the battlefield under the instruction's
+        // controller with a +1/+1 counter, then install a Duration::Permanent
+        // layer-4 type override on that same object.
+        ImperativeFamilyAst::Assimilate { target } => {
+            // CR 205.1b: "becomes a '[creature type or types] artifact
+            // creature'" RETAINS every prior card type, supertype, and
+            // non-creature subtype and REPLACES only the creature types.
+            // `SetCardTypes` would replace the whole card-type set and is
+            // therefore rules-WRONG here.
+            //
+            // WRITTEN ORDER IS LOAD-BEARING and all four modifications must ride
+            // ONE StaticDefinition: they are all layer 4 (CR 613.1d), so list
+            // order decides. The CR 613.8 intra-static dependency edge
+            // RemoveAllSubtypes -> AddSubtype is deliberately suppressed in
+            // layers.rs so the written pre-sort wins (guarded by
+            // layers.rs::same_static_modifications_apply_in_written_order);
+            // splitting these into separate StaticDefinitions would create
+            // separate transient effects ordered by CR 613.7 timestamp instead,
+            // and the wipe could erase Borg.
+            let retype = StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![
+                    // CR 205.1a: the new creature subtype replaces the existing
+                    // creature-type set. Wipe first.
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: crate::types::card_type::SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Borg".to_string(),
+                    },
+                    // CR 205.1b: additive card types — prior card types and all
+                    // supertypes (e.g. Legendary) are retained.
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Artifact,
+                    },
+                    // CR 205.1b + CR 613.7: the phrase asserts the object IS a
+                    // creature. The filter's creature guarantee was checked once
+                    // in the graveyard at target selection (CR 601.2c), not
+                    // continuously, so a lower-timestamped type-removal effect
+                    // must be overridden here. Idempotent when already present.
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                ])
+                .description(
+                    "It's a Borg artifact creature and loses all other creature types.".to_string(),
+                );
+
+            // CR 611.2a: no stated duration on a keyword-action definition means
+            // "until the end of the game" — Duration::Permanent. Setting this
+            // explicitly is REQUIRED: effects/effect.rs's
+            // `ability.duration.or(duration).unwrap_or(Duration::UntilEndOfTurn)`
+            // would otherwise let layers.rs::prune_end_of_turn_effects drop the
+            // override at the next cleanup.
+            // CR 611.2c: the affected set freezes to the resolved parent target
+            // at install.
+            let override_step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![retype],
+                    duration: Some(Duration::Permanent),
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+            )
+            .duration(Duration::Permanent);
+
+            // CR 110.2a: enters under the instruction's controller, not its
+            // owner (CR 108.3: ownership is unchanged).
+            // CR 122.1: the +1/+1 counter is placed as part of the entry event;
+            // it modifies P/T in layer 7c (CR 613.4c), never in the layer-4
+            // modification list above.
+            // CR 115.2: `origin` stays None — the graveyard constraint travels
+            // on the target filter (FilterProp::InZone{Graveyard} +
+            // FilterProp::Owned{Opponent}), which is what both target
+            // enumeration and resolution-time re-legality consult. This matches
+            // every shipped card with this exact phrase ("from an opponent's
+            // graveyard"): Ashen Powder, Puppeteer Clique, Macabre Mockery all
+            // store origin: None. (Cards phrased "from A graveyard" — Rise from
+            // the Grave, Reanimate — store Some(Graveyard); that is a different
+            // phrase and not this card's.)
+            let mut clause = parsed_clause(Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 1 },
+                )],
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            });
+            // CR 608.2c: the type override is a resolution STEP of the single
+            // `assimilate` instruction, not a following independent instruction,
+            // so the link stays the default `ContinuationStep` (mirroring
+            // Recruit). `forward_result` is intentionally NOT hand-set: the sub
+            // binds via `ParentTarget`, not `SelfRef`, and
+            // `lower::rewire_result_anchored_subchain` already stamps the flag
+            // for this shape.
+            //
+            // CR 611.2e DEVIATION (pre-existing, class-wide): the definition's
+            // "It's a Borg artifact creature" is the "is [characteristic]" form,
+            // which the rule says must apply SIMULTANEOUSLY with the permanent
+            // entering the battlefield. This continuation applies it AFTER
+            // entry, so an ETB trigger keying on the new types does not see
+            // them. Same behavior as Rise from the Grave / Grave Betrayal (both
+            // also the "is" form); NOT fixed here.
+            clause.sub_ability = Some(Box::new(override_step));
+            clause
+        }
         // CR 118.12: A Counter with an "unless [player] pays [cost]" modifier
         // — intercepted here so the modifier propagates to
         // `ParsedEffectClause.unless_pay`. The Effect itself becomes the
@@ -12348,6 +12811,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
         },
+        ImperativeFamilyAst::Recruit => {
+            unreachable!("Recruit lowering constructs a sub-ability chain")
+        }
+        ImperativeFamilyAst::Assimilate { .. } => {
+            unreachable!("Assimilate lowering constructs a sub-ability chain")
+        }
         ImperativeFamilyAst::ForceBlock { attacker, duration } => Effect::ForceBlock {
             target: TargetFilter::Any,
             attacker,
@@ -12400,6 +12869,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
+        ImperativeFamilyAst::NoteManaSpent => Effect::NoteManaSpent,
         // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
@@ -20401,10 +20871,18 @@ mod tests {
         let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
         match &*def.effect {
             Effect::RollDie {
-                sides, modifier, ..
+                count,
+                sides,
+                modifier,
+                ..
             } => {
                 assert_eq!(*sides, 6);
                 assert!(modifier.is_none());
+                // Singular "a ... die" lowers to an explicit count of 1.
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
             }
             other => panic!("expected RollDie, got {other:?}"),
         }
@@ -20429,24 +20907,6 @@ mod tests {
                     crate::types::ability::QuantityExpr::Fixed { value: 2 }
                 );
                 assert!(modifier.is_none());
-            }
-            other => panic!("expected RollDie, got {other:?}"),
-        }
-    }
-
-    /// CR 706.1: The single-die path is unchanged — "Roll a six-sided die"
-    /// still lowers to `count: Fixed(1)` so back-compat with existing
-    /// single-die cards holds.
-    #[test]
-    fn roll_a_six_sided_die_lowers_to_count_one() {
-        let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
-        match &*def.effect {
-            Effect::RollDie { count, sides, .. } => {
-                assert_eq!(*sides, 6);
-                assert_eq!(
-                    *count,
-                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
-                );
             }
             other => panic!("expected RollDie, got {other:?}"),
         }
@@ -21792,6 +22252,76 @@ mod tests {
             def.multi_target, None,
             "a bare singular return must not gain a multi_target, got {:?}",
             def.multi_target
+        );
+    }
+
+    #[test]
+    fn recruit_lowers_to_direct_discard_contingent_chain() {
+        let ast = parse_imperative_family_ast("recruit", "recruit", &mut ParseContext::default())
+            .expect("Recruit should parse as its standalone keyword action");
+        let draw = lower_imperative_family_ast(ast);
+        assert!(matches!(draw.effect, Effect::Draw { .. }));
+        let discard = draw
+            .sub_ability
+            .expect("Recruit draw must chain to discard");
+        assert!(matches!(&*discard.effect, Effect::Discard { .. }));
+        let token = discard
+            .sub_ability
+            .expect("Recruit discard must have the contingent token as its direct child");
+        assert!(matches!(
+            token.condition.as_ref(),
+            Some(AbilityCondition::DiscardedCardMatchesFilter {
+                filter: TargetFilter::Not { .. }
+            })
+        ));
+        assert!(matches!(
+            &*token.effect,
+            Effect::Token {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recruiter_is_not_recruit() {
+        assert!(
+            parse_imperative_family_ast("recruiter", "recruiter", &mut ParseContext::default())
+                .is_none(),
+            "the anchored Recruit grammar must not accept a longer word"
+        );
+    }
+
+    /// The `tag("assimilate ")` word boundary. Mirrors
+    /// `recruiter_is_not_recruit`: the trailing space in the tag IS the boundary,
+    /// so no longer word beginning "assimilat…" may reach the Assimilate node.
+    /// Positive reach-guard included so the negatives cannot pass vacuously.
+    #[test]
+    fn assimilation_is_not_assimilate() {
+        for text in [
+            "assimilation",
+            "assimilates target creature card from an opponent's graveyard",
+            "assimilation aegis target creature card from an opponent's graveyard",
+        ] {
+            assert!(
+                !matches!(
+                    parse_imperative_family_ast(text, text, &mut ParseContext::default()),
+                    Some(ImperativeFamilyAst::Assimilate { .. })
+                ),
+                "the anchored Assimilate grammar must not accept {text:?}"
+            );
+        }
+        // Positive reach-guard: the real phrase DOES reach the node, so the
+        // negatives above are about the word boundary and not about a
+        // production that never fires.
+        let real = "assimilate target creature card from an opponent's graveyard";
+        assert!(
+            matches!(
+                parse_imperative_family_ast(real, real, &mut ParseContext::default()),
+                Some(ImperativeFamilyAst::Assimilate { .. })
+            ),
+            "reach-guard: the printed assimilate phrase must produce the Assimilate node"
         );
     }
 }

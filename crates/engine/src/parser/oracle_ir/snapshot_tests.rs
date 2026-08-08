@@ -2335,6 +2335,25 @@ fn edgewall_innkeeper() {
 }
 
 // ---------------------------------------------------------------------------
+// Valakut Exploration (existential exiled-with intervening-if + plural-pool
+// sweep + chained "that much" damage — CR 603.4 + CR 406.6 + CR 607.2a +
+// CR 608.2c/608.2k)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn valakut_exploration() {
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Landfall — Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.\nAt the beginning of your end step, if there are cards exiled with this enchantment, put them into their owner's graveyard, then this enchantment deals that much damage to each opponent.",
+        "Valakut Exploration",
+        &["Landfall"],
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("valakut_exploration_ir", &ir);
+    insta::assert_json_snapshot!("valakut_exploration_lowered", &lowered);
+}
+
+// ---------------------------------------------------------------------------
 // Bomat Courier (exile + activated with complex costs)
 // ---------------------------------------------------------------------------
 

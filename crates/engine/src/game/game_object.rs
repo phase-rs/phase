@@ -21,7 +21,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
@@ -81,6 +81,38 @@ pub struct BestowFormState;
 /// permanent — the merge identity lives in `GameObject::merged_components`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
+
+/// Serde adapter for presence-only unit markers stored in optional fields.
+///
+/// The owning fields retain `#[serde(default)]` so an absent field restores as
+/// `None`, while a present legacy `null` reaches this adapter and restores the
+/// marker. Canonical serialization omits `None` through the fields'
+/// `skip_serializing_if` attributes and represents `Some(_)` as `true`.
+///
+/// This adapter must not be used for markers that carry payload. Adding payload
+/// requires a deliberately versioned wire representation rather than silently
+/// discarding it behind this presence bit.
+mod unit_marker_option_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(value.is_some())
+    }
+
+    pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: Default,
+        D: Deserializer<'de>,
+    {
+        match Option::<bool>::deserialize(deserializer)? {
+            Some(true) | None => Ok(Some(T::default())),
+            Some(false) => Ok(None),
+        }
+    }
+}
 
 /// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
 /// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
@@ -368,6 +400,12 @@ pub struct GameObject {
     pub base_controller: Option<PlayerId>,
     pub controller: PlayerId,
     pub zone: Zone,
+    /// Viewer-specific identity-display projection. This is false on
+    /// authoritative game state and populated only at client-view boundaries;
+    /// presentation consumers must use it instead of reconstructing hidden
+    /// information permissions from reveal bookkeeping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub display_visible_to_viewer: bool,
 
     // Battlefield state
     pub tapped: bool,
@@ -515,7 +553,11 @@ pub struct GameObject {
     pub back_face: Option<BackFaceData>,
 
     /// Digital-only Specialize: specialized faces keyed by added color pip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_map"
+    )]
     pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
 
     /// Digital-only Specialize: set after specializing; prevents re-specializing.
@@ -726,7 +768,11 @@ pub struct GameObject {
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
     /// CR 702.103e–g (illegal target, unattach, zone exit).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bestow_form: Option<BestowFormState>,
 
     /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
@@ -739,7 +785,11 @@ pub struct GameObject {
     /// the stack (cast for its mutate cost). Set by `apply_mutate_form`; cleared
     /// by `revert_mutate_form` when the target is illegal at resolution
     /// (CR 702.140b). Does not persist onto the merged permanent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mutate_form: Option<MutateFormState>,
 
     /// CR 730.2 + CR 702.140c: The ordered list of card/token `ObjectId`s that
@@ -932,13 +982,21 @@ pub struct GameObject {
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
     /// Multiple players can goad the same creature, creating additional combat requirements.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub goaded_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.35a: Which players have detained this permanent. A detained permanent
     /// can't attack or block and its activated abilities can't be activated until the
     /// detaining player's next turn. Cleared during layer evaluation like goaded_by.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub detained_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.60a: Whether this creature is currently suspected.
@@ -970,7 +1028,11 @@ pub struct GameObject {
     /// memory of its previous existence). `Option<PreparedState>` over a bool
     /// per project idiom (no bool flags). Assign when WotC publishes SOS CR
     /// update.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prepared: Option<PreparedState>,
 
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end
@@ -1130,6 +1192,25 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+
+    /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
+    /// object's own activated-ability mana cost, stamped by
+    /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
+    /// activation-time payment. PURELY A BRIDGE: `push_ability_entry` (the
+    /// single authority where an activated ability reaches the stack)
+    /// synchronously drains this field — via `std::mem::take` — into that
+    /// specific activation's own `ResolvedAbility::noted_mana_payment`
+    /// (paired with the source's live incarnation at that same moment)
+    /// immediately after cost payment completes, before any later activation
+    /// of this permanent could occur. Nothing reads this field at resolution
+    /// time; `Effect::NoteManaSpent` reads the per-activation snapshot
+    /// instead, so a permanent untapped and reactivated with a different
+    /// payment while an earlier activation still sits unresolved on the
+    /// stack cannot corrupt what that earlier instance observed. Always
+    /// empty except transiently between the payment stamp and the very next
+    /// `push_ability_entry` call for the same source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_to_activate: Vec<ManaType>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1148,6 +1229,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_controller: _,
         controller: _,
         zone: _,
+        display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
         flipped: _,
@@ -1289,6 +1371,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // Activation-cost-payment latch — same omission class as
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
+        // synchronously by `push_ability_entry` into the resolving
+        // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
+        mana_spent_to_activate: _,
     } = o;
 }
 
@@ -1925,6 +2012,7 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             // CR 701.60b: Snapshot suspected status at the moment of the move,
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
@@ -2014,6 +2102,7 @@ impl GameObject {
             base_controller: Some(owner),
             controller: owner,
             zone,
+            display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
             flipped: false,
@@ -2155,6 +2244,7 @@ impl GameObject {
             phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+            mana_spent_to_activate: Vec::new(),
         }
     }
 
@@ -2602,6 +2692,16 @@ impl GameObject {
         })
     }
 
+    /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
+    /// resolution on this permanent's own ability ("this artifact's last noted
+    /// type" — Jeweled Amulet). Read by `ManaProduction::NotedType`.
+    pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),
+            _ => None,
+        })
+    }
+
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
     ///
@@ -2811,6 +2911,10 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's

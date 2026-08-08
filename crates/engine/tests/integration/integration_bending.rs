@@ -3,6 +3,7 @@
 
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility,
@@ -118,6 +119,85 @@ fn test_generic_animate_does_not_register_earthbend() {
     );
     let player = state.players.iter().find(|p| p.id == P0).unwrap();
     assert!(!player.bending_types_this_turn.contains(&BendingType::Earth));
+}
+
+/// Real-card regression for Earthbend's delayed-return provenance: the land
+/// must be recovered from the dies event, not from the Earthbend trigger's
+/// creation-time event context.
+#[test]
+fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let cub = scenario.add_real_card(P0, "Badgermole Cub", Zone::Hand, db);
+    let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let yawgmoth = scenario.add_real_card(P0, "Yawgmoth, Thran Physician", Zone::Battlefield, db);
+    scenario.add_card_to_library_top(P0, "Yawgmoth draw");
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    runner.cast(cub).target_object(garden).resolve();
+    let animated_garden = &runner.state().objects[&garden];
+    assert!(
+        animated_garden
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "Earthbend must animate Khalni Garden"
+    );
+    assert_eq!(
+        animated_garden.counters.get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "Earthbend must put its +1/+1 counter on Khalni Garden"
+    );
+
+    let sacrifice_ability = runner.state().objects[&yawgmoth]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                ability.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    ..
+                }
+            )
+        })
+        .expect("Yawgmoth's printed -1/-1 counter ability must be available");
+    let outcome = runner
+        .activate(yawgmoth, sacrifice_ability)
+        .pay_with(&[garden])
+        .resolve();
+
+    assert_eq!(outcome.hand_drawn(P0), 1, "Yawgmoth must draw a card");
+    assert_eq!(runner.state().objects[&garden].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&garden].tapped,
+        "Earthbend returns the land tapped"
+    );
+    assert!(
+        runner.state().objects.values().any(|object| {
+            object.zone == Zone::Battlefield
+                && object.is_token
+                && object.name == "Plant"
+                && object.owner == P0
+        }),
+        "Khalni Garden's real ETB must create its Plant token after returning"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the full interaction must settle"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +999,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1293,6 +1374,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1863,6 +1945,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         enter_transformed: false,
         face_down_profile: None,
         enter_as_copy: None,
+        discard_frame: None,
         applied: std::collections::HashSet::new(),
     };
 
@@ -1939,6 +2022,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         enter_transformed: false,
         face_down_profile: None,
         enter_as_copy: None,
+        discard_frame: None,
         applied: std::collections::HashSet::new(),
     };
 
@@ -2100,6 +2184,7 @@ fn cast_synthetic_earthbend(
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(state, entry, &mut vec![]);
@@ -2413,6 +2498,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);

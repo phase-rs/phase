@@ -269,6 +269,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Odkręć",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -440,6 +441,8 @@
     "initiativeTooltip": "Ma Inicjatywę — wyprawia się do Podmiasta na początku utrzymania",
     "cityBlessing": "Błogosławieństwo miasta",
     "cityBlessingTooltip": "Błogosławieństwo miasta — kontroluje dziesięć lub więcej trwałych (Ascend)",
+    "enduringStory": "Trwała historia",
+    "enduringStoryTooltip": "Trwała historia — zdobyta za kontrolowanie permanenta ze Storied i co najmniej trzech artefaktów, legendarnych permanentów i/lub Sag; trwa do końca gry",
     "dungeonAriaLabel": "Wyprawa w {{name}}, pokój {{room}}",
     "dungeonTooltip": "Wyprawa w {{name}} — pokój {{room}}",
     "poisonAriaLabel_one": "{{count}} znacznik trucizny",
@@ -481,6 +484,11 @@
     "pendingCheaper": "Następny czar kosztuje {{amount}} mniej",
     "companion": "Towarzysz",
     "unboundedTooltip": "Nieograniczone: {{resource}} (∞)",
+    "unboundedScheduledTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; zostanie wybrana skończona liczba",
+    "unboundedScheduledGlyph": "∞→N",
+    "unboundedConditionalTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone",
+    "unboundedMixedTooltip": "Nieograniczone: {{resource}} (∞) — część tej grupy ma oczekujące zwinięcie; część pozostaje nieograniczona",
+    "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
     "unboundedMana": "mana",
     "unboundedLife": "życie",
@@ -569,13 +577,15 @@
   "mana": {
     "free": "Za darmo",
     "chooseXTitle": "Wybierz wartość dla X",
-    "chooseXAria": "Wybierz wartość X",
     "chooseXInputAria": "Wpisz wartość X",
     "decreaseX": "Zmniejsz wartość X",
     "increaseX": "Zwiększ wartość X",
-    "xEquals": "X = {{value}}",
     "minMax": "min {{min}} / maks {{max}}",
     "maxOnly": "maks {{max}}",
+    "amountOutOfRange": "Wpisz liczbę całkowitą od {{min}} do {{max}}",
+    "decreaseAmount": "Zmniejsz kwotę",
+    "increaseAmount": "Zwiększ kwotę",
+    "confirmAmount": "Potwierdź",
     "confirmX": "Potwierdź X = {{value}}",
     "payMana": "Zapłać koszt many",
     "convokeHint": "Obróć stwory, aby pomóc zapłacić.",
@@ -622,6 +632,10 @@
     "cardBack": "Rewers karty",
     "organizeLabel": "Uporządkuj rękę",
     "reorderPausedHint": "Zmiana kolejności przeciąganiem jest wstrzymana, gdy ręka jest posortowana lub przefiltrowana."
+  },
+  "storm": {
+    "copies_one": "Sztorm: {{count}} kopia",
+    "copies_other": "Sztorm: {{count}} kopie"
   },
   "opponentHud": {
     "ally": "Sojusznik",
@@ -1083,6 +1097,14 @@
       "returnToHand_one": "zwróć trwałego do ręki",
       "returnToHand_other": "zwróć {{count}} trwałych do ręki",
       "energy": "{{amount}} energii",
+      "playerCounters_one": "zdobądź {{count}} znacznik {{kind}}",
+      "playerCounters_other": "zdobądź {{count}} znaczników {{kind}}",
+      "playerCounterKind": {
+        "Poison": "trucizny",
+        "Experience": "doświadczenia",
+        "Rad": "promieniowania",
+        "Ticket": "biletu"
+      },
       "generic": "koszt",
       "pay": "Zapłać {{cost}}"
     },
@@ -2188,6 +2210,7 @@
       "return": "Return",
       "exile": "Exile",
       "tap": "Tap",
+      "untap": "Odkręć",
       "crew": "Crew",
       "saddle": "Saddle",
       "station": "Station",
@@ -2228,6 +2251,23 @@
     "noScheme": "No scheme",
     "deckCount": "{{count}} in deck",
     "heroCount": "{{count}} heroes"
+  },
+  "debugPanel": {
+    "aiDecisionVisibility": "Pokaż decyzje SI",
+    "aiDecisionUnavailable": "Diagnostyka decyzji SI jest niedostępna w tej grze."
+  },
+  "aiDecisionOverlay": {
+    "title": "Decyzja SI",
+    "rankedSubtitle": "Próbka softmax przy temperaturze {{temperature}}.",
+    "directSubtitle": "Wybrano przez bezpośrednią strategię SI.",
+    "metrics": "W {{score}} · Waga {{weight}}",
+    "top": "NAJLEPSZA",
+    "chosen": "WYBRANA",
+    "legendTop": "Najwyżej oceniona",
+    "legendChosen": "Wybrana",
+    "collapse": "Zwiń szczegóły decyzji SI",
+    "expand": "Rozwiń szczegóły decyzji SI",
+    "close": "Zamknij nakładkę decyzji SI"
   },
   "status": {
     "yourPriority": "Your priority",

@@ -223,7 +223,8 @@ pub struct ShortcutDecisionSchema {
     /// The single count authority: the declared-count check in `game::engine` rejects a
     /// `Fixed(n)` above it, and `game::interaction` publishes it as the count picker's
     /// ceiling. Every offer built before the bounded-offer phase carries
-    /// `MAX_SHORTCUT_CYCLES`, so those checks are inert until a producer narrows it.
+    /// `MAX_SHORTCUT_CYCLES`, and those checks were inert until the bounded-cycle producer
+    /// began narrowing it.
     ///
     /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`:
     /// the frontend never reads the raw bound, it reads the already-clamped ceiling the
@@ -259,6 +260,23 @@ impl Default for ShortcutDecisionSchema {
             points: Vec::new(),
             convoke_tappable_count: 0,
         }
+    }
+}
+
+impl ShortcutDecisionSchema {
+    /// CR 732.2a: `true` iff this offer's producer NARROWED the repetition bound below the
+    /// engine-wide safety cap — i.e. it measured a CR 704.5a / CR 704.5c / CR 104.3c
+    /// threshold inside the loop. A producer that cannot compute a real bound publishes
+    /// `MAX_SHORTCUT_CYCLES` (see `max_iterations` above), so an unnarrowed offer is NOT
+    /// bounded in this sense.
+    ///
+    /// The SINGLE AUTHORITY for that question, and the reason it is a method rather than
+    /// an inline comparison repeated at each caller: `MAX_SHORTCUT_CYCLES` is `pub(crate)`
+    /// to the engine, so `phase-ai`'s declare policy cannot name it and would otherwise
+    /// hard-code the literal. This predicate crosses the crate boundary; the constant does
+    /// not.
+    pub fn is_bounded(&self) -> bool {
+        self.max_iterations < crate::game::engine::MAX_SHORTCUT_CYCLES
     }
 }
 
@@ -308,6 +326,10 @@ pub enum DecisionPointKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetPin {
     ByIdentity(DecisionSource),
+    /// A CONSTANT target (CR 732.2a): this pin answers EVERY firing of its source within
+    /// the period with the declared player. A seat is state-independent by construction —
+    /// it can never denote "the newest copy" — so no iteration can turn the pin into the
+    /// conditional action CR 732.2a forbids.
     Player(PlayerId),
     Scheduled(TargetSchedule),
 }
@@ -411,15 +433,17 @@ pub enum ConcreteTarget {
 /// `Static` or `Scheduled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayFailure {
-    /// CR 608.2b: a TARGET pin (`Targets`'s `ByIdentity`, or a `Scheduled` schedule) no
-    /// longer resolves to a legal live object (left its zone / ceased to exist). Raised
-    /// whenever a *target* is illegal-or-absent, in ANY `ReplayMode` — a `Static`-mode
-    /// `Targets` pin with a removed target yields THIS, not `MissingSource`. ⇒ abort the
-    /// auto-shortcut, hand back to manual.
-    IllegalTarget {
-        slot: DecisionSlot,
-        source: DecisionSource,
-    },
+    /// CR 608.2b: a TARGET pin no longer resolves to a legal live target (left its zone /
+    /// ceased to exist / CR 800.4 + CR 102.1 left the game). Raised whenever a *target* is
+    /// illegal-or-absent, in ANY `ReplayMode` — a `Static`-mode `Targets` pin with a
+    /// removed target yields THIS, not `MissingSource`. ⇒ abort the auto-shortcut, hand
+    /// back to manual.
+    ///
+    /// Carries the [`TargetPin`] itself rather than a `DecisionSource`: `Player` and
+    /// `Scheduled` pins are equally capable of going illegal, and a `DecisionSource` can
+    /// name neither. Parameterizing the existing variant keeps ONE "target went illegal"
+    /// failure instead of growing a per-pin-kind sibling cluster.
+    IllegalTarget { slot: DecisionSlot, pin: TargetPin },
     /// CR 400.7: an ORDER pin's source (`Order`) is absent from the current battlefield
     /// ⇒ the ordering template no longer matches ⇒ fall through to a normal manual
     /// prompt. Raised ONLY for the `Order` pin kind, in any `ReplayMode`.
@@ -538,22 +562,70 @@ fn resolve_pin(
     }
 }
 
-/// Resolve one target pin. CR 608.2b: a by-identity or scheduled target must still be a
-/// legal live object; an absent one is `IllegalTarget`.
+/// Resolve one target pin. CR 608.2b: a by-identity, player, or scheduled target must
+/// still be a legal live target; an absent or departed one is `IllegalTarget`.
 fn resolve_target(
     pin: &TargetPin,
     slot: &DecisionSlot,
     iteration: IterationIndex,
     state: &GameState,
 ) -> Result<ConcreteTarget, ReplayFailure> {
+    let illegal = || ReplayFailure::IllegalTarget {
+        slot: slot.clone(),
+        pin: pin.clone(),
+    };
     match pin {
         TargetPin::ByIdentity(source) => resolve_source(source, state)
             .map(ConcreteTarget::Object)
-            .ok_or_else(|| ReplayFailure::IllegalTarget {
-                slot: slot.clone(),
-                source: source.clone(),
-            }),
-        TargetPin::Player(p) => Ok(ConcreteTarget::Player(*p)),
+            .ok_or_else(illegal),
+        // CR 115.10a + CR 701.34a: this seam answers "may this seat be CHOSEN", not "may it
+        // be TARGETED". A proliferate choice is not a target, so the targeting-only
+        // exclusions (CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection) must
+        // NOT be applied here — doing so would refuse a legal CR 732.2a proposal (the
+        // over-veto class). Existence is delegated to
+        // `game::players::player_exists_for_choice` (CR 800.4 + CR 102.1, phasing per the
+        // CR 702.26b MIRROR).
+        //
+        // AND THE OTHER HALF, so nobody "fixes" this back into the over-veto: declare-path
+        // TARGET legality is enforced by `validate_pins`' `legal_targets.contains(..)`
+        // against the offer's PUBLISHED set, which `ability_utils::build_target_slots`
+        // derives through `targeting::find_legal_targets` →
+        // `static_abilities::player_cannot_be_targeted_by`. It is NOT enforced here, and
+        // does not need to be.
+        //
+        // OPEN RESIDUAL — the object-growth route. Stated in full here, because no shipped
+        // file states it elsewhere. INVARIANT: a `TargetPin::Player` must never reach
+        // materialization validated only against a legal set derived from the declared pins
+        // themselves. `try_offer_object_growth_shortcut` builds its points through
+        // `pinned_decisions_to_points`, whose legal sets come FROM the pins, so on that
+        // route the offer would ratify its own pin — and CR 732.2a admits only a sequence
+        // "that may be legally taken based on the current game state", which a self-derived
+        // set cannot establish. NOT live today FROM ANY IN-PROCESS PRODUCER — and the scope
+        // word is load-bearing: the one `record_loop_pin` arm that can push a
+        // `TargetPin::Player` is the CR 701.34a proliferate-target arm, and a proliferate
+        // choice is not a target, so THIS call is its correct authority.
+        //
+        // PINS ALSO ARRIVE WIRE-SOURCED, and no in-process invariant covers that.
+        // `LoopActionContext` is `#[serde(from = "LoopActionContextRepr")]`, and that shim's
+        // `From` impl installs the deserialized vector verbatim (`pins: r.pins`), so a
+        // restored save can carry a Player pin of UNKNOWN class.
+        // `GameState::migrate_transient_loop_sequence` keeps a loaded sequence ONLY for a
+        // save captured in a `LoopShortcut` / `RespondToShortcut` window, and on that route
+        // the pins are replayed by the accept→materialize drive through
+        // `build_recast_template` → `decision_template::resolve`, i.e. through THIS call —
+        // so a wire pin's EXISTENCE half is authority-enforced here too. Same class as the
+        // wire-sourced `max_iterations` defect `reject_zero_bound_shortcut_offer` closes: a
+        // load-seam value the in-process producer census cannot see.
+        //
+        // The residual opens the moment any producer — IN-PROCESS OR WIRE — puts a
+        // TARGET-class Player pin into `LoopActionContext.pins`. DAMAGE MODE then:
+        // `CycleOutcome::Abort` rolls back only the crossing cycle, so cycles `0..k` stay
+        // committed under a pin no authority ever validated. Deferred fix shape:
+        // provenance-type the pin so the two classes are distinguishable at this seam — a
+        // change to a serialized type, hence not this phase.
+        TargetPin::Player(p) => crate::game::players::player_exists_for_choice(state, *p)
+            .then_some(ConcreteTarget::Player(*p))
+            .ok_or_else(illegal),
         TargetPin::Scheduled(sched) => evaluate_schedule(sched, slot, iteration, state),
     }
 }
@@ -621,12 +693,21 @@ fn evaluate_schedule(
         .map(ConcreteTarget::Object)
         .ok_or_else(|| ReplayFailure::IllegalTarget {
             slot: slot.clone(),
-            source: source.clone(),
+            pin: TargetPin::Scheduled(sched.clone()),
         })
 }
 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
-/// free choice in the cycle is pinned (TOTAL COVERAGE). "No conditional on a prior
+/// free choice in the cycle is pinned (TOTAL COVERAGE).
+///
+/// THIS IS WHERE THE NO-CONDITIONAL-ACTIONS CLAUSE IS SATISFIED, AND IT IS SATISFIED BY
+/// CONSTRUCTION. CR 732.2a requires a proposal describe "the predictable results of the sequence of
+/// choices" and says it "can't include conditional actions, where the outcome of a game event
+/// determines the next action a player takes". Pins fix every free choice BEFORE the offer is made,
+/// so the sequence the table accepts is the sequence that runs. The two companion gates are
+/// `game::engine::try_offer_object_growth_shortcut`'s static rejection of coin flip / die roll /
+/// random discard, and `analysis::resource::elimination_bounds` stopping the count strictly short
+/// of every CR 704 loss threshold. "No conditional on a prior
 /// iteration's outcome" needs NO runtime check — it is unrepresentable in
 /// [`TargetSchedule`] by construction (see the type doc); a choice a player could only
 /// make reactively is one they cannot pin, which surfaces HERE as an unpinned slot.
@@ -672,7 +753,8 @@ pub enum PredictabilityViolation {
 /// CR 732.2a + CR 608.2b: why a declared pin is not a LEGAL answer to the offered decision
 /// schema. `validate_pins` is the fail-closed VALUE-legality firewall paired with
 /// [`predictability_gate`]'s COVERAGE check: the gate proves every offered slot is pinned;
-/// this proves every pin's VALUE lies inside the slot's offered legal set. Any violation ⇒
+/// this proves every pin's VALUE lies inside the slot's offered legal set at every index the
+/// ACCEPTED COUNT will drive. Any violation ⇒
 /// the declare handler rejects the shortcut and hands back to manual play (no APNAP, no
 /// drive, no crown).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,9 +796,11 @@ pub(crate) fn resolve_target_ref(
 /// CR 732.2a + CR 608.2b: the fail-closed VALUE-legality firewall for a declared shortcut.
 /// Verifies every pin in `template` is a LEGAL answer to `schema` — each pin's slot is one
 /// the offer exposed, and each pin's resolved value lies inside that slot's offered legal
-/// set. `period` (the drive count from [`shortcut_drive_period`]) bounds the iteration
-/// indices a scheduled target pin is re-resolved for, so a `RoundRobin`/`Piecewise` schedule
-/// is validated at EVERY index it will drive. EXHAUSTIVE over [`PinnedDecision`] with no
+/// set. `validated_range` bounds the iteration indices a scheduled target pin is re-resolved
+/// for: every pin is validated at every index in `0..validated_range`. Supplying a range that
+/// COVERS the drive is the CALLER's obligation, discharged by
+/// `game::engine::shortcut_validated_range`, which reads the range off the declared count
+/// rather than off the schedule's own length. EXHAUSTIVE over [`PinnedDecision`] with no
 /// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point;
 /// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
 /// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
@@ -724,7 +808,7 @@ pub(crate) fn resolve_target_ref(
 pub fn validate_pins(
     schema: &ShortcutDecisionSchema,
     template: &DecisionTemplate,
-    period: IterationIndex,
+    validated_range: IterationIndex,
     state: &GameState,
 ) -> Result<(), PinValidation> {
     for pin in &template.decisions {
@@ -751,7 +835,20 @@ pub fn validate_pins(
                 // require the concrete value to be an offered legal target. A scheduled pin
                 // that cannot resolve to a live legal object is itself an illegal value.
                 for t in targets {
-                    for i in 0..period.max(1) {
+                    // CR 732.2b + CR 732.2c: NO `.max(1)` FLOOR. A shortened proposal whose
+                    // new ending point is the first deviating choice — CR 732.2b's "that
+                    // place becomes the new ending point" — is a ZERO-repetition accepted
+                    // proposal, and CR 732.2c makes taking it mandatory, so count 0 must be
+                    // representable AND validatable. A floor would validate index 0 of a
+                    // range nothing drives, refusing conforming declarations. Validation is
+                    // NOT disabled at 0: the slot-exposure (`UnexposedSlot`), pin-kind and
+                    // cardinality checks all sit OUTSIDE this loop and still run.
+                    //
+                    // ⚠ SCOPE: this licenses representing and validating count 0. It does NOT
+                    // claim today's Shorten path reaches here with 0 —
+                    // `handle_respond_to_shortcut` realizes Shorten as a real priority window,
+                    // not an auto-applied `Fixed(0)`.
+                    for i in 0..validated_range {
                         let concrete = resolve_target(t, slot, i, state)
                             .map_err(|_| PinValidation::IllegalPinValue { slot: slot.clone() })?;
                         if !legal_targets.contains(&concrete_to_target_ref(concrete)) {
@@ -1217,6 +1314,253 @@ mod tests {
         let mut present = GameState::new_two_player(7);
         bf_object(&mut present, 30, 30, 1);
         assert!(resolve(&template, 0, &present).is_ok());
+    }
+
+    /// CR 800.4 + CR 102.1 + CR 608.2b: a `TargetPin::Player` aimed at a seat that has LEFT
+    /// THE GAME is no longer one of the people in the game, so it is not choosable and the
+    /// per-iteration re-check must raise `IllegalTarget{pin}`. Both this seam and
+    /// `game::targeting`'s legal-set enumeration now SHARE that existence authority —
+    /// `game::players::player_exists_for_choice`, reached here directly and there through
+    /// `targeting::player_is_legal_target` — so this is one authority consulted twice, not
+    /// two implementations mirroring each other. (NOT CR 800.4a, which governs a departed
+    /// player's objects, control effects and priority rather than choice legality.)
+    /// This row is the sole owner of `IllegalTarget{pin}` for the `Player` kind, and it is
+    /// reachable by construction.
+    ///
+    /// MATCHED PAIR, one variable (`is_eliminated`): the LIVE half resolves, the DEAD half
+    /// fails. Only the ABSOLUTE expectations discriminate — a parity assertion against the
+    /// targeting side would be vacuous now that both sides call one function, since
+    /// deleting a conjunct moves both together. REVERT-PROBE: drop the `!is_eliminated`
+    /// conjunct inside `player_exists_for_choice` (via `is_alive`) ⇒ the dead half
+    /// resolves ⇒ FAILS.
+    #[test]
+    fn a_dead_player_pin_is_illegal() {
+        let pin_slot = DecisionSlot {
+            source: this_obj(70, Some(0)),
+            index: 0,
+        };
+        let template = |victim: u8| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: pin_slot.clone(),
+                targets: vec![TargetPin::Player(PlayerId(victim))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: tri_key(),
+        };
+
+        // LIVE half — the positive reach-guard: nothing upstream of the liveness check
+        // rejects this pin, so the dead half's failure is attributable to liveness alone.
+        let live = GameState::new_two_player(7);
+        assert!(!live.players[1].is_eliminated, "fixture: P1 starts alive");
+        assert_eq!(
+            resolve(&template(1), 0, &live).unwrap(),
+            vec![ConcreteDecision::Targets {
+                slot: pin_slot.clone(),
+                targets: vec![ConcreteTarget::Player(PlayerId(1))],
+            }],
+            "a live player pin resolves unchanged"
+        );
+
+        // DEAD half — the identical board with exactly one field flipped.
+        let mut dead = live.clone();
+        dead.players[1].is_eliminated = true;
+        let err = resolve(&template(1), 0, &dead).unwrap_err();
+        assert_eq!(
+            err,
+            ReplayFailure::IllegalTarget {
+                slot: pin_slot,
+                pin: TargetPin::Player(PlayerId(1)),
+            },
+            "CR 800.4 + CR 102.1: a departed seat is no longer one of the people in the \
+             game, so it is not choosable — and the failure NAMES the pin, which a \
+             `source: DecisionSource` payload could not express"
+        );
+    }
+
+    /// R1 — CR 115.10a + the CR 702.26b MIRROR: a `TargetPin::Player` aimed at a
+    /// PHASED-OUT seat also fails the per-iteration re-check. At HEAD this seam checked
+    /// `is_alive` only, so a phased-out seat resolved here and was killed (or not) further
+    /// downstream; routing it through `game::players::player_exists_for_choice` makes the
+    /// EXISTENCE half one authority for both halves of "no longer there".
+    ///
+    /// MATCHED PAIR, one variable (the phasing transition): the PHASED-IN half resolves,
+    /// the PHASED-OUT half fails. The phased-in half is the positive reach-guard — it
+    /// proves nothing upstream of the existence check rejects this pin, so the other
+    /// half's failure is attributable to phasing alone. The transition itself is asserted
+    /// (production API return value + the flag) because a setup that silently no-opped
+    /// would make the second half pass for no reason at all.
+    ///
+    /// R1 and `a_dead_player_pin_is_illegal` are the two behaviour changes of one
+    /// conjunct pair, deliberately kept as separate rows: elimination was already enforced
+    /// here, phasing was not.
+    ///
+    /// REVERT-PROBE: drop the `is_phased_out` conjunct in `player_exists_for_choice` ⇒ the
+    /// phased-out half resolves ⇒ FAILS (and `a_dead_player_pin_is_illegal` does not move,
+    /// which is what attributes this row to the phasing conjunct specifically).
+    #[test]
+    fn a_phased_out_player_pin_is_illegal() {
+        let pin_slot = DecisionSlot {
+            source: this_obj(71, Some(0)),
+            index: 0,
+        };
+        let template = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: pin_slot.clone(),
+                targets: vec![TargetPin::Player(PlayerId(1))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: tri_key(),
+        };
+
+        // PHASED-IN half — the positive reach-guard.
+        let phased_in = GameState::new_two_player(7);
+        assert!(
+            !phased_in.players[1].is_phased_out(),
+            "fixture: P1 starts phased in"
+        );
+        assert_eq!(
+            resolve(&template, 0, &phased_in).unwrap(),
+            vec![ConcreteDecision::Targets {
+                slot: pin_slot.clone(),
+                targets: vec![ConcreteTarget::Player(PlayerId(1))],
+            }],
+            "a phased-in player pin resolves unchanged"
+        );
+
+        // PHASED-OUT half — the same board, transitioned through the PRODUCTION API.
+        let mut phased_out = phased_in.clone();
+        let mut events = Vec::new();
+        let transitioned =
+            crate::game::phasing::phase_out_player(&mut phased_out, PlayerId(1), &mut events);
+        assert_eq!(
+            transitioned,
+            vec![PlayerId(1)],
+            "setup anti-vacuity: phase_out_player must report the seat it transitioned"
+        );
+        assert!(
+            phased_out.players[1].is_phased_out(),
+            "setup anti-vacuity: P1 must read as phased out"
+        );
+        assert!(
+            !phased_out.players[1].is_eliminated,
+            "the ONLY variable is phasing — P1 must still be un-eliminated, or this row \
+             would be a second copy of `a_dead_player_pin_is_illegal`"
+        );
+
+        assert_eq!(
+            resolve(&template, 0, &phased_out).unwrap_err(),
+            ReplayFailure::IllegalTarget {
+                slot: pin_slot,
+                pin: TargetPin::Player(PlayerId(1)),
+            },
+            "CR 702.26b MIRROR: a phased-out seat is treated as though it does not exist, \
+             so it is not choosable here either"
+        );
+    }
+
+    /// R2 — CR 115.10a is a BOUNDARY, and this row is what stops a future "fix" from
+    /// erasing it: a targeting-only exclusion gates the TARGET seam and must NOT gate the
+    /// CHOICE seam.
+    ///
+    /// One board, one SHROUDED seat (CR 702.18a — shroud blocks every source, including
+    /// the shrouded player's own, so the assertion does not depend on who the source
+    /// controller is), and two assertions at two different seams:
+    ///
+    /// 1. the EXCLUDE half — `targeting::find_legal_targets` drops the seat. This is the
+    ///    paired POSITIVE: it proves the shroud grant actually took effect, so assertion 2
+    ///    is about the seam boundary and not about a setup that silently did nothing.
+    /// 2. the ADMIT half — `resolve_target`'s `TargetPin::Player` arm still resolves it,
+    ///    because a proliferate choice (CR 701.34a) is not a target and refusing it here
+    ///    is the over-veto class this phase exists to remove.
+    ///
+    /// REVERT-PROBE: route the `TargetPin::Player` arm through
+    /// `targeting::player_is_legal_target` instead of `players::player_exists_for_choice`
+    /// ⇒ assertion 2 FAILS while assertion 1 still passes.
+    #[test]
+    fn a_shrouded_seat_is_untargetable_yet_still_choosable_at_the_pin_recheck() {
+        use crate::types::ability::{
+            ControllerRef, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // P1 gains shroud from a permanent they control ("You have shroud"). Built with
+        // the production `zones::create_object`, not a raw `objects.insert`: a raw insert
+        // never joins `state.battlefield`, so `game_functioning_statics` would not see the
+        // grantor and the shroud would silently never apply.
+        let grantor = crate::game::zones::create_object(
+            &mut state,
+            CardId(90),
+            PlayerId(1),
+            "You Have Shroud Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&grantor).unwrap().static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Shroud).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        crate::game::layers::flush_layers(&mut state);
+
+        // 1. EXCLUDE half, and the setup's positive control: the TARGET seam drops P1.
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(91),
+            PlayerId(0),
+            "Targeting Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let targets = crate::game::targeting::find_legal_targets(
+            &state,
+            &TargetFilter::Any,
+            PlayerId(0),
+            source,
+        );
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(1))),
+            "CR 702.18a: the shroud grant must actually bite at the TARGET seam — if it \
+             does not, assertion 2 below proves nothing. Got {targets:?}"
+        );
+        assert!(
+            targets.contains(&TargetRef::Player(PlayerId(0))),
+            "the un-shrouded seat is still targetable, so the exclusion above is shroud \
+             and not an empty legal set"
+        );
+
+        // 2. ADMIT half: the CHOICE seam still resolves the same seat.
+        let pin_slot = DecisionSlot {
+            source: this_obj(92, None),
+            index: 0,
+        };
+        let template = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: pin_slot.clone(),
+                targets: vec![TargetPin::Player(PlayerId(1))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: tri_key(),
+        };
+        assert_eq!(
+            resolve(&template, 0, &state).unwrap(),
+            vec![ConcreteDecision::Targets {
+                slot: pin_slot,
+                targets: vec![ConcreteTarget::Player(PlayerId(1))],
+            }],
+            "CR 115.10a: a CHOSEN seat is not a TARGETED seat — the targeting-only \
+             exclusions must not reach this seam"
+        );
     }
 
     /// T5b (G2 sibling): the SAME `Static` mode with an `Order` pin (different pin kind)

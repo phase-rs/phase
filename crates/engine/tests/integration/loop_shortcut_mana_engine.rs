@@ -1,3 +1,4 @@
+// engine-citation-gate: symbol anchors only
 //! P7 v3 (CR 732.2a): capture + drive a MULTI-ACTION mana-engine loop.
 //!
 //! Real-card acceptance: **Basalt Monolith + Power Artifact** — the canonical 2-card infinite-mana
@@ -17,6 +18,7 @@ use engine::analysis::loop_check::{ShortcutResponse, WinKind};
 use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
+use engine::game::derived_views::{CollapseCertainty, FamilyCollapseState, UnboundedFamily};
 use engine::game::effects::attach::attach_to;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -679,6 +681,7 @@ fn loop_action_sequence_conditional_load_migration() {
             win_kind: WinKind::Advantage,
             mandatory: false,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         },
         schema: ShortcutDecisionSchema::default(),
     };
@@ -805,22 +808,31 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
     );
 }
 
-/// R6a-2 (FAIL-CLOSED DISCRIMINATOR for the CR 732.2c ∞-badge filter). A mana engine
-/// registers NO deferred materialization — `current_period_fodder` finds no fodder,
-/// `current_period_counter_growth` / `current_period_life_growth` are empty — so nothing
-/// will ever collapse its `Mana(_)` axis at the CR 500.5 boundary. It is therefore still
-/// genuinely unbounded within the phase (`refill_infinite_mana` holds the pool at
-/// `INFINITE_MANA_PER_TYPE`) and MUST keep rendering its `∞` row on the wire.
+/// R6a-2, RECLASSIFIED under option (B): a CHANNEL-LIVENESS row, no longer a discriminator.
+/// A mana engine registers NO deferred materialization — `current_period_fodder` finds no
+/// fodder, `current_period_counter_growth` / `current_period_life_growth` are empty — so
+/// nothing will ever collapse its `Mana(_)` axis at the CR 500.5 boundary. It is genuinely
+/// unbounded within the phase (`refill_infinite_mana` holds the pool at
+/// `INFINITE_MANA_PER_TYPE`) and MUST keep rendering its `∞` row on the wire. That claim is
+/// true, user-visible and revert-detectable (RP-6 below) — it is simply no longer the thing
+/// that distinguishes candidate implementations, because option (B) projects EVERY ∞ row.
 ///
-/// The 12 shipped rows in this file are the must-NOT-flip control set; THIS is the new
-/// discriminator. It is the fail-closed half of the R6a filter: R6a-1 proves a scheduled
-/// axis hides, this proves an UNscheduled one does not.
+/// WHY IT NO LONGER DISCRIMINATES: reach-guard (2) below asserts `pending_unbounded_
+/// materialization` is EMPTY on this rig, so no schedule-keyed hide filter — stash-keyed or
+/// count-keyed (`pending_materialization_count` is empty here too, asserted by the sibling
+/// `mana_engine_accept_records_no_collapse_bound`) — could fire against this row anyway. The
+/// schedule-independence discrimination therefore lives on rigs where a schedule IS present:
+/// `loop_shortcut::unregistered_axis_still_renders_its_infinity_badge` and
+/// `scheduled_drive_still_renders_the_already_spendable_mana_badge` below, whose ONE stash names
+/// both a `Mana(_)` and a deferred `Life(P0)`.
 ///
-/// REVERT-PROBE (RUN): key the `derive_views` filter on the ACCEPTED COUNT
-/// (`state.pending_materialization_count.contains_key(&controller)`) instead of on the
-/// axis set `scheduled_collapse_axes` returns — the count-keyed filter is written at every
-/// `Fixed(n)` accept including this one, so the `Mana(_)` row vanishes ⇒ this row FAILS
-/// while R6a-1 and the 12/12 control set stay green.
+/// REVERT-PROBE (RP-6, RUN): append `views.unbounded_resources.clear();` at the END of
+/// `derive_views` (re-kill the row channel unconditionally) ⇒ this row FAILS while the ∞ PILE
+/// assertion in `loop_shortcut::scheduled_collapse_still_renders_the_unbounded_badge`
+/// stays green — a different channel.
+///
+/// The `shared_card_db()` guard below is DORMANT in a normal checkout: `integration_cards.json.gz`
+/// is tracked, so it only fires in a checkout without the card-data pipeline.
 #[test]
 fn mana_engine_accept_still_renders_its_infinity_badge() {
     let Some(db) = shared_card_db() else { return };
@@ -999,21 +1011,27 @@ fn mana_engine_accept_records_no_collapse_bound() {
     );
 }
 
-/// R6a FIX-ROUND-3 (CR 732.2c + CR 500.5). MEASURED DEFECT in the ∞-badge hide-set: the
-/// `PersistentAxisMaterialization::DriveSequence` arm of `scheduled_collapse_axes` extends the
-/// hide-set with the loop's WHOLE axis set (`collapsed_axes` == `proposal.unbounded`), so a
-/// scheduled drive covering a `Mana(_)` axis suppressed that axis' `∞` row on the wire.
+/// R6a FIX-ROUND-3 (CR 500.5), now the MULTI-AXIS row: the
+/// `PersistentAxisMaterialization::DriveSequence` arm of `scheduled_collapse_axes` returns the
+/// loop's WHOLE axis set (`collapsed_axes` == `proposal.unbounded`), so ONE stash here names TWO
+/// axes — an already-materialized `Mana(Colorless)` and a deferred `Life(P0)`. Both keep their ∞
+/// row while the collapse is merely scheduled, and they get there for DIFFERENT reasons, which is
+/// what makes this the strongest rig in the file for the projection's schedule-independence.
 ///
-/// That is the wrong side of the class rule. `Tokens` / `Counters` / `Life` each name a
-/// DEFERRED materialization — the growth is not on the board until the boundary applies it, so
-/// rendering `∞` for them is the lie R6a exists to kill. Mana is ALREADY MATERIALIZED at accept:
+/// The `Life(P0)` axis is DEFERRED: no life has been gained, and none will be until the CR 500.5
+/// boundary applies the growth. The growth is in flight along CR 732.2c's advance to the
+/// proposal's ending point (`types::game_state`'s `scheduled_collapse_axes` doc). For the DISPLAY
+/// what matters is only
+/// that the mark and its enablers are still live through the window, so the ∞ renders current
+/// engine state rather than a stale mark.
+///
+/// The `Mana(Colorless)` axis is ALREADY MATERIALIZED at accept:
 /// `mana_payment::refill_infinite_mana` re-tops the flagged pool to `INFINITE_MANA_PER_TYPE` off
 /// `unbounded_resources` (the STORE, which the projection deliberately never filters) after every
 /// action, so throughout the accept→boundary window the player can really spend an unbounded
-/// pool while the HUD showed no `∞` — an internally inconsistent HUD, the inverse of an "∞ Life"
-/// badge beside a finite life total. CR 500.5 is what legitimately ends the badge: the step/phase
-/// end drains the pool and `turns::drain_pending_phase_transition_progress` clears the axis
-/// (covered by `combo_infinite_pile`'s E4 mana axis-clear row, not re-proved here).
+/// pool. CR 500.5 is what ends that badge: the step/phase end drains the pool and
+/// `turns::drain_pending_phase_transition_progress` clears the axis (covered by
+/// `combo_infinite_pile`'s E4 mana axis-clear row, not re-proved here) — NOT a materialization.
 ///
 /// HONEST SCOPE. Everything except one write is real: real cards through the real parser, a real
 /// two-beat Basalt+Power period, a real `DeclareShortcut`/`RespondToShortcut` accept that marks
@@ -1027,11 +1045,12 @@ fn mana_engine_accept_records_no_collapse_bound() {
 /// `proposal.unbounded.clone()` that production writes. Same graft technique as
 /// `combo_infinite_pile::real_4p_observed_drive_sequence_replays_captured_period_n_times`.
 ///
-/// REVERT-PROBE (RUN): delete the `axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)))` in
-/// `derive_views`' hide-set ⇒ (5) FAILS — the `Mana(Colorless)` row vanishes from the wire while
-/// the pool is still being refilled. (6) is the paired positive control that keeps the probe
-/// honest: the genuinely deferred `Life(P0)` axis in the SAME stash MUST stay hidden, so a
-/// blanket "disable the filter" is not a passing alternative.
+/// REVERT-PROBE (RP-1d, RUN): restore `if collapse_scheduled(controller, &axis) { continue; }` in
+/// `derive_views`' resource-row loop ⇒ (6) FAILS — `Life(P0)` is in the `DriveSequence`'s
+/// `collapsed_axes`, so the restored guard hides its row. (5) is the paired control that keeps
+/// the probe honest: BASE also carried an `axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)))`
+/// on the hide-set, so the mana row survived that guard and (5) stayed green — a blanket "hide
+/// every scheduled axis" and a blanket "hide nothing" are distinguished by this pair.
 #[test]
 fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     use engine::types::game_state::PersistentAxisMaterialization;
@@ -1122,9 +1141,9 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
         },
     );
 
-    // (4) REACH-GUARD ON THE SEAM: the shared authority really does name the Mana axis, so the
-    // unfiltered hide-set WOULD have suppressed it. Without this, (5) could pass because the
-    // stash never reached the `DriveSequence` arm at all.
+    // (4) REACH-GUARD ON THE SEAM: the collapse authority really does name BOTH axes, so a
+    // schedule-keyed hide filter would have suppressed both rows below. Without this, (5) and (6)
+    // could pass because the stash never reached the `DriveSequence` arm at all.
     let state = rig.runner.state();
     let scheduled = state.scheduled_collapse_axes(
         state
@@ -1140,25 +1159,70 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     );
 
     for viewer in [None, Some(P0), Some(P1)] {
-        let rows = engine::game::derived_views::derive_views(state, viewer).unbounded_resources;
+        let views = engine::game::derived_views::derive_views(state, viewer);
+        let rows = views.unbounded_resources;
+        let families = views.unbounded_families;
         let axes: Vec<ResourceAxis> = rows.iter().map(|r| r.axis).collect();
-        // (5) DISCRIMINATOR — the already-materialized mana axis keeps its ∞ row on the WIRE.
+        // (5) the already-materialized mana axis keeps its ∞ row on the WIRE.
         assert!(
             axes.contains(&ResourceAxis::Mana(ManaType::Colorless)),
-            "CR 732.2c/CR 500.5: mana is already in the pool and still being refilled, so a \
+            "CR 500.5: mana is already in the pool and still being refilled, so a \
              merely-scheduled drive must NOT hide its ∞ row (viewer {viewer:?}), got {axes:?}"
         );
-        // (6) POSITIVE CONTROL, SAME STATE — the genuinely deferred axis in the SAME
-        // `DriveSequence` is still hidden. Proves (5) is a targeted carve-out, not a disabled
-        // filter.
+        // (6) DISCRIMINATOR — the DEFERRED axis of the SAME `DriveSequence` also keeps its ∞ row.
+        // Nothing has been applied yet, so both rows project even though the collapse authority
+        // names both axes at (4).
         assert!(
-            !axes.contains(&ResourceAxis::Life(P0)),
-            "CR 732.2c: the deferred Life axis of the same scheduled drive stays hidden (viewer \
-             {viewer:?}), got {axes:?}"
+            axes.contains(&ResourceAxis::Life(P0)),
+            "the deferred Life axis of the same scheduled drive still projects its ∞ \
+             row while the collapse is merely scheduled (viewer {viewer:?}), got {axes:?}"
+        );
+
+        // (8) R4 — the documented `Mana(_)` scope limit is FALSIFIABLE, not dead code: (4) above
+        // proves the collapse authority names BOTH axes on this exact stash, so the mana axis
+        // going unflagged below can only come from the projection's own guard. Assertion (5)
+        // already pins that the mana ROW still exists, so the scope limit governing the AFFORDANCE
+        // rather than row EXISTENCE is covered there; a duplicate pin here would be subsumed by it
+        // and by the same `derive_views` output, so this reuses `rows` instead of recomputing.
+
+        // (9) R4/agree — the FAMILY COLLAPSE STATE obeys the `Mana(_)` scope limit.
+        //
+        // MEASURED DEFECT this pins: the limit once lived in a separate tag channel's loop and not
+        // in the row loop, so on this exact state the mana row shipped `scheduled: true`. The HUD
+        // folded that flag into the "mana" family and rendered `∞→N` with a "collapse pending; a
+        // finite amount will be chosen" tooltip — beside a pool `refill_infinite_mana` is still
+        // topping up, and beside `ManaPoolSummary`'s plain `∞` for the same pool in the same
+        // frame. The whole suite was green over it: every other schedule assertion in the repo
+        // sits on a non-mana axis, so nothing chose between that behaviour and its opposite. The
+        // tag channel is gone and so is the row flag; this assertion is what keeps the scope limit
+        // honest on the channel that replaced them.
+        //
+        // TWO-SIDED on purpose. The `life` half is the matched positive, from the SAME stash and
+        // the SAME `derive_views` call: without it, `Unscheduled` everywhere satisfies the mana
+        // half, and this row would pass against a channel that can never report a schedule.
+        let state_of = |want: UnboundedFamily| {
+            families
+                .iter()
+                .find(|f| f.player == P0 && f.family == want)
+                .unwrap_or_else(|| panic!("R4/agree reach: no {want:?} family (viewer {viewer:?})"))
+                .state
+        };
+        assert_eq!(
+            state_of(UnboundedFamily::Mana),
+            FamilyCollapseState::Unscheduled,
+            "R4/agree: the mana family must not report a schedule — the accepted count bounds \
+             nothing the player can spend (viewer {viewer:?})"
+        );
+        assert_eq!(
+            state_of(UnboundedFamily::Life),
+            FamilyCollapseState::Scheduled(CollapseCertainty::Committed),
+            "R4/agree positive: the deferred life family of the SAME stash IS scheduled, so the \
+             mana assertion above is discriminating rather than vacuous. It is COMMITTED because \
+             a `DriveSequence` replays real cycles and has no non-push exit (viewer {viewer:?})"
         );
     }
 
-    // (7) THE STORE IS UNTOUCHED — the projection filtered, it did not mutate. The boundary
+    // (7) THE STORE IS UNTOUCHED — the projection read, it did not mutate. The boundary
     // clear still reads both axes from here.
     assert_eq!(
         state
@@ -1166,6 +1230,6 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
             .get(&P0)
             .map(|a| a.iter().copied().collect::<Vec<_>>()),
         Some(collapsed_axes),
-        "the ∞ store survives the projection (CR 104.4b / CR 110.1 lockstep)"
+        "the ∞ store survives the projection (engine-state enabler lockstep)"
     );
 }

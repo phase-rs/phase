@@ -73,6 +73,7 @@ function renderOverflow(options: {
   groups?: GroupedPermanentType[];
   includePreview?: boolean;
   objects?: Record<string, GameObject>;
+  activatableObjectIds?: Set<number>;
   boardChoiceObjectIds?: Set<number>;
   selectableSacrificeObjectIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
@@ -87,7 +88,7 @@ function renderOverflow(options: {
   return render(
     <BoardInteractionContext.Provider
       value={{
-        activatableObjectIds: new Set(),
+        activatableObjectIds: options.activatableObjectIds ?? new Set(),
         boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
@@ -199,6 +200,28 @@ describe("BattlefieldZoneOverflow", () => {
 
     expect(screen.getByText(/target 1/i)).toBeInTheDocument();
     expect(screen.getByText(/mana 1/i)).toBeInTheDocument();
+  });
+
+  // V24 — this component is the SECOND consumer of the affordance pair this PR
+  // re-plumbs (`:378`/`:382` destructured from `useBoardInteractionState()`,
+  // read at `:407`/`:410`), and its `activatableObjectIds` read was unaudited:
+  // the sibling `manaTappableObjectIds` read is already load-bearing (the stub
+  // seeds `new Set([1])` and the badge test above asserts `/mana 1/i`), but the
+  // activatable read could be DELETED with the whole board suite still green.
+  // QUOTED (plan §7.0, the two arms of one recipe — the sibling is the control
+  // that makes the silent arm readable):
+  //   `R8BZO[mutant-DELETE-activatable-read@407]  Tests 130 passed (130) `
+  //   `R8BZO[mutant-DELETE-mana-read@410] Tests 1 failed | 129 passed (130) `
+  // MEASURED (drop side — the `:407` read deleted): `Unable to find an element
+  //   with the text: /^act 2$/i`.
+  // MEASURED (always side — `activatable++` made unconditional, i.e. count the
+  //   whole group instead of the set): `act 9` renders and the anchored matcher
+  //   fails. The count is asserted against the SEEDED SET, never the group size,
+  //   which is what makes "count everything" visible.
+  it("counts only the activatable ids the board published, not the whole group", () => {
+    renderOverflow({ activatableObjectIds: new Set([2, 5]) });
+
+    expect(screen.getByText(/^act 2$/i)).toBeInTheDocument();
   });
 
   it("surfaces hidden board-choice permanents as interactive", () => {

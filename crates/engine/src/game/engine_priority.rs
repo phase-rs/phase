@@ -100,17 +100,13 @@ pub(crate) fn run_post_action_pipeline_from(
             }
         }
         // A completed logical owner has already collected its segment and
-        // settlement contexts into the existing deferred queue. The owner is
-        // intentionally gone before the trailing completion event, so use those
-        // exact queued occurrences to keep the generic scan from rediscovering
-        // them while still allowing every unrelated event through.
-        let deferred_logical_zone_events: Vec<_> = state
-            .deferred_triggers
-            .iter()
-            .flat_map(|context| context.trigger_events.iter())
-            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
-            .collect();
-        let unconsumed_events = triggers::filter_consumed_trigger_events_from(
+        // settlement contexts into the deferred queue, and a paused owner that
+        // drained may instead have claimed them in the consumed ledger.
+        // `filter_already_collected_trigger_events_from` is the single authority
+        // for both (CR 603.2c), shared with the search-delivery park family so
+        // the two collectors cannot drift.
+        let unconsumed_events = triggers::filter_already_collected_trigger_events_from(
+            state,
             events,
             event_start,
             &consumed_trigger_events,
@@ -121,7 +117,6 @@ pub(crate) fn run_post_action_pipeline_from(
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
                     && !retained_logical_zone_events.contains(event)
-                    && !deferred_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();
@@ -400,7 +395,10 @@ fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
     // resolution. Now its terminal instruction has completed, so clear the
     // resolution-only LKI before the explicit post-announcement drain.
     state.pending_resolution_completion = None;
-    super::stack::clear_resolving_stack_entry(state);
+    super::stack::finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
     state.resolution_source_relatch = None;
     true
 }

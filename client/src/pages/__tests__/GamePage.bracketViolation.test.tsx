@@ -20,6 +20,9 @@ import type { FormatConfig } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
 import { WebSocketAdapter } from "../../adapter/ws-adapter";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { gameObjectFactory } from "../../test/factories/gameObjectFactory";
+import { gameStateFactory } from "../../test/factories/gameStateFactory";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
@@ -35,7 +38,12 @@ const { mockClearPromptOverlayState, mockSetGameState, storeOverrides } = vi.hoi
   // Mutable slice of the mocked game store. Defaults match the previous
   // hardcoded values, so every pre-existing test is unaffected; tests that
   // need a live adapter assign here and `beforeEach` resets.
-  storeOverrides: { adapter: null as unknown, gameState: null as unknown, waitingFor: null as unknown },
+  storeOverrides: {
+    adapter: null as unknown,
+    gameState: null as unknown,
+    gameMode: null as unknown,
+    waitingFor: null as unknown,
+  },
 }));
 
 // Captures the props GameMenu was rendered with, so tests can assert which
@@ -122,13 +130,15 @@ vi.mock("../../game/dispatch.ts", () => ({
   currentSnapshot: new Map(),
 }));
 
-vi.mock("../../stores/gameStore", () => ({
+vi.mock("../../stores/gameStore", async () => ({
   useGameStore: Object.assign(
     vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
       selector({
         gameState: storeOverrides.gameState,
+        gameMode: storeOverrides.gameMode,
         waitingFor: storeOverrides.waitingFor,
         legalActions: [],
+        endContinuousEffectOffers: [],
         autoPassRecommended: false,
         spellCosts: {},
         legalActionsByObject: {},
@@ -142,6 +152,16 @@ vi.mock("../../stores/gameStore", () => ({
     { setState: mockSetGameState },
   ),
   clearGame: vi.fn(),
+  // The real predicate, and `importActual` is what makes that claim true.
+  // `hasRemoteHumans` reads `GAME_MODE_TRAITS`, a frozen taxonomy that lives
+  // only in this module; re-deriving it here as `mode === "online" || …` would
+  // pass while the real predicate classified a mode differently — exactly the
+  // failure the `takebackAudience` assertions below exist to catch. Only the
+  // predicate is taken: `useGameStore` stays the mock above, so the real
+  // zustand store is imported but never rendered against.
+  hasRemoteHumans: (
+    await vi.importActual<typeof import("../../stores/gameStore")>("../../stores/gameStore")
+  ).hasRemoteHumans,
   loadActiveGame: vi.fn(() => null),
   saveActiveGame: vi.fn(),
   clearActiveGame: vi.fn(),
@@ -203,7 +223,12 @@ vi.mock("../../components/hud/HUD", () => ({
 }));
 
 vi.mock("../../components/board/GameBoard", () => ({
-  GameBoard: () => null,
+  GameBoard: ({ effectiveMultiplayerBoardLayout }: { effectiveMultiplayerBoardLayout: string }) => (
+    <div
+      data-layout={effectiveMultiplayerBoardLayout}
+      data-testid="game-board-layout"
+    />
+  ),
 }));
 
 vi.mock("../../components/modal/EngineLostModal", () => ({
@@ -280,7 +305,9 @@ beforeEach(() => {
   capturedGameMenuProps = undefined;
   storeOverrides.adapter = null;
   storeOverrides.gameState = null;
+  storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
+  usePreferencesStore.setState({ multiplayerBoardLayout: "focused" });
   capturedConcedeDialogProps = undefined;
   vi.clearAllMocks();
 });
@@ -428,6 +455,49 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     });
 
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+});
+
+describe("GamePage — multiplayer board layout during board choices", () => {
+  it("forces split visibility for an authorized untap choice at a three-player table", () => {
+    const untapCandidate = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .tapped()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(untapCandidate)
+      .untapChoice({ player: 0, candidates: [untapCandidate.id] })
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "split");
+  });
+
+  it("retains the persisted focused layout for a non-untap waiting state", () => {
+    const permanent = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .withId(10)
+      .ownedBy(0)
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers(0, 1, 2)
+      .withObjects(permanent)
+      .priority(0)
+      .build();
+    storeOverrides.gameState = gameState;
+    storeOverrides.waitingFor = gameState.waiting_for;
+
+    renderGamePage();
+
+    expect(screen.getByTestId("game-board-layout")).toHaveAttribute("data-layout", "focused");
   });
 });
 
@@ -643,6 +713,70 @@ describe("GamePage — takeback is a transport capability", () => {
     renderGamePage("/game/test-game-123?mode=host");
 
     expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+  });
+
+  // F5 (M11 half). The label axis must come from the AUTHORITATIVE store mode,
+  // not the URL-derived one: desktop solo arrives as `?mode=ai` and the store
+  // says `native-ai`, so a URL-derived answer cannot tell it apart from a
+  // browser AI game — and both must read as a solo undo, while an online table
+  // keeps the "request" wording.
+  it("addresses the rollback to the player alone in desktop solo", () => {
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+    storeOverrides.gameMode = "native-ai";
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(capturedGameMenuProps?.takebackAudience).toBe("solo");
+  });
+
+  it("addresses the rollback to the table in online play", () => {
+    // Paired positive. `?mode=host` with the store reporting `online` is the
+    // shape that must NOT change wording.
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+    storeOverrides.gameMode = "online";
+
+    renderGamePage("/game/test-game-123?mode=host");
+
+    expect(capturedGameMenuProps?.takebackAudience).toBe("table");
+  });
+});
+
+/**
+ * F5 — desktop solo-vs-AI sandbox characterization.
+ *
+ * HONESTLY LABELLED: this PASSES at BASE_SHA. The user's "sandbox mode, no
+ * banner" ask is already satisfied, and this exists so a later change cannot
+ * silently undo it. `mode` is URL-derived and structurally cannot be
+ * `native-ai`; desktop solo arrives as `rawMode === "ai"`, which already
+ * satisfies `showSandboxTools`. The SANDBOX badge is gated separately on
+ * `format_config.allow_debug_actions`, which the server's `SingleUser` branch
+ * deliberately leaves false.
+ */
+describe("GamePage — desktop solo sandbox tools without the banner", () => {
+  it("enables sandbox tools while the SANDBOX badge stays hidden", () => {
+    storeOverrides.gameMode = "native-ai";
+    storeOverrides.gameState = gameStateFactory.build({
+      format_config: { allow_debug_actions: false } as unknown as FormatConfig,
+    });
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(capturedGameMenuProps?.showSandboxTools).toBe(true);
+    expect(screen.queryByRole("status", { name: "Sandbox mode banner" })).toBeNull();
+  });
+
+  it("shows the SANDBOX badge once the game really is sandbox-flagged", () => {
+    // Non-vacuity guard for the negative above: flipping the one flag the
+    // badge is gated on must make it appear, proving the assertion measures
+    // the gate rather than an unrendered subtree.
+    storeOverrides.gameMode = "ai";
+    storeOverrides.gameState = gameStateFactory.build({
+      format_config: { allow_debug_actions: true } as unknown as FormatConfig,
+    });
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(screen.getByRole("status", { name: "Sandbox mode banner" })).toBeInTheDocument();
   });
 });
 

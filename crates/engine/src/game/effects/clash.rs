@@ -26,11 +26,16 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
 
-    // CR 701.30b: The clashing player chooses which opponent to clash with.
+    // CR 701.30b: "Choose an opponent. You and that opponent each clash." — a CHOICE, not
+    // a target (CR 115.10a), so the seat is judged by `player_exists_for_choice` and NOT
+    // by the targeting-only exclusions. `p.id != controller` stays: that is opponent
+    // SCOPE, not legality.
     let candidates: Vec<PlayerId> = state
         .players
         .iter()
-        .filter(|p| p.id != controller && !p.is_eliminated)
+        .filter(|p| {
+            p.id != controller && crate::game::players::player_exists_for_choice(state, p.id)
+        })
         .map(|p| p.id)
         .collect();
 

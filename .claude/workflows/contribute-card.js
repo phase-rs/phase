@@ -19,10 +19,8 @@ const TIER = 'Frontier'
 // Published coverage endpoint (AI-CONTRIBUTOR.md §3).
 const COVERAGE_URL = 'https://data.phase-rs.dev/staging/coverage-data.json'
 
-// This per-card pipeline embodies the /engine-implementer contract: /engine-planner ->
-// /review-engine-plan (looped) -> engine-implementation-executor -> /review-impl (looped until
-// clean; reviewer confirms the card actually parses correctly). The review caps are runaway-loop
-// safeguards, not a "two rounds and ship" gate (which engine-implementer forbids).
+// This is a legacy uncommitted-worktree card workflow: it keeps its own planning and review loops.
+// It is not /engine-implementer Checkpoint Mode, whose executor requires immutable-candidate inputs.
 const MAX_PLAN_REVIEW_ROUNDS = 8
 const MAX_IMPL_REVIEW_ROUNDS = 8
 const MAX_CROSSCHECK_ROUNDS = 2
@@ -336,17 +334,16 @@ async function planCard(card) {
 }
 
 async function implementCard(card, plan) {
-  // Step 3 of the /engine-implementer contract: surgical edits via the executor agent.
+  // This legacy workflow intentionally uses a general implementation agent, not the checkpoint executor.
   return await agent(implementPrompt(card, plan), {
     label: `implement:${card}`,
     phase: 'Implement',
     schema: IMPL_SCHEMA,
-    agentType: 'engine-implementation-executor',
   })
 }
 
 async function reviewImpl(card) {
-  // /review-impl looped until clean (engine-implementer mandate); fixes via a fresh executor agent.
+  // This workflow reviews its uncommitted diff and fixes it with a fresh general implementation agent.
   for (let round = 1; round <= MAX_IMPL_REVIEW_ROUNDS; round++) {
     const review = await agent(reviewImplPrompt(card), {
       label: `review-impl:${card}#${round}`,
@@ -357,7 +354,6 @@ async function reviewImpl(card) {
     await agent(fixImplPrompt(card, review.findings), {
       label: `fix-impl:${card}#${round}`,
       phase: 'Review',
-      agentType: 'engine-implementation-executor',
     })
   }
   return false

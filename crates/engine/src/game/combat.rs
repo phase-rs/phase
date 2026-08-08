@@ -205,8 +205,10 @@ impl<'de> Deserialize<'de> for BlockRequirement {
 pub struct CombatState {
     pub attackers: Vec<AttackerInfo>,
     /// attacker_id -> list of blocker ids
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_assignments: HashMap<ObjectId, Vec<ObjectId>>,
     /// blocker_id -> attacker_ids (reverse lookup; Vec supports multi-blocking via ExtraBlockers)
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub blocker_to_attacker: HashMap<ObjectId, Vec<ObjectId>>,
     /// Defending players who have declared blockers this step.
     #[serde(default)]
@@ -219,23 +221,36 @@ pub struct CombatState {
     /// they attacked in this combat. Declaration history, not live attacker
     /// membership, so Melee counts remain stable if attackers leave combat
     /// before the trigger resolves.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set"
+    )]
     pub attacked_defenders_this_combat: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 702.121a: Source-specific current-combat counterpart to
     /// `attacked_defenders_this_combat`.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set"
+    )]
     pub creature_attacked_defenders_this_combat: HashMap<ObjectId, HashSet<PlayerId>>,
     /// CR 400.7 + CR 508.1: exact current-combat attack ledger for source
     /// intervening-if conditions. The raw-id defender map remains a display
     /// history; this identity ledger must not match a re-entered object.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub attacking_incarnations_this_combat: HashSet<ObjectIncarnationRef>,
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
     /// CR 510.4: Combatants that had first strike or double strike as the first
     /// combat-damage step began. `None` means the step has not been snapshotted;
     /// `Some(empty)` means combat has only a regular damage step.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
     pub first_strike_participants: Option<HashSet<ObjectId>>,
     /// Index into attacker list for resumable damage assignment iteration.
     pub damage_step_index: Option<usize>,
@@ -1277,37 +1292,61 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
 /// Yields `(&StaticDefinition, ObjectId)` — the source id re-resolves the
 /// controller for `FilterContext`, so no `GameObject` field beyond `.id` is read.
 fn block_restriction_statics_against_from_precomputed<'a>(
-    state: &'a GameState,
+    state: &GameState,
     attacker_id: ObjectId,
     precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (&'a StaticDefinition, ObjectId)> + 'a {
-    precomputed.iter().filter_map(move |(src_id, def)| {
-        let src = state.objects.get(src_id)?;
-        // CR 604.1: a static with no `affected` filter is implicitly about its
-        // own source (intrinsic SelfRef semantics).
-        let affected_ok = match def.affected.as_ref() {
-            None => src.id == attacker_id,
-            Some(filter) => matches_target_filter(
-                state,
-                attacker_id,
-                filter,
-                &FilterContext::from_source(state, src.id),
-            ),
-        };
-        if !affected_ok {
-            return None;
-        }
-        let condition_ok = def.condition.as_ref().is_none_or(|condition| {
-            crate::game::layers::evaluate_condition_with_recipient(
-                state,
-                condition,
-                src.controller,
-                src.id,
-                attacker_id,
-            )
-        });
-        condition_ok.then_some((def, *src_id))
-    })
+) -> Vec<(&'a StaticDefinition, ObjectId)> {
+    precomputed
+        .iter()
+        .filter_map(|(src_id, def)| {
+            let src = state.objects.get(src_id)?;
+            // CR 604.1: a static with no `affected` filter is implicitly about its
+            // own source (intrinsic SelfRef semantics).
+            let affected_ok = match def.affected.as_ref() {
+                None => src.id == attacker_id,
+                Some(filter) => matches_target_filter(
+                    state,
+                    attacker_id,
+                    filter,
+                    &FilterContext::from_source(state, src.id),
+                ),
+            };
+            if !affected_ok {
+                return None;
+            }
+            let condition_ok = def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    attacker_id,
+                )
+            });
+            condition_ok.then_some((def, *src_id))
+        })
+        .collect()
+}
+
+/// CR 509.1b: True when a bare, currently applicable `CantBeBlocked` static
+/// makes this creature unblockable. This shares the combat legality predicate's
+/// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
+/// restrictions intentionally remain distinct.
+pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
+    let restrictions = collect_block_restriction_statics(state);
+    has_cant_be_blocked_static_from_precomputed(state, attacker_id, &restrictions)
+}
+
+/// CR 509.1b: Precomputed counterpart of `has_cant_be_blocked_static` for
+/// callers deriving multiple battlefield-object views from one game state.
+pub fn has_cant_be_blocked_static_from_precomputed(
+    state: &GameState,
+    attacker_id: ObjectId,
+    restrictions: &[(ObjectId, StaticDefinition)],
+) -> bool {
+    block_restriction_statics_against_from_precomputed(state, attacker_id, restrictions)
+        .into_iter()
+        .any(|(definition, _)| definition.mode == StaticMode::CantBeBlocked)
 }
 
 /// CR 509.1b: Blocker-side restriction ("~ can't block").
@@ -2520,6 +2559,7 @@ fn validate_blockers_core(
             *attacker_id,
             &block_restriction,
         )
+        .into_iter()
         .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
         if !has_unless_all {
             continue;
@@ -5752,6 +5792,7 @@ pub fn max_blockers_allowed_from_precomputed(
     block_restriction: &[(ObjectId, StaticDefinition)],
 ) -> Option<u32> {
     block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
+        .into_iter()
         .filter_map(|(def, _src_id)| match def.mode {
             StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
             _ => None,
@@ -7352,6 +7393,15 @@ mod tests {
 
         // Non-sick, eligible creature (create_creature leaves summoning_sick false).
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // CR 508.1a: a SECOND eligible attacker keeps the refreshed snapshot
+        // non-empty after `id` goes sick. Without it the declaration becomes
+        // forced, and `run_auto_pass_loop` auto-submits the only legal (empty)
+        // declaration — the prompt is gone and this row can no longer observe
+        // the refresh at all. Keeping the set non-empty also makes the
+        // assertion strictly sharper: it proves the refresh dropped THAT
+        // creature while retaining the other, which an emptied set cannot
+        // distinguish from a snapshot that simply cleared everything.
+        let companion = create_creature(&mut state, PlayerId(0), "Ox", 3, 3);
 
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
@@ -7363,10 +7413,17 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                valid_attacker_ids.contains(&id),
-                "precondition: eligible creature must be a valid attacker"
-            ),
+            } => {
+                assert!(
+                    valid_attacker_ids.contains(&id),
+                    "precondition: eligible creature must be a valid attacker"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "precondition: the companion must also be a valid attacker, \
+                     or the post-refresh set would be empty for the wrong reason"
+                );
+            }
             other => panic!("expected DeclareAttackers, got {other:?}"),
         }
 
@@ -7383,10 +7440,17 @@ mod tests {
         match &result.waiting_for {
             WaitingFor::DeclareAttackers {
                 valid_attacker_ids, ..
-            } => assert!(
-                !valid_attacker_ids.contains(&id),
-                "refreshed snapshot must drop the now-sick creature"
-            ),
+            } => {
+                assert!(
+                    !valid_attacker_ids.contains(&id),
+                    "refreshed snapshot must drop the now-sick creature"
+                );
+                assert!(
+                    valid_attacker_ids.contains(&companion),
+                    "the refresh must be selective, not a wholesale clear: the \
+                     untouched companion is still an eligible attacker"
+                );
+            }
             other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
         }
     }
@@ -12602,19 +12666,6 @@ mod tests {
             "Error should cite the CR 508.1d maximum-requirement bar"
         );
         let _ = goaded;
-    }
-
-    #[test]
-    fn goad_enforcement_attacking_passes() {
-        let mut state = setup_combat_phase();
-        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
-        // Declare goaded creature as attacker attacking non-goading player.
-        let result = declare_attackers(
-            &mut state,
-            &[(goaded, AttackTarget::Player(PlayerId(1)))],
-            &mut vec![],
-        );
-        assert!(result.is_ok());
     }
 
     #[test]

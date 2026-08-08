@@ -31,6 +31,8 @@ pub(super) fn finalize_trigger_target_selection(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     let assigned_targets = flatten_targets_in_chain(&ability);
+    let crime_candidate =
+        casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(
         state,
         &assigned_targets,
@@ -101,6 +103,8 @@ pub(super) fn finalize_trigger_target_selection(
         priority::clear_priority_passes(state);
         return WaitingFor::Priority { player: controller };
     }
+
+    casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
 
     priority::clear_priority_passes(state);
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
