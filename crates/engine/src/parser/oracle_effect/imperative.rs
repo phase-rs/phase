@@ -9813,7 +9813,7 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ast);
     }
 
-    // CR 701.9a + CR 608.2c: Recruit is a standalone keyword action. Keep this
+    // CR 701.70a + CR 608.2c: Recruit is a standalone keyword action. Keep this
     // an anchored nom production so `recruiter` and compound text do not become
     // an accidental Recruit instruction.
     if all_consuming(terminated(
@@ -11942,7 +11942,7 @@ pub(crate) fn try_parse_reflexive_coin_flip_branch<'a>(
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
-        // CR 701.9a + CR 608.2c: Recruit's contingent token sees exactly the
+        // CR 701.9a + CR 701.70a + CR 608.2c: Recruit's contingent token sees exactly the
         // immediately preceding discard result. The typed condition is carried
         // by the direct child, so no later chain step can consume stale discard
         // provenance.

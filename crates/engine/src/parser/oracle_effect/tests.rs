@@ -52451,8 +52451,9 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
 
     // (1) POSITIVE REACH-GUARD (mandatory): zero `Effect::Unimplemented` in the
     // whole chain. Every negative assertion below is non-vacuous only because
-    // this passes — at BASE_SHA the execute IS an `Unimplemented { name:
-    // "assimilate" }`, so this is also the revert-failing assertion.
+    // this passes — with the assimilate lowering (PR #7096) reverted the execute
+    // IS an `Unimplemented { name: "assimilate" }`, so this is also the
+    // revert-failing assertion.
     assert!(
         !ability_chain_has_unimplemented(execute),
         "the assimilate trigger must lower with no residual Unimplemented node: {execute:#?}"
@@ -52613,5 +52614,32 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
         )),
         "CR 205.1b: no SetCardTypes (card types are RETAINED) and no AddColor: {:#?}",
         retype.modifications
+    );
+}
+
+/// 3c. Parser fail-closed: an `assimilate` phrasing whose target is NOT a
+/// graveyard card is a shape this production does not model, so it must keep
+/// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
+/// than be silently lowered into a reanimation. `name` is `"assimilate"` because
+/// the imperative fallback derives it from the clause's first word.
+///
+/// Paired positive: the real card's phrasing in the same test produces a
+/// `ChangeZone`, so the negative is about the graveyard guard and not about a
+/// production that never fires.
+#[test]
+fn assimilate_without_a_graveyard_target_stays_unimplemented() {
+    let non_graveyard = parse_effect("assimilate target creature you control");
+    assert!(
+        matches!(
+            &non_graveyard,
+            Effect::Unimplemented { name, .. } if name == "assimilate"
+        ),
+        "a non-graveyard assimilate phrasing must stay honestly unsupported, got {non_graveyard:?}"
+    );
+
+    let real = parse_effect("assimilate target creature card from an opponent's graveyard");
+    assert!(
+        matches!(real, Effect::ChangeZone { .. }),
+        "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
     );
 }
