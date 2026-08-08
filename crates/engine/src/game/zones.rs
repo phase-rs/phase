@@ -1701,6 +1701,7 @@ pub(crate) fn reorder_within_library(
             .library
             .insert(insert_index + offset, object_id);
     }
+    state.advance_library_knowledge_epoch(player);
 
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
@@ -1816,6 +1817,7 @@ pub fn move_to_library_at_index(
         }
         None => player.library.push_back(object_id),
     }
+    state.advance_library_knowledge_epoch(owner);
 
     let mut bump: Option<(u64, u64)> = None;
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {

@@ -78,7 +78,7 @@ fn bards_company_recruit_creates_a_human_soldier_only_for_nonland_discards() {
     // serialized Recruit parser change.
     if db.get_face_by_name(BARDS_COMPANY).is_none() {
         eprintln!(
-            "skipping: Bard's Company is not in integration_cards.json — add it once the authoritative card export includes it"
+            "skipping: Bard's Company is not in integration_cards.json.gz — add it once the authoritative card export includes it"
         );
         return;
     }

@@ -1427,7 +1427,7 @@ fn exile_return_combines_normal_and_delayed_triggers_in_one_ordering_prompt() {
 // ---------------------------------------------------------------------------
 
 /// Verbatim Animate Dead Oracle text (matches the repo's canonical corpus form
-/// in `crates/engine/tests/fixtures/integration_cards.json`, mirroring the
+/// in `crates/engine/tests/fixtures/integration_cards.json.gz`, mirroring the
 /// `casting_tests.rs` reanimation fixtures).
 const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
 

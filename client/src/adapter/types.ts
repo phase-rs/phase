@@ -3115,6 +3115,8 @@ export interface GameState {
   debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
   public_revealed_cards?: ObjectId[];
+  /** Durable identities explicitly projected by the engine for this viewer. */
+  viewer_known_card_ids?: ObjectId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;
   monarch?: PlayerId | null;

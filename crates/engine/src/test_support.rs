@@ -3,13 +3,23 @@
 //! TWIN-SYNC: keep the fixture path here in lockstep with
 //! `crates/engine/tests/integration/support.rs` — both must track the fixture file.
 
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::database::card_db::CardDatabase;
+use flate2::read::GzDecoder;
 
 fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
+}
+
+fn load_fixture(path: &Path) -> CardDatabase {
+    let file = File::open(path).expect("integration fixture should open");
+    let reader = BufReader::new(file);
+    let decoder = GzDecoder::new(reader);
+    CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
 }
 
 fn export_path() -> PathBuf {
@@ -70,7 +80,7 @@ pub(crate) fn shared_card_db() -> &'static CardDatabase {
         let db = if std::env::var_os("FORGE_TEST_FULL_DB").is_none() {
             let fixture = fixture_path();
             if fixture.exists() {
-                CardDatabase::from_export(&fixture).expect("integration fixture should load")
+                load_fixture(&fixture)
             } else {
                 CardDatabase::from_export(&export_path()).expect("card-data export should load")
             }

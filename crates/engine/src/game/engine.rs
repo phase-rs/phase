@@ -5567,6 +5567,15 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
                     ResolvedInformationEdit::Reveal,
                 )
                 .expect("published reveal occurrences must be live and distinct");
+            // A public reveal is durable product knowledge for every player.
+            // Keep this centralized at the event boundary so individual effect
+            // resolvers cannot publish duplicate or divergent facts.
+            let audience = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>();
+            state.remember_card_identities(audience, card_ids);
         }
     }
 }
@@ -6775,6 +6784,21 @@ fn apply_action(
     ) {
         state.private_look_ids.clear();
         state.private_look_player = None;
+    }
+
+    // A ScryChoice has already disclosed its cards to the deciding player. The
+    // choice response is the first reducer boundary at which that private view
+    // can become durable product knowledge; this never changes the prompt or
+    // rules-visible Scry state.
+    if matches!(&action, GameAction::SelectCards { .. }) {
+        if let WaitingFor::ScryChoice { player, cards } = &state.waiting_for {
+            let player = *player;
+            let cards = cards.clone();
+            state.remember_card_identities(
+                turn_control::decision_audience_for_player(state, player),
+                &cards,
+            );
+        }
     }
 
     let mut events = Vec::new();

@@ -79,6 +79,15 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    filtered.viewer_known_card_ids = state
+        .objects
+        .keys()
+        .copied()
+        .filter(|&id| state.viewer_knows_card_identity(viewer, id))
+        .collect();
+    filtered
+        .viewer_known_card_ids
+        .sort_unstable_by_key(|id| id.0);
     // Analysis provenance is meaningful only to the clone executing a preview;
     // never carry it into a viewer projection.
     filtered.life_safety_probe = Box::default();
@@ -99,6 +108,12 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.interaction_generation = 0;
     filtered.next_interaction_serial = "1".to_string();
     filtered.active_interaction_slots.clear();
+    // Product knowledge is projection authority, never transport payload. Its
+    // effect is applied below before hidden cards are redacted; viewers receive
+    // identities they learned, not the audience facts or library epochs behind
+    // that decision.
+    filtered.product_knowledge.clear();
+    filtered.library_knowledge_epochs.clear();
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
@@ -235,7 +250,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|opp| filtered.players[opp.0 as usize].hand.iter().copied())
         .collect();
     for obj_id in opp_hand_ids {
-        if !is_visible_revealed_card(state, obj_id) && !private_look_visible.contains(&obj_id) {
+        if !is_visible_revealed_card(state, viewer, obj_id)
+            && !state.viewer_knows_card_identity(viewer, obj_id)
+            && !private_look_visible.contains(&obj_id)
+        {
             hide_card(&mut filtered, obj_id);
             record_hidden_replacement_candidate_source(
                 replacement_candidate_source_ids.as_ref(),
@@ -489,6 +507,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             // contain dig cards, so the exclusion still applies.
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id))
+            || state.viewer_knows_card_identity(viewer, obj_id)
             // CR 701.20e: own (or controlled-turn) library top under a
             // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
             || look_top_visible.contains(&obj_id)
@@ -730,7 +749,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 state.objects.get(&id).is_some_and(|obj| {
                     matches!(obj.zone, Zone::Hand | Zone::Library)
                         && !can_view_private_for_player(obj.owner)
-                        && !is_visible_revealed_card(state, id)
+                        && !is_visible_revealed_card(state, viewer, id)
+                        && !state.viewer_knows_card_identity(viewer, id)
                         && !private_look_visible.contains(&id)
                 })
             };
@@ -1771,8 +1791,9 @@ fn viewer_may_look_at_face_down(
     false
 }
 
-fn is_visible_revealed_card(state: &GameState, obj_id: ObjectId) -> bool {
+fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectId) -> bool {
     state.revealed_cards.contains(&obj_id)
+        || state.viewer_knows_card_identity(viewer, obj_id)
         || state.objects.get(&obj_id).is_some_and(|obj| {
             state.public_revealed_cards.contains(&obj_id) && obj.zone != Zone::Library
         })
@@ -3168,6 +3189,53 @@ mod tests {
             opponent_view.waiting_for,
             WaitingFor::ScryChoice { cards, .. } if cards == vec![ObjectId(0)]
         ));
+    }
+
+    #[test]
+    fn durable_product_knowledge_survives_reveal_cleanup_for_its_viewer_only() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Known Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state.remember_card_identities([PlayerId(0)], &[card]);
+
+        let viewer = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(viewer.objects[&card].name, "Known Hand Card");
+        assert_eq!(viewer.viewer_known_card_ids, vec![card]);
+        assert!(viewer.product_knowledge.is_empty());
+        assert!(viewer.library_knowledge_epochs.is_empty());
+
+        let other = filter_state_for_viewer(&state, PlayerId(2));
+        assert_eq!(other.objects[&card].name, HIDDEN_CARD_NAME);
+    }
+
+    #[test]
+    fn library_product_knowledge_expires_on_reorder_without_erasing_hand_knowledge() {
+        let mut state = GameState::new_two_player(42);
+        let library = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Known Library Card".to_string(),
+            Zone::Library,
+        );
+        let hand = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(1),
+            "Known Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state.remember_card_identities([PlayerId(0)], &[library, hand]);
+        crate::game::zones::reorder_within_library(&mut state, PlayerId(1), &[library], None);
+
+        let viewer = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(viewer.objects[&library].name, HIDDEN_CARD_NAME);
+        assert_eq!(viewer.objects[&hand].name, "Known Hand Card");
     }
 
     /// CR 400.7 + CR 122.2: A card that was publicly revealed in hand (e.g.

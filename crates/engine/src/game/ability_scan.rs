@@ -7778,7 +7778,7 @@ mod tests {
         let face = db
             .face_index
             .get("park heights pegasus")
-            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json");
+            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json.gz");
 
         // (1) the flip CANNOT be landing on the Conservative `condition` path.
         assert_eq!(face.triggers.len(), 1, "(1) exactly one trigger definition");

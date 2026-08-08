@@ -1564,6 +1564,7 @@ pub(super) fn handle_resolution_choice(
                 // allow-raw-zone: scry reorder never leaves the library (CR 701.22a).
                 player_state.library.push_back(card_id);
             }
+            state.advance_library_knowledge_epoch(player);
             // CR 701.22a + CR 701.22d: a scry event occurs only after the
             // controller has completed its top/bottom choices. Keep both the
             // clamped look count and an explicit `Some(0)` bottom count on the

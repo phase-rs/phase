@@ -831,7 +831,7 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
 /// assertion in `loop_shortcut::scheduled_collapse_still_renders_the_unbounded_badge`
 /// stays green — a different channel.
 ///
-/// The `shared_card_db()` guard below is DORMANT in a normal checkout: `integration_cards.json`
+/// The `shared_card_db()` guard below is DORMANT in a normal checkout: `integration_cards.json.gz`
 /// is tracked, so it only fires in a checkout without the card-data pipeline.
 #[test]
 fn mana_engine_accept_still_renders_its_infinity_badge() {

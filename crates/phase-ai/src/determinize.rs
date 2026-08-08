@@ -145,6 +145,13 @@ fn pinned_known_ids(state: &GameState, ai_player: PlayerId) -> HashSet<ObjectId>
     if state.private_look_player == Some(ai_player) {
         ids.extend(state.private_look_ids.iter().copied());
     }
+    ids.extend(
+        state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| state.viewer_knows_card_identity(ai_player, id)),
+    );
     ids
 }
 

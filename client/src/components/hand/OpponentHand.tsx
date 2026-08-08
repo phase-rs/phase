@@ -42,6 +42,7 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
   const objects = useGameStore((s) => s.gameState?.objects);
   const revealedCards = useGameStore((s) => s.gameState?.revealed_cards);
   const publicRevealedCards = useGameStore((s) => s.gameState?.public_revealed_cards);
+  const viewerKnownCardIds = useGameStore((s) => s.gameState?.viewer_known_card_ids);
 
   if (!opponent) return null;
 
@@ -79,6 +80,7 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
           const obj = objects ? objects[id] : null;
           const isRevealed = (revealedCards?.includes(id) ?? false)
             || (publicRevealedCards?.includes(id) ?? false)
+            || (viewerKnownCardIds?.includes(id) ?? false)
             // CR 701.20e: Glasses of Urza / Gitaxian Probe "look at target
             // player's hand" surfaces the card's identity only to the looker.
             || isPrivatelyLookedAtByViewer(gameState ?? null, id, myId);

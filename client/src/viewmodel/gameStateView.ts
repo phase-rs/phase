@@ -156,6 +156,7 @@ export function isLibraryCardRevealedToViewer(
   viewerId: PlayerId,
 ): boolean {
   if (!gameState) return false;
+  if (gameState.viewer_known_card_ids?.includes(objectId)) return true;
   // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
   // revealed") are visible to every player.
   if (gameState.revealed_cards?.includes(objectId)) return true;
@@ -231,10 +232,11 @@ export function isObjectReportableToViewer(
       return (
         obj.owner === viewerId ||
         revealed ||
+        (gameState.viewer_known_card_ids?.includes(obj.id) ?? false) ||
         (gameState.public_revealed_cards?.includes(obj.id) ?? false)
       );
     case "Library":
-      return false; // hidden; rare face-up-top reveals are out of scope
+      return gameState.viewer_known_card_ids?.includes(obj.id) ?? false;
   }
 }
 
