@@ -14,6 +14,57 @@ pub struct GameLogEntry {
     pub phase: Phase,
     pub category: LogCategory,
     pub segments: Vec<LogSegment>,
+    #[serde(default)]
+    pub presentation: LogPresentation,
+}
+
+/// Engine-authored display metadata for a log entry. Consumers may choose a
+/// denser presentation, but must not infer importance or tone from text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogPresentation {
+    #[serde(default)]
+    pub importance: LogImportance,
+    #[serde(default)]
+    pub tone: LogTone,
+    #[serde(default)]
+    pub boundary: LogBoundary,
+}
+
+impl Default for LogPresentation {
+    fn default() -> Self {
+        Self {
+            importance: LogImportance::Detail,
+            tone: LogTone::Neutral,
+            boundary: LogBoundary::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogImportance {
+    Essential,
+    Context,
+    #[default]
+    Detail,
+    Diagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogTone {
+    #[default]
+    Neutral,
+    Positive,
+    Negative,
+    Informational,
+    Diagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogBoundary {
+    #[default]
+    None,
+    Turn,
+    Phase,
 }
 
 /// A typed segment of a log entry, enabling rich UI rendering.

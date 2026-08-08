@@ -1190,7 +1190,7 @@ fn finish_action_boundary_with_lifecycle(
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
-    result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    result.log_entries = super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
     if preserve_interaction && !auto_pass_advanced {
         interaction::preserve_interaction_slots(state, previous_interaction_slots);
     } else {
@@ -13632,6 +13632,7 @@ fn build_contest_rounds(
 /// `start_game_with_starting_player` directly — that path runs no contest and
 /// emits no `StartingPlayerContest` event.
 pub fn start_game(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     if state.seat_order.is_empty() {
         return start_game_with_starting_player(state, PlayerId(0));
     }
@@ -13662,6 +13663,7 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             winner: starting_player,
         },
     );
+    result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
 
@@ -13670,6 +13672,7 @@ pub fn start_game_with_starting_player(
     state: &mut GameState,
     starting_player: PlayerId,
 ) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
@@ -13723,7 +13726,7 @@ pub fn start_game_with_starting_player(
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,
@@ -13733,6 +13736,7 @@ pub fn start_game_with_starting_player(
 
 /// Start game without mulligan (for backward compatibility with existing tests).
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
@@ -13757,7 +13761,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,

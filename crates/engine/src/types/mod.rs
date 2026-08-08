@@ -63,7 +63,9 @@ pub use interaction::{
 };
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
-pub use log::{GameLogEntry, LogCategory, LogSegment};
+pub use log::{
+    GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+};
 pub use mana::{
     ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourceOutput,
     ManaSourcePenalty, ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
