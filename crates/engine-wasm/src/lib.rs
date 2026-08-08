@@ -914,18 +914,7 @@ pub fn initialize_game(
     }
 
     let mut state = GameState::new(format_config.clone(), count, seed);
-    state.debug_mode = true;
-    // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
-    // `submit_action` gate checks `debug_permitted`, mirroring server-core's
-    // WebSocket gate. server-core seeds every seat when `allow_debug_actions`
-    // is set (session.rs); the WASM host must do the same or sandbox Debug
-    // actions are rejected for everyone — the host included. Every seat is
-    // permitted by default; the host's grant/revoke flow still narrows it.
-    if state.format_config.allow_debug_actions {
-        for i in 0..count {
-            state.debug_permitted.insert(PlayerId(i));
-        }
-    }
+    initialize_debug_permissions(&mut state, is_multiplayer_mode());
     let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -1566,8 +1555,8 @@ pub fn legal_targets_for_castables_js(object_ids: JsValue) -> JsValue {
 /// the TS side accepts it via structural typing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ViewerSnapshot {
-    state: GameState,
+struct ViewerSnapshot<'a> {
+    state: engine::game::derived_views::ClientGameStateRef<'a>,
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
     end_continuous_effect_offers: Vec<GameAction>,
@@ -1608,6 +1597,7 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
 #[cfg(test)]
 mod viewer_priority_tests {
     use super::*;
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{PriorityPassingMode, WaitingFor};
     use engine::types::phase::Phase;
 
@@ -1646,6 +1636,23 @@ mod viewer_priority_tests {
             "the controlled viewer is not authorized to act and must receive false"
         );
     }
+
+    #[test]
+    fn local_debug_permission_is_explicit_but_non_sandbox_p2p_stays_empty() {
+        let mut local = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut local, false);
+        assert!(local.debug_mode);
+        assert!(local.debug_permitted.contains(&PlayerId(0)));
+        assert!(!local.debug_permitted.contains(&PlayerId(1)));
+
+        let mut p2p = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut p2p, true);
+        assert!(p2p.debug_mode);
+        assert!(
+            p2p.debug_permitted.is_empty(),
+            "normal P2P must not receive the debug-library capability"
+        );
+    }
 }
 
 #[wasm_bindgen]
@@ -1658,7 +1665,11 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         let viewer_interaction =
             engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
         to_js(&ViewerSnapshot {
-            state: filtered,
+            state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                state,
+                &filtered,
+                Some(viewer),
+            ),
             actions: legal.actions,
             auto_pass_recommended: legal.auto_pass_recommended,
             end_continuous_effect_offers: legal.end_continuous_effect_offers,
@@ -1814,6 +1825,20 @@ fn decode_and_rehydrate_restored_game_state(json_str: &str) -> Result<GameState,
     Ok(state)
 }
 
+/// Sets the explicit debug capability that client projections consume. Local
+/// games authorize their perspective seat; multiplayer reserves debug access
+/// for the sandbox permission set so ordinary P2P games cannot expose it.
+fn initialize_debug_permissions(state: &mut GameState, multiplayer: bool) {
+    state.debug_mode = true;
+    if state.format_config.allow_debug_actions {
+        state
+            .debug_permitted
+            .extend(state.players.iter().map(|player| player.id));
+    } else if !multiplayer {
+        state.debug_permitted.insert(PlayerId(0));
+    }
+}
+
 #[cfg(test)]
 fn load_minimal_test_card_database() {
     CARD_DB.with(|cell| {
@@ -1847,6 +1872,12 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     // and reproduce the previous rewind-to-origin behavior.
     state.rehydrate_rng();
     state.debug_mode = true;
+    // Legacy local saves predate the explicit P0 capability. Backfill only
+    // that case; a sandbox save's grant/revoke set is authoritative and must
+    // survive restore unchanged.
+    if !state.format_config.allow_debug_actions && state.debug_permitted.is_empty() {
+        state.debug_permitted.insert(PlayerId(0));
+    }
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));

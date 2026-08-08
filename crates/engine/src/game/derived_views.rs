@@ -390,6 +390,15 @@ pub struct TurnOrderSlotView {
     pub is_starting_player: bool,
 }
 
+/// A card identity deliberately exposed to the debug library browser. This
+/// is separate from normal hidden-zone visibility: only the authorized viewer
+/// receives their own library identities through this explicit debug surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugLibraryCardView {
+    pub object_id: ObjectId,
+    pub name: String,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -400,6 +409,11 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// Debug-only identities for the viewing player's own library. The normal
+    /// `GameState` projection keeps those objects hidden; this capability is
+    /// intentionally narrow so a debug browser can select a card by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_library_cards: Vec<DebugLibraryCardView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -912,6 +926,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
+        debug_library_cards: debug_library_cards(state, viewer),
         ..DerivedViews::default()
     };
 
@@ -1342,11 +1357,41 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     // CR 509.1g: blocking relationships are public information. Preserve this
     // display projection even when a viewer-safe state intentionally omits raw
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     views
+}
+
+fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<DebugLibraryCardView> {
+    let Some(viewer) = viewer else {
+        return Vec::new();
+    };
+    if !state.debug_mode || !state.debug_permitted.contains(&viewer) {
+        return Vec::new();
+    }
+    let mut cards = state
+        .players
+        .iter()
+        .find(|player| player.id == viewer)
+        .into_iter()
+        .flat_map(|player| player.library.iter())
+        .filter_map(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .map(|object| DebugLibraryCardView {
+                    object_id: *object_id,
+                    name: object.name.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    // Keep the explicit identity capability independent of the library's
+    // current order. The debug UI randomizes this stable list for display.
+    cards.sort_by_key(|card| card.object_id);
+    cards
 }
 
 /// CR 509.1g: flatten each blocking creature's chosen attacking creatures into
@@ -2409,6 +2454,84 @@ mod tests {
         let unknown: ClientGameState =
             serde_json::from_str(&unknown_wire).expect("round-trip other viewer client state");
         assert!(!unknown.state.objects[&secret].display_visible_to_viewer);
+    }
+
+    #[test]
+    fn debug_library_projection_is_separate_from_filtered_library_visibility() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(0));
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Authorized Debug Card".to_string(),
+            Zone::Library,
+        );
+        let another_own = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Authorized Debug Card".to_string(),
+            Zone::Library,
+        );
+        let opponent = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Library Card".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library.swap(0, 1);
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let wire = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered debug viewer state");
+        let client: ClientGameState =
+            serde_json::from_str(&wire).expect("deserialize filtered debug viewer state");
+
+        assert_eq!(
+            client.state.objects[&own].name, "Hidden Card",
+            "normal filtered library objects must remain hidden"
+        );
+        assert_eq!(
+            client.state.objects[&opponent].name, "Hidden Card",
+            "an opponent's library must remain hidden"
+        );
+        assert_eq!(
+            client.derived.debug_library_cards,
+            vec![
+                DebugLibraryCardView {
+                    object_id: own,
+                    name: "Authorized Debug Card".to_string(),
+                },
+                DebugLibraryCardView {
+                    object_id: another_own,
+                    name: "Second Authorized Debug Card".to_string(),
+                },
+            ],
+            "the explicit debug surface must expose only the authorized viewer's own cards in a non-library order"
+        );
+
+        let local_wire =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+                .expect("serialize local debug viewer state");
+        let local: ClientGameState =
+            serde_json::from_str(&local_wire).expect("deserialize local debug viewer state");
+        assert_eq!(
+            local.derived.debug_library_cards,
+            client.derived.debug_library_cards
+        );
+
+        let unauthorized = derive_views(&state, Some(PlayerId(1)));
+        assert!(
+            unauthorized.debug_library_cards.is_empty(),
+            "a player without debug permission must not receive a debug library projection"
+        );
     }
 
     #[test]
