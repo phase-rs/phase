@@ -2110,10 +2110,9 @@ mod tests {
                 LogTone::Neutral,
             ),
             (
-                GameEvent::TokenCreated {
-                    object_id: ObjectId(1),
-                    name: "Soldier".to_string(),
-                    source_id: ObjectId(2),
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 1,
                 },
                 LogImportance::Essential,
                 LogTone::Positive,
