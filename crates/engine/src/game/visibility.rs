@@ -79,16 +79,6 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
-    filtered.product_knowledge_state.viewer_known_card_ids = state
-        .objects
-        .keys()
-        .copied()
-        .filter(|&id| state.viewer_knows_card_identity(viewer, id))
-        .collect();
-    filtered
-        .product_knowledge_state
-        .viewer_known_card_ids
-        .sort_unstable_by_key(|id| id.0);
     // Analysis provenance is meaningful only to the clone executing a preview;
     // never carry it into a viewer projection.
     filtered.life_safety_probe = Box::default();
@@ -1523,6 +1513,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(ctx.pending.controller) {
             redact_pending_trigger_context_for_observer(ctx);
         }
+    }
+
+    // This is the single display-identity authority sent to every client. The
+    // preceding projection/redaction passes decide whether an object's identity
+    // remains available; UI code consumes this result rather than recreating
+    // those rules from reveal/private-look bookkeeping.
+    for object in filtered.objects.values_mut() {
+        object.display_visible_to_viewer = object.name != HIDDEN_CARD_NAME;
     }
 
     filtered
@@ -3206,15 +3204,23 @@ mod tests {
 
         let viewer = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(viewer.objects[&card].name, "Known Hand Card");
-        assert_eq!(
-            viewer.product_knowledge_state.viewer_known_card_ids,
-            vec![card]
-        );
+        assert!(viewer.objects[&card].display_visible_to_viewer);
         assert!(viewer.product_knowledge_state.facts.is_empty());
         assert!(viewer.product_knowledge_state.library_epochs.is_empty());
+        let wire = serde_json::to_value(&viewer).expect("viewer state serializes");
+        assert_eq!(
+            wire["objects"][card.0.to_string()]["display_visible_to_viewer"],
+            true,
+            "the engine sends display visibility on the object itself"
+        );
+        assert!(
+            wire.get("viewer_known_card_ids").is_none(),
+            "the legacy visibility side-channel is not sent to clients"
+        );
 
         let other = filter_state_for_viewer(&state, PlayerId(2));
         assert_eq!(other.objects[&card].name, HIDDEN_CARD_NAME);
+        assert!(!other.objects[&card].display_visible_to_viewer);
     }
 
     #[test]
@@ -3237,9 +3243,34 @@ mod tests {
         state.remember_card_identities([PlayerId(0)], &[library, hand]);
         crate::game::zones::reorder_within_library(&mut state, PlayerId(1), &[library], None);
 
+        assert!(state
+            .product_knowledge_state
+            .facts
+            .iter()
+            .all(|fact| fact.zone != Zone::Library));
+        assert!(state.product_knowledge_state.library_epochs.is_empty());
+
         let viewer = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(viewer.objects[&library].name, HIDDEN_CARD_NAME);
         assert_eq!(viewer.objects[&hand].name, "Known Hand Card");
+    }
+
+    #[test]
+    fn expired_library_knowledge_is_canonical_after_reorder() {
+        let mut state = GameState::new_two_player(42);
+        let library = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(1),
+            "Known Library Card".to_string(),
+            Zone::Library,
+        );
+        let baseline = state.clone();
+
+        state.remember_card_identities([PlayerId(0)], &[library]);
+        crate::game::zones::reorder_within_library(&mut state, PlayerId(1), &[library], Some(0));
+
+        assert_eq!(state, baseline);
     }
 
     /// CR 400.7 + CR 122.2: A card that was publicly revealed in hand (e.g.
@@ -3262,6 +3293,7 @@ mod tests {
             Zone::Hand,
         );
         state.public_revealed_cards.insert(card_id);
+        state.remember_card_identities([PlayerId(0), PlayerId(1)], &[card_id]);
 
         // While in hand, the opponent (PlayerId(0)) sees it by name.
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
@@ -3281,6 +3313,7 @@ mod tests {
             !state.public_revealed_cards.contains(&card_id),
             "public_revealed_cards must be cleared on zone change (CR 400.7)"
         );
+        assert!(state.product_knowledge_state.facts.is_empty());
 
         // Library → Hand (draw the same storage id back). Without the fix,
         // the persistent flag would resurface visibility for the opponent.

@@ -166,12 +166,14 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
         .iter()
         .position(|ability| {
             matches!(
-                ability.cost,
-                Some(AbilityCost::Composite { ref costs })
-                    if costs.iter().any(|cost| matches!(cost, AbilityCost::Sacrifice { .. }))
+                ability.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    ..
+                }
             )
         })
-        .expect("Yawgmoth's printed sacrifice ability must be available");
+        .expect("Yawgmoth's printed -1/-1 counter ability must be available");
     let outcome = runner
         .activate(yawgmoth, sacrifice_ability)
         .pay_with(&[garden])

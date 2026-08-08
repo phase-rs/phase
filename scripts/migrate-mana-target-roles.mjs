@@ -108,7 +108,7 @@ function readGzipUtf8(path) {
 }
 
 function writeCanonicalGzip(path, text) {
-  writeFileSync(path, gzipCommand(["-9", "-n", "-c"], { input: text, encoding: "utf8" }));
+  writeFileSync(path, gzipCommand(["-9", "-n", "-c"], { input: text }));
 }
 
 // The curated fixture carries u64 sentinels (e.g. a `SpecificObject` id of

@@ -3367,6 +3367,10 @@ pub(super) fn handle_resolution_choice(
                         None => Some(Zone::Graveyard),
                     }
                 };
+                // CR 701.20d: This direct library reorder has the same
+                // information boundary as the shared reorder helper. Advance
+                // product knowledge before any unkept cards leave the library.
+                state.advance_library_knowledge_epoch(library_owner);
                 // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
                 // library directly, so a `TopOfLibraryMatches` static must be
                 // re-evaluated (self-gated on liveness).

@@ -394,9 +394,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// Only phase-delayed triggers lose their event subject between creation and
-/// firing. Event-based delayed triggers, including one-shot `WhenNextEvent`,
-/// must resolve `TriggeringSource` from the event that actually fires them.
+/// CR 603.7c: Only phase-delayed triggers lose their event subject between
+/// creation and firing. Event-based delayed triggers, including one-shot
+/// `WhenNextEvent`, must resolve `TriggeringSource` from the event that
+/// actually fires them.
 fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) -> bool {
     match condition {
         DelayedTriggerCondition::AtNextPhase { .. }

@@ -4297,6 +4297,14 @@ mod tests {
     const PACT_OF_NEGATION_ORACLE: &str =
         "Counter target spell.\nAt the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.";
 
+    fn integration_card_db() -> CardDatabase {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/fixtures/integration_cards.json.gz");
+        let file = File::open(path).expect("integration fixture should open");
+        let decoder = flate2::read::GzDecoder::new(BufReader::new(file));
+        CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum PactTerminalOutcome {
         OwnerWin,
@@ -4708,13 +4716,7 @@ mod tests {
 
     #[test]
     fn prospective_fetch_choice_survives_to_the_real_search_prompt() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("fetchland integration fixture should open");
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        let db = CardDatabase::from_export_reader(decoder)
-            .expect("fetchland integration fixture should load");
+        let db = integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let misty = scenario.add_real_card(P0, "Misty Rainforest", Zone::Battlefield, &db);
@@ -7239,13 +7241,7 @@ mod tests {
     }
 
     fn real_solitude_evoke_prompt(target_controller: Option<PlayerId>) -> GameState {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("Solitude integration fixture should open");
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        let db = CardDatabase::from_export_reader(decoder)
-            .expect("Solitude integration fixture should load");
+        let db = integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         if let Some(controller) = target_controller {
@@ -7434,13 +7430,7 @@ mod tests {
     #[test]
     fn chosen_evoke_action_runs_through_cast_target_and_resolution() {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("Solitude integration fixture should open");
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        let db = CardDatabase::from_export_reader(decoder)
-            .expect("Solitude integration fixture should load");
+        let db = integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let target = scenario
@@ -7597,13 +7587,7 @@ mod tests {
 
     #[test]
     fn real_subtlety_prompt_stays_conservative_against_an_opposing_creature_spell() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("Subtlety integration fixture should open");
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        let db = CardDatabase::from_export_reader(decoder)
-            .expect("Subtlety integration fixture should load");
+        let db = integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let subtlety = scenario.add_real_card(P0, "Subtlety", Zone::Hand, &db);

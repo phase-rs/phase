@@ -159,12 +159,6 @@ pub(crate) struct ProductKnowledgeState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) library_epochs: Vec<u64>,
-    #[serde(
-        default,
-        rename = "viewer_known_card_ids",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub(crate) viewer_known_card_ids: Vec<ObjectId>,
 }
 
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
@@ -6324,6 +6318,13 @@ impl GameState {
         }
         self.product_knowledge_state.library_epochs[index] =
             self.product_knowledge_state.library_epochs[index].wrapping_add(1);
+        // CR 701.20d: Reordering a library invalidates every disclosed library
+        // occurrence for that owner. Drop the now-unobservable facts immediately
+        // rather than retaining stale generations in authoritative state.
+        self.product_knowledge_state
+            .facts
+            .retain(|fact| !(fact.owner == owner && fact.zone == Zone::Library));
+        self.canonicalize_library_knowledge_epoch(owner);
     }
 
     fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
@@ -6332,6 +6333,34 @@ impl GameState {
             .get(owner.0 as usize)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Removes an epoch once no current library fact relies on it, keeping
+    /// equivalent product-knowledge states equal and serialized identically.
+    fn canonicalize_library_knowledge_epoch(&mut self, owner: PlayerId) {
+        let current_epoch = self.library_knowledge_epoch(owner);
+        let has_live_library_fact = self.product_knowledge_state.facts.iter().any(|fact| {
+            fact.owner == owner
+                && fact.zone == Zone::Library
+                && fact.library_epoch == Some(current_epoch)
+        });
+        if !has_live_library_fact {
+            if let Some(epoch) = self
+                .product_knowledge_state
+                .library_epochs
+                .get_mut(owner.0 as usize)
+            {
+                *epoch = 0;
+            }
+        }
+        while self
+            .product_knowledge_state
+            .library_epochs
+            .last()
+            .is_some_and(|epoch| *epoch == 0)
+        {
+            self.product_knowledge_state.library_epochs.pop();
+        }
     }
 
     /// Temporarily removes the activation-local trigger transaction from the
@@ -18683,11 +18712,18 @@ impl GameState {
         &mut self,
         occurrence: ObjectIncarnationRef,
     ) {
-        let controller = self
+        let (controller, owner) = self
             .objects
             .get(&occurrence.object_id)
-            .map(|object| object.controller)
+            .map(|object| (object.controller, object.owner))
             .expect("zone-exit reveal clear must reference a live object");
+        // Product knowledge is exact-occurrence scoped too. Unlike the
+        // rules-visible reveal sets below, this removes every entitled viewer's
+        // fact, never just the object's current controller.
+        self.product_knowledge_state
+            .facts
+            .retain(|fact| fact.identity != occurrence);
+        self.canonicalize_library_knowledge_epoch(owner);
         for (audience, lifetime) in [
             (
                 ResolvedInformationAudience::Controller(controller),

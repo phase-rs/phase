@@ -400,6 +400,12 @@ pub struct GameObject {
     pub base_controller: Option<PlayerId>,
     pub controller: PlayerId,
     pub zone: Zone,
+    /// Viewer-specific identity-display projection. This is false on
+    /// authoritative game state and populated only at client-view boundaries;
+    /// presentation consumers must use it instead of reconstructing hidden
+    /// information permissions from reveal bookkeeping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub display_visible_to_viewer: bool,
 
     // Battlefield state
     pub tapped: bool,
@@ -1223,6 +1229,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_controller: _,
         controller: _,
         zone: _,
+        display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
         flipped: _,
@@ -2095,6 +2102,7 @@ impl GameObject {
             base_controller: Some(owner),
             controller: owner,
             zone,
+            display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
             flipped: false,
@@ -2903,6 +2911,10 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's

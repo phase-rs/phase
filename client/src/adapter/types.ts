@@ -987,6 +987,9 @@ export interface GameObject {
   owner: PlayerId;
   controller: PlayerId;
   zone: Zone;
+  /** Engine-projected identity visibility for the current viewer. Omitted/false
+   *  means the display layer must not show this card's face or name. */
+  display_visible_to_viewer?: boolean;
   tapped: boolean;
   face_down: boolean;
   flipped: boolean;
@@ -3115,8 +3118,6 @@ export interface GameState {
   debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
   public_revealed_cards?: ObjectId[];
-  /** Durable identities explicitly projected by the engine for this viewer. */
-  viewer_known_card_ids?: ObjectId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;
   monarch?: PlayerId | null;

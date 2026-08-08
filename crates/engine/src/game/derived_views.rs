@@ -602,6 +602,7 @@ pub struct DerivedViews {
 pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
+    display_visible_object_ids: Option<BTreeSet<ObjectId>>,
 }
 
 impl Serialize for ClientGameStateRef<'_> {
@@ -615,7 +616,8 @@ impl Serialize for ClientGameStateRef<'_> {
             derived: &'a DerivedViews,
         }
 
-        let state = client_state_wire_value(self.state).map_err(serde::ser::Error::custom)?;
+        let state = client_state_wire_value(self.state, self.display_visible_object_ids.as_ref())
+            .map_err(serde::ser::Error::custom)?;
         ClientGameStateEnvelope {
             state: &state,
             derived: &self.derived,
@@ -628,11 +630,38 @@ impl Serialize for ClientGameStateRef<'_> {
 /// persistence schema of [`GameState`]. Delayed-trigger receipts and their
 /// allocators authorize replay/transition handling; clients receive neither
 /// those private capabilities nor the resolved journal that contains them.
-fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
+fn client_state_wire_value(
+    state: &GameState,
+    display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
+) -> serde_json::Result<serde_json::Value> {
     let mut value = serde_json::to_value(state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
+
+    if let Some(display_visible_object_ids) = display_visible_object_ids {
+        if let Some(objects) = root
+            .get_mut("objects")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for object in objects.values_mut() {
+                if let Some(object) = object.as_object_mut() {
+                    object.remove("display_visible_to_viewer");
+                }
+            }
+            for object_id in display_visible_object_ids {
+                if let Some(object) = objects
+                    .get_mut(&object_id.0.to_string())
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    object.insert(
+                        "display_visible_to_viewer".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+            }
+        }
+    }
 
     root.remove("next_delayed_trigger_token");
     root.remove("next_delayed_trigger_instance");
@@ -680,9 +709,17 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
+        let display_visible_object_ids = viewer.map(|viewer| {
+            crate::game::visibility::filter_state_for_viewer(state, viewer)
+                .objects
+                .iter()
+                .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
+                .collect()
+        });
         Self {
             state,
             derived: derive_views(state, viewer),
+            display_visible_object_ids,
         }
     }
 
@@ -697,6 +734,7 @@ impl<'a> ClientGameStateRef<'a> {
         Self {
             state: filtered_state,
             derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
+            display_visible_object_ids: None,
         }
     }
 }
@@ -2344,6 +2382,33 @@ mod tests {
             vec![(blocker, attacker)],
             "the authoritative public blocking pair survives the filtered viewer wire path"
         );
+    }
+
+    #[test]
+    fn client_wire_round_trip_projects_display_visibility_per_object() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let secret = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Known Opponent Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state.remember_card_identities([PlayerId(0)], &[secret]);
+
+        let known_wire =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(PlayerId(0))))
+                .expect("serialize viewer client state");
+        let known: ClientGameState =
+            serde_json::from_str(&known_wire).expect("round-trip viewer client state");
+        assert!(known.state.objects[&secret].display_visible_to_viewer);
+
+        let unknown_wire =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(PlayerId(2))))
+                .expect("serialize other viewer client state");
+        let unknown: ClientGameState =
+            serde_json::from_str(&unknown_wire).expect("round-trip other viewer client state");
+        assert!(!unknown.state.objects[&secret].display_visible_to_viewer);
     }
 
     #[test]

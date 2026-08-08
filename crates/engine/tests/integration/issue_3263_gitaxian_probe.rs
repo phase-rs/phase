@@ -81,9 +81,16 @@ fn gitaxian_probe_paid_life_keeps_target_hand_known_after_opponent_land_play() {
         filter_state_for_viewer(runner.state(), P0).objects[&secret].name,
         "Probe Secret"
     );
-    runner
-        .act(GameAction::PassPriority)
-        .expect("pass to opponent");
+    // The opponent's normal land play happens in their next main phase. Configure
+    // that legal priority window directly; advancing an entire turn is unrelated
+    // to the action-boundary regression under test.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.phase = engine::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
     runner
         .act(GameAction::PlayLand {
             object_id: land,

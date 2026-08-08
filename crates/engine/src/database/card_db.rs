@@ -78,7 +78,8 @@ impl CardDatabase {
     /// Keeps compressed test fixtures on the same deserialization path as the
     /// production file loader without changing production's buffered-file flow.
     pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
-        let entries: HashMap<String, CardExportEntry> = serde_json::from_reader(reader)?;
+        let entries: HashMap<String, CardExportEntry> =
+            serde_json::from_reader(BufReader::new(reader))?;
         Ok(Self::from_export_entries(entries))
     }
 
