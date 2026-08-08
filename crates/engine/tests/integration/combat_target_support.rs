@@ -205,9 +205,11 @@ fn firkraag_goad_produces_selectable_target_support_for_searslicer() {
                     .expect("choose Searslicer for Firkraag's goad trigger");
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            _ => runner
-                .act(GameAction::PassPriority)
-                .expect("advance the Firkraag trigger pipeline"),
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("advance the Firkraag trigger pipeline");
+            }
         }
     }
     assert!(
