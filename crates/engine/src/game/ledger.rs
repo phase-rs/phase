@@ -95,8 +95,10 @@ pub fn record_ability_activation(
     )
 }
 
-/// CR 700.13: Record one crime only after the targeting action survives its
-/// complete announcement and has been placed on the stack.
+/// CR 700.13: Record that the player has committed a crime this turn after
+/// the targeting action survives its complete announcement and is placed on
+/// the stack. Individual `CrimeCommitted` events are still emitted for every
+/// qualifying action; this durable record only backs the per-turn condition.
 pub fn record_crime_committed(
     state: &mut GameState,
     player: PlayerId,
@@ -109,6 +111,9 @@ pub fn record_crime_committed(
             player,
         ))?
         .crimes_committed_this_turn;
+    if expected_turn_count > 0 {
+        return Ok(());
+    }
     resolve_and_apply_ledger_edit(
         state,
         ResolvedLedgerEdit::CrimeCommitted {

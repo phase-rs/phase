@@ -806,8 +806,8 @@ pub enum ResolvedLedgerEdit {
         expected_turn_count: u32,
         expected_game_count: u32,
     },
-    /// CR 700.13: Record one committed crime after its targeting action is
-    /// successfully placed on the stack.
+    /// CR 700.13: Record the first committed crime of the turn after its
+    /// targeting action is successfully placed on the stack.
     CrimeCommitted {
         player: PlayerId,
         expected_turn_count: u32,

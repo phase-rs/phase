@@ -11,6 +11,7 @@ fn crime_ledger_edit_is_turn_scoped() {
     let mut state = GameState::new_two_player(42);
 
     record_crime_committed(&mut state, PlayerId(0)).expect("live player records a crime");
+    record_crime_committed(&mut state, PlayerId(0)).expect("repeat crime preserves turn fact");
     assert_eq!(state.players[0].crimes_committed_this_turn, 1);
 
     start_next_turn(&mut state, &mut Vec::new());
