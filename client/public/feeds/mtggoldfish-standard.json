@@ -5,9 +5,148 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-07T00:00:00Z",
+  "updated": "2026-08-08T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
+    {
+      "name": "Izzet Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Bounce Off"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 2,
+          "name": "Colorstorm Stallion"
+        },
+        {
+          "count": 3,
+          "name": "Eddymurk Crab"
+        },
+        {
+          "count": 4,
+          "name": "Flow State"
+        },
+        {
+          "count": 1,
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 7,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 1,
+          "name": "Roaring Furnace // Steaming Sauna"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Slickshot Show-Off"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Vibrant Outburst"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Annul"
+        },
+        {
+          "count": 1,
+          "name": "Broadside Barrage"
+        },
+        {
+          "count": 1,
+          "name": "Colorstorm Stallion"
+        },
+        {
+          "count": 1,
+          "name": "Eddymurk Crab"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Get Out"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Sear"
+        },
+        {
+          "count": 2,
+          "name": "Slagstorm"
+        },
+        {
+          "count": 2,
+          "name": "Soul-Guide Lantern"
+        }
+      ]
+    },
     {
       "name": "Jeskai Lessons",
       "author": "MTGGoldfish",
@@ -323,145 +462,6 @@
         },
         {
           "count": 1,
-          "name": "Soul-Guide Lantern"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Bounce Off"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 2,
-          "name": "Colorstorm Stallion"
-        },
-        {
-          "count": 3,
-          "name": "Eddymurk Crab"
-        },
-        {
-          "count": 4,
-          "name": "Flow State"
-        },
-        {
-          "count": 1,
-          "name": "Impractical Joke"
-        },
-        {
-          "count": 7,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 1,
-          "name": "Roaring Furnace // Steaming Sauna"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Slickshot Show-Off"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Vibrant Outburst"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Broadside Barrage"
-        },
-        {
-          "count": 1,
-          "name": "Colorstorm Stallion"
-        },
-        {
-          "count": 1,
-          "name": "Eddymurk Crab"
-        },
-        {
-          "count": 1,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Get Out"
-        },
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 1,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Sear"
-        },
-        {
-          "count": 2,
-          "name": "Slagstorm"
-        },
-        {
-          "count": 2,
           "name": "Soul-Guide Lantern"
         }
       ]
@@ -888,7 +888,7 @@
           "name": "Winternight Stories"
         },
         {
-          "count": 10,
+          "count": 9,
           "name": "Swamp"
         },
         {
@@ -914,10 +914,6 @@
         {
           "count": 3,
           "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
         },
         {
           "count": 4,
@@ -952,17 +948,25 @@
           "name": "M.O.D.O.K."
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Hidden Lair"
         },
         {
           "count": 4,
+          "name": "Deceit"
+        },
+        {
+          "count": 4,
           "name": "Superior Spider-Man"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
+          "count": 1,
           "name": "Negate"
         },
         {
@@ -994,8 +998,16 @@
           "name": "M.O.D.O.K."
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Malcolm, Alluring Scoundrel"
+        },
+        {
+          "count": 1,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
         }
       ]
     },
@@ -1286,126 +1298,133 @@
       ]
     },
     {
-      "name": "4c Gearhulk",
+      "name": "Izzet Self-Bounce",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "U",
-        "G"
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Hallowed Fountain"
+          "count": 7,
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Bloom Tender"
+          "name": "Eddymurk Crab"
         },
         {
           "count": 4,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Willowrush Verge"
-        },
-        {
-          "count": 4,
-          "name": "Nature's Rhythm"
-        },
-        {
-          "count": 2,
-          "name": "Cryogen Relic"
-        },
-        {
-          "count": 3,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 1,
-          "name": "Mockingbird"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 2,
-          "name": "Nurturing Pixie"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 4,
-          "name": "Sewer-veillance Cam"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
+          "name": "Opt"
         },
         {
           "count": 4,
           "name": "Stormchaser's Talent"
         },
         {
-          "count": 1,
-          "name": "The Jolly Balloon Man"
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Boomerang Basics"
         },
         {
           "count": 2,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 3,
-          "name": "Botanical Sanctum"
+          "name": "Get Out"
         },
         {
           "count": 4,
-          "name": "Badgermole Cub"
+          "name": "Colorstorm Stallion"
+        },
+        {
+          "count": 2,
+          "name": "Roaring Furnace // Steaming Sauna"
+        },
+        {
+          "count": 4,
+          "name": "Flow State"
         },
         {
           "count": 1,
-          "name": "Hushwood Verge"
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 2,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
         },
         {
           "count": 4,
-          "name": "Brightglass Gearhulk"
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Nurturing Pixie"
-        },
-        {
-          "count": 1,
           "name": "Disdainful Stroke"
         },
         {
-          "count": 3,
-          "name": "Erode"
+          "count": 1,
+          "name": "Flashfreeze"
         },
         {
           "count": 1,
-          "name": "Seam Rip"
+          "name": "Impractical Joke"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
         },
         {
           "count": 3,
-          "name": "Crystal Barricade"
-        },
-        {
-          "count": 4,
-          "name": "Spell Pierce"
+          "name": "Sunderflock"
         }
       ]
     }
