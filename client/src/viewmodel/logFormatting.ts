@@ -23,6 +23,7 @@ const LEGACY_PRESENTATION: LogPresentation = {
   importance: "Detail",
   tone: "Neutral",
   boundary: "None",
+  visibility: "Public",
 };
 
 /** The only compatibility seam for persisted pre-presentation entries. */
@@ -46,8 +47,15 @@ export function filterLogByView(
   entries: GameLogEntry[],
   view: LogView,
   categories: Set<LogCategory> | null = null,
+  showHiddenInformation = false,
 ): GameLogEntry[] {
   return entries.filter((entry) => {
+    if (
+      logPresentation(entry).visibility === "HiddenInformation"
+      && (view !== "diagnostics" || !showHiddenInformation)
+    ) {
+      return false;
+    }
     const explicitCategory = categories?.has(entry.category) ?? false;
     if (categories && !explicitCategory) return false;
 

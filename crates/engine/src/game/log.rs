@@ -4,12 +4,13 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::log::{
     GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
 };
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 /// Resolve a batch of events into structured log entries.
-/// Events that would leak hidden information (e.g., cards drawn from library) are filtered out.
+/// Events that could leak hidden information are tagged for an explicit diagnostic opt-in.
 pub fn resolve_log_entries(
     events: &[GameEvent],
     before: &GameState,
@@ -78,6 +79,7 @@ fn presentation(event: &GameEvent) -> LogPresentation {
         importance: importance(event),
         tone: tone(event),
         boundary: boundary(event),
+        visibility: visibility(event),
     }
 }
 
@@ -360,6 +362,17 @@ fn boundary(event: &GameEvent) -> LogBoundary {
         GameEvent::TurnStarted { .. } => LogBoundary::Turn,
         GameEvent::PhaseChanged { .. } => LogBoundary::Phase,
         _ => LogBoundary::None,
+    }
+}
+
+fn visibility(event: &GameEvent) -> LogVisibility {
+    match event {
+        // Draws are intentionally retained for diagnostics, but normal logs
+        // must not disclose an opponent or AI's private card flow.
+        GameEvent::CardDrawn { .. } | GameEvent::CardsDrawn { .. } => {
+            LogVisibility::HiddenInformation
+        }
+        _ => LogVisibility::Public,
     }
 }
 
@@ -2059,6 +2072,10 @@ mod tests {
         assert_eq!(entries[2].phase, Phase::Untap);
         assert_eq!(entries[3].phase, Phase::Upkeep);
         assert_eq!(entries[4].turn, 1);
+        assert_eq!(
+            entries[4].presentation.visibility,
+            LogVisibility::HiddenInformation
+        );
         assert!(
             matches!(entries[4].segments.as_slice(), [LogSegment::PlayerName { .. }, LogSegment::Text(text)] if text == " draws a card")
         );

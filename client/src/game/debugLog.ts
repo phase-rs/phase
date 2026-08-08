@@ -30,6 +30,7 @@ export function debugLog(message: string, level: DebugLogLevel = "error"): void 
       importance: "Diagnostic",
       tone: "Diagnostic",
       boundary: "None",
+      visibility: "Public",
     },
   };
 

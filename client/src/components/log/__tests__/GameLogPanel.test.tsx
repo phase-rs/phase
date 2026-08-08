@@ -43,7 +43,7 @@ function entry(
     phase: "PreCombatMain",
     category: "Stack",
     segments: [{ type: "Text", value: text }],
-    presentation: { importance: "Essential", tone: "Informational", boundary: "None" },
+    presentation: { importance: "Essential", tone: "Informational", boundary: "None", visibility: "Public" },
     ...overrides,
   };
 }
@@ -181,7 +181,7 @@ describe("GameLogPanel", () => {
           turn: 2,
           phase: "Upkeep",
           category: "Turn",
-          presentation: { importance: "Context", tone: "Neutral", boundary: "Turn" },
+          presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
         }),
         entry(1, "Spell cast", { turn: 2 }),
       ],
@@ -215,6 +215,24 @@ describe("GameLogPanel", () => {
     expect(useUiStore.getState().logPanelOpen).toBe(false);
   });
 
+  it("shows hidden diagnostic information only after opting in", async () => {
+    const user = userEvent.setup();
+    useGameStore.setState({
+      logHistory: [
+        entry(0, "AI draws a card", {
+          presentation: { importance: "Detail", tone: "Neutral", boundary: "None", visibility: "HiddenInformation" },
+        }),
+      ],
+    });
+    render(<GameLogPanel />);
+
+    await user.click(screen.getByRole("button", { name: "Diagnostics" }));
+    expect(screen.queryByText("AI draws a card")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "Show hidden information" }));
+    expect(screen.getByText("AI draws a card")).toBeInTheDocument();
+  });
+
   it("shares the panel node with drag behavior and closes only from outside interaction", () => {
     render(<GameLogPanel />);
 
@@ -237,7 +255,7 @@ describe("GameLogPanel", () => {
     useGameStore.setState({ logHistory: [entry(0, "casts Lightning Bolt")] });
     render(<GameLogPanel />);
 
-    await user.click(screen.getByRole("button", { name: "Copy 1 filtered log entries" }));
+    await user.click(screen.getByRole("button", { name: "Copy 1 filtered log entry" }));
 
     expect(writeText).toHaveBeenCalledWith("Turn 1 · Main Phase 1 · Stack: casts Lightning Bolt");
     expect(await screen.findByText("Log copied to clipboard")).toBeInTheDocument();

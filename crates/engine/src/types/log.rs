@@ -28,6 +28,8 @@ pub struct LogPresentation {
     pub tone: LogTone,
     #[serde(default)]
     pub boundary: LogBoundary,
+    #[serde(default)]
+    pub visibility: LogVisibility,
 }
 
 impl Default for LogPresentation {
@@ -36,6 +38,7 @@ impl Default for LogPresentation {
             importance: LogImportance::Detail,
             tone: LogTone::Neutral,
             boundary: LogBoundary::None,
+            visibility: LogVisibility::Public,
         }
     }
 }
@@ -65,6 +68,15 @@ pub enum LogBoundary {
     None,
     Turn,
     Phase,
+}
+
+/// Whether an entry is safe in the normal game log. The client must require an
+/// explicit diagnostic opt-in before showing hidden information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LogVisibility {
+    #[default]
+    Public,
+    HiddenInformation,
 }
 
 /// A typed segment of a log entry, enabling rich UI rendering.

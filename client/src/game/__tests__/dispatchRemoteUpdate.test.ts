@@ -88,6 +88,7 @@ describe("processRemoteUpdate", () => {
       importance: "Detail",
       tone: "Neutral",
       boundary: "None",
+      visibility: "Public",
     });
   });
 

@@ -61,13 +61,14 @@ export function GameLogPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [turnFilter, setTurnFilter] = useState<number | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<Set<LogCategory>>(new Set());
+  const [showHiddenInformation, setShowHiddenInformation] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [copyStatus, setCopyStatus] = useState<"success" | "failure" | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const lastLogSeqRef = useRef(logHistory[logHistory.length - 1]?.seq);
   const lastGameSessionRef = useRef(gameSessionGeneration);
+  const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomRef = useRef(true);
   const logDrag = useDraggableWidget({ kind: "widget", key: "logPanel" });
 
@@ -80,8 +81,8 @@ export function GameLogPanel() {
   );
 
   const presentationFiltered = useMemo(
-    () => filterLogByView(logHistory, view, categoryFilter.size > 0 ? categoryFilter : null),
-    [logHistory, view, categoryFilter],
+    () => filterLogByView(logHistory, view, categoryFilter.size > 0 ? categoryFilter : null, showHiddenInformation),
+    [logHistory, view, categoryFilter, showHiddenInformation],
   );
   const filteredEntries = useMemo(
     () =>
@@ -97,6 +98,18 @@ export function GameLogPanel() {
     [categoryFilter, filteredEntries],
   );
   const availableTurns = useMemo(() => uniqueTurns(logHistory), [logHistory]);
+  const filterSignature = useMemo(
+    () => JSON.stringify({
+      categories: Array.from(categoryFilter).sort(),
+      searchQuery,
+      showHiddenInformation,
+      turnFilter,
+      view,
+    }),
+    [categoryFilter, searchQuery, showHiddenInformation, turnFilter, view],
+  );
+  const lastVisibleLogSeqRef = useRef(filteredEntries[filteredEntries.length - 1]?.seq);
+  const lastFilterSignatureRef = useRef(filterSignature);
 
   const seededRef = useRef(false);
   useEffect(() => {
@@ -110,12 +123,14 @@ export function GameLogPanel() {
   }, [isGameOver, setLogPanelOpen]);
 
   useEffect(() => {
-    const nextLogSeq = logHistory[logHistory.length - 1]?.seq;
-    const previousLogSeq = lastLogSeqRef.current;
-    lastLogSeqRef.current = nextLogSeq;
+    const nextLogSeq = filteredEntries[filteredEntries.length - 1]?.seq;
+    const previousLogSeq = lastVisibleLogSeqRef.current;
+    lastVisibleLogSeqRef.current = nextLogSeq;
+    const filtersChanged = lastFilterSignatureRef.current !== filterSignature;
+    lastFilterSignatureRef.current = filterSignature;
     const sessionChanged = lastGameSessionRef.current !== gameSessionGeneration;
     lastGameSessionRef.current = gameSessionGeneration;
-    if (sessionChanged) {
+    if (filtersChanged || sessionChanged) {
       setUnreadCount(0);
       return;
     }
@@ -124,7 +139,8 @@ export function GameLogPanel() {
       return;
     }
     if (nextLogSeq === previousLogSeq) return;
-    const newEntries = nextLogSeq - previousLogSeq;
+    const newEntries = filteredEntries.filter((entry) => entry.seq > previousLogSeq).length;
+    if (newEntries === 0) return;
     const element = scrollRef.current;
     if (element && nearBottomRef.current) {
       requestAnimationFrame(() => {
@@ -133,7 +149,11 @@ export function GameLogPanel() {
       return;
     }
     setUnreadCount((count) => count + newEntries);
-  }, [gameSessionGeneration, logHistory]);
+  }, [filterSignature, filteredEntries, gameSessionGeneration]);
+
+  useEffect(() => () => {
+    if (copyResetRef.current) clearTimeout(copyResetRef.current);
+  }, []);
 
   const jumpToLatest = useCallback(() => {
     const element = scrollRef.current;
@@ -189,10 +209,18 @@ export function GameLogPanel() {
   };
 
   const clearFilters = () => {
+    setView("diagnostics");
     setSearchQuery("");
     setTurnFilter(null);
     setCategoryFilter(new Set());
+    setShowHiddenInformation(false);
   };
+
+  const reportCopyStatus = useCallback((status: "success" | "failure") => {
+    setCopyStatus(status);
+    if (copyResetRef.current) clearTimeout(copyResetRef.current);
+    copyResetRef.current = setTimeout(() => setCopyStatus(null), 3000);
+  }, []);
 
   const handleExport = () => {
     const blob = new Blob([exportLogEntriesJson(filteredEntries)], { type: "application/json" });
@@ -215,9 +243,9 @@ export function GameLogPanel() {
       .join("\n");
     try {
       await navigator.clipboard.writeText(text);
-      setCopyStatus("success");
+      reportCopyStatus("success");
     } catch {
-      setCopyStatus("failure");
+      reportCopyStatus("failure");
     }
   };
 
@@ -253,12 +281,13 @@ export function GameLogPanel() {
             </div>
           </div>
 
-          <div className="flex gap-1 border-b border-gray-800 px-3 py-1.5" aria-label={t("log.viewLabel")}>
+          <div role="group" className="flex gap-1 border-b border-gray-800 px-3 py-1.5" aria-label={t("log.viewLabel")}>
             {VIEWS.map((candidate) => (
               <button key={candidate} type="button" onClick={() => setView(candidate)} aria-pressed={view === candidate} className={`min-h-11 rounded px-2 text-[10px] font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 ${view === candidate ? "bg-cyan-600 text-white" : "bg-gray-800 text-white hover:bg-gray-700"}`}>{t(VIEW_LABEL_KEYS[candidate])}</button>
             ))}
             <span className="ml-auto self-center text-[9px] tabular-nums text-gray-500">{filterSummary}</span>
           </div>
+          {view === "diagnostics" && <label className="flex min-h-11 items-center gap-2 border-b border-gray-800 px-3 text-[10px] text-gray-300"><input type="checkbox" checked={showHiddenInformation} onChange={(event) => setShowHiddenInformation(event.target.checked)} className="h-4 w-4 accent-cyan-500" />{t("log.showHiddenInformation")}</label>}
 
           <div className="border-b border-gray-800 px-3 py-2">
             <button type="button" onClick={() => setFiltersOpen((open) => !open)} aria-expanded={filtersOpen} className="min-h-11 w-full rounded px-1 text-left text-[10px] text-gray-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.filters", { count: categoryFilter.size + (turnFilter == null ? 0 : 1) + (searchQuery ? 1 : 0) })}</button>
@@ -278,10 +307,10 @@ export function GameLogPanel() {
             )}
           </div>
 
-          <div ref={scrollRef} role="region" aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-3 py-1">
+          <div ref={scrollRef} role="region" tabIndex={0} aria-label={t("log.title")} onScroll={handleScroll} className="select-text flex-1 overflow-y-auto px-3 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
             {rows.length === 0 ? <div className="py-4 text-center text-xs text-gray-500"><p>{t("log.noMatchingEvents")}</p><button type="button" onClick={clearFilters} className="mt-2 min-h-11 rounded px-2 text-cyan-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">{t("log.clearFilters")}</button></div> : rows.map((row, index) => row.type === "entry" ? <LogEntry key={row.entry.seq} entry={row.entry} onInspectObject={inspectObject} /> : <div key={`divider-${index}`} className="my-2 border-y border-gray-700 py-1 text-center text-[9px] font-semibold uppercase tracking-wide text-gray-500">{row.divider.turn > 0 && `${t("log.turnChip", { turn: row.divider.turn })} · `}{t(`phaseName.${row.divider.phase}`)}</div>)}
           </div>
-          {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-9 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
+          {unreadCount > 0 && <button type="button" onClick={jumpToLatest} className="m-2 min-h-11 rounded bg-cyan-700 px-3 text-xs font-medium text-white shadow focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("log.jumpToLatest", { count: unreadCount })}</button>}
           <p className="sr-only" aria-live="polite">{copyStatus === "success" ? t("log.copySuccess") : copyStatus === "failure" ? t("log.copyFailure") : filterSummary}</p>
         </motion.div>
       )}

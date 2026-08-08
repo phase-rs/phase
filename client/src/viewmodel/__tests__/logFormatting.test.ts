@@ -13,7 +13,7 @@ function entry(
     phase: "PreCombatMain",
     category: "Stack",
     segments: [{ type: "Text", value: "event" }],
-    presentation: { importance, tone: "Neutral", boundary: "None" },
+    presentation: { importance, tone: "Neutral", boundary: "None", visibility: "Public" },
     ...overrides,
   };
 }
@@ -21,7 +21,7 @@ function entry(
 describe("game log presentation", () => {
   it("uses one detail/neutral/non-boundary fallback for legacy entries", () => {
     const legacy = { ...entry("Essential"), presentation: undefined };
-    expect(logPresentation(legacy)).toEqual({ importance: "Detail", tone: "Neutral", boundary: "None" });
+    expect(logPresentation(legacy)).toEqual({ importance: "Detail", tone: "Neutral", boundary: "None", visibility: "Public" });
     expect(filterLogByView([legacy], "timeline")).toEqual([]);
     expect(filterLogByView([legacy], "details")).toEqual([legacy]);
     expect(filterLogByView([legacy], "diagnostics")).toEqual([legacy]);
@@ -35,12 +35,22 @@ describe("game log presentation", () => {
     expect(filterLogByView(entries, "timeline", new Set(["Debug"]))).toEqual([entries[3]]);
   });
 
+  it("requires an explicit diagnostics opt-in for hidden information", () => {
+    const hidden = entry("Detail", {
+      presentation: { importance: "Detail", tone: "Neutral", boundary: "None", visibility: "HiddenInformation" },
+    });
+
+    expect(filterLogByView([hidden], "diagnostics")).toEqual([]);
+    expect(filterLogByView([hidden], "diagnostics", null, true)).toEqual([hidden]);
+    expect(filterLogByView([hidden], "details", null, true)).toEqual([]);
+  });
+
   it("coalesces retained boundaries and never creates a turn-zero divider", () => {
     const rows = timelineRows([
-      entry("Context", { seq: 1, turn: 1, phase: "Untap", category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Turn" } }),
-      entry("Context", { seq: 2, turn: 1, phase: "Upkeep", category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Phase" } }),
+      entry("Context", { seq: 1, turn: 1, phase: "Untap", category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" } }),
+      entry("Context", { seq: 2, turn: 1, phase: "Upkeep", category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Phase", visibility: "Public" } }),
       entry("Essential", { seq: 3, turn: 1 }),
-      entry("Context", { seq: 4, turn: 0, category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Turn" } }),
+      entry("Context", { seq: 4, turn: 0, category: "Turn", presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" } }),
       entry("Essential", { seq: 5, turn: 0 }),
       entry("Essential", { seq: 6, turn: 1 }),
     ]);
@@ -53,14 +63,14 @@ describe("game log presentation", () => {
     const firstBoundary = entry("Context", {
       category: "Turn",
       phase: "Upkeep",
-      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn" },
+      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
     });
     const secondBoundary = entry("Context", {
       seq: 2,
       turn: 2,
       category: "Turn",
       phase: "Draw",
-      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn" },
+      presentation: { importance: "Context", tone: "Neutral", boundary: "Turn", visibility: "Public" },
     });
 
     expect(timelineRows([firstBoundary, secondBoundary])).toEqual([]);

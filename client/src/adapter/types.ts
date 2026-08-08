@@ -2055,11 +2055,13 @@ export type LogCategory = (typeof LOG_CATEGORIES)[number];
 export type LogImportance = "Essential" | "Context" | "Detail" | "Diagnostic";
 export type LogTone = "Neutral" | "Positive" | "Negative" | "Informational" | "Diagnostic";
 export type LogBoundary = "None" | "Turn" | "Phase";
+export type LogVisibility = "Public" | "HiddenInformation";
 
 export interface LogPresentation {
   importance: LogImportance;
   tone: LogTone;
   boundary: LogBoundary;
+  visibility: LogVisibility;
 }
 
 export type LogSegment =

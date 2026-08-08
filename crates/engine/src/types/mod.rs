@@ -65,6 +65,7 @@ pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use log::{
     GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
 };
 pub use mana::{
     ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourceOutput,
