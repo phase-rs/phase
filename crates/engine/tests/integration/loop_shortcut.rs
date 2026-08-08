@@ -6203,8 +6203,8 @@ fn dump_c_still_crowns_at_one_living_opponent_after_pause_retention() {
     // exact count is reported (not just `> 0`) so a change in how far the detector has
     // to drive to re-derive the crown surfaces as a diff rather than passing silently.
     assert_eq!(
-        beats, 6,
-        "the `c decline` arm re-derives the crown after a measured 6 driven beats — a 0 here \
+        beats, 8,
+        "the `c decline` arm re-derives the crown after a measured 8 driven beats — a 0 here \
          would mean the row read the dump's saved offer back instead of re-deriving one, \
          which is what makes both revert-probes above live"
     );

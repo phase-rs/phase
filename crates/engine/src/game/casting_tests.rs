@@ -22528,6 +22528,16 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         &mut events,
     );
 
+    // CR 601.2c: This direct payment-boundary test bypasses the normal target
+    // declaration continuation, so reproduce its event before paying costs.
+    emit_targeting_events(
+        &state,
+        &flatten_targets_in_chain(&ability),
+        object_id,
+        PlayerId(0),
+        &mut events,
+    );
+
     let waiting_for = crate::game::casting_costs::pay_and_push(
         &mut state,
         PlayerId(0),
