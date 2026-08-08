@@ -4361,7 +4361,6 @@ fn target_step_actions(
     let mut actions: Vec<CandidateAction> = current_legal_targets
         .iter()
         .cloned()
-        .into_iter()
         .map(|target| {
             candidate(
                 GameAction::ChooseTarget {
