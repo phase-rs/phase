@@ -5604,6 +5604,11 @@ pub struct PendingCast {
     pub pending_loyalty_activation_player: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 700.13 + CR 601.2c: Whether this action's announced target set was
+    /// a crime at target-declaration time. It is committed only once stack
+    /// placement succeeds, so failed casts and activations leave no record.
+    #[serde(default)]
+    pub crime_candidate: bool,
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
@@ -6128,6 +6133,7 @@ impl PendingCast {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -26096,6 +26102,7 @@ mod tests {
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
+                crime_candidate: false,
                 casting_variant: CastingVariant::Normal,
                 casting_permission_index: None,
                 cast_timing_permission: None,
@@ -26513,6 +26520,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,

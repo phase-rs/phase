@@ -1639,6 +1639,11 @@ pub(crate) fn begin_deferred_target_selection(
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
+        pending.crime_candidate = super::casting::targets_commit_crime(
+            state,
+            &flatten_targets_in_chain(&pending.ability),
+            pending.ability.controller,
+        );
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -1666,6 +1671,11 @@ pub(crate) fn begin_deferred_target_selection(
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
+        pending.crime_candidate = super::casting::targets_commit_crime(
+            state,
+            &flatten_targets_in_chain(&pending.ability),
+            pending.ability.controller,
+        );
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -4344,6 +4354,7 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         pending.activation_target_selection,
         pending.pending_loyalty_activation_player,
         pending.activation_trigger_collection.clone(),
+        pending.crime_candidate,
         events,
     )
 }
@@ -5106,6 +5117,7 @@ pub(super) fn push_activated_ability_to_stack(
     target_selection: ActivationTargetSelection,
     mut pending_loyalty_activation_player: Option<PlayerId>,
     activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
+    crime_candidate: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 602.2b + CR 601.2c-h: This is also a defensive entry point for
@@ -5130,6 +5142,8 @@ pub(super) fn push_activated_ability_to_stack(
             // root. It is still announced before payment, not pushed directly.
             if assigned_targets.len() >= target_slots.len() || resolved.distribution.is_some() {
                 let mut pending = pending(resolved);
+                pending.crime_candidate =
+                    super::casting::targets_commit_crime(state, &assigned_targets, player);
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(state, &assigned_targets, source_id, player, events);
                 return finish_target_selected_activated_ability_at_payment_boundary(
@@ -5144,6 +5158,11 @@ pub(super) fn push_activated_ability_to_stack(
                 let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
+                pending.crime_candidate = super::casting::targets_commit_crime(
+                    state,
+                    &flatten_targets_in_chain(&pending.ability),
+                    player,
+                );
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
@@ -5162,6 +5181,11 @@ pub(super) fn push_activated_ability_to_stack(
             {
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
                 let mut pending = pending(resolved);
+                pending.crime_candidate = super::casting::targets_commit_crime(
+                    state,
+                    &flatten_targets_in_chain(&pending.ability),
+                    player,
+                );
                 pending.begin_activation_trigger_collection();
                 emit_targeting_events(
                     state,
@@ -5324,6 +5348,7 @@ pub(super) fn push_activated_ability_to_stack(
             resolved,
             pending_loyalty_activation_player,
             activation_trigger_collection,
+            crime_candidate,
             events,
         );
     }
@@ -5336,6 +5361,7 @@ pub(super) fn push_activated_ability_to_stack(
         resolved,
         pending_loyalty_activation_player,
         activation_trigger_collection,
+        crime_candidate,
         events,
     )
 }
@@ -5391,6 +5417,7 @@ pub(super) fn push_ability_entry(
     mut resolved: ResolvedAbility,
     pending_loyalty_activation_player: Option<PlayerId>,
     activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
+    crime_candidate: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let entry_id = ObjectId(state.next_object_id);
@@ -5445,6 +5472,7 @@ pub(super) fn push_ability_entry(
         },
         events,
     );
+    super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
     if let Some(activation_player) = pending_loyalty_activation_player {
         super::planeswalker::record_loyalty_activation(state, source_id, activation_player);
     }
@@ -5534,6 +5562,13 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     cost: ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if !pending.crime_candidate {
+        pending.crime_candidate = super::casting::targets_commit_crime(
+            state,
+            &flatten_targets_in_chain(&ability),
+            player,
+        );
+    }
     pending.ability = Box::new(ability);
     pending.cost = cost;
     // If an optional additional cost was already decided (paid or declined) in the
@@ -9197,15 +9232,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
     ability.context.cast_phase = Some(state.phase);
     stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
 
-    // Emit targeting events now that the cast is committed.
-    emit_targeting_events(
-        state,
-        &flatten_targets_in_chain(&ability),
-        object_id,
-        player,
-        events,
-    );
-
     // CR 107.3m: Stash the paid X value directly on the permanent so replacement
     // effects ("enters with X counters") and ETB triggered abilities that
     // reference the cost X (via `QuantityRef::CostXPaid`) can resolve after the
@@ -9285,6 +9311,8 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 .unwrap_or_default();
         }
     }
+
+    let announced_targets = flatten_targets_in_chain(&ability);
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
@@ -9626,6 +9654,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");
+
+    let crime_candidate = deferred_life_resume_pending
+        .is_some_and(|pending| pending.crime_candidate)
+        || super::casting::targets_commit_crime(state, &announced_targets, player);
+    super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {
@@ -12687,6 +12720,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.activation_target_selection,
                 pending.pending_loyalty_activation_player,
                 pending.activation_trigger_collection.clone(),
+                pending.crime_candidate,
                 events,
             );
         }
@@ -13746,6 +13780,7 @@ mod tests {
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -19023,6 +19058,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -19160,6 +19196,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -19266,6 +19303,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -19361,6 +19399,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -19489,6 +19528,7 @@ mod tests {
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
+            crime_candidate: false,
             casting_variant: CastingVariant::Normal,
             casting_permission_index: None,
             cast_timing_permission: None,
@@ -22506,6 +22546,7 @@ its replicate cost was paid.)\nDraw a card.";
             ActivationTargetSelection::Pending,
             None,
             None,
+            false,
             &mut events,
         );
     }
@@ -22545,6 +22586,7 @@ its replicate cost was paid.)\nDraw a card.";
             ActivationTargetSelection::Pending,
             None,
             None,
+            false,
             &mut events,
         )
         .expect("direct activation root must enter target selection");

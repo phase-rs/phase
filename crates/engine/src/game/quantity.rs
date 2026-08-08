@@ -4048,7 +4048,7 @@ fn resolve_ref(
                 )
             },
         ),
-        // CR 710.2: Crimes committed this turn — uses tracked counter on player.
+        // CR 700.13: Crimes committed this turn — uses tracked counter on player.
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }

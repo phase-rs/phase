@@ -1292,37 +1292,51 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
 /// Yields `(&StaticDefinition, ObjectId)` — the source id re-resolves the
 /// controller for `FilterContext`, so no `GameObject` field beyond `.id` is read.
 fn block_restriction_statics_against_from_precomputed<'a>(
-    state: &'a GameState,
+    state: &GameState,
     attacker_id: ObjectId,
     precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (&'a StaticDefinition, ObjectId)> + 'a {
-    precomputed.iter().filter_map(move |(src_id, def)| {
-        let src = state.objects.get(src_id)?;
-        // CR 604.1: a static with no `affected` filter is implicitly about its
-        // own source (intrinsic SelfRef semantics).
-        let affected_ok = match def.affected.as_ref() {
-            None => src.id == attacker_id,
-            Some(filter) => matches_target_filter(
-                state,
-                attacker_id,
-                filter,
-                &FilterContext::from_source(state, src.id),
-            ),
-        };
-        if !affected_ok {
-            return None;
-        }
-        let condition_ok = def.condition.as_ref().is_none_or(|condition| {
-            crate::game::layers::evaluate_condition_with_recipient(
-                state,
-                condition,
-                src.controller,
-                src.id,
-                attacker_id,
-            )
-        });
-        condition_ok.then_some((def, *src_id))
-    })
+) -> Vec<(&'a StaticDefinition, ObjectId)> {
+    precomputed
+        .iter()
+        .filter_map(|(src_id, def)| {
+            let src = state.objects.get(src_id)?;
+            // CR 604.1: a static with no `affected` filter is implicitly about its
+            // own source (intrinsic SelfRef semantics).
+            let affected_ok = match def.affected.as_ref() {
+                None => src.id == attacker_id,
+                Some(filter) => matches_target_filter(
+                    state,
+                    attacker_id,
+                    filter,
+                    &FilterContext::from_source(state, src.id),
+                ),
+            };
+            if !affected_ok {
+                return None;
+            }
+            let condition_ok = def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    attacker_id,
+                )
+            });
+            condition_ok.then_some((def, *src_id))
+        })
+        .collect()
+}
+
+/// CR 509.1b: True when a bare, currently applicable `CantBeBlocked` static
+/// makes this creature unblockable. This shares the combat legality predicate's
+/// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
+/// restrictions intentionally remain distinct.
+pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
+    let restrictions = collect_block_restriction_statics(state);
+    block_restriction_statics_against_from_precomputed(state, attacker_id, &restrictions)
+        .into_iter()
+        .any(|(definition, _)| definition.mode == StaticMode::CantBeBlocked)
 }
 
 /// CR 509.1b: Blocker-side restriction ("~ can't block").
@@ -2535,6 +2549,7 @@ fn validate_blockers_core(
             *attacker_id,
             &block_restriction,
         )
+        .into_iter()
         .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
         if !has_unless_all {
             continue;
@@ -5767,6 +5782,7 @@ pub fn max_blockers_allowed_from_precomputed(
     block_restriction: &[(ObjectId, StaticDefinition)],
 ) -> Option<u32> {
     block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
+        .into_iter()
         .filter_map(|(def, _src_id)| match def.mode {
             StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
             _ => None,

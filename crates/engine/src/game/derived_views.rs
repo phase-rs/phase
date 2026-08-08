@@ -415,6 +415,11 @@ pub struct DerivedViews {
     /// Keyed by recipient ObjectId; absent when no such grant is active.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub temporary_cant_be_blocked: HashMap<ObjectId, Option<ObjectId>>,
+    /// CR 509.1b: battlefield creatures with a currently applicable bare
+    /// `CantBeBlocked` static. This is the semantic display authority; the
+    /// temporary map above remains attribution for tooltip text only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cant_be_blocked: Vec<ObjectId>,
     /// CR 509.1g: public blocker-to-attacker relationships, flattened as
     /// `(blocker, attacker)` pairs for combat-line rendering. This is sorted
     /// deterministically so equivalent combat states have stable wire output.
@@ -905,6 +910,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
         }
+        if crate::game::combat::has_cant_be_blocked_static(state, obj_id) {
+            views.cant_be_blocked.push(obj_id);
+        }
         // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
         // through the same `matches_target_filter` the layer engine uses to
         // pick a continuous effect's recipients, so this projection and the
@@ -926,6 +934,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // permanents are copies, not on battlefield churn that never changed the
     // answer.
     views.copied_permanents.sort_unstable();
+    views.cant_be_blocked.sort_unstable();
 
     // CR 702.40a: viewer-scoped prospective Storm copy counts (own hand only → leak-proof).
     if let Some(viewer) = viewer {

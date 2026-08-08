@@ -2844,6 +2844,9 @@ export interface DerivedViews {
   */
   temporary_cant_be_blocked?: Record<string, ObjectId | null>;
 
+  /** Engine-classified recipients of an applicable bare CantBeBlocked static. */
+  cant_be_blocked?: ObjectId[];
+
   /**
    * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
    * renders these directly rather than deciding which combat relations are

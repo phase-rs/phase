@@ -604,18 +604,18 @@ pub(crate) fn sacrifice_cost_bounds_with_chosen_x(
     sacrifice_cost_bounds(count, eligible_len)
 }
 
-/// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
+/// Emit `BecomesTarget` events for each target at target declaration.
 ///
-/// Called whenever targets are locked in for a spell or ability. CR 700.13:
-/// Targeting an opponent, their permanent, or a card in their graveyard is a crime.
+/// Crime commitment is deliberately separate: CR 700.13's targeting
+/// classification is retained through the in-flight action and recorded only
+/// after the spell or ability has successfully reached the stack.
 pub(crate) fn emit_targeting_events(
-    state: &GameState,
+    _state: &GameState,
     targets: &[TargetRef],
     source_id: ObjectId,
-    controller: PlayerId,
+    _controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let mut crime_committed = false;
     for target in targets {
         match target {
             TargetRef::Object(obj_id) => {
@@ -623,29 +623,64 @@ pub(crate) fn emit_targeting_events(
                     target: TargetRef::Object(*obj_id),
                     source_id,
                 });
-                if !crime_committed {
-                    if let Some(obj) = state.objects.get(obj_id) {
-                        if obj.controller != controller && obj.owner != controller {
-                            crime_committed = true;
-                        }
-                    }
-                }
             }
             TargetRef::Player(pid) => {
                 events.push(GameEvent::BecomesTarget {
                     target: TargetRef::Player(*pid),
                     source_id,
                 });
-                if !crime_committed && *pid != controller {
-                    crime_committed = true;
-                }
             }
         }
     }
-    if crime_committed {
-        events.push(GameEvent::CrimeCommitted {
-            player_id: controller,
-        });
+}
+
+/// CR 700.13: Whether this announced target set commits a crime for `controller`.
+///
+/// This follows the rule's exact target classes: an opponent; a permanent,
+/// spell, or ability controlled by an opponent; or a card owned by an opponent
+/// in their graveyard. `players::is_opponent` keeps team formats authoritative.
+pub(crate) fn targets_commit_crime(
+    state: &GameState,
+    targets: &[TargetRef],
+    controller: PlayerId,
+) -> bool {
+    targets.iter().any(|target| match target {
+        TargetRef::Player(player) => super::players::is_opponent(state, controller, *player),
+        TargetRef::Object(object_id) => {
+            let stack_target_is_opponent_controlled = state.stack.iter().any(|entry| {
+                entry.id == *object_id
+                    && super::players::is_opponent(state, controller, entry.controller)
+            });
+            stack_target_is_opponent_controlled
+                || state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|object| match object.zone {
+                        Zone::Battlefield | Zone::Stack => {
+                            super::players::is_opponent(state, controller, object.controller)
+                        }
+                        Zone::Graveyard => {
+                            super::players::is_opponent(state, controller, object.owner)
+                        }
+                        _ => false,
+                    })
+        }
+    })
+}
+
+/// CR 700.13: Commit and publish one crime only after the action's stack
+/// placement succeeds. The ledger edit supplies replayable, prefix-checked
+/// durable state before `CommitCrime` triggers inspect the event.
+pub(crate) fn commit_crime_after_stack_placement(
+    state: &mut GameState,
+    crime_candidate: bool,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    if crime_candidate {
+        crate::game::ledger::record_crime_committed(state, player)
+            .expect("crime ledger prefix must match the live player state");
+        events.push(GameEvent::CrimeCommitted { player_id: player });
     }
 }
 
@@ -12296,6 +12331,13 @@ fn continue_with_prepared(
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
+                emit_targeting_events(
+                    state,
+                    &flatten_targets_in_chain(&resolved),
+                    prepared.object_id,
+                    player,
+                    events,
+                );
                 return check_additional_cost_or_pay(
                     state,
                     player,
@@ -12375,6 +12417,13 @@ fn continue_with_prepared(
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&resolved),
+                prepared.object_id,
+                player,
+                events,
+            );
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -12775,6 +12824,13 @@ fn continue_with_prepared(
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&resolved),
+                prepared.object_id,
+                player,
+                events,
+            );
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -18713,6 +18769,8 @@ pub fn handle_activate_ability(
     // Push to stack
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    let announced_targets = flatten_targets_in_chain(&resolved);
+    let crime_candidate = targets_commit_crime(state, &announced_targets, player);
 
     stack::push_to_stack(
         state,
@@ -18727,6 +18785,7 @@ pub fn handle_activate_ability(
         },
         events,
     );
+    commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
     restrictions::record_ability_activation(state, source_id, ability_index);
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
