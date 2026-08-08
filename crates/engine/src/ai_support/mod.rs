@@ -5959,8 +5959,14 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_do_not_simulate_each_target() {
+    fn target_selection_legal_actions_validate_each_current_target() {
         let mut state = setup_priority();
+        state.players[0].mana_pool.mana.push(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
                 let creature = create_object(
@@ -6005,9 +6011,20 @@ mod tests {
         let (actions, spell_costs, grouped) = legal_actions_full(&state);
         let counters = crate::game::perf_counters::snapshot();
 
-        assert_eq!(counters.state_clone_for_legality, 0);
+        assert!(
+            counters.state_clone_for_legality >= 26,
+            "every current target and the optional skip must be checked through the reducer"
+        );
         assert_eq!(counters.priority_cast_probe_builds, 0);
-        assert_eq!(actions.len(), 26);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) }))
+                .count(),
+            25
+        );
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
+        assert!(actions.contains(&GameAction::CancelCast));
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
         assert!(actions
@@ -6368,6 +6385,12 @@ mod tests {
     #[test]
     fn target_selection_legal_actions_do_not_fall_back_to_stale_slot_targets() {
         let mut state = setup_priority();
+        state.players[0].mana_pool.mana.push(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
         let target = TargetRef::Object(create_object(
             &mut state,
             CardId(101),

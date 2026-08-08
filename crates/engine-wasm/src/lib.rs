@@ -2691,7 +2691,7 @@ mod tests {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
-        TargetFilter,
+        TargetFilter, TargetRef,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -2823,15 +2823,13 @@ mod tests {
         state
     }
 
-    fn fireball_target_selection_state() -> GameState {
-        const FIREBALL_ORACLE: &str =
-            "Fireball deals X damage divided evenly, rounded down, among any number of targets.";
-
+    fn fireball_final_target_state(pool: usize) -> (GameState, TargetRef) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.add_creature(P1, "Fireball Target", 3, 3);
+        let first_target = scenario.add_creature(P1, "Fireball Target One", 3, 3).id();
+        let final_target = scenario.add_creature(P1, "Fireball Target Two", 3, 3).id();
         let spell = scenario
-            .add_spell_to_hand_from_oracle(P0, "Fireball", false, FIREBALL_ORACLE)
+            .add_spell_to_hand(P0, "Fireball", true)
             .with_mana_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::X, ManaCostShard::Red],
                 generic: 0,
@@ -2840,10 +2838,34 @@ mod tests {
                 shards: Vec::new(),
                 generic: 1,
             })
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                        excess: None,
+                    },
+                )
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                        excess: None,
+                    },
+                )),
+            )
             .id();
         scenario.with_mana_pool(
             P0,
-            (0..8)
+            (0..pool)
                 .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()))
                 .collect(),
         );
@@ -2861,11 +2883,18 @@ mod tests {
         .expect("Fireball announcement must reach ChooseX");
         engine::game::engine::apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
             .expect("Fireball X announcement must reach target selection");
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(first_target)),
+            },
+        )
+        .expect("first Fireball target must leave the final target slot pending");
         assert!(matches!(
             state.waiting_for,
             WaitingFor::TargetSelection { .. }
         ));
-        state
+        (state, TargetRef::Object(final_target))
     }
 
     /// The contract is only useful if every member can cross the public
@@ -3047,35 +3076,70 @@ mod tests {
     }
 
     #[test]
-    fn public_fireball_x_target_and_payment_proposals_never_reject() {
+    fn public_fireball_final_target_filters_unpayable_surcharge_and_keeps_payable_sibling() {
         clear_game_state();
-        GAME_STATE.with(|cell| cell.set(Some(fireball_target_selection_state())));
-
-        for step in 0..12 {
-            let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
-                get_ai_action_proposal("Medium", P0.0)
-                    .expect("public issuer must answer Fireball continuation"),
-            )
-            .expect("proposal must serialize");
-            let action: GameAction = serde_json::from_value(proposal["action"].clone())
-                .expect("proposal action must deserialize");
-            if step == 0 {
-                assert!(
-                    matches!(action, GameAction::ChooseTarget { .. }),
-                    "the real X route must issue a public target proposal first, got {action:?}"
+        // {X}{R} with X=3 costs four mana for one target. The final second
+        // target adds the pinned Fireball/Strive-shaped {1} surcharge, so this
+        // exact reducer transition is rejected from a four-mana pool.
+        let (doomed_state, doomed_target) = fireball_final_target_state(4);
+        let doomed_action = GameAction::ChooseTarget {
+            target: Some(doomed_target.clone()),
+        };
+        let mut direct_doomed_state = doomed_state.clone();
+        let error =
+            engine::game::engine::apply_as_current(&mut direct_doomed_state, doomed_action.clone())
+                .expect_err(
+                    "reach guard: the final target must hit the unpayable payment boundary",
                 );
-            }
-            submit_public_proposal(&proposal);
+        assert!(
+            error.to_string().contains("Cannot pay mana cost"),
+            "expected the production payment rejection, got {error}"
+        );
+        let doomed_contract = AiDecisionContract::issue(&doomed_state, P0);
+        assert!(
+            !doomed_contract.contains_action(&doomed_state, &doomed_action),
+            "the unpayable final target must not enter the issued contract"
+        );
+        assert!(doomed_contract.contains_action(&doomed_state, &GameAction::CancelCast));
+        assert!(
+            !engine::ai_support::legal_actions(&doomed_state).contains(&doomed_action),
+            "public legal actions must share the contract's filtered target domain"
+        );
+        GAME_STATE.with(|cell| cell.set(Some(doomed_state)));
+        let doomed_proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", P0.0)
+                .expect("public issuer must expose the issued cancellation"),
+        )
+        .expect("proposal must serialize");
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(doomed_proposal["action"].clone()),
+            Ok(GameAction::CancelCast)
+        ));
+        submit_public_proposal(&doomed_proposal);
+        clear_game_state();
 
-            let done = with_state(|state| matches!(state.waiting_for, WaitingFor::Priority { .. }))
-                .expect("successful public proposal must retain state");
-            if done {
-                clear_game_state();
-                return;
-            }
-        }
-
-        panic!("Fireball public continuation did not reach payment/priority within 12 proposals");
+        let (payable_state, payable_target) = fireball_final_target_state(5);
+        let payable_action = GameAction::ChooseTarget {
+            target: Some(payable_target),
+        };
+        let payable_contract = AiDecisionContract::issue(&payable_state, P0);
+        assert!(
+            payable_contract.contains_action(&payable_state, &payable_action),
+            "the same final target must remain issued once its target-dependent cost is payable"
+        );
+        assert!(engine::ai_support::legal_actions(&payable_state).contains(&payable_action));
+        GAME_STATE.with(|cell| cell.set(Some(payable_state)));
+        let payable_proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", P0.0)
+                .expect("public issuer must retain the payable target"),
+        )
+        .expect("proposal must serialize");
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(payable_proposal["action"].clone()),
+            Ok(GameAction::ChooseTarget { target: Some(_) })
+        ));
+        submit_public_proposal(&payable_proposal);
+        clear_game_state();
     }
 
     #[test]
