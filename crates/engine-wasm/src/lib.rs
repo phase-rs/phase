@@ -125,10 +125,10 @@ fn format_diagnostic_value(value: &serde_json::Value) -> String {
     }
 }
 
-fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
+fn decode_restored_game_state(json_str: &str) -> Result<GameState, String> {
     serde_json::from_str::<PersistedGameState>(json_str)
         .map(PersistedGameState::into_game_state)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {e}")))
+        .map_err(|error| format!("Failed to deserialize GameState: {error}"))
 }
 
 /// Bind the engine's interaction authority for the one game this module hosts.
@@ -1796,20 +1796,19 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
     })?
 }
 
-fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), JsValue> {
+fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), String> {
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref().ok_or_else(|| {
-            JsValue::from_str(
-                "Cannot restore game state: card database is not loaded. Call load_card_database first.",
-            )
+            "Cannot restore game state: card database is not loaded. Call load_card_database first."
+                .to_string()
         })?;
         rehydrate_game_from_card_db(state, db);
         Ok(())
     })
 }
 
-fn decode_and_rehydrate_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
+fn decode_and_rehydrate_restored_game_state(json_str: &str) -> Result<GameState, String> {
     let mut state = decode_restored_game_state(json_str)?;
     rehydrate_restored_state_from_card_db(&mut state)?;
     Ok(state)
@@ -1839,7 +1838,8 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
             "restore_game_state refused: undo is disabled in multiplayer sessions",
         ));
     }
-    let mut state = decode_and_rehydrate_restored_game_state(json_str)?;
+    let mut state = decode_and_rehydrate_restored_game_state(json_str)
+        .map_err(|error| JsValue::from_str(&error))?;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
     // come NEXT rather than replaying from origin. The engine owns this logic
@@ -1899,7 +1899,8 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
 
-    let mut state = decode_and_rehydrate_restored_game_state(json_str)?;
+    let mut state = decode_and_rehydrate_restored_game_state(json_str)
+        .map_err(|error| JsValue::from_str(&error))?;
 
     // Deliberately re-roll a fresh seed on multiplayer host resume so continued
     // play diverges from any pre-save sequence (mirrors server-core). This is a
@@ -1939,9 +1940,7 @@ mod restored_card_db_requirements_tests {
 
         let error = decode_and_rehydrate_restored_game_state(&json)
             .expect_err("restore must require CARD_DB");
-        assert!(error
-            .as_string()
-            .is_some_and(|message| message.contains("card database")));
+        assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
     }

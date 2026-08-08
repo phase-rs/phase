@@ -106,17 +106,23 @@ pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) ->
     let WaitingFor::TargetSelection {
         player,
         pending_cast,
+        target_slots,
+        selection,
         ..
     } = &state.waiting_for
     else {
         return false;
     };
 
-    !crate::game::casting::pending_mana_obligation_is_stable_before_targets(
-        state,
-        *player,
-        pending_cast,
-    )
+    // Only the final target can lock a target-dependent cost. Earlier
+    // selections are valid reducer continuations regardless of whether the
+    // eventual cost is payable.
+    selection.current_slot.checked_add(1) == Some(target_slots.len())
+        && !crate::game::casting::pending_mana_obligation_is_stable_before_targets(
+            state,
+            *player,
+            pending_cast,
+        )
 }
 
 fn candidate_action_matches(issued: &GameAction, submitted: &GameAction) -> bool {
