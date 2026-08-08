@@ -166,7 +166,7 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
         .iter()
         .position(|ability| {
             matches!(
-                ability.effect,
+                ability.effect.as_ref(),
                 Effect::PutCounter {
                     counter_type: CounterType::Minus1Minus1,
                     ..
