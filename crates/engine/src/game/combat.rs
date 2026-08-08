@@ -1291,11 +1291,11 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
 /// `block_restriction_statics_against` but without re-walking the battlefield.
 /// Yields `(&StaticDefinition, ObjectId)` — the source id re-resolves the
 /// controller for `FilterContext`, so no `GameObject` field beyond `.id` is read.
-fn block_restriction_statics_against_from_precomputed<'a>(
-    state: &'a GameState,
+fn block_restriction_statics_against_from_precomputed(
+    state: &GameState,
     attacker_id: ObjectId,
-    precomputed: &'a [(ObjectId, StaticDefinition)],
-) -> impl Iterator<Item = (&'a StaticDefinition, ObjectId)> + 'a {
+    precomputed: &[(ObjectId, StaticDefinition)],
+) -> impl Iterator<Item = (&StaticDefinition, ObjectId)> + '_ {
     precomputed.iter().filter_map(move |(src_id, def)| {
         let src = state.objects.get(src_id)?;
         // CR 604.1: a static with no `affected` filter is implicitly about its
