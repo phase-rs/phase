@@ -3243,12 +3243,8 @@ mod tests {
         state.remember_card_identities([PlayerId(0)], &[library, hand]);
         crate::game::zones::reorder_within_library(&mut state, PlayerId(1), &[library], None);
 
-        assert!(state
-            .product_knowledge_state
-            .facts
-            .iter()
-            .all(|fact| fact.zone != Zone::Library));
-        assert!(state.product_knowledge_state.library_epochs.is_empty());
+        assert!(!state.viewer_knows_card_identity(PlayerId(0), library));
+        assert!(state.viewer_knows_card_identity(PlayerId(0), hand));
 
         let viewer = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(viewer.objects[&library].name, HIDDEN_CARD_NAME);
