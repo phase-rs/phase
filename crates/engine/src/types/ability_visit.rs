@@ -200,13 +200,30 @@ where
 /// they are structurally invisible to any effect-shaped visitor. This is a
 /// type-level gap, not a missing match arm.
 ///
-/// Yields every `AbilityCost` in the same own-resolution tree the effect walk
-/// covers: the node's `cost` (CR 602.1a — the activation cost, at the root),
+/// Yields every `AbilityCost` on the CHAIN-LINK axis of the own-resolution
+/// tree: the node's `cost` (CR 602.1a — the activation cost, at the root),
 /// the node's `unless_pay.cost` (CR 118.12a -> CR 118.12 — a cost paid when the
 /// ability RESOLVES, therefore reached under CR 608.2c as part of "its effect"),
 /// and every `sub_ability` / `else_ability` / `mode_abilities` link, recursing
 /// through the SAME `scope_prunes_nested_ability` authority so the CR 603.12
 /// reflexive boundary holds identically on both axes.
+///
+/// **KNOWN GAP — inline branch carriers are NOT descended on the cost axis.**
+/// `visit_effect_scoped` descends nested `AbilityDefinition`s under
+/// `Vote.per_choice_effect` / `VoteSubject.outcome_template`,
+/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoin` / `FlipCoins`,
+/// `FlipCoinUntilLose`, `RollDie.results`, and `ChooseOneOf.branches` (all via
+/// `visit_nested_ability_def_scoped`); this walk does not. A cost sitting on one
+/// of those nested defs — e.g. `ChooseOneOf { branches: [AbilityDefinition {
+/// cost: AbilityCost::Mill { .. }, .. }] }` — is therefore invisible here, which
+/// would leave CR 605.1a's cost criterion unapplied to it. The same is true of
+/// `Effect::PayCost`, whose cost is reached only by the one-node delegation in
+/// `Effect::moves_card_to_or_from_library`'s `PayCost` arm. **Unreachable
+/// today:** `data/card-data.json` carries zero costs of any type on an
+/// effect-payload-nested `AbilityDefinition`. Closing it means driving both
+/// walks from one shared carrier→nested-def list; that widens cost coverage for
+/// every existing `IncludeRegisteredLater` caller too, so it needs its own
+/// census rather than riding along here.
 ///
 /// Only TOP-LEVEL cost nodes are yielded; composition (`Composite`, `OneOf`,
 /// `PerCounter`) is the consuming predicate's own recursion to do. A second
@@ -563,8 +580,11 @@ where
         // (Words of Worship/Wilding). Walk it so any conjure name it carries is
         // surfaced (GainLife/Token carry none today, but it is a nested carrier).
         //
-        // BOUNDARY CARRIER (CR 603.3 primary / CR 614.1 secondary): this
-        // registers a replacement that applies to a LATER event. It is therefore
+        // BOUNDARY CARRIER (CR 614.1 primary / CR 614.15 secondary): this
+        // registers a replacement that applies to a LATER event. CR 614.1:
+        // replacement effects "watch for a particular event that would happen"
+        // and "aren't locked in ahead of time" — they never trigger and never
+        // use the stack, so CR 603.3 is NOT the authority here. It is therefore
         // NOT a self-replacement effect (CR 614.15, which scopes those to an
         // effect of a resolving spell or ability replacing "that spell or
         // ability's own effect(s)"), so CR 605.1a's closing carve-out does not
@@ -579,7 +599,7 @@ where
         // surfaced (ChaosEnsues carries none today, but it is a nested carrier).
         //
         // BOUNDARY CARRIER — same reason as `CreateDrawReplacement` above:
-        // CR 603.3 primary, CR 614.1 secondary, not a CR 614.15 self-replacement.
+        // CR 614.1 primary, not a CR 614.15 self-replacement.
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             if scope == ResolutionScope::IncludeRegisteredLater {
                 visit_effect_scoped(replacement_effect, scope, visit)?
@@ -705,7 +725,7 @@ where
         }
         // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
         //
-        // BOUNDARY CARRIER (CR 603.3 primary / CR 614.1 secondary): registers a
+        // BOUNDARY CARRIER (CR 614.1 primary / CR 614.15 secondary): registers a
         // replacement that applies to a later event AND to another object, so it
         // is not a CR 614.15 self-replacement effect of this ability and falls
         // outside CR 605.1a's carve-out.

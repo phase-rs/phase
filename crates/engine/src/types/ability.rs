@@ -9280,7 +9280,8 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::PayEnergy { .. }
-            // CR 702.179f: speed is a player designation, not a card.
+            // CR 702.179b: speed is a numeric value a rule or effect sets on a
+            // PLAYER ("players do not have speed until..."), never a card.
             | AbilityCost::PaySpeed { .. }
             // CR 119.4: paying life moves no card.
             | AbilityCost::PayLife { .. }
@@ -9322,7 +9323,8 @@ impl AbilityCost {
             // CR 702.49a: ninjutsu returns an unblocked attacker to its owner's
             // hand and puts the ninja onto the battlefield from hand.
             | AbilityCost::NinjutsuFamily { .. }
-            // CR 118.9: a borrowed keyword mana cost is still a mana cost.
+            // CR 118.9: a keyword ALTERNATIVE cost is paid "rather than paying
+            // the spell's mana cost"; either way no card changes zones.
             | AbilityCost::KeywordCostOfCastSpell { .. }
             // The parser could not classify the cost fragment. Asserting `true`
             // would strip mana-ability status on a guess; `false` is the honest
@@ -15779,7 +15781,9 @@ impl Effect {
             // CR 728.1: a player with rad counters "mills a number of cards equal
             // to the number of rad counters they have".
             | Effect::ProcessRadCounters
-            // CR 701.13a: exiles from the top of a player's library.
+            // The variant's own semantics: exiles from the TOP OF A LIBRARY. No
+            // CR is cited because CR 701.13a ("move it to the exile zone from
+            // wherever it is") names no source zone — cf. the `ExileTop` arm.
             | Effect::ExileFromTopUntil { .. }
             // Reveal-until. TWO clauses, TWO authorities — do not collapse them.
             // CR 701.20a is the authority for the REVEAL LOOP ONLY; per CR 701.20b
@@ -15792,7 +15796,11 @@ impl Effect {
             // CR 702.85a: cascade exiles from the top of your library, then
             // bottoms the cards not cast.
             | Effect::Cascade
-            // CR 702.60a: ripple reveals the top N and "put the rest on the bottom".
+            // CR 702.60a + CR 601.2a: ripple may CAST revealed cards, moving them
+            // library -> stack. It is the CASTING leg that carries this `true` —
+            // the reveal (CR 701.20b) and the bottoming (same library, cf. the
+            // `Scry` arm) are both non-moves on their own, so do not "correct"
+            // this to `false` by reading only those two clauses.
             | Effect::Ripple { .. }
             // Destination is a library position.
             | Effect::PutAtLibraryPosition { .. }
@@ -15810,7 +15818,9 @@ impl Effect {
             | Effect::Seek { .. } => true,
 
             // `Effect::Manifest` is TRUE because the ENGINE's manifest is always
-            // top-of-library (all 8 shipping cards; Ghastly Conscription's
+            // top-of-library (all 24 `"type":"Manifest"` nodes in
+            // `data/card-data.json`, each "manifest the top card of your
+            // library"; Ghastly Conscription's
             // manifest-from-a-graveyard-pile routes to `ChangeZoneAll` instead),
             // NOT because CR 701.40a says so — CR 701.40a names no source zone
             // ("Put that card onto the battlefield face down"), and CR 701.40e
@@ -16033,10 +16043,12 @@ impl Effect {
             | Effect::RevealHand { .. }
             | Effect::RevealFromHand { .. } => false,
 
-            // CR 400.11: "Outside the game is not a zone" — so a sideboard/wish
-            // search moves nothing to or from a library. CR 701.23j covers the
-            // outside-the-game search itself.
-            Effect::SearchOutsideGame { .. } => false,
+            // CR 400.11: "Outside the game is not a zone" — so the ORIGIN half
+            // never touches a library. CR 701.23j covers the outside-the-game
+            // search itself. The destination is still read, because a
+            // `Zone::Library` destination WOULD be a move *to* a library; every
+            // one of the 11 shipping nodes is `Hand` today.
+            Effect::SearchOutsideGame { destination, .. } => *destination == Zone::Library,
 
             // CR 901.4: "All plane and phenomenon cards remain in the COMMAND ZONE
             // throughout the game, both while they're part of a planar deck and
@@ -16152,7 +16164,7 @@ impl Effect {
             // gated by `ResolutionScope` in `ability_visit`, not here.
             //
             // CR 603.3: `Effect::Mana`'s `grants` carry a `TriggerOnSpend`
-            // reflexive rider that fires when the mana is LATER spent — a separate
+            // rider that fires when the mana is LATER spent — a separate
             // triggered ability (Gilanra). `AddKeywordUntilEndOfTurn` is a CR 611.2
             // continuous effect on another object; `CantBeCountered` is a fieldless
             // leaf. Deliberately NOT descended — see `ability_visit`'s leaf arm.
@@ -16160,7 +16172,7 @@ impl Effect {
             // CR 603.7a: a delayed triggered ability, created now, resolving later
             // as its own ability (CR 603.3).
             | Effect::CreateDelayedTrigger { .. }
-            // CR 603.3 primary / CR 614.1 secondary: these register a replacement
+            // CR 614.1 primary / CR 614.15 secondary: these register a replacement
             // that applies to a later event or to another object, so none is a
             // self-replacement effect (CR 614.15) and CR 605.1a's carve-out does
             // not reach them.
@@ -16199,7 +16211,8 @@ impl Effect {
             // no card changes zones — that point carries no CR, because CR 707.2
             // addresses neither pools nor libraries.
             Effect::CreateTokenCopyFromPool { .. } => false,
-            // CR 701.42: meld moves the two cards from exile to the battlefield.
+            // CR 701.42a: meld puts the pair onto the battlefield; no library
+            // endpoint at either end.
             Effect::Meld { .. } => false,
             // CR 702.55a: haunt exiles from a graveyard.
             Effect::ExileHaunting { .. } => false,

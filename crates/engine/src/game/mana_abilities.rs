@@ -52,7 +52,7 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 /// `card_value::mana_role` -> mulligan `keep_tier`, for a reason unrelated to
 /// manabase development.
 ///
-/// CR 605.3: Mana abilities produce mana and resolve immediately without using
+/// CR 605.3b: Mana abilities produce mana and resolve immediately without using
 /// the stack.
 /// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
 /// `ManaTargetRole` naming its recipient and/or count-source player targets;
@@ -5320,10 +5320,10 @@ mod tests {
 
     /// V9c — the boundary covers the replacement family, the emblem, and the
     /// token's granted abilities. Each REGISTERS something rather than moving a
-    /// card during this resolution: CR 603.3 primary (a replacement applying to
+    /// card during this resolution: CR 614.1 primary (a replacement applying to
     /// a later event or to another object is NOT a self-replacement effect under
-    /// CR 614.15, so CR 605.1a's carve-out does not reach it; CR 614.1
-    /// secondary), CR 114.1 for the emblem, CR 111.1 for the token, CR 611.2 for
+    /// CR 614.15, so CR 605.1a's carve-out does not reach it), CR 114.1 for the
+    /// emblem, CR 111.1 for the token, CR 611.2 for
     /// a granted continuous effect.
     #[test]
     fn replacement_emblem_and_token_payloads_are_not_this_abilitys_effect() {

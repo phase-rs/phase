@@ -101,9 +101,12 @@ fn chromatic_sphere_produces_mana_and_draws_through_the_stack() {
 }
 
 /// **V14b** — a reclassified ability drops out of the instant-speed auto-tap
-/// pool, because CR 605.3a only lets a player activate a **mana ability** while
-/// casting or paying. An affordance a player cannot legally use would be a UI
-/// lie, so the payment picker must stop offering it.
+/// pool, because CR 605.3a grants a player permission to activate a **mana
+/// ability** mid-cast or mid-payment. That permission is an exception; once an
+/// ability stops being a mana ability the exception no longer covers it and the
+/// general priority rule (CR 117.1b) governs again. An affordance a player
+/// cannot legally use would be a UI lie, so the payment picker must stop
+/// offering it.
 ///
 /// The paired reach-guard is a Llanowar Elves on the same battlefield: it is
 /// still a mana ability, so it must still be offered. Without that pair the
@@ -145,8 +148,9 @@ fn chromatic_sphere_is_not_offered_as_an_instant_speed_mana_source() {
     );
     assert!(
         !mentions(sphere),
-        "Chromatic Sphere is no longer a mana ability (CR 605.1a) so CR 605.3a \
-         forbids activating it during a payment window (actions: {actions:?})"
+        "Chromatic Sphere is no longer a mana ability (CR 605.1a), so CR 605.3a's \
+         permission no longer covers it and the general priority rule governs — \
+         it must not be offered in a payment window (actions: {actions:?})"
     );
 }
 
