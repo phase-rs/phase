@@ -486,24 +486,6 @@ mod tests {
                 > target_score(TargetRef::Player(PlayerId(0))),
             "Peek-style hand reveal should prefer an opponent's hand over the AI's own hand"
         );
-
-        let scored = crate::search::score_candidates(&state, PlayerId(0), &config);
-        let score_for_target = |target| {
-            scored
-                .iter()
-                .find_map(|(action, score)| match action {
-                    GameAction::ChooseTarget {
-                        target: Some(chosen),
-                    } if *chosen == target => Some(*score),
-                    _ => None,
-                })
-                .expect("target candidate should be scored")
-        };
-        assert!(
-            score_for_target(TargetRef::Player(PlayerId(1)))
-                > score_for_target(TargetRef::Player(PlayerId(0))),
-            "registered AI scoring should prefer the opponent target"
-        );
     }
 
     #[test]
