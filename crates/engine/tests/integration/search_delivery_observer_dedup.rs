@@ -695,33 +695,32 @@ fn dispatched_delivery_records_carry_distinct_occurrence_indices() {
     );
     assert_observers_were_dispatched(&runner);
 
+    // CR 603.3b requires the controller to order the two simultaneous landfall
+    // triggers before either is put on the stack. This is not a priority pass
+    // and does not resolve either trigger, so their event contexts remain
+    // observable below.
+    if let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() {
+        let order = (0..triggers.len()).collect();
+        runner
+            .act(GameAction::OrderTriggers { order })
+            .expect("ordering the simultaneous landfall triggers must succeed");
+    }
+
     // Every `ZoneChanged` carried by the dispatched trigger stack entries,
-    // paired with the occurrence index its record was stamped with. A trigger
-    // for simultaneous entries stores its complete event batch in the side
-    // table keyed by stack-entry id; the stack payload itself holds only its
-    // representative event.
-    let state = runner.state();
-    let dispatched: Vec<(ObjectId, usize)> = state
+    // paired with the occurrence index its record was stamped with.
+    let dispatched: Vec<(ObjectId, usize)> = runner
+        .state()
         .stack
         .iter()
-        .flat_map(|entry| {
-            let trigger_events = state
-                .stack_trigger_event_batches
-                .get(&entry.id)
-                .map(Vec::as_slice)
-                .unwrap_or_else(|| match &entry.kind {
-                    engine::types::game_state::StackEntryKind::TriggeredAbility {
-                        trigger_event,
-                        ..
-                    } => trigger_event.as_slice(),
-                    _ => &[],
-                });
-            trigger_events.iter().filter_map(|event| match event {
-                engine::types::events::GameEvent::ZoneChanged {
-                    object_id, record, ..
-                } => Some((*object_id, record.turn_zone_change_index)),
-                _ => None,
-            })
+        .filter_map(|entry| match &entry.kind {
+            engine::types::game_state::StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(engine::types::events::GameEvent::ZoneChanged {
+                        object_id, record, ..
+                    }),
+                ..
+            } => Some((*object_id, record.turn_zone_change_index)),
+            _ => None,
         })
         .collect();
 
