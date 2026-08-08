@@ -10925,7 +10925,6 @@ fn undaunted_reduces_generic_by_living_opponent_count() {
         &mut mana_cost,
         None,
         None,
-        None,
     );
     assert_eq!(
         mana_cost,
@@ -10949,7 +10948,6 @@ fn undaunted_no_op_without_keyword() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
-        None,
         None,
         None,
     );
@@ -11008,7 +11006,6 @@ fn play_from_exile_cast_cost_raise_increases_generic() {
         &mut mana_cost,
         None,
         None,
-        None,
     );
     assert_eq!(
         mana_cost,
@@ -11048,7 +11045,6 @@ fn gobakhan_play_from_exile_cost_raise_adds_two_generic() {
         &mut mana_cost,
         None,
         None,
-        None,
     );
     assert_eq!(
         mana_cost,
@@ -11082,7 +11078,6 @@ fn play_from_exile_cast_cost_raise_only_applies_to_grantee() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
-        None,
         None,
         None,
     );
@@ -11158,7 +11153,6 @@ fn undaunted_multiple_instances_scale_by_living_opponents() {
         &mut mana_cost,
         None,
         None,
-        None,
     );
     assert_eq!(
         mana_cost,
@@ -11198,7 +11192,6 @@ fn undaunted_does_not_count_eliminated_opponents() {
         PlayerId(0),
         obj_id,
         &mut mana_cost,
-        None,
         None,
         None,
     );
