@@ -308,7 +308,7 @@ describe("ActionButton", () => {
     expect(vi.mocked(dispatchAction)).not.toHaveBeenCalled();
     expect(screen.getByText("No shared target — switch to Distribute to aim each attacker.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Distribute" }));
-    expect(screen.getByRole("button", { name: "Declare 2 Attackers" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Assign 2 more" })).toBeDisabled();
   });
 
   it("does not client-gate Block with None on an unassigned must-block creature", () => {
