@@ -156,7 +156,7 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
         "Earthbend must animate Khalni Garden"
     );
     assert_eq!(
-        animated_garden.counters.get(&CounterType::P1P1),
+        animated_garden.counters.get(&CounterType::Plus1Plus1),
         Some(&1),
         "Earthbend must put its +1/+1 counter on Khalni Garden"
     );
