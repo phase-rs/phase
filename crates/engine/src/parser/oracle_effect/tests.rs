@@ -35699,6 +35699,234 @@ fn exile_anaphor_with_time_counters_lifts_to_enter_with_counters() {
     );
 }
 
+/// CR 122.2 + CR 122.1 + CR 702.62a: "Exile target nonland card from your
+/// graveyard with two time counters on it." (Doom's Time Platform). A card in a
+/// graveyard bears no counters (CR 122.2 — counters cease to exist on a zone
+/// change; CR 400.7 makes the moved object a new object), so "with two time
+/// counters on it" is the ENTER-WITH-COUNTERS rider the object receives as it
+/// enters Exile (the suspend template of CR 702.62a "…exile it with N time
+/// counters on it"), NOT a target filter demanding the graveyard card already
+/// hold >=2 time counters (a vacuous, unsatisfiable reading). This is the
+/// descriptive-target sibling of the anaphor test above.
+///
+/// Revert-guard: pre-fix this clause parsed a `FilterProp::Counters { GE, 2 }`
+/// on the target and an EMPTY `enter_with_counters` — both assertions below
+/// flip if the fix is reverted.
+#[test]
+fn exile_graveyard_descriptive_target_with_counters_lifts_to_enter_with_counters() {
+    let def = parse_effect_chain(
+        "Exile target nonland card from your graveyard with two time counters on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Graveyard),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from graveyard, got: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        enter_with_counters.as_slice(),
+        &[(CounterType::Time, QuantityExpr::Fixed { value: 2 })],
+        "expected (Time, 2) enter_with_counters, got: {enter_with_counters:?}"
+    );
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Graveyard
+            }
+        )),
+        "target must retain its graveyard origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
+        !typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Counters { .. })),
+        "the counter clause must NOT remain a vacuous target filter: {:?}",
+        typed.properties
+    );
+}
+
+/// CR 122.2 + CR 702.62a: the counterless-origin lift is class-level, not a
+/// Doom's Time Platform special case — a LIBRARY origin ("exile target card
+/// from your library with a +1/+1 counter on it") is equally counterless, so
+/// the clause is an enter-with-counters rider rather than a filter. Guards the
+/// whole "exile <descriptive target> from your {graveyard,hand,library} with N
+/// <type> counter(s) on it" class.
+#[test]
+fn exile_library_descriptive_target_with_counters_lifts_to_enter_with_counters() {
+    let def = parse_effect_chain(
+        "Exile target card from your library with a +1/+1 counter on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Library),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from library, got: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        enter_with_counters.as_slice(),
+        &[(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+        "expected (+1/+1, 1) enter_with_counters, got: {enter_with_counters:?}"
+    );
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Library
+            }
+        )),
+        "target must retain its library origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
+        !typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Counters { .. })),
+        "counter clause must not remain a target filter: {:?}",
+        typed.properties
+    );
+}
+
+/// The same trailing counter rider on a card selected from HAND belongs to the
+/// destination object. The target must nevertheless retain its hand constraint,
+/// so this covers the hand arm of the counterless-origin split independently of
+/// the graveyard and library cases.
+#[test]
+fn exile_hand_descriptive_target_with_counters_lifts_to_enter_with_counters() {
+    let def = parse_effect_chain(
+        "Exile target creature card from your hand with a time counter on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Hand),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from hand, got: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        enter_with_counters.as_slice(),
+        &[(CounterType::Time, QuantityExpr::Fixed { value: 1 })],
+        "expected (Time, 1) enter_with_counters, got: {enter_with_counters:?}"
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+        "target must retain its hand origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
+        !typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Counters { .. })),
+        "counter rider must not remain a target filter: {:?}",
+        typed.properties
+    );
+}
+
+/// A non-counter `with …` phrase on a hand target is not an enter-with-
+/// counters rider. This reach-guard ensures the counter parser's failure
+/// preserves the target's hand-origin constraint.
+#[test]
+fn exile_hand_target_with_non_counter_clause_preserves_target_filter() {
+    let def = parse_effect_chain(
+        "Exile target creature card from your hand with flying.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Hand),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from hand, got: {:?}",
+            def.effect
+        );
+    };
+    assert!(
+        enter_with_counters.is_empty(),
+        "a non-counter clause must not create enter_with_counters: {enter_with_counters:?}"
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+        "target must retain its hand origin constraint: {:?}",
+        typed.properties
+    );
+}
+
+/// Negative reach-guard for the counterless-origin lift: a BATTLEFIELD target
+/// ("exile target creature with two +1/+1 counters on it") CAN legitimately
+/// bear counters (CR 122.1), so the origin gate must NOT fire — the clause stays
+/// a `FilterProp::Counters` target filter and `enter_with_counters` stays empty.
+/// Pairs with the positive tests to prove the split is origin-scoped, not a
+/// blanket rewrite of every "exile … with N counters" clause.
+#[test]
+fn exile_battlefield_target_with_counters_stays_a_target_filter() {
+    let def = parse_effect_chain(
+        "Exile target creature with two +1/+1 counters on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: None,
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected ChangeZone->Exile(Typed), got: {:?}", def.effect);
+    };
+    assert!(
+        enter_with_counters.is_empty(),
+        "a battlefield target's counter clause must NOT be lifted: {enter_with_counters:?}"
+    );
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Counters {
+                comparator: Comparator::GE,
+                ..
+            }
+        )),
+        "battlefield counter clause must remain a target filter: {:?}",
+        typed.properties
+    );
+}
+
 /// CR 701.20a: Passive form without inline exile — Blessed Reincarnation pattern.
 /// "That player reveals cards … until a creature card is revealed."
 #[test]
