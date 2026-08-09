@@ -26,7 +26,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
     SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -4816,37 +4816,9 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         children.push(build_ability_item(mode_ability));
     }
 
-    // CR 705.2 (#5601): coin-flip branch effects are embedded `AbilityDefinition`s
-    // (not `sub_ability` links), so — like the sub-ability / else / modal chains
-    // above — recurse into them here. Without this the win/lose branch parse
-    // signatures are swallowed by the bare `("win"/"lose", "yes")` presence
-    // markers in `effect_details`, making a real parser change inside a branch
-    // (e.g. Desperate Gambit's lose-branch `damage_source_filter` flipping
-    // `SelfRef` → `ChosenDamageSource`) invisible to the coverage parse-diff.
-    // Same swallowed-structure class as #5492/#5495/#5501.
-    match &*def.effect {
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win) = win_effect {
-                children.push(build_ability_item(win));
-            }
-            if let Some(lose) = lose_effect {
-                children.push(build_ability_item(lose));
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            children.push(build_ability_item(win_effect));
-        }
-        _ => {}
-    }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        children.push(build_ability_item(payload));
+    });
 
     ParsedItem {
         category: ParseCategory::Ability,
@@ -6257,6 +6229,115 @@ fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousM
     }
 }
 
+/// Direct `Effect` fields that carry executable ability definitions.
+///
+/// These payloads are neither ordinary ability chains nor grants inside a
+/// `GenericEffect`. Consumers that need to inspect an ability tree use this
+/// enumeration in addition to their existing traversal for those separate
+/// structures.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DirectEffectPayloadEdge {
+    VotePerChoice,
+    VoteObjectOutcome,
+    SeparateIntoPilesChosen,
+    SeparateIntoPilesUnchosen,
+    RevealFromHandOnDecline,
+    CreateDelayedTriggerEffect,
+    RollDieResult,
+    FlipCoinWin,
+    FlipCoinLose,
+    FlipCoinsWin,
+    FlipCoinsLose,
+    FlipCoinUntilLoseWin,
+    ChooseOneOfBranch,
+}
+
+/// Visits the one-level executable ability payloads embedded directly in an effect.
+fn visit_direct_effect_ability_payloads<'a>(
+    effect: &'a Effect,
+    mut visit: impl FnMut(DirectEffectPayloadEdge, &'a AbilityDefinition),
+) {
+    match effect {
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for effect in per_choice_effect {
+                visit(DirectEffectPayloadEdge::VotePerChoice, effect);
+            }
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                visit(DirectEffectPayloadEdge::VoteObjectOutcome, outcome_template);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            visit(
+                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
+                chosen_pile_effect,
+            );
+            if let Some(unchosen_pile_effect) = unchosen_pile_effect {
+                visit(
+                    DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
+                    unchosen_pile_effect,
+                );
+            }
+        }
+        Effect::RevealFromHand { on_decline, .. } => {
+            if let Some(on_decline) = on_decline {
+                visit(DirectEffectPayloadEdge::RevealFromHandOnDecline, on_decline);
+            }
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            visit(DirectEffectPayloadEdge::CreateDelayedTriggerEffect, effect);
+        }
+        Effect::RollDie { results, .. } => {
+            for result in results {
+                visit(DirectEffectPayloadEdge::RollDieResult, &result.effect);
+            }
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win_effect) = win_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinWin, win_effect);
+            }
+            if let Some(lose_effect) = lose_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinLose, lose_effect);
+            }
+        }
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win_effect) = win_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinsWin, win_effect);
+            }
+            if let Some(lose_effect) = lose_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinsLose, lose_effect);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            visit(DirectEffectPayloadEdge::FlipCoinUntilLoseWin, win_effect);
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                visit(DirectEffectPayloadEdge::ChooseOneOfBranch, branch);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Recursively visit modifications inside an ability's effect graph.
 /// Descends into `GenericEffect.static_abilities` (the typical carrier of
 /// continuous modifications emitted from animations), sub-abilities, and
@@ -6284,6 +6365,9 @@ fn visit_ability_modifications(
     for mode_ability in &def.mode_abilities {
         visit_ability_modifications(mode_ability, visit);
     }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        visit_ability_modifications(payload, visit);
+    });
 }
 
 /// Validate every `AddSubtype` modification on the face against the lexicon
@@ -6455,6 +6539,13 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
             .mode_abilities
             .iter()
             .any(ability_definition_has_unimplemented_parts)
+        || {
+            let mut has_unimplemented_parts = false;
+            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+                has_unimplemented_parts |= ability_definition_has_unimplemented_parts(payload);
+            });
+            has_unimplemented_parts
+        }
 }
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
@@ -6503,6 +6594,10 @@ fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<Stri
     for mode_ability in &def.mode_abilities {
         collect_ability_missing_parts(mode_ability, missing);
     }
+
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        collect_ability_missing_parts(payload, missing);
+    });
 }
 
 fn collect_additional_cost_missing_parts(
@@ -7111,6 +7206,13 @@ fn is_ability_supported(def: &AbilityDefinition) -> bool {
             return false;
         }
     }
+    let mut supported = true;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        supported &= is_ability_supported(payload);
+    });
+    if !supported {
+        return false;
+    }
     true
 }
 
@@ -7327,6 +7429,9 @@ fn extract_ability_features(
     for mode_ab in &def.mode_abilities {
         extract_ability_features(mode_ab, features);
     }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        extract_ability_features(payload, features);
+    });
 }
 
 /// Extract QuantityRef variants from within conditions.
@@ -7927,48 +8032,12 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
             return true;
         }
     }
-    // Compound effects that embed AbilityDefinitions
-    match &*def.effect {
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(ref w) = win_effect {
-                if ability_tree_any(w, pred) {
-                    return true;
-                }
-            }
-            if let Some(ref l) = lose_effect {
-                if ability_tree_any(l, pred) {
-                    return true;
-                }
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } if ability_tree_any(win_effect, pred) => {
-            return true;
-        }
-        Effect::RollDie { results, .. } => {
-            for branch in results {
-                if ability_tree_any(&branch.effect, pred) {
-                    return true;
-                }
-            }
-        }
-        Effect::ChooseOneOf { branches, .. }
-            if branches.iter().any(|branch| ability_tree_any(branch, pred)) =>
-        {
-            return true;
-        }
-        Effect::CreateDelayedTrigger { effect, .. } if ability_tree_any(effect, pred) => {
-            return true;
-        }
-        _ => {}
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        found |= ability_tree_any(payload, pred);
+    });
+    if found {
+        return true;
     }
     // ContinuousModification::GrantAbility inside GenericEffect
     if let Effect::GenericEffect {
@@ -8803,11 +8872,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         if let Some(else_ab) = &def.else_ability {
             push_ability_tree(else_ab, out);
         }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                push_ability_tree(branch, out);
-            }
-        }
+        visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+            push_ability_tree(payload, out);
+        });
     }
     for a in face.abilities.iter() {
         push_ability_tree(a, &mut elements);
@@ -11021,8 +11088,10 @@ mod tests {
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
-        AbilityKind, CounterTransferMode, Effect, PreventionAmount, PreventionScope,
-        ReplacementCondition, TargetFilter,
+        AbilityCondition, AbilityKind, ContinuousModification, ControllerRef, CounterTransferMode,
+        DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter, VoteTally,
+        VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -11935,6 +12004,374 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    fn delayed_trigger_payload(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    fn direct_effect_payload_matrix() -> Vec<AbilityDefinition> {
+        let payload = |name: &str| {
+            let mut payload = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, format!("unsupported {name}")),
+            );
+            payload.condition = Some(AbilityCondition::HasMaxSpeed);
+            Box::new(payload)
+        };
+
+        vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec!["choice one".into(), "choice two".into()],
+                    per_choice_effect: vec![
+                        payload("vote_per_choice_one"),
+                        payload("vote_per_choice_two"),
+                    ],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Named,
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec![],
+                    per_choice_effect: vec![],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Objects {
+                        candidate_filter: TargetFilter::Any,
+                        outcome_template: payload("vote_object_outcome"),
+                    },
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Any,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: payload("separate_chosen"),
+                    pile_source: PileSource::Battlefield,
+                    unchosen_pile_effect: Some(payload("separate_unchosen")),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Any,
+                    on_decline: Some(payload("reveal_decline")),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: payload("delayed_trigger"),
+                    uses_tracked_set: false,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 6,
+                    results: vec![
+                        DieResultBranch {
+                            min: 1,
+                            max: 1,
+                            effect: payload("roll_die_result_one"),
+                        },
+                        DieResultBranch {
+                            min: 2,
+                            max: 2,
+                            effect: payload("roll_die_result_two"),
+                        },
+                    ],
+                    modifier: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: Some(payload("flip_coin_win")),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(payload("flip_coin_lose")),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: Some(payload("flip_coins_win")),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: None,
+                    lose_effect: Some(payload("flip_coins_lose")),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoinUntilLose {
+                    win_effect: payload("flip_until_lose_win"),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        *payload("choose_one_branch_one"),
+                        *payload("choose_one_branch_two"),
+                    ],
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn direct_effect_payload_edges_reach_coverage_consumers() {
+        let mut all_edges = Vec::new();
+        for definition in direct_effect_payload_matrix() {
+            let mut visited = Vec::new();
+            visit_direct_effect_ability_payloads(&definition.effect, |actual_edge, payload| {
+                let Effect::Unimplemented { name, .. } = payload.effect.as_ref() else {
+                    panic!("payload matrix must contain an unimplemented leaf");
+                };
+                visited.push((actual_edge, name.clone()));
+            });
+            let expected_names: Vec<_> = visited.iter().map(|(_, name)| name.clone()).collect();
+            let projected = build_ability_item(&definition);
+            assert_eq!(
+                projected
+                    .children
+                    .iter()
+                    .map(|child| child.label.clone())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "the parse-details report must project every direct payload"
+            );
+            assert!(ability_definition_has_unimplemented_parts(&definition));
+            assert!(!is_ability_supported(&definition));
+            for (_, name) in &visited {
+                assert!(ability_tree_any(&definition, &|payload| {
+                    matches!(payload.effect.as_ref(), Effect::Unimplemented { name: payload_name, .. } if payload_name == name)
+                }));
+            }
+
+            let mut missing = Vec::new();
+            collect_ability_missing_parts(&definition, &mut missing);
+            let expected_gaps: Vec<_> = visited
+                .iter()
+                .map(|(_, name)| format!("Effect:{name}"))
+                .collect();
+            assert_eq!(missing, expected_gaps);
+
+            let mut face = make_face();
+            face.abilities.push(definition.clone());
+            assert_eq!(
+                card_face_gaps(&face),
+                expected_gaps,
+                "the card-face gap report must include every direct payload"
+            );
+            assert!(card_face_has_unimplemented_parts(&face));
+
+            let mut features = HashMap::new();
+            extract_ability_features(&definition, &mut features);
+            assert!(features.contains_key("condition:HasMaxSpeed"));
+            all_edges.extend(visited.into_iter().map(|(edge, _)| edge));
+        }
+        assert_eq!(
+            all_edges,
+            vec![
+                DirectEffectPayloadEdge::VotePerChoice,
+                DirectEffectPayloadEdge::VotePerChoice,
+                DirectEffectPayloadEdge::VoteObjectOutcome,
+                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
+                DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
+                DirectEffectPayloadEdge::RevealFromHandOnDecline,
+                DirectEffectPayloadEdge::CreateDelayedTriggerEffect,
+                DirectEffectPayloadEdge::RollDieResult,
+                DirectEffectPayloadEdge::RollDieResult,
+                DirectEffectPayloadEdge::FlipCoinWin,
+                DirectEffectPayloadEdge::FlipCoinLose,
+                DirectEffectPayloadEdge::FlipCoinsWin,
+                DirectEffectPayloadEdge::FlipCoinsLose,
+                DirectEffectPayloadEdge::FlipCoinUntilLoseWin,
+                DirectEffectPayloadEdge::ChooseOneOfBranch,
+                DirectEffectPayloadEdge::ChooseOneOfBranch,
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_effect_payload_controls_are_empty_or_supported() {
+        let empty = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut visited = Vec::new();
+        visit_direct_effect_ability_payloads(&empty.effect, |edge, _| visited.push(edge));
+        assert!(visited.is_empty());
+        assert!(build_ability_item(&empty).children.is_empty());
+        assert!(!ability_definition_has_unimplemented_parts(&empty));
+        assert!(is_ability_supported(&empty));
+
+        let supported = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )],
+            },
+        );
+        assert!(is_ability_supported(&supported));
+        assert!(!ability_definition_has_unimplemented_parts(&supported));
+        let mut missing = Vec::new();
+        collect_ability_missing_parts(&supported, &mut missing);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn direct_effect_payloads_reach_modification_visitors() {
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                            ContinuousModification::AddSubtype {
+                                subtype: "Wizard".into(),
+                            },
+                        ])],
+                        duration: None,
+                        target: None,
+                        end_cost: None,
+                    },
+                ))),
+            },
+        );
+        let mut subtypes = Vec::new();
+        visit_ability_modifications(&definition, &mut |modification| {
+            if let ContinuousModification::AddSubtype { subtype } = modification {
+                subtypes.push(subtype.clone());
+            }
+        });
+        assert_eq!(subtypes, vec!["Wizard"]);
+    }
+
+    #[test]
+    fn delayed_trigger_payload_projects_and_reports_unimplemented_parts() {
+        let unsupported = delayed_trigger_payload(Effect::unimplemented(
+            "delayed_payload",
+            "unsupported delayed effect",
+        ));
+        let projected = build_ability_item(&unsupported);
+        assert_eq!(
+            projected.children.len(),
+            1,
+            "a delayed trigger's executable payload must appear in its parse signature"
+        );
+        assert_eq!(projected.children[0].label, "delayed_payload");
+
+        let mut unsupported_face = make_face();
+        unsupported_face.abilities.push(unsupported);
+        assert!(
+            card_face_gaps(&unsupported_face)
+                .iter()
+                .any(|gap| gap == "Effect:delayed_payload"),
+            "an unimplemented delayed payload must be reported as a card-face gap"
+        );
+        assert!(
+            card_face_has_unimplemented_parts(&unsupported_face),
+            "an unimplemented delayed payload must make the card face unsupported"
+        );
+
+        let mut supported_face = make_face();
+        supported_face
+            .abilities
+            .push(delayed_trigger_payload(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }));
+        assert!(
+            card_face_gaps(&supported_face).is_empty(),
+            "a supported delayed payload must not create a card-face gap"
+        );
+        assert!(
+            !card_face_has_unimplemented_parts(&supported_face),
+            "a supported delayed payload must keep the card face supported"
+        );
+    }
+
+    #[test]
+    fn replacement_execute_projects_delayed_trigger_payload_support() {
+        let replacement_supported = |payload| {
+            let mut face = make_face();
+            face.replacements.push(
+                ReplacementDefinition::new(ReplacementEvent::Draw)
+                    .execute(delayed_trigger_payload(payload)),
+            );
+            build_parse_details_for_face(&face)
+                .into_iter()
+                .find(|item| item.category == ParseCategory::Replacement)
+                .expect("replacement must be projected")
+                .supported
+        };
+
+        assert!(
+            !replacement_supported(Effect::unimplemented(
+                "delayed_replacement_payload",
+                "unsupported replacement payload",
+            )),
+            "an unimplemented delayed payload must make replacement execution unsupported"
+        );
+        assert!(
+            replacement_supported(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+            "a supported delayed payload must keep replacement execution supported"
+        );
     }
 
     #[test]
