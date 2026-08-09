@@ -1790,7 +1790,7 @@ fn check_zero_defense(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5p (+ CR 310.9 for the battle half): the full "this permanent may not
+/// CR 704.5p (+ CR 310.10 for the battle half): the full "this permanent may not
 /// be attached to anything" state-based action, expressed as its two printed
 /// sentences.
 ///
