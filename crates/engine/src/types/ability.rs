@@ -10222,6 +10222,10 @@ pub enum ExcessRecipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageContextSnapshot {
     pub source_id: ObjectId,
+    /// CR 400.7: Exact source identity captured when the damage context was
+    /// created. A replacement pause must not rebind a later incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     pub controller: PlayerId,
     pub source_is_creature: bool,
     pub has_deathtouch: bool,
