@@ -4468,8 +4468,8 @@ pub(super) fn handle_resolution_choice(
                 events,
                 event_start,
                 &provisional_cleanup_priority,
-                false,
-                false,
+                false, // skip_trigger_scan
+                false, // skip_deferred_trigger_drain
             )?;
             public_state::sync_waiting_for(state, &settled);
 

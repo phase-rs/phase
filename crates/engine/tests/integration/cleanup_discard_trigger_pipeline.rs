@@ -340,7 +340,23 @@ fn cleanup_discard_orders_same_controller_triggers_before_advancing() {
     ));
     assert_eq!(runner.state().phase, engine::types::phase::Phase::Cleanup);
     assert!(runner.state().stack.is_empty());
-    assert_eq!(artillerists.len(), 2);
+
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("order simultaneous cleanup discard triggers");
+    for artillerist in artillerists {
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == artillerist)
+                .count(),
+            1,
+            "each Magmakin trigger must reach the stack after ordering"
+        );
+    }
+    assert_eq!(runner.state().phase, engine::types::phase::Phase::Cleanup);
 }
 
 #[test]
@@ -411,7 +427,10 @@ fn cleanup_discard_without_observers_advances_normally() {
 
 #[test]
 fn cleanup_discard_replacement_returns_immediate_choice_without_advance() {
-    let (mut runner, cards, _) = setup_cleanup_discard(8, 0, false);
+    // A discard observer makes this an actual early-return guard: it must not
+    // be scanned before the replacement choice completes the discard event.
+    let (mut runner, cards, artillerists) = setup_cleanup_discard(8, 1, false);
+    let artillerist = artillerists[0];
     let source = create_object(
         runner.state_mut(),
         CardId(9_001),
@@ -442,8 +461,23 @@ fn cleanup_discard_replacement_returns_immediate_choice_without_advance() {
         WaitingFor::ReplacementChoice { .. }
     ));
     assert_eq!(runner.state().phase, engine::types::phase::Phase::Cleanup);
+    assert_eq!(
+        runner.state().objects[&artillerist].zone,
+        Zone::Battlefield,
+        "reach guard: Magmakin must be present to observe the pending discard"
+    );
     assert!(
         runner.state().stack.is_empty(),
         "no observer scan runs before the replacement choice"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == artillerist)
+            .count(),
+        0,
+        "Magmakin must not be scanned until the replacement resolves"
     );
 }
