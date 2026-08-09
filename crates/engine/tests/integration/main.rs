@@ -1078,6 +1078,7 @@ mod detectives_phoenix_bestow_graveyard;
 mod dreadhorde_invasion_amass;
 mod dromokas_command_spell_prevention;
 mod duggan_private_detective_punch;
+mod dwarven_armorer_counter_choice;
 mod dynamic_x_cost_reduction;
 mod each_player_they_control_scope;
 mod edgar_markov_eminence_command_zone;

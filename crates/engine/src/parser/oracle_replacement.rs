@@ -15688,6 +15688,10 @@ mod tests {
             "Denry Klin enters with your choice of a +1/+1, first strike, or vigilance counter on it.",
             &expected,
         );
+        assert_choice(
+            "Denry Klin Enters With Your Choice Of A +1/+1, First Strike, Or Vigilance Counter On It.",
+            &expected,
+        );
         // Distributed shape.
         assert_choice(
             "Denry Klin enters with your choice of a +1/+1 counter, a first strike counter, or a vigilance counter on it.",
