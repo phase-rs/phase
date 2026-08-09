@@ -692,6 +692,115 @@ fn mixed_damage_and_gain_control_is_not_penalized_as_a_damage_whiff() {
     );
 }
 
+/// A mixed spell carrying a DEFAULT-population `DestroyAll` (declaring
+/// `TargetFilter::None`) plus a "deal 1 damage to target creature" effect must
+/// NOT be penalized as a damage whiff when its wipe half is independently
+/// useful. `TargetFilter::None` means the engine resolver's default population
+/// — all creatures (destroy.rs `resolve_all`, CR 701.8) — so the opponent's
+/// 3/3 is a wipe target even though the spell declares no filter. Pre-fix, the
+/// cast-commit gate fed the raw `None` into `find_legal_targets` (an empty
+/// set), the wipe half credited nothing, and the 1-damage half vetoed the
+/// whole spell as a whiff. The wipe is also NON-targeted (CR 115.10a): target
+/// legality never gates its population.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1),
+/// Slash-of-Light-shaped. On this board the pure burn is a provable total
+/// damage whiff (-8 `wasted_cast_penalty`) while the mixed wipe spell must not
+/// be penalized. Both are driven through the real cast pipeline so the
+/// cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but is in
+    // the wipe's default all-creatures population (CR 701.8, destroy.rs
+    // `resolve_all`).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + destroy all permanents" — the
+    // wipe declares NO filter, so its population is the resolver's default
+    // (all creatures).
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Judgement", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's default-population wipe line (the 3/3 is in the
+    // resolver's all-creatures population, CR 701.8 / destroy.rs `resolve_all`;
+    // the wipe is non-targeted, CR 115.10a) makes it strictly more castable
+    // than the identical pure-damage whiff. Without the resolver-mirroring mass
+    // path, `can_kill_any_legal_target` penalizes the mixed spell with the same
+    // -8 whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + 1.0,
+        "mixed deal-1 + default-population destroy-all ({mixed_score:.3}) must outrank \
+         the identical pure burn whiff ({pure_score:.3}): the wipe's default \
+         all-creatures population (CR 701.8 / destroy.rs `resolve_all`) makes the \
+         3/3 a wipe target and the wipe is non-targeted (CR 115.10a), so the gate \
+         must not penalize the spell as a damage whiff"
+    );
+}
+
 // ── Full Game Completion ─────────────────────────────────────────────────
 
 #[test]

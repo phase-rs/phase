@@ -44,11 +44,14 @@
 //! modelled damage to the target, so `-X/-X`, destroy, and exile removal are
 //! untouched.
 
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
-use engine::types::ability::{DamageSource, Effect, TargetRef};
+use engine::types::ability::{
+    DamageSource, Effect, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -396,7 +399,10 @@ pub(crate) fn lethality_bonus(
 ///   with the COMPLETE typed filter — including `TypedFilter.controller`
 ///   (CR 108.4 / CR 109.5) — so an own-controller-constrained line ("gain
 ///   control of target creature you control") credits nothing, so the spell is
-///   never a total *damage* whiff);
+///   never a total *damage* whiff). A wipe's population is evaluated
+///   resolver-mirroring (CR 115.10a: it is NON-targeted, so hexproof/protected
+///   creatures still count and `TargetFilter::None` means the resolver's
+///   default all-creatures population, destroy.rs `resolve_all`);
 /// * ANY `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
 ///   value at announcement, so it is unknowable at cast-commit), including a
 ///   `DealDamage` whose target filter is not creature-only;
@@ -428,6 +434,10 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     // the engine's `find_legal_targets`: an own-controller-constrained line
     // ("gain control of target creature you control") credits nothing, and a
     // wipe's real population is resolved, not guessed from filter shape.
+    // Wipes take a resolver-mirroring population path instead of target
+    // legality: `DestroyAll` is NON-targeted (CR 115.10a), so hexproof/protected
+    // creatures count toward the population and `TargetFilter::None` means the
+    // resolver's default all-creatures population (destroy.rs `resolve_all`).
     if effects.iter().any(|effect| {
         matches!(
             effect_polarity(effect),
@@ -501,11 +511,28 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
 /// including `TypedFilter.controller` (CR 108.4 / CR 109.5) — via the
 /// engine's `find_legal_targets`; never a filter-shape proxy. Effects with no
 /// extractable filter (or no source object) resolve to false (no line).
+///
+/// [`Effect::DestroyAll`] bypasses the targeting path entirely: it is
+/// NON-targeted, so the engine resolver (`destroy::resolve_all`) matches a
+/// battlefield POPULATION with no hexproof/shroud/protection exemptions and a
+/// default all-creatures population for `TargetFilter::None` (CR 115.10a).
+/// `find_legal_targets` would wrongly gate that population on target legality
+/// and read `None` as an empty set, so wipes take the resolver-mirroring
+/// [`mass_effect_has_opposing_population`] path instead.
 fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
-    let Some(filter) = extract_target_filter(effect) else {
+    let Some(source) = ctx.source_object() else {
         return false;
     };
-    let Some(source) = ctx.source_object() else {
+    // CR 115.10a: inherently-mass effects (`DestroyAll`) are NON-targeted —
+    // the resolver matches a battlefield POPULATION (engine destroy.rs
+    // `resolve_all`) with no target-legality exemptions and a default
+    // population when the filter is `None`. Evaluate those resolver-mirroring;
+    // `find_legal_targets` would wrongly apply hexproof/shroud/protection and
+    // read `None` as an empty set.
+    if let Effect::DestroyAll { target, .. } = effect {
+        return mass_effect_has_opposing_population(ctx, source, target);
+    }
+    let Some(filter) = extract_target_filter(effect) else {
         return false;
     };
     find_legal_targets(ctx.state, filter, ctx.ai_player, source.id)
@@ -517,6 +544,37 @@ fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> b
                     if ctx.state.objects.get(&id).is_some_and(|o| o.controller != ctx.ai_player)
             )
         })
+}
+
+/// Resolver-mirroring population evaluation for a non-targeted mass effect
+/// (CR 115.10a): iterate the battlefield and match the effect's population
+/// exactly as `engine::game::effects::destroy::resolve_all` does —
+/// indestructible objects are skipped (CR 702.12b: they can't be destroyed)
+/// and `TargetFilter::None` means the resolver's default population (all
+/// creatures). Unlike `find_legal_targets`, NO hexproof / shroud / protection
+/// targets-exemption applies: those gate targeting only (CR 115.10a) and
+/// never a wipe's population.
+fn mass_effect_has_opposing_population(
+    ctx: &PolicyContext<'_>,
+    source: &GameObject,
+    target: &TargetFilter,
+) -> bool {
+    // Mirror destroy.rs `resolve_all`'s `None` -> default creature population.
+    let default_population = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+    let effective = if matches!(target, TargetFilter::None) {
+        &default_population
+    } else {
+        target
+    };
+    let filter_ctx = FilterContext::from_source_with_controller(source.id, source.controller);
+    ctx.state.battlefield.iter().any(|&id| {
+        let Some(obj) = ctx.state.objects.get(&id) else {
+            return false;
+        };
+        obj.controller != ctx.ai_player
+            && !obj.has_keyword(&Keyword::Indestructible)
+            && matches_target_filter(ctx.state, id, effective, &filter_ctx)
+    })
 }
 
 #[cfg(test)]
@@ -919,6 +977,169 @@ mod tests {
              resolves a real opposing population (the 3/3) through \
              `find_legal_targets`, so the spell is not a total whiff even though \
              1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Mixed removal spell with a DEFAULT-population wipe line: "deal 1 damage
+    /// to target creature; destroy all permanents" where the `DestroyAll` half
+    /// declares `TargetFilter::None`. The engine resolver (`destroy.rs`
+    /// `resolve_all`) treats `None` as its DEFAULT population — all creatures —
+    /// so the 3/3 is a wipe target even though the spell declares no filter
+    /// (CR 701.8). Pre-fix, `extract_target_filter` surfaced the raw `None`
+    /// into `find_legal_targets`, which reads an empty set: the wipe half was
+    /// not credited and the 1-damage half vetoed the whole cast. The gate must
+    /// fail open via the resolver-mirroring mass path (CR 115.10a).
+    #[test]
+    fn can_kill_fails_open_on_default_population_destroy_all() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_007),
+            PlayerId(0),
+            "Charred Judgement".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            // `None` is the serde default for `DestroyAll.target`, but construct
+            // it explicitly: the resolver's `None` -> all-creatures default
+            // population is the whole point of this test.
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::None,
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_007),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + default-population destroy-all must fail open: the \
+             resolver's default population (`None` -> all creatures, destroy.rs \
+             `resolve_all`) makes the 3/3 a wipe target (CR 701.8) even though \
+             the spell declares no filter, so the spell is not a total damage \
+             whiff even though 1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Wipe population counts HEXPROOF opponent creatures: "destroy all
+    /// creatures" against a board whose only opposing creature is hexproof.
+    /// Hexproof gates TARGETING only (CR 115.10a) — an affected object is not a
+    /// target — so it never protects anything from a non-targeted wipe's
+    /// population, exactly as the resolver matches it (`destroy.rs`
+    /// `resolve_all`). Pre-fix, `find_legal_targets` excluded the hexproof
+    /// creature on target legality, so the wipe half credited nothing. The
+    /// helper-level assert pins the resolver-semantics seam directly; the
+    /// can_kill-level empty-set clause would fail open even pre-fix, so it is a
+    /// secondary guard.
+    #[test]
+    fn mass_population_counts_protected_opponent_creatures() {
+        let mut state = make_state();
+        let hexproof_bear = add_creature(&mut state, PlayerId(1), "Hexproof Bear", 3, 3);
+        state
+            .objects
+            .get_mut(&hexproof_bear)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_008),
+            PlayerId(0),
+            "Hexproof-Proof Wipe".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        )]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_008),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        let filter = TargetFilter::Typed(TypedFilter::creature());
+        // THE discriminating seam: pre-fix, `find_legal_targets` returned false
+        // for this hexproof-only board (target legality), so the wipe half
+        // credited nothing even though the resolver destroys the hexproof bear.
+        assert!(
+            mass_effect_has_opposing_population(&ctx, ctx.source_object().unwrap(), &filter),
+            "the wipe's resolver-mirroring population must count hexproof \
+             opponent creatures: hexproof gates targeting only (CR 115.10a), \
+             and the resolver (destroy.rs `resolve_all`) matches the population \
+             with no target-legality exemptions"
+        );
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "destroy-all vs a hexproof-only opposing board must fail open: the \
+             wipe is non-targeted (CR 115.10a), so hexproof does not protect \
+             the 3/3 from the mass-removal line"
         );
     }
 
