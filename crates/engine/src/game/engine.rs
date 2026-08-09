@@ -15834,7 +15834,8 @@ mod stage2_injector_tests {
                 .strip_prefix(&root)
                 .expect("under src")
                 .display()
-                .to_string();
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
             for (n, line) in lines.iter().enumerate() {
                 if !line.contains(&needle) || line.contains("..") {

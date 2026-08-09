@@ -1828,7 +1828,7 @@ mod tests {
         use crate::types::events::PlayerActionKind;
 
         let state = GameState::new_two_player(42);
-        // CR 121.1: the Draw ledger signal must not reach the visible log —
+        // The Draw ledger signal must not reach the visible log —
         // this assertion flips (entries.len() == 1) if the exclusion is reverted.
         let draw_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
