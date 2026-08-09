@@ -315,6 +315,13 @@ fn does_not_cast_slash_of_light_for_nonlethal_damage() {
 /// `AntiSelfHarm::score_pre_cast`) deprioritizes a burn whose damage kills no
 /// legal target, so the Very Hard AI passes instead of pinging the 3/3 for a
 /// wasted 1 point.
+///
+/// Two-tier reach-guard: (1) the scorer must offer the exact Slash of Light
+/// `CastSpell` candidate at the cast-commit step — proving the gate is in the
+/// decision path rather than the test passing vacuously on an unrelated
+/// action — and (2) the bounded pipeline must still produce at least one
+/// decision. Only with both tiers does "no CastSpell in the results" prove the
+/// whiff guard deprioritized the cast.
 #[test]
 fn very_hard_slash_of_light_does_not_commit_or_ping_the_3_3() {
     let mut scenario = GameScenario::new();
@@ -323,7 +330,7 @@ fn very_hard_slash_of_light_does_not_commit_or_ping_the_3_3() {
     let _mine = scenario.add_creature(P0, "My Bear", 2, 1).id();
     let _theirs = scenario.add_creature(P1, "Opponent Bear", 3, 3).id();
 
-    scenario
+    let slash = scenario
         .add_spell_to_hand_from_oracle(
             P0,
             "Slash of Light",
@@ -354,8 +361,22 @@ fn very_hard_slash_of_light_does_not_commit_or_ping_the_3_3() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
+    // Reach-guard (tier 1): the exact Slash of Light cast must be offered as a
+    // candidate to the Very Hard scorer. A vacuous "no candidates" pass would
+    // satisfy the outcome asserts below for the wrong reason. Read-only — no
+    // borrow survives past this block.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+    assert!(
+        scored.iter().any(|(a, _)| matches!(
+            a,
+            GameAction::CastSpell { object_id, .. } if *object_id == slash
+        )),
+        "Slash of Light must be offered as a CastSpell candidate, got {scored:?}"
+    );
+
     let ai_players = HashSet::from([P0]);
-    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let ai_configs = HashMap::from([(P0, config)]);
     let mut ai_rng = SmallRng::seed_from_u64(42);
     let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
 
@@ -570,6 +591,108 @@ fn mixed_damage_and_destroy_is_not_penalized_as_a_damage_whiff() {
         "mixed deal-1 + destroy ({mixed_score:.3}) must outrank the identical pure \
          burn whiff ({pure_score:.3}): Destroy is a useful removal line the gate \
          must not penalize as a damage whiff"
+    );
+}
+
+/// Differential test for mixed control spells: a spell with a creature-damage
+/// effect AND a "gain control of target permanent" effect must NOT be
+/// penalized as a damage whiff when the control half is independently useful.
+/// `Effect::GainControl` is classified `EffectPolarity::Contextual`, so the
+/// fail-open requires the gate to cover Contextual non-`DealDamage` effects
+/// with a creature-or-permanent target (CR 613.1b, Layer 2). Without it,
+/// `can_kill_any_legal_target` aggregates only the `DealDamage` half, sees the
+/// 1 damage survive the 3/3, and wrongly vetoes the cast.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1),
+/// Slash-of-Light-shaped; the opponent also controls a non-creature permanent
+/// (Island) so the control line is legal and genuinely useful. On this board the
+/// pure burn is a provable total damage whiff (-8 `wasted_cast_penalty`) while
+/// the mixed control spell must not be penalized. Both are driven through the
+/// real cast pipeline so the cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_gain_control_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but the
+    // Island is a legal, useful GainControl permanent target (CR 613.1b).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+    scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + gain control of target permanent".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charmed Heist", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::GainControl {
+            target: TargetFilter::Typed(TypedFilter::permanent()),
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's permanent-control line makes it strictly more castable
+    // than the identical pure-damage whiff. Without the Contextual/permanent
+    // fail-open, `can_kill_any_legal_target` penalizes the mixed spell with the
+    // same -8 whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + 1.0,
+        "mixed deal-1 + gain control of a permanent ({mixed_score:.3}) must outrank \
+         the identical pure burn whiff ({pure_score:.3}): stealing the opponent's \
+         permanent is a useful control line (CR 613.1b) the gate must not penalize \
+         as a damage whiff"
     );
 }
 

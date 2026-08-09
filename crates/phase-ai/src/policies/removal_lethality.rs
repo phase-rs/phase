@@ -48,7 +48,7 @@ use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
-use engine::types::ability::{DamageSource, Effect, TargetRef};
+use engine::types::ability::{DamageSource, Effect, TargetFilter, TargetRef, TypeFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -56,8 +56,8 @@ use engine::types::keywords::{Keyword, KeywordKind};
 
 use super::context::PolicyContext;
 use super::effect_classify::{
-    effect_polarity, effect_targets_object, extract_target_filter, targets_creatures_only,
-    EffectPolarity,
+    effect_polarity, effect_targets_object, extract_target_filter, targets_creatures,
+    targets_creatures_only, EffectPolarity,
 };
 
 /// Reward for a target the removal spell actually kills — a clean kill is worth
@@ -387,10 +387,12 @@ pub(crate) fn lethality_bonus(
 /// **Conservative no-veto contract** — returns `true` (do not veto) whenever it
 /// cannot *prove* a total whiff:
 /// * no source object / no usable filter (cannot reason);
-/// * ANY harmful creature-only effect is not a `DealDamage` (e.g. a mixed
-///   "deal damage + destroy" spell — the non-damage half is an independent,
-///   useful removal line, CR 701.8a, so the spell is never a total *damage*
-///   whiff);
+/// * ANY `Harmful` or `Contextual` non-`DealDamage` effect whose target filter
+///   can hit an opponent's battlefield permanent (e.g. a mixed "deal damage +
+///   destroy" spell — the Destroy half is an independent, useful removal line,
+///   CR 701.8a; or "deal damage + gain control" — stealing a planeswalker or
+///   artifact is an independent control-changing line, CR 613.1b Layer 2), so
+///   the spell is never a total *damage* whiff);
 /// * ANY `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
 ///   value at announcement, so it is unknowable at cast-commit), including a
 ///   `DealDamage` whose target filter is not creature-only;
@@ -412,16 +414,21 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     };
     let effects = ctx.effects();
 
-    // FAIL OPEN on any harmful creature-only effect that is NOT a `DealDamage`
-    // (e.g. a mixed "deal 1 damage to target creature; destroy target creature"
-    // spell). `pending_damage_to_object` aggregates the spell's `DealDamage`
-    // halves only, but a non-damage removal effect like `Destroy` is an
-    // independent, useful removal line (CR 701.8a). The spell must never read
-    // as a total *damage* whiff through its damage half alone.
+    // FAIL OPEN on any `Harmful`/`Contextual` non-`DealDamage` effect whose
+    // target filter can hit an opponent's battlefield permanent — e.g. a mixed
+    // "deal 1 damage to target creature; destroy target creature" spell, or a
+    // control-changing line like "deal 1 damage; gain control of target
+    // permanent" (`GainControl`, CR 613.1b Layer 2 — creatures, planeswalkers,
+    // artifacts, etc.). `pending_damage_to_object` aggregates the spell's
+    // `DealDamage` halves only, but a non-damage removal/control effect is an
+    // independent, useful line. The spell must never read as a total *damage*
+    // whiff through its damage half alone.
     if effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Harmful)
-            && targets_creatures_only(effect)
-            && !matches!(effect, Effect::DealDamage { .. })
+        matches!(
+            effect_polarity(effect),
+            EffectPolarity::Harmful | EffectPolarity::Contextual
+        ) && !matches!(effect, Effect::DealDamage { .. })
+            && targets_creature_or_permanent(effect)
     }) {
         return true;
     }
@@ -484,6 +491,45 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     !modelled_any_target
 }
 
+/// Can `effect` target an opponent's battlefield permanent? True for
+/// creature-typed or any-target filters (`targets_creatures`, CR 205), and for
+/// any permanent-type filter — control-changing effects like `GainControl`
+/// (CR 613.1b, Layer 2) target creatures, planeswalkers, artifacts, etc.
+fn targets_creature_or_permanent(effect: &Effect) -> bool {
+    if targets_creatures(effect) {
+        return true;
+    }
+    let Some(TargetFilter::Typed(typed)) = extract_target_filter(effect) else {
+        return false;
+    };
+    typed.type_filters.iter().any(|t| match t {
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Permanent
+        | TypeFilter::Any => true,
+        // CR 608.2b: disjunction — any inner filter matching a permanent type suffices.
+        TypeFilter::AnyOf(inners) => inners.iter().any(|inner| {
+            matches!(
+                inner,
+                TypeFilter::Creature
+                    | TypeFilter::Land
+                    | TypeFilter::Artifact
+                    | TypeFilter::Enchantment
+                    | TypeFilter::Planeswalker
+                    | TypeFilter::Battle
+                    | TypeFilter::Permanent
+                    | TypeFilter::Any
+            )
+        }),
+        // Non(..) / Subtype(..) / Instant / Sorcery / Card / Kindred alone never
+        // name a battlefield-permanent type — do not fail open on them.
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -525,6 +571,22 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.power = Some(power);
         obj.toughness = Some(toughness);
+        id
+    }
+
+    /// Add a bare non-creature permanent (artifact) to the battlefield — a
+    /// legal, useful "gain control of target permanent" target that is
+    /// invisible to creature-only filters.
+    fn add_artifact(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
         id
     }
 
@@ -794,6 +856,150 @@ mod tests {
             "mixed deal-1 + destroy must fail open: the Destroy half is a useful \
              removal line, so the spell is not a total damage whiff even though \
              1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Mixed spell: "deal 1 damage to target creature; gain control of target
+    /// creature". The 1-damage half is a whiff on the 3/3, but `GainControl`
+    /// (CR 613.1b, Layer 2) is an independent, useful control line. `GainControl`
+    /// is classified `EffectPolarity::Contextual`, so the fail-open guard must
+    /// cover Contextual non-`DealDamage` effects — not just `Harmful` ones.
+    /// Without that extension this spell is wrongly vetoed as a total *damage*
+    /// whiff. Guards round-2 review MED #1 (lost fix).
+    #[test]
+    fn can_kill_fails_open_on_mixed_damage_and_gain_control_creature() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_003),
+            PlayerId(0),
+            "Charmed Lightning".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainControl {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_003),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + gain control of a creature must fail open: the \
+             control half (CR 613.1b, Layer 2) is a useful line even though \
+             1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Same mixed-shape spell, but the control half targets ANY permanent
+    /// ("gain control of target permanent" — planeswalkers, artifacts, lands,
+    /// enchantments, CR 613.1b) instead of only creatures. The fail-open must
+    /// not require a creature filter: `permanent()` here targets the
+    /// opponent's artifact, a legal and useful control line invisible to
+    /// creature-only filters. Guards round-2 review LOW (lost fix).
+    #[test]
+    fn can_kill_fails_open_on_mixed_damage_and_gain_control_of_permanent() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+        add_artifact(&mut state, PlayerId(1), "Opponent Rock");
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_004),
+            PlayerId(0),
+            "Charmed Heist".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainControl {
+                    target: TargetFilter::Typed(TypedFilter::permanent()),
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_004),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + gain control of a permanent must fail open: the \
+             permanent-stealing half (CR 613.1b, Layer 2) is useful against the \
+             opponent's artifact even though 1 damage alone cannot kill the 3/3"
         );
     }
 
