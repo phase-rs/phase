@@ -9388,13 +9388,13 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("prevent") && effective_lower.contains("damage")
                 }
                 Effect::CopySpell { .. } => {
+                    // CR 707.5: clone-permanent copies enter "as a copy of ..."
+                    // (including "enter tapped as a copy of").
                     // CR 707.10: to copy a spell is to put a copy of it onto the
                     // stack. A CopySpell is parsed without a description string, so
-                    // it is matched here by effect type. Two surface classes:
-                    //   (a) clone-permanent copies — "... enter as a copy of ..."
-                    //       (including "enter tapped as a copy of");
-                    //   (b) spell copies — "copy that spell", "copy it", "copy
-                    //       target instant or sorcery spell". These frequently nest
+                    // it is matched here by effect type. Spell copies — "copy that
+                    // spell", "copy it", "copy target instant or sorcery spell" —
+                    // frequently nest
                     //       inside a CreateDelayedTrigger ("When you next cast ...
                     //       this turn, copy that spell", CR 603.7b), reached via
                     //       ability_tree_any's CreateDelayedTrigger recursion. The
@@ -9405,7 +9405,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         || (effective_lower.contains("copy")
                             && (effective_lower.contains("that spell")
                                 || effective_lower.contains("copy it")
-                                || effective_lower.contains("copy target")))
+                                || (effective_lower.contains("copy target")
+                                    && effective_lower.contains("spell"))))
                 }
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
@@ -13765,6 +13766,36 @@ mod tests {
         assert!(
             findings.is_empty(),
             "direct spell-copy line falsely flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_effect_does_not_cover_unparsed_ability_copy_line() {
+        // CR 707.10 distinguishes copying a spell from copying an activated
+        // ability. The face-wide CopySpell fallback must not hide a separate,
+        // unparsed ability-copy line.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle = "Copy target instant or sorcery spell.\nCopy target activated ability.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "unparsed ability-copy line must remain visible: {findings:?}"
         );
     }
 
