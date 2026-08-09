@@ -3248,6 +3248,9 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
+            // The frozen trigger-event damage read is independent of an
+            // optional-effect decision, so it cannot select a decline branch.
+            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
             | AbilityCondition::WhenYouDo
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
