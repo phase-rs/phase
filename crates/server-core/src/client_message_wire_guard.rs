@@ -180,6 +180,7 @@ pub fn guard_client_message_before_dispatch(
             timer_seconds,
             pod_size,
             kind,
+            ..
         } => guard_create_draft_with_settings(
             display_name,
             set_code,
