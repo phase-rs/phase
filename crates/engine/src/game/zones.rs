@@ -1,7 +1,7 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
+    GameState, ResolutionSourceRelatch, StackEntry, StackEntryKind, ZoneChangeCombatStatus,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -17,11 +17,38 @@ use crate::types::zones::Zone;
 use super::game_object::GameObject;
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
-/// CR 111.7 / CR 111.8: A token outside the battlefield ceases to exist at
-/// the next SBA, and can't change zones before then. Stack tokens are excluded
-/// so spell copies can finish resolving before the next SBA check.
-pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+/// CR 109.1 + CR 601.2a + CR 405.1: A spell is an object on the stack from
+/// announcement, even while this engine retains its origin-zone field until
+/// finalization. The retained-origin representation is stack-resident only while
+/// the exact spell's `PendingCast` lifecycle and announcement placeholder both
+/// remain live; a bare same-id stack entry is insufficient.
+fn object_has_stack_residency(state: &GameState, obj: &GameObject) -> bool {
+    if obj.zone == Zone::Stack {
+        return true;
+    }
+
+    let is_pending_spell = |pending: &crate::types::game_state::PendingCast| {
+        pending.object_id == obj.id && pending.activation_ability_index.is_none()
+    };
+    let has_pending_spell = state.pending_cast.as_deref().is_some_and(is_pending_spell)
+        || state
+            .waiting_for
+            .pending_cast_ref()
+            .is_some_and(is_pending_spell);
+
+    has_pending_spell
+        && state
+            .stack
+            .iter()
+            .any(|entry| entry.id == obj.id && matches!(entry.kind, StackEntryKind::Spell { .. }))
+}
+
+/// CR 704.5d / CR 111.7 / CR 111.8: A token outside the battlefield ceases to
+/// exist at the next SBA and can't change zones before then. Effectively
+/// stack-resident tokens are excluded so announced spell copies can finish
+/// casting and resolving before the next applicable SBA check.
+pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &GameObject) -> bool {
+    obj.is_token && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
@@ -30,8 +57,11 @@ pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
 /// (CR 707.10f makes a permanent copy a token there) and may change zones freely
 /// while alive, so this predicate is used ONLY by the cease-to-exist SBA — never
 /// by the CR 111.8 "can't change zones" movement guards, which apply to tokens only.
-pub(super) fn copy_of_card_outside_battlefield_and_stack(obj: &GameObject) -> bool {
-    obj.is_copy && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+pub(super) fn copy_of_card_outside_battlefield_and_stack(
+    state: &GameState,
+    obj: &GameObject,
+) -> bool {
+    obj.is_copy && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
 /// CR 122.2 + CR 113.6b: Determine whether `object_id`'s counters survive a move
@@ -561,8 +591,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // enabled (every-enabler: `interactive_loop_bridge` Path C). Gated on a
         // non-empty enabler map so Off/On games (which never populate it — only the
         // Interactive B5 arm does) pay nothing and stay byte-identical. Whole-
-        // capability clear per controller whose enabler set contains this object
-        // (`clear_unbounded_loop` removes BOTH maps in lockstep).
+        // capability clear per controller whose enabler set contains this object:
+        // `clear_unbounded_loop` drops SIX maps, incl. the accepted-collapse stash.
         if !state.unbounded_loop_enablers.is_empty() {
             let revoked: Vec<PlayerId> = state
                 .unbounded_loop_enablers
@@ -794,6 +824,7 @@ pub fn resolve_and_apply_zone_change(
     zone_change_record.entered_incarnation =
         (to == Zone::Battlefield).then_some(resulting_incarnation);
     zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    zone_change_record.recorded_turn_number = state.turn_number;
 
     let command = ResolvedZoneChangeCommand {
         object: occurrence,
@@ -858,6 +889,14 @@ pub fn apply_resolved_zone_change(
             },
         );
     }
+    if command.zone_change_record.recorded_turn_number != state.turn_number {
+        return Err(
+            ResolvedZoneChangeReplayInvariantError::RecordedTurnMismatch {
+                expected: command.zone_change_record.recorded_turn_number,
+                found: state.turn_number,
+            },
+        );
+    }
 
     let destination_position = destination_position_after_removal(
         state,
@@ -911,8 +950,9 @@ pub fn apply_resolved_zone_change(
         state.adopt_replayed_timestamp(entry_timestamp);
     }
 
+    let mut zone_change_record = command.zone_change_record.clone();
     let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, command.zone_change_record.clone());
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     if turn_zone_change_index != command.turn_zone_change_index {
         return Err(
             ResolvedZoneChangeReplayInvariantError::TurnRecordIndexMismatch {
@@ -941,7 +981,7 @@ pub fn move_to_zone(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
         return;
     }
@@ -1317,9 +1357,7 @@ pub fn move_to_zone(
     }
 
     if !transition_recorded {
-        let turn_zone_change_index =
-            super::restrictions::record_zone_change(state, zone_change_record.clone());
-        zone_change_record.turn_zone_change_index = turn_zone_change_index;
+        super::restrictions::record_zone_change(state, &mut zone_change_record);
     }
 
     if let Some(old_target) = unattached_from {
@@ -1396,7 +1434,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
         .objects
         .get(&object_id)
         .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
-    record.turn_zone_change_index = super::restrictions::record_zone_change(state, record.clone());
+    super::restrictions::record_zone_change(state, &mut record);
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: None,
@@ -1641,12 +1679,13 @@ pub(crate) fn capture_combat_status(
 }
 
 /// Reorder objects that remain in one player's library without performing a
-/// zone change. `ordered` is placed at `start_index` in the supplied order.
+/// zone change. `ordered` is placed at `index` in the supplied order, or
+/// appended when `index` is `None`.
 pub(crate) fn reorder_within_library(
     state: &mut GameState,
     player: PlayerId,
     ordered: &[ObjectId],
-    start_index: usize,
+    index: Option<usize>,
 ) {
     let player_state = state
         .players
@@ -1654,9 +1693,15 @@ pub(crate) fn reorder_within_library(
         .find(|candidate| candidate.id == player)
         .expect("player exists");
     player_state.library.retain(|id| !ordered.contains(id));
+    let insert_index = index
+        .unwrap_or(player_state.library.len())
+        .min(player_state.library.len());
     for (offset, &object_id) in ordered.iter().enumerate() {
-        player_state.library.insert(start_index + offset, object_id);
+        player_state
+            .library
+            .insert(insert_index + offset, object_id);
     }
+    state.advance_library_knowledge_epoch(player);
 
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
@@ -1707,17 +1752,21 @@ pub fn move_to_library_at_index(
     if state
         .objects
         .get(&object_id)
-        .is_some_and(token_is_outside_battlefield_and_stack)
+        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
     {
+        return;
+    }
+
+    let obj = state.objects.get(&object_id).expect("object exists");
+    let from = obj.zone;
+    let owner = obj.owner;
+    if from == Zone::Library {
+        reorder_within_library(state, owner, &[object_id], index);
         return;
     }
 
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
     state.commander_declined_zone_return.remove(&object_id);
-
-    let obj = state.objects.get(&object_id).expect("object exists");
-    let from = obj.zone;
-    let owner = obj.owner;
     let unattached_from = state.objects.get(&object_id).and_then(|obj| {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -1768,6 +1817,7 @@ pub fn move_to_library_at_index(
         }
         None => player.library.push_back(object_id),
     }
+    state.advance_library_knowledge_epoch(owner);
 
     let mut bump: Option<(u64, u64)> = None;
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
@@ -1785,9 +1835,7 @@ pub fn move_to_library_at_index(
         record_resolution_source_relatch(state, object_id, pre, new);
     }
 
-    let turn_zone_change_index =
-        super::restrictions::record_zone_change(state, zone_change_record.clone());
-    zone_change_record.turn_zone_change_index = turn_zone_change_index;
+    super::restrictions::record_zone_change(state, &mut zone_change_record);
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {
@@ -3200,6 +3248,89 @@ mod tests {
 
         assert_eq!(state.players[0].library[0], id1); // stays at top
         assert_eq!(state.players[0].library[1], id2); // goes to bottom
+    }
+
+    #[test]
+    fn within_library_reposition_does_not_create_a_zone_change() {
+        let mut state = setup();
+        let filler = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Filler".to_string(),
+            Zone::Library,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+
+        let incarnation_before = state.objects[&card].incarnation;
+        state.commander_declined_zone_return.insert(card);
+        let mut events = Vec::new();
+        move_to_library_at_index(&mut state, card, Some(0), &mut events); // to top
+        move_to_library_at_index(&mut state, card, None, &mut events); // to bottom
+
+        assert_eq!(
+            state.objects[&card].incarnation, incarnation_before,
+            "a within-library reposition must preserve object identity"
+        );
+        assert!(
+            state.players[0].library.contains(&filler) && state.players[0].library.contains(&card)
+        );
+        assert!(
+            events.is_empty(),
+            "repositioning within a library emits no events"
+        );
+        assert!(
+            state.zone_changes_this_turn.is_empty(),
+            "repositioning within a library does not enter the zone-change ledger"
+        );
+        assert!(
+            state.commander_declined_zone_return.contains(&card),
+            "without a zone change, the commander marker must be preserved"
+        );
+    }
+
+    #[test]
+    fn reorder_within_library_clamps_after_removal_and_appends_when_unspecified() {
+        let mut state = setup();
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+
+        reorder_within_library(&mut state, PlayerId(0), &[first, third], Some(99));
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, first, third]
+        );
+
+        reorder_within_library(&mut state, PlayerId(0), &[first], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [second, third, first]
+        );
     }
 
     #[test]

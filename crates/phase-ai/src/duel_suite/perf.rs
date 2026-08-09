@@ -82,7 +82,7 @@ use super::run::{drive_game, resolve_matchup};
 /// the report shape or the counter field set changes (a changed field set is
 /// self-flagged by [`PerfCounters::from_snapshot`]'s struct destructure — the
 /// `Removed`/`New` classifications also warn to bump this).
-pub const PERF_SCHEMA_VERSION: u32 = 4; // was 3: added spell_keyword_grant_scans counter
+pub const PERF_SCHEMA_VERSION: u32 = 5; // was 4: added offer-payment counters
 
 /// Number of INDEPENDENT cold-process trajectory samples the gate aggregates by
 /// per-counter median. Independence is why each sample must be its own process
@@ -152,6 +152,19 @@ impl PerfCounters {
     pub fn from_snapshot(snapshot: &PerfCounterSnapshot) -> Self {
         let PerfCounterSnapshot {
             state_clone_for_legality,
+            generation_state_clones,
+            strict_fast_path_state_clones,
+            strict_fast_path_mana_readiness_state_clones,
+            raw_validation_state_clones,
+            grouped_mana_readiness_state_clones,
+            post_apply_auto_payment_core_state_clones,
+            priority_cast_probe_state_clones,
+            auto_payment_borrowed_wrapper_calls,
+            auto_payment_owned_state_clones,
+            generation_auto_payment_wrapper_calls,
+            strict_fast_path_auto_payment_wrapper_calls,
+            post_apply_auto_payment_core_calls,
+            post_apply_uncached_source_collections,
             static_full_scans,
             spell_keyword_grant_scans,
             layers_full_eval,
@@ -186,6 +199,58 @@ impl PerfCounters {
         map.insert(
             "state_clone_for_legality".to_string(),
             state_clone_for_legality,
+        );
+        map.insert(
+            "generation_state_clones".to_string(),
+            generation_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_state_clones".to_string(),
+            strict_fast_path_state_clones,
+        );
+        map.insert(
+            "strict_fast_path_mana_readiness_state_clones".to_string(),
+            strict_fast_path_mana_readiness_state_clones,
+        );
+        map.insert(
+            "raw_validation_state_clones".to_string(),
+            raw_validation_state_clones,
+        );
+        map.insert(
+            "grouped_mana_readiness_state_clones".to_string(),
+            grouped_mana_readiness_state_clones,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_state_clones".to_string(),
+            post_apply_auto_payment_core_state_clones,
+        );
+        map.insert(
+            "priority_cast_probe_state_clones".to_string(),
+            priority_cast_probe_state_clones,
+        );
+        map.insert(
+            "auto_payment_borrowed_wrapper_calls".to_string(),
+            auto_payment_borrowed_wrapper_calls,
+        );
+        map.insert(
+            "auto_payment_owned_state_clones".to_string(),
+            auto_payment_owned_state_clones,
+        );
+        map.insert(
+            "generation_auto_payment_wrapper_calls".to_string(),
+            generation_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "strict_fast_path_auto_payment_wrapper_calls".to_string(),
+            strict_fast_path_auto_payment_wrapper_calls,
+        );
+        map.insert(
+            "post_apply_auto_payment_core_calls".to_string(),
+            post_apply_auto_payment_core_calls,
+        );
+        map.insert(
+            "post_apply_uncached_source_collections".to_string(),
+            post_apply_uncached_source_collections,
         );
         map.insert("static_full_scans".to_string(), static_full_scans);
         map.insert(
@@ -987,6 +1052,19 @@ mod tests {
     fn from_snapshot_maps_every_field_distinctly() {
         let snapshot = PerfCounterSnapshot {
             state_clone_for_legality: 1,
+            generation_state_clones: 30,
+            strict_fast_path_state_clones: 31,
+            strict_fast_path_mana_readiness_state_clones: 32,
+            raw_validation_state_clones: 33,
+            grouped_mana_readiness_state_clones: 34,
+            post_apply_auto_payment_core_state_clones: 35,
+            priority_cast_probe_state_clones: 36,
+            auto_payment_borrowed_wrapper_calls: 37,
+            auto_payment_owned_state_clones: 38,
+            generation_auto_payment_wrapper_calls: 39,
+            strict_fast_path_auto_payment_wrapper_calls: 40,
+            post_apply_auto_payment_core_calls: 41,
+            post_apply_uncached_source_collections: 42,
             static_full_scans: 2,
             spell_keyword_grant_scans: 29,
             layers_full_eval: 3,

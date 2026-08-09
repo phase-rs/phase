@@ -27,7 +27,10 @@ export function ChoiceOverlay({
   const peek = useOptionalDialogPeek();
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6">
+    <div
+      className="fixed inset-0 z-50 flex flex-col px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6"
+      data-card-preview-dock="side"
+    >
       <div className="absolute inset-0 bg-black/68" />
       <div className={`relative flex h-full flex-col lg:h-auto lg:max-h-[calc(100vh_-_3rem)] ${widthClassName} ${maxWidthClassName}`}>
         <motion.div

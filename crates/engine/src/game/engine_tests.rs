@@ -199,6 +199,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -215,6 +216,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             source_name: "Pinger".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     state.pending_trigger = Some(Box::new(pending));
@@ -356,6 +358,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
     let mut result = ActionResult {
@@ -384,6 +387,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         effect_kind: EffectKind::DiscardCard,
         up_to: false,
         unless_filter: None,
+        discard_frame: None,
     };
     let mut result = ActionResult {
         events: Vec::new(),
@@ -2418,6 +2422,7 @@ fn push_token_trigger(
             source_name: "Token".to_string(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     entry_id
@@ -3963,9 +3968,14 @@ fn integration_full_turn_cycle() {
         }
     ));
 
-    // Pass priority from player 1 (both passed, stack empty -> advance)
+    // Pass priority from player 1 (both passed, stack empty -> BeginCombat).
     let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // Should skip combat phases and land at PostCombatMain
+    assert_eq!(state.phase, Phase::BeginCombat);
+
+    // Beginning of combat has its own priority window. With no attackers, the
+    // subsequent forced empty declaration skips only blockers and damage.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
     // Pass through post-combat main
@@ -5912,7 +5922,12 @@ fn full_turn_integration_with_mulligan() {
     // Pass priority through the rest of the turn
     // PreCombatMain: P0 passes
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-    // PreCombatMain: P1 passes -> advances to PostCombatMain
+    // PreCombatMain: P1 passes -> BeginCombat priority.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::BeginCombat);
+    // BeginCombat: both pass. No attackers are declared, so only Declare
+    // Blockers and Combat Damage are skipped before PostCombatMain.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
 
@@ -7621,6 +7636,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
         casting_permission_index: None,
         cast_timing_permission: None,
@@ -8057,6 +8073,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
+        crime_candidate: false,
         casting_variant: crate::types::game_state::CastingVariant::Normal,
         casting_permission_index: None,
         cast_timing_permission: None,

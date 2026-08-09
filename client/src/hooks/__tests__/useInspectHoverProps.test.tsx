@@ -12,6 +12,25 @@ function HoverPropsHarness() {
   return <div data-testid="card" {...hoverProps(OBJECT_ID)} />;
 }
 
+function ModalHoverPropsHarness() {
+  const hoverProps = useInspectHoverProps();
+  return (
+    <div data-card-preview-dock="side">
+      <div data-testid="card" {...hoverProps(OBJECT_ID)} />
+    </div>
+  );
+}
+
+function TwoCardHoverPropsHarness() {
+  const hoverProps = useInspectHoverProps();
+  return (
+    <>
+      <div data-testid="card-one" {...hoverProps(OBJECT_ID)} />
+      <div data-testid="card-two" {...hoverProps(OBJECT_ID + 1)} />
+    </>
+  );
+}
+
 // React derives onPointerEnter/onPointerLeave from pointerover/pointerout, which
 // is what fireEvent.pointerEnter/pointerLeave fire — a hand-built
 // `new PointerEvent("pointerenter")` would reach no handler at all.
@@ -20,7 +39,12 @@ describe("useInspectHoverProps", () => {
     vi.useFakeTimers();
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
     usePreferencesStore.setState({ cardPreviewMode: "follow", cardPreviewHoverDelayMs: 0 });
-    useUiStore.setState({ inspectedObjectId: null, hoveredObjectId: null, previewSticky: false });
+    useUiStore.setState({
+      inspectedObjectId: null,
+      hoveredObjectId: null,
+      previewPlacement: "cursor",
+      previewSticky: false,
+    });
   });
 
   afterEach(() => {
@@ -50,6 +74,14 @@ describe("useInspectHoverProps", () => {
     fireEvent.pointerEnter(screen.getByTestId("card"), { pointerType: "mouse" });
 
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
+  });
+
+  it("docks previews opened from a modal", () => {
+    render(<ModalHoverPropsHarness />);
+
+    fireEvent.pointerEnter(screen.getByTestId("card"), { pointerType: "mouse" });
+
+    expect(useUiStore.getState().previewPlacement).toBe("side");
   });
 
   // A pen genuinely hovers, so it is deliberately treated like a mouse; only
@@ -110,6 +142,30 @@ describe("useInspectHoverProps", () => {
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().previewSticky).toBe(false);
+  });
+
+  it("keeps the first touch as the armed preview target", () => {
+    render(<TwoCardHoverPropsHarness />);
+
+    fireEvent.pointerDown(screen.getByTestId("card-one"), {
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: "touch",
+    });
+    fireEvent.pointerDown(screen.getByTestId("card-two"), {
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+      isPrimary: false,
+      pointerId: 2,
+      pointerType: "touch",
+    });
+    act(() => vi.advanceTimersByTime(500));
+
+    expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
   });
 
   it("keeps the long-press preview open when the finger lifts", () => {

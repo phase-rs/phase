@@ -174,6 +174,7 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
       zone: "Exile",
       name: "Ghalta, Primal Hunter",
       face_down: true,
+      display_visible_to_viewer: true,
       printed_ref: { oracle_id: "ghalta-oracle", face_name: "Ghalta, Primal Hunter" },
     });
     const gameState = makeState(
@@ -251,6 +252,7 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
       name: "Alrund's Epiphany",
       face_down: true,
       foretold: true,
+      display_visible_to_viewer: true,
       printed_ref: { oracle_id: "epiphany-oracle", face_name: "Alrund's Epiphany" },
     });
     const gameState = makeState([ownForetold]);

@@ -21761,7 +21761,7 @@ fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
 /// the already-merged unmodified class (Worldgorger Dragon) must still report
 /// ZERO coverage gaps after the modifier-unsupported path was added — proving
 /// the coverage-honesty fix did not regress the supported class. Oracle text
-/// verbatim from `crates/engine/tests/fixtures/integration_cards.json` (2026-07).
+/// verbatim from `crates/engine/tests/fixtures/integration_cards.json.gz` (2026-07).
 #[test]
 fn mass_exile_ltb_return_unmodified_class_reports_no_gaps() {
     use crate::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};

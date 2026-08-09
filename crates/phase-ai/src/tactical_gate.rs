@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use engine::ai_support::{AiDecisionContext, CandidateAction};
+use engine::ai_support::{
+    is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
+    TargetedExchangeVerdict,
+};
 use engine::game::combat::AttackTarget;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -203,33 +206,23 @@ fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
         // `search::fallback_action`, which emits CancelCast when the scored
         // pool is empty.
         GameAction::CancelCast => GateDecision::Reject,
-        // CR 106.3 + CR 608.2d: A flexible source's color is mechanical during a
-        // pending cast, not a policy judgment. Enumerating one candidate per
-        // (source, color) row lets the scorer pick an arbitrary color and tap a
-        // U/R dual for {R} against a {2}{U} spell, stranding the blue pip in a
-        // ManaPayment dead-end with no untapped source left to repair it.
-        // Rejecting only the stranding rows leaves at least the demanded-color
-        // row of that same source in the pool, so the choice of WHICH source to
-        // tap stays strategic. Mirrors the `ChooseManaColor` pre-emption in
-        // `search::choose_action_with_session`, which fixes the prompt-shaped
-        // expression of this same choice.
-        GameAction::TapLandForMana { selection } => {
-            if crate::mana_colors::tap_strands_demanded_color(
-                ctx.state,
-                ctx.ai_player,
-                selection.source.object_id,
-                selection.mana_type,
-            ) {
-                GateDecision::Reject
-            } else {
-                GateDecision::Allow
-            }
-        }
         _ => GateDecision::Allow,
     }
 }
 
 fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
+    // CR 601.2c + CR 608.2c: Target-sourced self-damage and fight exchanges are
+    // evaluated from reducer-issued, fully-bound target paths before scoring.
+    // `Indeterminate` stays fail-open: this is a proof-backed veto only.
+    if is_targeted_exchange_root(&ctx.candidate.action)
+        && matches!(
+            targeted_exchange_verdict(ctx.state, ctx.candidate),
+            TargetedExchangeVerdict::Reject
+        )
+    {
+        return GateDecision::Reject;
+    }
+
     // CR 608.2c: Reject abilities whose source-type condition is known to fail.
     // E.g. Figure of Fable's "{1}{G/W}{G/W}: If this creature is a Scout, ..." when
     // the source is not currently a Scout. The ability is legal to activate but wastes mana.
@@ -732,6 +725,9 @@ mod tests {
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{BounceSelection, EffectKind, ResolvedAbility, TargetFilter};
+    use engine::types::ability::{
+        QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+    };
     use engine::types::game_state::{
         PendingCast, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
         TargetSelectionSlot, WaitingFor,
@@ -739,6 +735,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::keywords::WardCost;
     use engine::types::mana::ManaCost;
+    use engine::types::replacements::ReplacementEvent;
 
     #[test]
     fn rejects_pump_after_combat_without_live_threat() {
@@ -1185,6 +1182,282 @@ mod tests {
         assert_ne!(gate_for(4, 3), GateDecision::Reject);
     }
 
+    /// CR 702.21a + CR 104.3d: a Ward payment that would push the AI to ten
+    /// or more poison counters must reject the target — the AI must never
+    /// treat ending its own game as an ordinary payable ward cost.
+    #[test]
+    fn rejects_targeting_ward_that_would_be_lethal_poison() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].poison_counters = 5;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// A poison Ward payment that stays below the ten-poison threshold does
+    /// not gate the target out — mirrors `allows_targeting_payable_ward`.
+    #[test]
+    fn allows_targeting_ward_with_nonlethal_poison_payment() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // P0 starts at 0 poison — 0 + 5 = 5, well below the 10-poison SBA.
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in
+    /// a `Compound` Ward can be jointly lethal — the aggregate across every
+    /// sub-cost must be checked, not each sub-cost against the same
+    /// unchanged starting total.
+    #[test]
+    fn rejects_targeting_ward_with_jointly_lethal_compound_poison() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+            ])))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // 4 existing + 3 + 3 = 10 (lethal), but 4 + 3 = 7 alone is not — a
+        // per-sub-cost check against the same starting total would wrongly
+        // allow this.
+        state.players[P0.0 as usize].poison_counters = 4;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: the ward-affordability gate applies to any targetable
+    /// permanent, not just creatures — a lethal poison Ward on a noncreature
+    /// permanent must be rejected identically.
+    #[test]
+    fn rejects_targeting_noncreature_ward_that_would_be_lethal_poison() {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario
+            .add_creature(P1, "Warded Artifact", 0, 0)
+            .as_artifact()
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].poison_counters = 5;
+        let decision = damage_target_decision(artifact, 3);
+        let candidate = choose_target_candidate(artifact);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 104.3d + CR 614.1a: a doubler on the poison counters the AI itself
+    /// would receive can make an individually-nonlethal PRINTED count
+    /// actually lethal once replacement-adjusted. The AI must project the
+    /// real, replacement-adjusted result (`preview_player_counter_addition`)
+    /// rather than trusting the printed count — the naive printed-count math
+    /// (4 existing + 3 printed = 7) would wrongly call this safe, but the
+    /// doubled result (4 + 6 = 10) is lethal.
+    #[test]
+    fn rejects_targeting_ward_with_lethal_poison_after_doubling_replacement() {
+        let mut scenario = GameScenario::new();
+        // A permanent the AI (P0) controls that doubles poison counters P0
+        // would receive. `valid_player: Some(You)` + the default recipient
+        // scope means this applies whenever P0 is the one gaining counters,
+        // mirroring how `player_counter.rs`'s own Solemnity test constructs a
+        // global player-counter replacement, parameterized to double instead
+        // of prevent.
+        let doubler_id = scenario.add_creature(P0, "Poison Doubler", 0, 0).id();
+        let mut doubler_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::DOUBLE);
+        doubler_def.valid_player = Some(ReplacementPlayerScope::You);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 3,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&doubler_id)
+            .unwrap()
+            .replacement_definitions = vec![doubler_def].into();
+        state.players[P0.0 as usize].poison_counters = 4;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: a "players can't get counters" replacement (Solemnity) means
+    /// the AI's Ward payment will actually FAIL — `costs.rs`'s
+    /// `AbilityCost::GetPlayerCounters` treats `Prevented` as a failed payment,
+    /// not a zero-cost one — so the AI must not target into this believing the
+    /// Ward is safely (and freely) payable.
+    #[test]
+    fn rejects_targeting_ward_with_prevented_player_counter_payment() {
+        let mut scenario = GameScenario::new();
+        let solemnity_id = scenario.add_creature(P0, "Solemnity", 0, 0).id();
+        let mut prevent_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        prevent_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 3,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&solemnity_id)
+            .unwrap()
+            .replacement_definitions = vec![prevent_def].into();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: a `Compound` Ward's sub-costs are conjoined — ALL must be
+    /// payable, so a prevented `GetPlayerCounters` sub-cost must reject the
+    /// whole cost even when its sibling sub-cost (here, a small life payment)
+    /// is perfectly payable on its own. Proves the recursion through
+    /// `Compound`'s `.all(|cost| can_pay_ward_cost(...))`, not just the direct
+    /// leaf case covered by `rejects_targeting_ward_with_prevented_player_counter_payment`.
+    #[test]
+    fn rejects_compound_ward_with_prevented_player_counter_leaf() {
+        let mut scenario = GameScenario::new();
+        let solemnity_id = scenario.add_creature(P0, "Solemnity", 0, 0).id();
+        let mut prevent_def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        prevent_def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::PayLife(2), // trivially payable on its own (P0 starts at 20 life)
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+            ])))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state
+            .objects
+            .get_mut(&solemnity_id)
+            .unwrap()
+            .replacement_definitions = vec![prevent_def].into();
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
     /// Build an Improvise `ManaPayment` decision context: a `TapForConvoke`
     /// Colorless candidate for `object_id`, plus whatever sibling candidates
     /// the caller supplies for that same dual-purpose permanent.

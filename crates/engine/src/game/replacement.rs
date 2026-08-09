@@ -1170,6 +1170,18 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         // multiplier itself doesn't change the *kind* of cost the prompt
         // describes; the resolved scaled amount is decided in Task 6.
         AbilityCost::PerCounter { base, .. } => replacement_cost_description(base),
+        // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            let kind = format!("{counter_kind:?}").to_lowercase();
+            if *count == 1 {
+                format!("Get a {kind} counter")
+            } else {
+                format!("Get {count} {kind} counters")
+            }
+        }
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1647,7 +1659,10 @@ fn discard_applier(
 ) -> ApplyResult {
     match event {
         ProposedEvent::Discard {
-            object_id, applied, ..
+            object_id,
+            discard_frame,
+            applied,
+            ..
         } => ApplyResult::Modified(ProposedEvent::ZoneChange {
             object_id,
             from: Zone::Hand,
@@ -1660,6 +1675,7 @@ fn discard_applier(
             enter_transformed: false,
             face_down_profile: None,
             enter_as_copy: None,
+            discard_frame,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -10347,6 +10363,7 @@ mod tests {
                 object_id: ObjectId(10),
                 source_id: None,
                 caused_by_effect: false,
+                discard_frame: None,
                 applied: HashSet::new(),
             },
             &mut events,
@@ -10805,6 +10822,7 @@ mod tests {
                     object_id: ObjectId(1),
                     source_id: None,
                     caused_by_effect: false,
+                    discard_frame: None,
                     applied: HashSet::new(),
                 },
                 vec![ReplacementEvent::Discard],
@@ -11131,6 +11149,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -13349,6 +13368,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -13650,65 +13670,23 @@ mod tests {
     }
 
     #[test]
-    fn destination_zone_rip_matches_graveyard() {
-        // Battlefield → Graveyard with RIP replacement → should be a candidate
-        let repl = rip_replacement();
-        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+    fn destination_zone_rip_matches_graveyard_from_any_origin() {
+        // A destination-scoped replacement (RIP: destination_zone Graveyard) matches
+        // regardless of which zone the object is leaving.
+        for (origin, label) in [
+            (Zone::Battlefield, "dies (battlefield → graveyard)"),
+            (Zone::Hand, "discard (hand → graveyard)"),
+            (Zone::Library, "mill (library → graveyard)"),
+            (Zone::Stack, "countered spell (stack → graveyard)"),
+        ] {
+            let repl = rip_replacement();
+            let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
-        let proposed =
-            ProposedEvent::zone_change(ObjectId(99), Zone::Battlefield, Zone::Graveyard, None);
-        let registry = build_replacement_registry();
-        let candidates = find_applicable_replacements(&state, &proposed, &registry);
-        assert!(
-            !candidates.is_empty(),
-            "RIP should match zone change TO graveyard"
-        );
-    }
-
-    #[test]
-    fn destination_zone_rip_hand_to_graveyard() {
-        // Hand → Graveyard (discard) with RIP → should match
-        let repl = rip_replacement();
-        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
-
-        let proposed = ProposedEvent::zone_change(ObjectId(99), Zone::Hand, Zone::Graveyard, None);
-        let registry = build_replacement_registry();
-        let candidates = find_applicable_replacements(&state, &proposed, &registry);
-        assert!(
-            !candidates.is_empty(),
-            "RIP should match discard (hand → graveyard)"
-        );
-    }
-
-    #[test]
-    fn destination_zone_rip_library_to_graveyard() {
-        // Library → Graveyard (mill) with RIP → should match
-        let repl = rip_replacement();
-        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
-
-        let proposed =
-            ProposedEvent::zone_change(ObjectId(99), Zone::Library, Zone::Graveyard, None);
-        let registry = build_replacement_registry();
-        let candidates = find_applicable_replacements(&state, &proposed, &registry);
-        assert!(
-            !candidates.is_empty(),
-            "RIP should match mill (library → graveyard)"
-        );
-    }
-
-    #[test]
-    fn destination_zone_rip_stack_to_graveyard() {
-        // Stack → Graveyard (countered spell) with RIP → should match
-        let repl = rip_replacement();
-        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
-
-        let proposed = ProposedEvent::zone_change(ObjectId(99), Zone::Stack, Zone::Graveyard, None);
-        let registry = build_replacement_registry();
-        let candidates = find_applicable_replacements(&state, &proposed, &registry);
-        assert!(
-            !candidates.is_empty(),
-            "RIP should match countered spell (stack → graveyard)"
-        );
+            let proposed = ProposedEvent::zone_change(ObjectId(99), origin, Zone::Graveyard, None);
+            let registry = build_replacement_registry();
+            let candidates = find_applicable_replacements(&state, &proposed, &registry);
+            assert!(!candidates.is_empty(), "RIP should match {label}");
+        }
     }
 
     #[test]
@@ -14491,6 +14469,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
         };
@@ -17642,6 +17621,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            discard_frame: None,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -17687,6 +17667,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            discard_frame: None,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);
