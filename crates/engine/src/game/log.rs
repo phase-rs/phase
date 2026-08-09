@@ -2119,13 +2119,10 @@ mod tests {
         assert_eq!(entries[2].turn, 1);
         assert_eq!(entries[2].phase, Phase::Untap);
         assert_eq!(entries[3].phase, Phase::Upkeep);
-        assert_eq!(entries[4].turn, 1);
         assert_eq!(
-            entries[4].presentation.visibility,
-            LogVisibility::HiddenInformation
-        );
-        assert!(
-            matches!(entries[4].segments.as_slice(), [LogSegment::PlayerName { .. }, LogSegment::Text(text)] if text == " draws a card")
+            entries.len(),
+            4,
+            "CardDrawn is excluded from the visible log"
         );
     }
 

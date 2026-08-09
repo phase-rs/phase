@@ -15956,9 +15956,11 @@ mod stage2_injector_tests {
                 // and is offered as a follow-up rather than taken unannounced mid-review.
                 // #6812 noted-mana support inserts two lines above all three producers:
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
-                "game/effects/mod.rs:6212".to_string(),
-                "game/effects/mod.rs:6289".to_string(),
-                "game/effects/mod.rs:9477".to_string(),
+                // #7018 adds the 16-line distinct-player-scope continuation gate above all
+                // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
+                "game/effects/mod.rs:6228".to_string(),
+                "game/effects/mod.rs:6305".to_string(),
+                "game/effects/mod.rs:9493".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
