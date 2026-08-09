@@ -163,7 +163,10 @@ fn apply_generate_pairings(
             action: "GeneratePairings".to_string(),
         });
     }
-    if session.config.tournament_format == TournamentFormat::SingleElimination
+    if matches!(
+        session.kind,
+        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
+    ) && session.config.tournament_format == TournamentFormat::SingleElimination
         && session.seats.len() != 8
     {
         return Err(DraftError::UnsupportedTournamentSize {
@@ -595,20 +598,26 @@ fn apply_start_draft(
     }
 
     let seat_count = session.seats.len() as u8;
-    let valid_size = match session.config.tournament_format {
-        TournamentFormat::Swiss => (2..=8).contains(&seat_count),
-        TournamentFormat::SingleElimination => seat_count == 8,
-    };
-    if !valid_size {
-        return Err(DraftError::UnsupportedTournamentSize {
-            format: session.config.tournament_format,
-            required: if session.config.tournament_format == TournamentFormat::SingleElimination {
-                8
-            } else {
-                2
-            },
-            actual: seat_count,
-        });
+    if matches!(
+        session.kind,
+        DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed
+    ) {
+        let valid_size = match session.config.tournament_format {
+            TournamentFormat::Swiss => (2..=8).contains(&seat_count),
+            TournamentFormat::SingleElimination => seat_count == 8,
+        };
+        if !valid_size {
+            return Err(DraftError::UnsupportedTournamentSize {
+                format: session.config.tournament_format,
+                required: if session.config.tournament_format == TournamentFormat::SingleElimination
+                {
+                    8
+                } else {
+                    2
+                },
+                actual: seat_count,
+            });
+        }
     }
     if session.kind == DraftKind::Sealed || session.config.kind == DraftKind::Sealed {
         if session.kind != DraftKind::Sealed || session.config.kind != DraftKind::Sealed {
@@ -836,6 +845,49 @@ mod tests {
         );
         assert_eq!(session.status, DraftStatus::Lobby);
         assert_eq!(session.pools, before);
+    }
+
+    #[test]
+    fn tournament_size_limits_apply_to_sealed_boundaries() {
+        for (format, pod_size, accepted) in [
+            (TournamentFormat::Swiss, 1, false),
+            (TournamentFormat::Swiss, 2, true),
+            (TournamentFormat::Swiss, 8, true),
+            (TournamentFormat::Swiss, 9, false),
+            (TournamentFormat::SingleElimination, 7, false),
+            (TournamentFormat::SingleElimination, 8, true),
+            (TournamentFormat::SingleElimination, 9, false),
+        ] {
+            let (mut session, source) = test_session(pod_size);
+            session.kind = DraftKind::Sealed;
+            session.config.kind = DraftKind::Sealed;
+            session.config.pack_count = 6;
+            session.config.tournament_format = format;
+
+            assert_eq!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)).is_ok(),
+                accepted,
+                "{format:?} with {pod_size} seats"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_cube_allows_single_and_large_pods() {
+        for pod_size in [1, 9, 16] {
+            let (mut session, source) = test_session(pod_size);
+            session.kind = DraftKind::Quick;
+            session.config.kind = DraftKind::Quick;
+            session.config.source = DraftSource::Cube {
+                id: "cube".to_string(),
+                name: "Cube".to_string(),
+            };
+
+            assert!(
+                apply(&mut session, DraftAction::StartDraft, Some(&source)).is_ok(),
+                "Quick Cube with {pod_size} seats should start"
+            );
+        }
     }
 
     #[test]

@@ -6868,7 +6868,8 @@ async fn handle_client_message(
                 return;
             }
 
-            if tournament_format == draft_core::types::TournamentFormat::SingleElimination
+            if kind != draft_core::types::DraftKind::Quick
+                && tournament_format == draft_core::types::TournamentFormat::SingleElimination
                 && pod_size != 8
             {
                 let msg = ServerMessage::DraftActionRejected {
