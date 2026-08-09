@@ -273,6 +273,19 @@ fn cleanup_discard_fires_persistent_delayed_trigger_exactly_once() {
         "Persistent Discard Trigger".to_string(),
         Zone::Battlefield,
     );
+    let mut ability = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    ability.set_trigger_source_recursive(engine::game::triggers::trigger_source_context_for_latch(
+        runner.state(),
+        &runner.state().objects[&source],
+    ));
     runner
         .state_mut()
         .delayed_triggers
@@ -283,15 +296,7 @@ fn cleanup_discard_fires_persistent_delayed_trigger_exactly_once() {
                     after: TurnGate::After(creation_turn),
                 },
             },
-            Box::new(ResolvedAbility::new(
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Controller,
-                },
-                vec![],
-                source,
-                P0,
-            )),
+            Box::new(ability),
             P0,
             source,
             false,
