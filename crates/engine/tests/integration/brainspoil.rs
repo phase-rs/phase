@@ -45,6 +45,11 @@ fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: Object
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Regenerate targeting the creature");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("select Regenerate's target");
     runner.advance_until_stack_empty();
 }
 
