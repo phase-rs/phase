@@ -345,6 +345,16 @@ impl Broker {
             return vec![error("ClientHello required before any other message")];
         }
 
+        let pc = requested_player_count.clamp(2, 6);
+        if let Some(format_config) = format_config.as_ref() {
+            if let Err(reason) = format_config.validate_for_player_count(pc) {
+                return vec![error(&reason)];
+            }
+            if let Err(reason) = format_config.reject_unimplemented_range_of_influence() {
+                return vec![error(&reason)];
+            }
+        }
+
         let mut out = Vec::new();
 
         // Re-registration cleanup: drop a previously-owned entry first so a
@@ -375,15 +385,6 @@ impl Broker {
 
         let game_code = env.new_game_code();
         let player_token = env.new_token();
-        let pc = requested_player_count.clamp(2, 6);
-        if let Some(format_config) = format_config.as_ref() {
-            if let Err(reason) = format_config.validate_for_player_count(pc) {
-                return vec![error(&reason)];
-            }
-            if let Err(reason) = format_config.reject_unimplemented_range_of_influence() {
-                return vec![error(&reason)];
-            }
-        }
         let (host_version, host_build_commit) = conn
             .client_hello
             .as_ref()
@@ -905,6 +906,44 @@ mod tests {
         );
         // The new entry replaced the old ownership stamp.
         assert_ne!(conn.host_game.as_deref(), Some(first_code.as_str()));
+    }
+
+    #[test]
+    fn rejected_limited_range_re_registration_preserves_the_existing_lobby() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        let first = create(&mut conn, &mut broker, &env);
+        let first_code = game_code_of(&first);
+        let mut format_config = engine::types::format::FormatConfig::standard();
+        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: std::collections::BTreeMap::new(),
+        });
+
+        let out = broker.handle_create_game(
+            &mut conn,
+            "Host".into(),
+            true,
+            None,
+            None,
+            4,
+            Default::default(),
+            Some(format_config),
+            None,
+            Some("peer-1".into()),
+            None,
+            false,
+            &env,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert_eq!(conn.host_game.as_deref(), Some(first_code.as_str()));
+        assert!(broker.lobby_mut().public_game(&first_code).is_some());
     }
 
     #[test]
