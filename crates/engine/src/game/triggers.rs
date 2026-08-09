@@ -2090,7 +2090,14 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
-            if !zones_match && use_latched_trigger_entries {
+            // A zone-change record may let the moving source's own trigger
+            // function from its destination zone. An observer's LKI only
+            // proves it functioned from `zone_filter` immediately before the
+            // event; it must not gain the destination's trigger zone.
+            if !zones_match
+                && use_latched_trigger_entries
+                && matches!(visit, TriggerSourceVisit::EventSubject)
+            {
                 if let GameEvent::ZoneChanged { record, to, .. } = event {
                     zones_match = record.from_zone == Some(source_context.identity.expected_zone)
                         && trig_def.trigger_zones.contains(to);
