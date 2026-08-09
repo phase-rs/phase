@@ -218,6 +218,20 @@ mod external_format_config_tests {
             .expect_err("limited range must remain disabled at the restore boundary")
             .contains("not supported"));
     }
+
+    #[test]
+    fn legacy_scalar_range_restore_reaches_the_feature_gate() {
+        let mut serialized =
+            serde_json::to_value(GameState::new_two_player(42)).expect("state serializes");
+        serialized["format_config"]["range_of_influence"] = serde_json::json!(1);
+        let json = serde_json::to_string(&serialized).expect("legacy state serializes");
+
+        let error = decode_restored_game_state(&json)
+            .expect_err("legacy enabled range must be rejected after migration");
+
+        assert!(error.contains("not supported"));
+        assert!(!error.contains("deserialize"));
+    }
 }
 
 /// Bind the engine's interaction authority for the one game this module hosts.
@@ -3002,6 +3016,31 @@ mod tests {
     fn proposal_outcome(token: &str, actor: PlayerId, action: &GameAction) -> serde_json::Value {
         serde_wasm_bindgen::from_value(submit_ai_action_proposal(token, actor.0, to_js(action)))
             .expect("proposal outcome must serialize")
+    }
+
+    #[test]
+    fn initialize_game_returns_error_for_malformed_format_config_without_standard_fallback() {
+        clear_game_state();
+        let malformed_format_config = serde_wasm_bindgen::to_value(&serde_json::json!(42))
+            .expect("malformed JSON value converts to a JS input");
+
+        let result = initialize_game(
+            JsValue::NULL,
+            Some(42.0),
+            malformed_format_config,
+            JsValue::NULL,
+            Some(2),
+            None,
+        );
+        let error: serde_json::Value =
+            serde_wasm_bindgen::from_value(result).expect("initializer error is a JS object");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 
     /// Installs a real engine state and returns the production finite decision

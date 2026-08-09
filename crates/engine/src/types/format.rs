@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::database::legality::LegalityFormat;
 use crate::types::player::PlayerId;
@@ -143,6 +143,30 @@ pub struct RangeOfInfluenceConfig {
     pub player_overrides: BTreeMap<PlayerId, u8>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RangeOfInfluenceConfigWire {
+    Current(RangeOfInfluenceConfig),
+    Legacy(u8),
+}
+
+fn deserialize_range_of_influence<'de, D>(
+    deserializer: D,
+) -> Result<Option<RangeOfInfluenceConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<RangeOfInfluenceConfigWire>::deserialize(deserializer).map(|range| {
+        range.map(|range| match range {
+            RangeOfInfluenceConfigWire::Current(config) => config,
+            RangeOfInfluenceConfigWire::Legacy(default_range) => RangeOfInfluenceConfig {
+                default_range,
+                player_overrides: BTreeMap::new(),
+            },
+        })
+    })
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -161,6 +185,7 @@ pub struct FormatConfig {
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
+    #[serde(default, deserialize_with = "deserialize_range_of_influence")]
     pub range_of_influence: Option<RangeOfInfluenceConfig>,
     pub team_based: bool,
     /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
@@ -1328,6 +1353,28 @@ mod tests {
 
         assert_eq!(config.default_range, 0);
         assert!(config.player_overrides.is_empty());
+    }
+
+    #[test]
+    fn legacy_scalar_range_of_influence_deserializes_and_remains_rejected() {
+        let mut serialized = serde_json::to_value(FormatConfig::standard())
+            .expect("format config serializes before legacy rewrite");
+        serialized["range_of_influence"] = serde_json::json!(1);
+
+        let config: FormatConfig =
+            serde_json::from_value(serialized).expect("legacy scalar range config deserializes");
+
+        assert_eq!(
+            config.range_of_influence,
+            Some(RangeOfInfluenceConfig {
+                default_range: 1,
+                player_overrides: BTreeMap::new(),
+            })
+        );
+        assert!(config
+            .reject_unimplemented_range_of_influence()
+            .expect_err("legacy enabled range must reach the normal feature gate")
+            .contains("not supported"));
     }
 
     #[test]
