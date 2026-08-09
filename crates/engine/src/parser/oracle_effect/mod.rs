@@ -5445,16 +5445,37 @@ fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
 /// text; a single-quoted span (the depth-2 nested grant) is consumed via
 /// [`opaque_single_quoted_span`], whose structural close preserves embedded
 /// apostrophes.
-fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
+fn parse_choice_list_item(input: &str) -> nom::IResult<&str, &str> {
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
         opaque_single_quoted_span,
         recognize(preceded(not(parse_choice_list_separator), anychar)),
     ));
-    let item = recognize(many1(unit));
-    let (_, items) = all_consuming(separated_list1(parse_choice_list_separator, item))
+    recognize(many1(unit)).parse(input)
+}
+
+fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
+    let (_, items) = all_consuming(separated_list1(
+        parse_choice_list_separator,
+        parse_choice_list_item,
+    ))
+    .parse(input)
+    .ok()?;
+    Some(items)
+}
+
+/// Split a bare counter-choice list only when its final top-level separator is
+/// `or`. Unlike an explicit "your choice of" payload, an unmarked `and`
+/// conjunction means all listed counters are applied by the ordinary counter
+/// parser, not that one branch is chosen.
+fn split_bare_disjunctive_choice_list_items(input: &str) -> Option<Vec<&str>> {
+    let (rest, mut items) = separated_list1(tag(", "), parse_choice_list_item)
         .parse(input)
         .ok()?;
+    let (rest, _) = alt((tag(", or "), tag(" or "))).parse(rest).ok()?;
+    let (rest, last_item) = parse_choice_list_item(rest).ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+    items.push(last_item);
     Some(items)
 }
 
@@ -5644,7 +5665,7 @@ fn original_counter_choice_list_items(
     }
 }
 
-/// CR 122.1 + CR 608.2d: Context-free classifier for a disjunctive
+/// CR 122.1 + CR 122.1a + CR 122.1b: Context-free classifier for a disjunctive
 /// counter-choice list. Given the choices payload (the text BETWEEN
 /// "your choice of " and " on TARGET"), recognize which of the three list
 /// shapes it is and parse each item into a typed `(CounterType, QuantityExpr)`
@@ -5677,7 +5698,7 @@ pub(crate) fn classify_and_parse_counter_choice_list(
     Some(classify_counter_choice_list(&lower)?.entries)
 }
 
-/// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
+/// CR 122.1 + CR 122.1a + CR 122.1b: Parse shared-target counter choices of the form
 /// "put your choice of A counter-pattern, B counter-pattern, or C
 /// counter-pattern on TARGET" (N-ary branches).
 ///
@@ -5703,8 +5724,10 @@ fn try_parse_put_counter_choice(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    // CR 122.1b + CR 608.2d: two surface forms select a counter kind. The
-    // explicit "put your choice of <list> on TARGET" form (Inspirit, Invoke the
+    // CR 122.1 + CR 122.1a + CR 122.1b: Two surface forms name counter kinds.
+    // CR 608.2d: Each accepted form presents its controller with a
+    // resolution-time choice. The explicit "put your choice of <list> on
+    // TARGET" form (Inspirit, Invoke the
     // Ancients) and the bare "put a <X>, <Y>, or <Z> counter on TARGET" form
     // (Reluctant Role Model: "put a flying, lifelink, or +1/+1 counter on it").
     // Both resolve to the same `ChooseOneOf` of `PutCounter` branches — the
@@ -5727,6 +5750,10 @@ fn try_parse_put_counter_choice(
     let consumed = tp.original.len() - after_choice_original.len();
     let after_choice = TextPair::new(after_choice_original, &tp.lower[consumed..]);
     let (choices_tp, target_tp) = after_choice.split_around(" on ")?;
+
+    if !explicit_choice && split_bare_disjunctive_choice_list_items(choices_tp.lower).is_none() {
+        return None;
+    }
 
     // The shared classifier validates FromAmong, SharedNoun, and Distributed
     // lists before branch reparsing. The unmarked bare form retains its

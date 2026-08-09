@@ -40903,6 +40903,56 @@ fn bare_distributed_counter_choice_rejects_non_counter_noun_disjunction() {
 }
 
 #[test]
+fn bare_counter_conjunctions_fall_through_to_the_multi_counter_parser() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    // These are ordinary multi-counter placements, not resolution-time
+    // choices. They cover Unexpected Fangs (the All Will Be One/Stalwart
+    // driver) and Abigale's three keyword counters respectively.
+    let cases = [
+        (
+            "Put a +1/+1 counter and a lifelink counter on target creature.",
+            vec![
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        ),
+        (
+            "Put a flying counter, a first strike counter, and a lifelink counter on that creature.",
+            vec![
+                CounterType::Keyword(KeywordKind::Flying),
+                CounterType::Keyword(KeywordKind::FirstStrike),
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        ),
+    ];
+
+    for (text, expected_counter_types) in cases {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&ability);
+        assert_eq!(
+            effects.len(),
+            expected_counter_types.len(),
+            "the ordinary multi-counter parser must retain every conjunct: {text}"
+        );
+        for (effect, expected_counter_type) in effects.iter().zip(expected_counter_types) {
+            assert!(
+                matches!(
+                    effect,
+                    Effect::PutCounter {
+                        counter_type,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    } if counter_type == &expected_counter_type
+                ),
+                "counter conjunction must fall through instead of becoming ChooseOneOf: {text}; got {effect:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_noun_counter_choice_rejects_non_counter_list() {
     let valid = parse_effect_chain(
         "Put your choice of a flying or haste counter on target creature.",
