@@ -456,10 +456,14 @@ fn grant_answers_harmful_effect(
     }
 }
 
-/// Harmful single-target effects that select a permanent (answered by shroud /
-/// hexproof / protection when the source is not exempt).
+/// Harmful SINGLE-TARGET effects that select a permanent (answered by shroud /
+/// hexproof / protection when the source is not exempt). Mass/untargeted
+/// effects — `DestroyAll` (CR 115.10a: an affected object is not a target) —
+/// are excluded: targeting immunity grants (CR 702.11/702.16/702.18) save
+/// nothing from a wipe.
 fn harmful_effect_uses_object_targeting(effect: &Effect) -> bool {
-    !matches!(extract_target_filter(effect), Some(TargetFilter::Player))
+    !matches!(effect, Effect::DestroyAll { .. })
+        && !matches!(extract_target_filter(effect), Some(TargetFilter::Player))
         && extract_target_filter(effect).is_some()
 }
 

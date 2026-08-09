@@ -394,7 +394,7 @@ pub(crate) fn lethality_bonus(
 ///   planeswalker or artifact is an independent control-changing line,
 ///   CR 613.1b Layer 2; or a mass wipe, CR 701.8). The population is resolved
 ///   with the COMPLETE typed filter — including `TypedFilter.controller`
-///   (CR 108.3 / CR 115.2b) — so an own-controller-constrained line ("gain
+///   (CR 108.4 / CR 109.5) — so an own-controller-constrained line ("gain
 ///   control of target creature you control") credits nothing, so the spell is
 ///   never a total *damage* whiff);
 /// * ANY `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
@@ -424,7 +424,7 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     // a control-changing line like "deal 1 damage; gain control of target
     // permanent" (`GainControl`, CR 613.1b Layer 2), or a mass wipe
     // (`DestroyAll`, CR 701.8). The decision applies the COMPLETE typed filter
-    // — including `TypedFilter.controller` (CR 108.3 / CR 115.2b) — through
+    // — including `TypedFilter.controller` (CR 108.4 / CR 109.5) — through
     // the engine's `find_legal_targets`: an own-controller-constrained line
     // ("gain control of target creature you control") credits nothing, and a
     // wipe's real population is resolved, not guessed from filter shape.
@@ -498,7 +498,7 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
 
 /// Does this non-`DealDamage` effect currently have a legal target or
 /// population under an OPPONENT's control? Applies the full typed filter —
-/// including `TypedFilter.controller` (CR 108.3 / CR 115.2b) — via the
+/// including `TypedFilter.controller` (CR 108.4 / CR 109.5) — via the
 /// engine's `find_legal_targets`; never a filter-shape proxy. Effects with no
 /// extractable filter (or no source object) resolve to false (no line).
 fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
@@ -927,7 +927,7 @@ mod tests {
     /// Own-controller-constrained control line: "deal 1 damage to target
     /// creature; gain control of target creature YOU control". `GainControl` is
     /// `Contextual`, but its `TypedFilter.controller` is `ControllerRef::You`
-    /// (CR 108.3 / CR 115.2b), so `find_legal_targets` names only the caster's
+    /// (CR 108.4 / CR 109.5), so `find_legal_targets` names only the caster's
     /// own creatures — there is no legal OPPOSING population for the control
     /// line. The deleted filter-shape proxy credited this line anyway (its
     /// `targets_creatures` early-out ignored `TypedFilter.controller`); the
@@ -951,7 +951,7 @@ mod tests {
             |ctx| {
                 assert!(
                     !can_kill_any_legal_target(ctx),
-                    "an own-controller-constrained control line (CR 108.3/115.2b) must \
+                    "an own-controller-constrained control line (CR 108.4/109.5) must \
                      NOT be credited as opposing removal: the You filter names only the \
                      caster's own bear, so only the whiff 1-damage half remains and \
                      the gate vetoes the total damage whiff"
