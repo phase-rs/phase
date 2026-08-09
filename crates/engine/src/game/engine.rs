@@ -15963,9 +15963,12 @@ mod stage2_injector_tests {
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
                 // #7018 adds the 16-line distinct-player-scope continuation gate above all
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
-                "game/effects/mod.rs:6228".to_string(),
-                "game/effects/mod.rs:6305".to_string(),
-                "game/effects/mod.rs:9493".to_string(),
+                // #6958 adds the 13-line `CastFromZone` outcome-flag exclusion above all
+                // three. It creates no `OptionalEffect` prompt, so the census remains five
+                // producers while their coordinates shift uniformly by +13.
+                "game/effects/mod.rs:6241".to_string(),
+                "game/effects/mod.rs:6318".to_string(),
+                "game/effects/mod.rs:9506".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
