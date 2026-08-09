@@ -156,6 +156,21 @@ fn demilich_graveyard_cast_blocked_without_four_exilable_cards() {
         "with four exilable cards the additional exile cost is payable, so the \
          graveyard cast must be offered — proves the block is affordability-specific"
     );
+
+    // A non-spell graveyard card cannot inflate the filter-specific exile count.
+    let mut ineligible = GameScenario::new();
+    ineligible.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let demilich_ineligible = stage_demilich(&mut ineligible);
+    ineligible.add_spell_to_graveyard(P0, "Lightning Bolt", true);
+    ineligible.add_spell_to_graveyard(P0, "Opt", true);
+    ineligible.add_spell_to_graveyard(P0, "Divination", false);
+    ineligible.add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2);
+    ineligible.with_mana_pool(P0, pool_units(&[ManaType::Blue; 4]));
+    let ineligible_runner = ineligible.build();
+    assert!(
+        !can_cast_object_now(ineligible_runner.state(), P0, demilich_ineligible),
+        "three instant/sorcery cards plus an ineligible creature cannot pay Demilich's exile-four cost"
+    );
 }
 
 /// CR 601.2f + CR 701.13a: end-to-end — casting Helbrute from the graveyard pays

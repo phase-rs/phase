@@ -220,26 +220,42 @@ fn parse_self_flash_option(
         }
     }
 
-    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
-        if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
-            // CR 601.2f: the rider names the additional cost as a GERUND ("by
-            // discarding a card") — de-gerund via the shared cost authority. A
-            // present-but-unmodeled cost DECLINES the whole option (return None),
-            // mirroring the graveyard `AdditionalCostRider::Unmodeled` decline in
-            // `oracle_static/restriction.rs`. Falling through to the cost-less
-            // `Some(option)` tail below would grant flash while silently skipping
-            // the required additional cost AND be marked supported=true by coverage
-            // (`build_casting_option_item` treats a `None` cost as supported) —
-            // strictly more permissive than the printed text. Declining keeps the
-            // spell sorcery-speed and leaves the dropped cost as an honest coverage
-            // gap (the unconsumed line falls through to gap detection).
-            let cost = parse_gerund_cost(cost_text);
-            if matches!(cost, AbilityCost::Unimplemented { .. }) {
-                return None;
-            }
-            option = option.cost(cost);
-            return Some(option);
+    if let Some(((), after)) = nom_on_lower(rest, &rest.to_lowercase(), |input| {
+        value((), tag::<_, _, OracleError<'_>>("by ")).parse(input)
+    }) {
+        let after = after.trim();
+        let after_lower = after.to_lowercase();
+        // CR 601.2f: the trailing closer has the same independent axes as the
+        // graveyard permission parser: optional "paying " and either possessive
+        // pronoun. A malformed closer must decline the whole option rather than
+        // fall through to an uncosted flash grant.
+        let Some((cost_len, _)) = nom_on_lower(after, &after_lower, |input| {
+            all_consuming(map(
+                (
+                    terminated(
+                        take_until::<_, _, OracleError<'_>>(" in addition to "),
+                        tag(" in addition to "),
+                    ),
+                    opt(tag("paying ")),
+                    alt((tag("their other costs"), tag("its other costs"))),
+                    opt(tag(".")),
+                ),
+                |(cost, _, _, _)| cost.len(),
+            ))
+            .parse(input)
+        }) else {
+            return None;
+        };
+        // CR 601.2f: the rider names the additional cost as a GERUND ("by
+        // discarding a card") — de-gerund via the shared cost authority. A
+        // present-but-unmodeled cost declines the whole option, avoiding a
+        // strictly-more-permissive cost-less flash permission.
+        let cost = parse_gerund_cost(&after[..cost_len]);
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return None;
         }
+        option = option.cost(cost);
+        return Some(option);
     }
 
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("if you ").parse(rest) {
@@ -1662,18 +1678,27 @@ Trample";
     /// "cast … by <gerund> in addition to …" family alongside the graveyard rider.
     #[test]
     fn self_flash_by_gerund_additional_cost_carries_discard() {
-        let option = parse_spell_casting_option_line(
-            "You may cast this spell as though it had flash by discarding a card in addition to paying its other costs.",
-            "Test Card",
-        )
-        .expect("self-flash rider should parse");
-        match option {
-            SpellCastingOption {
-                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
-                cost: Some(AbilityCost::Discard { .. }),
-                condition: None,
-            } => {}
-            other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+        for closer in [
+            "its other costs",
+            "their other costs",
+            "paying its other costs",
+            "paying their other costs",
+        ] {
+            let option = parse_spell_casting_option_line(
+                &format!(
+                    "You may cast this spell as though it had flash by discarding a card in addition to {closer}."
+                ),
+                "Test Card",
+            )
+            .expect("self-flash rider should parse");
+            match option {
+                SpellCastingOption {
+                    kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                    cost: Some(AbilityCost::Discard { .. }),
+                    condition: None,
+                } => {}
+                other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+            }
         }
     }
 

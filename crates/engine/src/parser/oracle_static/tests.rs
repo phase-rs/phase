@@ -14336,10 +14336,22 @@ fn graveyard_cast_permission_demilich_additional_exile() {
     assert_eq!(*mode, CastCostMode::Additional);
     assert_eq!(*count, 4, "Demilich exiles four cards");
     assert_eq!(*zone, Some(Zone::Graveyard));
-    assert!(
-        filter.is_some(),
-        "the exile cost must carry the instant/sorcery card filter, got {filter:?}"
+    let Some(TargetFilter::Or { filters }) = filter else {
+        panic!("Demilich's exile cost must be an instant-or-sorcery filter, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "instant-or-sorcery must have two filter legs"
     );
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(typed) if typed.type_filters == [TypeFilter::Instant]
+    )));
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(typed) if typed.type_filters == [TypeFilter::Sorcery]
+    )));
 
     // Full Oracle dispatch (with real "~" normalization) must route the graveyard
     // line to the same static, leaving no Unimplemented node behind for it.
@@ -14389,7 +14401,12 @@ fn graveyard_cast_permission_helbrute_additional_exile() {
     assert_eq!(play_mode, CardPlayMode::Cast);
     assert_eq!(def.active_zones, vec![Zone::Graveyard]);
     let Some(CastExtraCost {
-        cost: AbilityCost::Exile { count, zone, .. },
+        cost:
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            },
         mode,
     }) = extra_cost
     else {
@@ -14398,6 +14415,12 @@ fn graveyard_cast_permission_helbrute_additional_exile() {
     assert_eq!(*mode, CastCostMode::Additional);
     assert_eq!(*count, 1, "Helbrute exiles one other creature card");
     assert_eq!(*zone, Some(Zone::Graveyard));
+    assert!(matches!(
+        filter,
+        Some(TargetFilter::Typed(typed))
+            if typed.type_filters == [TypeFilter::Creature]
+                && typed.properties.contains(&FilterProp::Another)
+    ));
 
     // Full Oracle dispatch, including the "Sarcophagus —" ability word and Haste,
     // must route the graveyard line to the same permission with no Unimplemented.

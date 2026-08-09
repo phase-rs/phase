@@ -86,21 +86,23 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
 /// callers can decline (or drop) rather than silently attach a wrong/absent cost.
 pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
-    let lower = phrase.trim().to_lowercase();
+    let original = phrase.trim();
+    let lower = original.to_lowercase();
     // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
     // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
-    let deconjugated = alt((
-        value("pay", tag::<_, _, E<'_>>("paying ")),
-        value("discard", tag("discarding ")),
-        value("sacrifice", tag("sacrificing ")),
-        value("tap", tag("tapping ")),
-        value("remove", tag("removing ")),
-        value("exile", tag("exiling ")),
-    ))
-    .parse(lower.as_str());
-    let Ok((rest, stem)) = deconjugated else {
+    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+        alt((
+            value("pay", tag::<_, _, E<'_>>("paying ")),
+            value("discard", tag("discarding ")),
+            value("sacrifice", tag("sacrificing ")),
+            value("tap", tag("tapping ")),
+            value("remove", tag("removing ")),
+            value("exile", tag("exiling ")),
+        ))
+        .parse(input)
+    }) else {
         return AbilityCost::Unimplemented {
-            description: phrase.trim().to_string(),
+            description: original.to_string(),
         };
     };
     parse_oracle_cost(&format!("{stem} {rest}"))
@@ -1955,6 +1957,7 @@ mod tests {
             ("discarding a card", "discard a card"),
             ("paying 1 life", "pay 1 life"),
             ("sacrificing a creature", "sacrifice a creature"),
+            ("sacrificing a Vehicle", "sacrifice a Vehicle"),
             // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
             // riders exile cards as an additional cost.
             (
@@ -1972,6 +1975,13 @@ mod tests {
                 "gerund {gerund:?} must lower like imperative {imperative:?}"
             );
         }
+        assert!(matches!(
+            parse_gerund_cost("sacrificing a Vehicle"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                ..
+            }) if type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+        ));
         // The required-for-this-fix arm is concretely a discard-a-card cost.
         assert!(
             matches!(
