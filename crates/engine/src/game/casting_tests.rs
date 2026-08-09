@@ -3251,6 +3251,11 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
         .insert(PlayerId(2), [you].into_iter().collect());
     assert!(evaluate_condition_for_test(&state, &cond, you, src));
 
+    // A departed player remains a valid attacker until their skipped next-turn
+    // boundary expires the record in `start_next_turn`.
+    crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut Vec::new());
+    assert!(evaluate_condition_for_test(&state, &cond, you, src));
+
     // Opponents attacked each other but not you ⇒ false (the defender must be you).
     let mut state = GameState::new(FormatConfig::standard(), 3, 7);
     state

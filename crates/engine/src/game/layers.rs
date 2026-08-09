@@ -1612,15 +1612,13 @@ fn evaluate_condition_with_context(
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        // CR 508.6 + CR 109.5: True when any non-eliminated player (other than the
-        // controller) declared a creature attacking the controller ("you") during
-        // that player's most recent completed turn. Existential; the defender is
-        // the controller, so a player who attacked someone else — or the
-        // controller's own attacks — do not satisfy it.
+        // CR 508.6 + CR 109.5: True when any other player declared a creature
+        // attacking the controller ("you") during that player's most recent
+        // completed turn. Existential; the defender is the controller, so a player
+        // who attacked someone else — or the controller's own attacks — do not
+        // satisfy it.
         StaticCondition::AnyPlayerAttackedYouLastTurn => state.players.iter().any(|p| {
-            !p.is_eliminated
-                && p.id != controller
-                && state.player_attacked_player_last_turn(p.id, controller)
+            p.id != controller && state.player_attacked_player_last_turn(p.id, controller)
         }),
         // CR 105.2 + CR 611.3a: the subject is the recipient (the enchanted
         // creature, "it"), not the Aura source; fall back to the source only when

@@ -14966,10 +14966,10 @@ declare_game_state! {
     /// Snapshotted from `attacked_defenders_this_turn` at cleanup
     /// (`execute_cleanup`), keyed by the ending active player, overwriting so a
     /// no-attack turn clears that player's entry while every other player's entry
-    /// persists (a skipped player never reaches cleanup, so it keeps its genuine
-    /// last-turn record). The "last turn" analog of `attacked_defenders_this_turn`
-    /// powering "attacked you during their last turn"
-    /// (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
+    /// persists. CR 800.4i: A departed player's entry survives until their skipped
+    /// next-turn boundary, where `start_next_turn` expires it. The "last turn"
+    /// analog of `attacked_defenders_this_turn` powering "attacked you during their
+    /// last turn" (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub attacked_defenders_last_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this

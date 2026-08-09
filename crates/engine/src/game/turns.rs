@@ -907,6 +907,40 @@ pub(crate) fn select_next_turn_after_completion(
     }
 }
 
+/// CR 800.4i: Expires a departed player's last-turn attack record when the turn
+/// that player would have taken is skipped in seat order.
+fn expire_departed_last_turn_attack_records(
+    state: &mut GameState,
+    completed_player: PlayerId,
+    next_active: PlayerId,
+    is_extra_turn: bool,
+) {
+    if is_extra_turn || state.seat_order.is_empty() {
+        return;
+    }
+
+    let seat_order = &state.seat_order;
+    let current_idx = seat_order
+        .iter()
+        .position(|&player| player == completed_player)
+        .unwrap_or(0);
+    for offset in 1..=seat_order.len() {
+        let idx = super::players::turn_order_index(
+            current_idx,
+            offset,
+            seat_order.len(),
+            state.turn_direction,
+        );
+        let candidate = seat_order[idx];
+        if !super::players::is_alive(state, candidate) {
+            state.attacked_defenders_last_turn.remove(&candidate);
+        }
+        if candidate == next_active {
+            break;
+        }
+    }
+}
+
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
 /// projection. Slot 0 is the current live turn representative; later slots are
 /// the next turns that would actually begin after extra turns, skipped turns,
@@ -1067,6 +1101,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
     // can observe it.
     let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    expire_departed_last_turn_attack_records(state, completed_player, next_active, is_extra_turn);
     state.active_player = next_active;
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
@@ -6641,6 +6676,32 @@ mod tests {
         assert!(
             !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
             "P1's subsequent no-attack turn clears its record to empty"
+        );
+    }
+
+    #[test]
+    fn start_next_turn_expires_departed_players_last_turn_attack_record() {
+        use crate::game::elimination::eliminate_player;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state
+            .attacked_defenders_last_turn
+            .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record persists before their skipped turn boundary"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(state.active_player, PlayerId(2));
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record expires when their skipped turn boundary is crossed"
         );
     }
 
