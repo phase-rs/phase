@@ -1143,18 +1143,26 @@ pub fn fallback_action(
     config: &AiConfig,
     contract: &AiDecisionContract,
 ) -> Option<GameAction> {
+    let gate = |action: Option<GameAction>| {
+        action.filter(|action| contract.contains_action(state, action))
+    };
+    let issued = |predicate: fn(&GameAction) -> bool| {
+        contract
+            .candidates
+            .iter()
+            .find(|candidate| predicate(&candidate.action))
+            .map(|candidate| candidate.action.clone())
+    };
     // CR 605.3b: A sacrificial mana prompt is an explicit payment decision,
     // not a generic pending-cast failure. Pick only an engine-issued source or
     // the exact BackToManaPayment escape; never synthesize CancelCast here.
     if matches!(state.waiting_for, WaitingFor::ManaSourceSelection { .. }) {
-        return engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| {
-                matches!(
-                    action,
-                    GameAction::ActivateManaSource { .. } | GameAction::BackToManaPayment
-                )
-            });
+        return gate(issued(|action| {
+            matches!(
+                action,
+                GameAction::ActivateManaSource { .. } | GameAction::BackToManaPayment
+            )
+        }));
     }
     // Target prompts must answer from the exact domain that will gate the
     // public proposal. The contract has already filtered current targets
@@ -1164,21 +1172,13 @@ pub fn fallback_action(
         state.waiting_for,
         WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
     ) {
-        let target = contract
-            .candidates
-            .iter()
-            .find(|candidate| matches!(candidate.action, GameAction::ChooseTarget { .. }))
-            .map(|candidate| candidate.action.clone());
+        let target = issued(|action| matches!(action, GameAction::ChooseTarget { .. }));
         if target.is_some()
             || matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. })
         {
-            return target;
+            return gate(target);
         }
-        return contract
-            .candidates
-            .iter()
-            .find(|candidate| matches!(candidate.action, GameAction::CancelCast))
-            .map(|candidate| candidate.action.clone());
+        return gate(issued(|action| matches!(action, GameAction::CancelCast)));
     }
 
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
@@ -1224,10 +1224,10 @@ pub fn fallback_action(
              that allowed an uncompletable cast through. Tighten the pre-cast check rather \
              than relying on CancelCast recovery."
         );
-        return Some(GameAction::CancelCast);
+        return gate(Some(GameAction::CancelCast));
     }
 
-    match &state.waiting_for {
+    let action = match &state.waiting_for {
         // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
 
@@ -1236,23 +1236,21 @@ pub fn fallback_action(
 
         // CR 732.2a: if tactical scoring found no choice, take the conservative legal escape
         // from the engine's candidate set. The AI is never forced to propose a shortcut.
-        WaitingFor::LoopShortcut { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| matches!(action, GameAction::DeclineShortcut)),
+        WaitingFor::LoopShortcut { .. } => {
+            issued(|action| matches!(action, GameAction::DeclineShortcut))
+        }
         // CR 732.2a: the finite pre-cast family has the same conservative
         // proposer fallback as the legacy shortcut. Ask the engine for its
         // issued decline capability instead of fabricating a route response.
-        WaitingFor::PrecastCopyShortcutOffer { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| {
-                matches!(
-                    action,
-                    GameAction::PrecastCopyShortcut {
-                        response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
-                        ..
-                    }
-                )
-            }),
+        WaitingFor::PrecastCopyShortcutOffer { .. } => issued(|action| {
+            matches!(
+                action,
+                GameAction::PrecastCopyShortcut {
+                    response: engine::types::actions::PrecastCopyShortcutResponse::Decline,
+                    ..
+                }
+            )
+        }),
         // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
         // `smart_shortcut_response` — Shorten when the polled player has a meaningful
         // way to break the loop, else Accept.
@@ -1292,14 +1290,14 @@ pub fn fallback_action(
 
         // Combat declarations: an empty declaration is NOT always legal —
         // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
-        // to be declared. Delegate to the engine's `legal_actions`, which runs
-        // the simulation filter and only emits engine-legal candidates.
-        WaitingFor::DeclareAttackers { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|a| matches!(a, GameAction::DeclareAttackers { .. })),
-        WaitingFor::DeclareBlockers { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|a| matches!(a, GameAction::DeclareBlockers { .. })),
+        // to be declared. The contract's engine-issued candidates already ran
+        // the simulation filter and only contain legal declarations.
+        WaitingFor::DeclareAttackers { .. } => {
+            issued(|action| matches!(action, GameAction::DeclareAttackers { .. }))
+        }
+        WaitingFor::DeclareBlockers { .. } => {
+            issued(|action| matches!(action, GameAction::DeclareBlockers { .. }))
+        }
         WaitingFor::UntapChoice { candidates, .. } => {
             candidates
                 .first()
@@ -1584,9 +1582,9 @@ pub fn fallback_action(
         // intentionally keep `options` empty and synthesize candidates from
         // `all_card_names` (#6248); reading `options.first()` softlocks after
         // restore when rehydrate succeeded but options stayed empty (#6393).
-        WaitingFor::NamedChoice { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|a| matches!(a, GameAction::ChooseOption { .. })),
+        WaitingFor::NamedChoice { .. } => {
+            issued(|action| matches!(action, GameAction::ChooseOption { .. }))
+        }
 
         // CR 608.2d: opponent-guess fallback — any printed guess is legal. The
         // hidden-info determinization in `choose_action` already pre-empts this
@@ -1827,7 +1825,7 @@ pub fn fallback_action(
             // first candidate object rather than emitting an action the engine
             // would reject.
             if !candidate_objects.is_empty() {
-                return Some(GameAction::SubmitVoteCandidate { candidate_index: 0 });
+                return gate(Some(GameAction::SubmitVoteCandidate { candidate_index: 0 }));
             }
             // The friend-or-foe heuristic only fires when the controller is
             // labeling other players (the delegated shape) — matching
@@ -2101,9 +2099,7 @@ pub fn fallback_action(
         WaitingFor::PayCost {
             resume: CostResume::Resolution,
             ..
-        } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| matches!(action, GameAction::SelectCards { .. })),
+        } => issued(|action| matches!(action, GameAction::SelectCards { .. })),
 
         // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
@@ -2165,12 +2161,12 @@ pub fn fallback_action(
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
-        WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
-        WaitingFor::RemoveCountersChoice { .. } => engine::ai_support::legal_actions(state)
-            .into_iter()
-            .find(|action| matches!(action, GameAction::ChooseCountersToRemove { .. })),
+        WaitingFor::MoveCountersDistribution { .. } => {
+            issued(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. }))
+        }
+        WaitingFor::RemoveCountersChoice { .. } => {
+            issued(|action| matches!(action, GameAction::ChooseCountersToRemove { .. }))
+        }
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -2194,7 +2190,9 @@ pub fn fallback_action(
             // is unreachable at runtime but keeps the match exhaustive.
             Some(GameAction::CancelCast)
         }
-    }
+    };
+
+    gate(action)
 }
 
 /// Score all candidate actions without selecting one.
@@ -9441,10 +9439,10 @@ mod tests {
     }
 
     /// Issue #6393: CardName NamedChoice keeps `options` empty and synthesizes
-    /// candidates from `all_card_names`. Fallback must ask `legal_actions`, not
-    /// `options.first()`, or restore softlocks after a successful rehydrate.
+    /// candidates from `all_card_names`. Fallback must use the issued contract,
+    /// not `options.first()`, or restore softlocks after a successful rehydrate.
     #[test]
-    fn named_choice_card_name_fallback_uses_legal_actions_when_options_empty() {
+    fn named_choice_card_name_fallback_uses_issued_contract_when_options_empty() {
         let mut state = make_state();
         create_object(
             &mut state,
@@ -9465,7 +9463,36 @@ mod tests {
         let action = fallback_action_default(&state).expect("fallback returns ChooseOption");
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "Forest"),
-            "expected Forest from legal_actions, got {action:?}"
+            "expected Forest from the issued contract, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn fallback_rejects_a_non_owner_contract_after_constructing_an_action() {
+        let mut state = make_state();
+        state.all_card_names = vec!["Forest".to_string()].into();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: P0,
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let owner_contract = AiDecisionContract::issue(&state, P0);
+        let action = fallback_action(&state, &config, &owner_contract)
+            .expect("the owner must receive the issued card-name choice");
+        assert!(owner_contract.contains_action(&state, &action));
+
+        let bystander_contract = AiDecisionContract::issue(&state, P1);
+        assert!(
+            bystander_contract.candidates.is_empty(),
+            "fixture premise: the bystander owes no NamedChoice"
+        );
+        assert_eq!(
+            fallback_action(&state, &config, &bystander_contract),
+            None,
+            "an empty non-owner contract must gate every fallback result"
         );
     }
 
