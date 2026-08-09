@@ -73,6 +73,16 @@ pub(crate) struct ParseContext {
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
     /// moves the spell on the stack, not the trigger source or a parent target.
     pub object_pronoun_ref: Option<TargetFilter>,
+    /// CR 608.2c (rules of English — number agreement) + CR 608.2k + CR 406.6:
+    /// Antecedent for bare PLURAL object pronouns ("them"/"themselves") in the
+    /// current trigger body, introduced by a plural noun phrase in the trigger's
+    /// intervening-if ("if there are cards exiled with ~, put THEM …" → the
+    /// linked-exile pool). Deliberately separate from the singular
+    /// `object_pronoun_ref`: a plural antecedent must never capture a singular
+    /// "it", whose antecedent is the nearer chained object (River Song's Diary:
+    /// "choose one of them at random. You may cast IT" — "it" is the chosen card,
+    /// not the pool).
+    pub plural_object_pronoun_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,

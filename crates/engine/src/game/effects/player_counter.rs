@@ -8,6 +8,30 @@ use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 
+/// The replacement-aware outcome of attempting to add player counters.
+///
+/// Distinguished from a plain `bool` because callers fall into two families
+/// that need `Prevented` handled differently:
+/// - Effect resolution (`resolve` below, `deal_damage`'s infect/toxic poison,
+///   `proliferate`, the pending-counter-addition drain in `counters.rs`)
+///   treats `Applied` and `Prevented` identically — the pending item is fully
+///   resolved either way, whether or not any counters actually landed.
+/// - Cost payment (`costs.rs`'s `GetPlayerCounters` ability-cost arm) must
+///   treat `Prevented` as a FAILED payment: a "players can't get counters"
+///   replacement (Solemnity) silently zeroing out a Ward's player-counter
+///   cost must not be mistaken for having actually paid it, or Ward's whole
+///   deterrent is bypassed for free (CR 702.21a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerCounterAdditionOutcome {
+    /// The counters were added (possibly replacement-adjusted in count).
+    Applied,
+    /// A replacement effect prevented the counter addition outright.
+    Prevented,
+    /// Replacement ordering or an optional replacement needs this player's
+    /// choice; `state.waiting_for` has already been set.
+    NeedsChoice,
+}
+
 pub fn add_player_counter_with_replacement(
     state: &mut GameState,
     actor: PlayerId,
@@ -15,9 +39,9 @@ pub fn add_player_counter_with_replacement(
     counter_kind: PlayerCounterKind,
     count: u32,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) -> PlayerCounterAdditionOutcome {
     if count == 0 {
-        return true;
+        return PlayerCounterAdditionOutcome::Applied;
     }
 
     // CR 122.1 + CR 614.17: Player-counter additions pass through the
@@ -48,12 +72,100 @@ pub fn add_player_counter_with_replacement(
             {
                 apply_player_counter_addition(state, player_id, counter_kind, count, events);
             }
-            true
+            PlayerCounterAdditionOutcome::Applied
         }
-        replacement::ReplacementResult::Prevented => true,
+        replacement::ReplacementResult::Prevented => PlayerCounterAdditionOutcome::Prevented,
         replacement::ReplacementResult::NeedsChoice(player) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            false
+            PlayerCounterAdditionOutcome::NeedsChoice
+        }
+    }
+}
+
+/// The replacement-aware result of previewing a player-counter addition.
+///
+/// Mirrors `counters::CounterAdditionPreview` (the object-counter sibling),
+/// parameterized for players instead of an object incarnation — players have
+/// no incarnation-staleness concept, so there is no `None` "target no longer
+/// matches" case here.
+///
+/// This is intentionally an engine-internal decision fact rather than wire
+/// state: callers use it while evaluating a currently-bound action, so it
+/// must not be serialized or retained across turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerCounterAdditionPreview {
+    /// The proposed count reaches the player unchanged.
+    Applied { count: u32 },
+    /// A replacement effect prevents the counter addition.
+    Prevented,
+    /// Replacement ordering or an optional replacement needs this player's choice.
+    ChoiceRequired { player: PlayerId },
+    /// Replacement effects change the proposed counter count (e.g. a doubler).
+    Transformed { count: u32 },
+    /// A replacement rewrites the counter event into a different event class.
+    ///
+    /// The preview cannot claim that the requested counter was added, so
+    /// consumers must handle this explicitly rather than treating it as an
+    /// absent preview.
+    Unsupported,
+}
+
+/// Preview a player-counter addition through the real replacement pipeline,
+/// without mutating live game state.
+///
+/// Runs on an isolated clone of `state`, so a tactical caller cannot add
+/// pending choices, events, or counters to the live game. Used by
+/// `phase-ai`'s Ward-lethality check (`can_pay_ward_cost`) to project the
+/// REPLACEMENT-ADJUSTED poison total a payment would actually give — a
+/// doubler or +N effect can make a printed count understate the real result,
+/// and trusting the printed count alone can let the AI accept a payment that
+/// is actually lethal (CR 104.3d).
+///
+/// CR 122.1 + CR 614.1: Counter placement is subject to applicable
+/// replacement effects before the event happens.
+pub fn preview_player_counter_addition(
+    state: &GameState,
+    actor: PlayerId,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+) -> PlayerCounterAdditionPreview {
+    if count == 0 {
+        return PlayerCounterAdditionPreview::Applied { count };
+    }
+
+    let proposed = ProposedEvent::AddCounter {
+        placement: CounterPlacement::Player {
+            actor,
+            player_id,
+            counter_kind,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+    let mut preview_state = state.clone();
+    let mut events = Vec::new();
+
+    match replacement::replace_event(&mut preview_state, proposed, &mut events) {
+        replacement::ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) if resulting_count == count => PlayerCounterAdditionPreview::Applied {
+            count: resulting_count,
+        },
+        replacement::ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) => PlayerCounterAdditionPreview::Transformed {
+            count: resulting_count,
+        },
+        // A replacement may redirect the event into a different event class.
+        // The counter-placement fact is explicitly unsupported rather than
+        // absent, so conservative callers cannot mistake it for "no counters".
+        replacement::ReplacementResult::Execute(_) => PlayerCounterAdditionPreview::Unsupported,
+        replacement::ReplacementResult::Prevented => PlayerCounterAdditionPreview::Prevented,
+        replacement::ReplacementResult::NeedsChoice(player) => {
+            PlayerCounterAdditionPreview::ChoiceRequired { player }
         }
     }
 }
@@ -158,14 +270,9 @@ pub fn resolve(
         else {
             continue;
         };
-        if !add_player_counter_with_replacement(
-            state,
-            actor,
-            player_id,
-            counter_kind,
-            count,
-            events,
-        ) {
+        if add_player_counter_with_replacement(state, actor, player_id, counter_kind, count, events)
+            == PlayerCounterAdditionOutcome::NeedsChoice
+        {
             super::counters::stash_pending_counter_additions(
                 state,
                 additions[index + 1..].to_vec(),
@@ -337,6 +444,7 @@ mod tests {
             trigger_source: None,
             trigger_definition_ref: None,
             force_block_attacker: None,
+            target_incarnations: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -356,6 +464,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
             cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
@@ -531,6 +640,7 @@ mod tests {
             trigger_source: None,
             trigger_definition_ref: None,
             force_block_attacker: None,
+            target_incarnations: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -550,6 +660,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            noted_mana_payment: None,
             cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,

@@ -45,6 +45,7 @@ export default defineConfig({
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __CARD_DATA_URL__: JSON.stringify("/card-data.json"),
     __CARD_DATA_LOCALE_URL_TEMPLATE__: JSON.stringify("/card-data.{lng}.json"),
+    __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify("/scryfall-images.{lng}.json"),
     __CHANGELOG_URL__: JSON.stringify("/changelog.json"),
     __CHANGELOG_META_URL__: JSON.stringify("/changelog-meta.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),

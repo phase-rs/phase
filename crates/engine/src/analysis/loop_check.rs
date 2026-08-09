@@ -188,9 +188,27 @@ pub struct ShortcutProposal {
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the
-/// shortcut proceed; `Shorten` names an earlier stopping point (Phase 3 realizes this
-/// conservatively as decline-to-manual — the opponent receives a real priority window
-/// instead of the loop being auto-taken; finite-K materialization is Phase 4).
+/// shortcut proceed; `Shorten` names an earlier stopping point.
+///
+/// CR 732.2b lets a shortening player name the PLACE now and the choice later — "the player
+/// doesn't need to specify at this time what the new choice will be" — which is why `Shorten`
+/// carries `at_iteration` and no choice payload.
+///
+/// DEFICIENCY NOTE — REALIZATION GAP vs THE DESIGN. This is a note, not a defense.
+///
+/// The design is stated at `types::game_state`'s `scheduled_collapse_axes` doc. Under CR 732.2b the
+/// place a responder names "becomes the new ending point", so the shortcut is still TAKEN up to
+/// there. This engine does not do that yet: every `Shorten` is realized as decline-to-manual —
+/// nothing is taken and the responder receives a real priority window, with `at_iteration` carried
+/// and honored as a stop signal rather than as a partial-advance instruction. Finite-K
+/// materialization at the named iteration is the remaining work.
+///
+/// The gap's direction is toward MORE responder agency than CR 732.2b grants (priority strictly
+/// earlier, proposer benefit strictly less), so it can never take a choice away from a player who
+/// asked to diverge — but the target is the rule, not a favorable direction. Closing it is tracked
+/// as the USER-AUTHORIZED follow-up "Shortcut-system rules-correctness completion — true all the
+/// way down" (`.deferred-backlog.md`), which exists to make the design true all the way down rather
+/// than to justify where it is not yet. Out of scope for the PR that wrote this note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ShortcutResponse {
     /// CR 732.2c: this player agrees to take the shortcut.
@@ -1477,6 +1495,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }

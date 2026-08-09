@@ -112,6 +112,14 @@ describe("OpponentHud designations (single-opponent path)", () => {
     expect(screen.getByLabelText("City's Blessing")).toBeInTheDocument();
   });
 
+  it("renders the enduring story badge for the opponent", () => {
+    act(() => {
+      useGameStore.setState({ gameState: createTwoPlayerState({ enduring_story: [1] }) });
+    });
+    render(<OpponentHud />);
+    expect(screen.getByLabelText("Enduring Story")).toBeInTheDocument();
+  });
+
   it("renders the ring counter at the opponent's level", () => {
     act(() => {
       useGameStore.setState({ gameState: createTwoPlayerState({ ring_level: { "1": 4 } }) });

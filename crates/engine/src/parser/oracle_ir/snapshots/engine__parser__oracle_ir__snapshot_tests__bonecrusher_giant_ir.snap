@@ -128,7 +128,7 @@ expression: "&ir"
               "constraint": null,
               "has_up_to": false,
               "effect_lower": "~ deals 2 damage to that spell's controller.",
-              "relative_player_scope": null
+              "relative_player_scope": "TriggeringPlayer"
             },
             "source_text": "Whenever ~ becomes the target of a spell, ~ deals 2 damage to that spell's controller.",
             "die_results": []

@@ -145,6 +145,13 @@ fn pinned_known_ids(state: &GameState, ai_player: PlayerId) -> HashSet<ObjectId>
     if state.private_look_player == Some(ai_player) {
         ids.extend(state.private_look_ids.iter().copied());
     }
+    ids.extend(
+        state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| state.viewer_knows_card_identity(ai_player, id)),
+    );
     ids
 }
 
@@ -202,6 +209,11 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::DeckEntry;
+    use engine::game::effects::resolve_ability_chain;
+    use engine::types::ability::{
+        CardSelectionMode, DigSource, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        TargetRef,
+    };
 
     fn face(name: &str) -> CardFace {
         CardFace {
@@ -357,6 +369,92 @@ mod tests {
         peeked.private_look_player = Some(PlayerId(1));
         let sim_opp = determinize_opponents(&peeked, PlayerId(0), &mut rng(5));
         assert_ne!(name_of(&sim_opp, pinned), "RevealedCard");
+    }
+
+    /// Durable look knowledge pins the observed opponent card, while another
+    /// hidden card still resamples. A subsequent library shuffle clears the
+    /// durable fact, so the prior peek no longer pins that library card.
+    #[test]
+    fn pins_durable_knowledge_and_expires_library_peeks_after_shuffle() {
+        let mut state = GameState::new_two_player(42);
+        set_deck(
+            &mut state,
+            PlayerId(1),
+            vec![
+                deck_entry("Known Hand", 1),
+                deck_entry("Known Library", 1),
+                deck_entry("Sampled", 3),
+            ],
+        );
+        let source = add(&mut state, PlayerId(0), "Observer", Zone::Battlefield);
+        let known_hand = add(&mut state, PlayerId(1), "Known Hand", Zone::Hand);
+        let known_library = add(&mut state, PlayerId(1), "Known Library", Zone::Library);
+
+        let private_hand_look = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::None,
+                count: None,
+                selection: CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &private_hand_look, &mut vec![], 0)
+            .expect("private hand look resolves");
+
+        let private_library_look = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+                enter_tapped: false,
+                source: DigSource::Library,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &private_library_look, &mut vec![], 0)
+            .expect("private library look resolves");
+        state.private_look_ids.clear();
+        state.private_look_player = None;
+        let unknown_hand = add(&mut state, PlayerId(1), "Unknown Hand", Zone::Hand);
+
+        let known = pinned_known_ids(&state, PlayerId(0));
+        assert!(known.contains(&known_hand));
+        assert!(known.contains(&known_library));
+        let sim = determinize_opponents(&state, PlayerId(0), &mut rng(11));
+        assert_eq!(name_of(&sim, known_hand), "Known Hand");
+        assert_eq!(
+            name_of(&sim, unknown_hand),
+            "Sampled",
+            "an unobserved hand card must still resample"
+        );
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        resolve_ability_chain(&mut state, &shuffle, &mut vec![], 0).expect("shuffle resolves");
+
+        assert!(
+            !pinned_known_ids(&state, PlayerId(0)).contains(&known_library),
+            "a library reorder must expire the AI's durable peek knowledge"
+        );
     }
 
     /// A3b (CR 400.2 / CR 701.20a) — the F4 fix is load-bearing. A continuous

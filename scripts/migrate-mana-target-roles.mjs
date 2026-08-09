@@ -25,9 +25,10 @@
  * the production's quantity shape. That guess is the bug the PR removes; the
  * role is now stamped at parse time from grammar.
  *
- * `crates/engine/tests/fixtures/integration_cards.json` is GENERATED (a curated
- * subset of `client/public/card-data.json`) and is git-tracked as a single
- * minified line. It therefore carries the old encoding and must be migrated
+ * `crates/engine/tests/fixtures/integration_cards.json.gz` is GENERATED (a curated
+ * subset of `client/public/card-data.json`) and is git-tracked as canonical
+ * gzip whose decompressed JSON is a single minified line. It therefore carries
+ * the old encoding and must be migrated
  * whenever it is regenerated on a checkout that has PR #6056's engine changes.
  *
  * ---------------------------------------------------------------------------
@@ -88,9 +89,27 @@
  * happened yet — treat it as a real signal, not noise.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
-const DEFAULT_FIXTURE = "crates/engine/tests/fixtures/integration_cards.json";
+const DEFAULT_FIXTURE = "crates/engine/tests/fixtures/integration_cards.json.gz";
+
+function gzipCommand(args, options) {
+  const result = spawnSync("gzip", args, { maxBuffer: 128 * 1024 * 1024, ...options });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`gzip ${args.join(" ")} failed: ${result.stderr.toString("utf8")}`);
+  }
+  return result.stdout;
+}
+
+function readGzipUtf8(path) {
+  return gzipCommand(["-d", "-c", path], { encoding: "buffer" }).toString("utf8");
+}
+
+function writeCanonicalGzip(path, text) {
+  writeFileSync(path, gzipCommand(["-9", "-n", "-c"], { input: text }));
+}
 
 // The curated fixture carries u64 sentinels (e.g. a `SpecificObject` id of
 // u64::MAX, 18446744073709551615) that exceed JS `Number.MAX_SAFE_INTEGER`. A
@@ -194,6 +213,12 @@ const ROLE_BY_CARD = new Map([
   // supplies the AMOUNT; the controller receives the mana. THE canary entry —
   // if a careless bulk rewrite flips anything, it flips this one.
   ["carpet of flowers", "CountSource"],
+  // "Add {R} for each card in target opponent's hand." The opponent supplies
+  // only the amount; Jeska's Will's controller receives the mana.
+  ["jeska's will", "CountSource"],
+  // "Target player adds that much {C}." The selected player receives the
+  // mana produced from the removed counters.
+  ["jetfire, ingenious scientist", "Recipient"],
   // "{T}, Mill a card: Target player adds one mana of any color." — a targeted
   // RECIPIENT (fixed one mana, no count source), same class as Jetfire. Entered
   // the curated fixture with a later `main` regeneration.
@@ -278,13 +303,11 @@ const fixturePath = args.find((a) => !a.startsWith("--")) ?? DEFAULT_FIXTURE;
 // maintainer decision, not something this script papers over.
 // ---------------------------------------------------------------------------
 if (stateMode) {
-  const zlib = await import("node:zlib");
   // Local copy: the shared `isRole` is declared later in the file (after the
   // fixture-mode load) and consts are TDZ-scoped.
   const isRole = (target) =>
     target !== null && typeof target === "object" && typeof target.role === "string";
-  const raw = readFileSync(fixturePath);
-  const text = zlib.gunzipSync(raw).toString("utf8");
+  const text = readGzipUtf8(fixturePath);
   // Bigint-lossless like fixture mode: GameState dumps carry u64 object-id
   // sentinels that a naive JSON round-trip would mangle into `expected u64`.
   const doc = parseLossless(text);
@@ -331,14 +354,13 @@ if (stateMode) {
   );
   migrated.forEach((l) => console.log(`  ${l}`));
   if (!checkOnly && migrated.length > 0) {
-    writeFileSync(fixturePath, zlib.gzipSync(stringifyLossless(doc)));
-    console.log(`rewrote ${fixturePath} (gzipped, minified)`);
+    writeCanonicalGzip(fixturePath, stringifyLossless(doc));
+    console.log(`rewrote ${fixturePath} (canonical gzip -9 -n)`);
   }
   process.exit(0);
 }
 
-const raw = readFileSync(fixturePath, "utf8");
-const db = parseLossless(raw);
+const db = parseLossless(readGzipUtf8(fixturePath));
 const cards = db.cards ?? db;
 
 /** True when `target` is already a `ManaTargetRole` rather than a bare filter. */
@@ -425,16 +447,16 @@ if (migrated.length === 0) {
   process.exit(0);
 }
 
-// The fixture is tracked as ONE minified line and is expected to round-trip its
-// generator's encoding. Pretty-printing it would turn a 1-line diff into
+// The fixture's decompressed JSON is ONE minified line and is expected to
+// round-trip its generator's encoding. Pretty-printing it would turn a 1-line diff into
 // hundreds of thousands of lines and make the change unreviewable.
 const out = `${stringifyLossless(db)}\n`;
-writeFileSync(fixturePath, out);
+writeCanonicalGzip(fixturePath, out);
 
 const lineCount = out.split("\n").length - 1;
 if (lineCount !== 1) {
   console.error(`\nERROR: fixture must stay a single minified line, got ${lineCount}.`);
   process.exit(1);
 }
-console.log(`\nWrote ${fixturePath} (1 line, ${out.length} bytes).`);
+console.log(`\nWrote ${fixturePath} (canonical gzip -9 -n; ${out.length} JSON bytes).`);
 console.log("Verify with: cargo test -p engine --test integration");

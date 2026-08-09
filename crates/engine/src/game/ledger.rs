@@ -95,6 +95,34 @@ pub fn record_ability_activation(
     )
 }
 
+/// CR 700.13: Record that the player has committed a crime this turn after
+/// the targeting action survives its complete announcement and is placed on
+/// the stack. Individual `CrimeCommitted` events are still emitted for every
+/// qualifying action; this durable record only backs the per-turn condition.
+pub fn record_crime_committed(
+    state: &mut GameState,
+    player: PlayerId,
+) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
+    let expected_turn_count = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+            player,
+        ))?
+        .crimes_committed_this_turn;
+    if expected_turn_count > 0 {
+        return Ok(());
+    }
+    resolve_and_apply_ledger_edit(
+        state,
+        ResolvedLedgerEdit::CrimeCommitted {
+            player,
+            expected_turn_count,
+        },
+    )
+}
+
 /// CR 603.2c: Record a fully classified constrained-trigger fact.
 pub fn record_trigger_fired(
     state: &mut GameState,
@@ -294,6 +322,28 @@ pub fn apply_resolved_ledger_edit(
             state
                 .activated_abilities_this_game
                 .insert(key, next_game_count);
+        }
+        ResolvedLedgerEdit::CrimeCommitted {
+            player,
+            expected_turn_count,
+        } => {
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|candidate| candidate.id == *player)
+                .ok_or(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+                    *player,
+                ))?;
+            if *expected_turn_count != 0
+                || player_state.crimes_committed_this_turn != *expected_turn_count
+            {
+                return Err(
+                    ResolvedLedgerEditReplayInvariantError::CrimeCommittedPreconditionMismatch,
+                );
+            }
+            player_state.crimes_committed_this_turn = expected_turn_count
+                .checked_add(1)
+                .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
         }
         ResolvedLedgerEdit::CardsDrawn {
             player,

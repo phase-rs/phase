@@ -135,9 +135,12 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
-      # debug profile (authoritative): counter VALUES are profile-independent and the
-      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
-      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
+      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
+      # coherent because every job in this workflow builds the same profile — the
+      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
+      # the first run after the dev -> server-release move.
+      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
       - name: Run decision-cost perf gate
         run: cargo ai-perf-gate
 
@@ -162,9 +165,12 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
-      # debug profile (authoritative): counter VALUES are profile-independent and the
-      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
-      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
+      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
+      # coherent because every job in this workflow builds the same profile — the
+      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
+      # the first run after the dev -> server-release move.
+      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
       # `cargo` build progress goes to stderr and spawned children are Stdio::null on
       # stdout, so the redirect captures only the binary's clean markdown table.
       - name: Run decision-cost perf gate
