@@ -76,6 +76,118 @@ fn hawkeye_draws_when_it_damaged_the_dying_opponent_creature() {
     outcome.assert_hand_drawn(P0, 1);
 }
 
+/// Runs Hawkeye's real damage activation, then kills Hawkeye and its damaged
+/// victim in the same SBA pass. When `reenter_hawkeye` is true, the permanent
+/// leaves and returns before that co-death, so the pending damage record belongs
+/// to its prior incarnation.
+fn co_dying_hawkeye_after_damage(reenter_hawkeye: bool) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw Fodder"]);
+    let hawkeye = scenario
+        .add_creature_from_oracle(P0, "Hawkeye, Avenging Archer", 3, 3, HAWKEYE_ORACLE)
+        .id();
+    // Hawkeye's activation deals one damage without killing this 2/2. The
+    // common SBA pass below performs the simultaneous death that exercises the
+    // off-battlefield trigger-source context.
+    let victim = scenario.add_creature(P1, "Damaged Victim", 2, 2).id();
+
+    let mut runner = scenario.build();
+    hand_priority(&mut runner, P0);
+    let idx = tap_damage_index(&runner, hawkeye);
+    {
+        let _ = runner
+            .activate(hawkeye, idx)
+            .target_object(victim)
+            .resolve();
+    }
+
+    let damage_incarnation = runner.state().objects[&hawkeye].incarnation;
+    assert!(
+        runner.state().damage_dealt_this_turn.iter().any(|record| {
+            record.source_id == hawkeye
+                && record.target == engine::types::ability::TargetRef::Object(victim)
+                && record.source_incarnation == Some(damage_incarnation)
+        }),
+        "the real Hawkeye activation must record its source incarnation before co-death"
+    );
+
+    if reenter_hawkeye {
+        let mut reentry_events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            hawkeye,
+            Zone::Exile,
+            &mut reentry_events,
+        );
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            hawkeye,
+            Zone::Battlefield,
+            &mut reentry_events,
+        );
+        assert_ne!(
+            runner.state().objects[&hawkeye].incarnation,
+            damage_incarnation,
+            "the return must create Hawkeye's later incarnation"
+        );
+    }
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&hawkeye)
+        .unwrap()
+        .damage_marked = 3;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&victim)
+        .unwrap()
+        .damage_marked = 2;
+    let mut death_events = Vec::new();
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut death_events);
+    assert!(
+        [hawkeye, victim].into_iter().all(|object_id| {
+            death_events.iter().any(|event| {
+                matches!(
+                    event,
+                    engine::types::events::GameEvent::ZoneChanged {
+                        object_id: moved,
+                        to: Zone::Graveyard,
+                        ..
+                    } if *moved == object_id
+                )
+            })
+        }),
+        "Hawkeye and its victim must enter the same death-trigger processing batch"
+    );
+    engine::game::triggers::process_triggers(runner.state_mut(), &death_events);
+    drain_stack(&mut runner);
+    runner
+}
+
+#[test]
+fn hawkeye_co_dying_with_its_damaged_victim_draws_from_lki() {
+    let runner = co_dying_hawkeye_after_damage(false);
+
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        1,
+        "the pre-move source incarnation must still satisfy Hawkeye's trigger after co-death"
+    );
+}
+
+#[test]
+fn reentered_hawkeye_co_dying_with_its_old_victim_does_not_draw() {
+    let runner = co_dying_hawkeye_after_damage(true);
+
+    assert!(
+        runner.state().players[0].hand.is_empty(),
+        "damage by Hawkeye's prior incarnation must not satisfy its re-entered incarnation's trigger"
+    );
+}
+
 #[test]
 fn hawkeye_does_not_draw_when_it_did_not_damage_the_dying_opponent_creature() {
     let mut scenario = GameScenario::new();
