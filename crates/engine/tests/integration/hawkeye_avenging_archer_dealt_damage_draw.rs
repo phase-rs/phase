@@ -21,6 +21,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const HAWKEYE_ORACLE: &str = "Reach\nWhenever a creature an opponent controls \
     dies, if Hawkeye dealt damage to it this turn, draw a card.\n{T}: Hawkeye \
@@ -118,6 +119,19 @@ fn kill_untouched_victim(runner: &mut GameRunner, victim: ObjectId) {
         .damage_marked = 1;
     let mut sba_events = Vec::new();
     engine::game::sba::check_state_based_actions(runner.state_mut(), &mut sba_events);
+    assert!(
+        sba_events.iter().any(|event| {
+            matches!(
+                event,
+                engine::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == victim
+            )
+        }),
+        "the untouched victim must die before the trigger pipeline is processed"
+    );
     engine::game::triggers::process_triggers(runner.state_mut(), &sba_events);
     drain_stack(runner);
 }
@@ -129,12 +143,13 @@ fn drain_stack(runner: &mut GameRunner) {
             continue;
         }
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass must process the Hawkeye trigger pipeline");
             }
         }
     }
+    panic!("Hawkeye trigger pipeline did not settle after 200 priority passes");
 }
