@@ -28,7 +28,9 @@
 //! CR 101.4: the `player_scope: All` fan-out iterates players in APNAP order.
 //! CR 406.3: the cards are exiled face down.
 
+use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{Effect, PlayerFilter, TargetFilter};
 use engine::types::actions::GameAction;
@@ -37,6 +39,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -140,6 +144,54 @@ fn extract_power_exiles_top_card_of_each_player() {
             "exiled cards must be face down (CR 406.3)"
         );
     }
+}
+
+#[test]
+fn extract_power_all_player_exile_grants_p0_a_usable_cast_permission() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new_n_player(3, 7_433);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    let extract_power = scenario
+        .add_spell_to_hand_from_oracle(P0, "Extract Power", false, EXTRACT_POWER)
+        .id();
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&extract_power].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: extract_power,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Extract Power must be castable");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, p1_bears), Zone::Exile);
+    assert!(
+        legal_actions(runner.state()).iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == p1_bears
+        )),
+        "P0 must be able to cast P1's exiled card through Extract Power's tracked permission"
+    );
+
+    let card_id = runner.state().objects[&p1_bears].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: p1_bears,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P0 must be able to cast P1's exiled Grizzly Bears for free");
+    runner.advance_until_stack_empty();
+    assert_eq!(zone_of(&runner, p1_bears), Zone::Battlefield);
 }
 
 /// Hostile fixture — CR 609.3 (an effect does only as much as possible; moving
