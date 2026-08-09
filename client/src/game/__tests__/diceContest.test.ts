@@ -153,6 +153,29 @@ describe("flashCompletedScry", () => {
     expect(useUiStore.getState().scryOutcome).toBeNull();
   });
 
+  it("queues every completed scry in an event batch in order", () => {
+    flashCompletedScry([scry(1, 1, 2), scry(2, 3, 0)]);
+
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 1,
+      topCount: 1,
+      bottomCount: 2,
+    });
+    expect(useUiStore.getState().scryOutcomeQueue).toEqual([
+      { playerId: 2, topCount: 3, bottomCount: 0 },
+    ]);
+
+    vi.advanceTimersByTime(4_000);
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 2,
+      topCount: 3,
+      bottomCount: 0,
+    });
+
+    vi.advanceTimersByTime(4_000);
+    expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+
   it("does not show a result for an incomplete or unrelated player action", () => {
     flashCompletedScry([
       {

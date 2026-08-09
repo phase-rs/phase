@@ -2072,6 +2072,7 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
+            biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     if socket.send(Message::text(json)).await.is_err() {
@@ -3801,6 +3802,7 @@ async fn handle_full_game_submission(
     db: &SharedDb,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     // Read-only: this handler reads `game_code`, `player_token`, and `player_id`
@@ -3864,9 +3866,7 @@ async fn handle_full_game_submission(
             Ok(human_result) => {
                 if is_zero_count_debug_create {
                     drop(mgr);
-                    if let Ok(json) = serde_json::to_string(&ServerMessage::ActionNoOp) {
-                        let _ = socket.send(Message::text(json)).await;
-                    }
+                    let _ = tx.send(ServerMessage::ActionNoOp);
                     return;
                 }
                 let human_revision = mgr
@@ -4478,6 +4478,7 @@ async fn handle_client_message(
                 db,
                 draft_state,
                 connections,
+                tx,
                 game_db,
                 game_spectators,
                 identity,
@@ -4493,6 +4494,7 @@ async fn handle_client_message(
                 db,
                 draft_state,
                 connections,
+                tx,
                 game_db,
                 game_spectators,
                 identity,
