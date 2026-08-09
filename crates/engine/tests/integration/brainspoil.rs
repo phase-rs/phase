@@ -10,6 +10,8 @@ use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, ShieldKind, TargetRef};
+use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -42,6 +44,20 @@ fn brainspoil_destroy_definition(
         .iter()
         .find(|definition| matches!(definition.effect.as_ref(), Effect::Destroy { .. }))
         .expect("the exact Brainspoil Oracle text must produce its Destroy ability")
+}
+
+/// Cast the canonical Regenerate card through the production action path.
+fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: ObjectId) {
+    let card_id = runner.state().objects[&regenerate].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: regenerate,
+            card_id,
+            targets: vec![target],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Regenerate targeting the creature");
+    runner.advance_until_stack_empty();
 }
 
 #[test]
@@ -128,14 +144,8 @@ fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
         .id();
     let mut runner = scenario.build();
 
-    runner
-        .cast(regenerate_brainspoil)
-        .target_object(brainspoil_victim)
-        .resolve();
-    runner
-        .cast(regenerate_control)
-        .target_object(control_victim)
-        .resolve();
+    cast_regenerate(&mut runner, regenerate_brainspoil, brainspoil_victim);
+    cast_regenerate(&mut runner, regenerate_control, control_victim);
     assert!(
         runner.state().objects[&brainspoil_victim]
             .replacement_definitions
