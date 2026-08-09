@@ -54,8 +54,23 @@ fn tap_untap_target_ids(
             .get(id)
             .cloned()
             .unwrap_or_default(),
+        // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
+        // a new object taps nothing. This arm is a RAW read that never reaches
+        // `resolved_targets`, so the targeting chokepoint cannot see this pin.
+        //
+        // SUBSTITUTION-ONLY, and that is verified rather than assumed against
+        // the decision rule: there is no source fallback below this arm, an
+        // empty vector simply skips `resolve_set_tap_state`'s resolution loop,
+        // and control falls to that function's UNCONDITIONAL
+        // `EffectResolved` push (`:135-139`). An emptied list is already a
+        // clean no-op that emits the event, so no early return is needed.
+        //
+        // No slot carve-out applies: this arm enumerates every object ref via
+        // `filter_map` and never hands the list to `effect_object_targets`'s
+        // positional indexer, so a filtered list cannot renumber a
+        // `ParentTargetSlot`.
         _ => ability
-            .targets
+            .live_object_targets(state)
             .iter()
             .filter_map(|t| match t {
                 TargetRef::Object(id) => Some(*id),

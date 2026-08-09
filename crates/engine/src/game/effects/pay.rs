@@ -1383,7 +1383,6 @@ mod tests {
             outcome,
             ResolutionChoiceOutcome::WaitingFor(_)
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
-                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
                 | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].life, 23);
@@ -1541,7 +1540,6 @@ mod tests {
         match outcome {
             ResolutionChoiceOutcome::WaitingFor(_) => {}
             ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
-            ResolutionChoiceOutcome::WaitingForWithParkedObservers(_) => {}
             ResolutionChoiceOutcome::ActionResult(_) => {}
         }
 
@@ -1660,7 +1658,6 @@ mod tests {
             outcome,
             ResolutionChoiceOutcome::WaitingFor(_)
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
-                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
                 | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].hand.len(), 2);
@@ -1807,7 +1804,6 @@ mod tests {
             outcome,
             ResolutionChoiceOutcome::WaitingFor(_)
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
-                | ResolutionChoiceOutcome::WaitingForWithParkedObservers(_)
                 | ResolutionChoiceOutcome::ActionResult(_)
         ));
         // All 7 mana units (4 colorless for X + W + U + B) must be spent —

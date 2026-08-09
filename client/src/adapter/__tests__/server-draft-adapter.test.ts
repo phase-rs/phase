@@ -88,6 +88,7 @@ function debugLogEntry(value: string): GameLogEntry {
     phase: "PreCombatMain",
     category: "Debug",
     segments: [{ type: "Text", value }],
+    presentation: { importance: "Diagnostic", tone: "Diagnostic", boundary: "None", visibility: "Public" },
   };
 }
 

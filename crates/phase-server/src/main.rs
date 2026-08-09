@@ -69,11 +69,14 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
-use server_core::session::{ActionResult, FullRuntime, GameSession, SessionManager};
+use server_core::session::{
+    ActionResult, FullRuntime, GameSession, RevisionedActionResult, SessionManager,
+};
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
+use server_core::takeback::RewindOption;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -392,6 +395,13 @@ fn build_game_started_message(
             .as_ref()
             .map(|runtime| runtime.key.clone()),
         events: server_core::filter_events_for_player(&events, &session.state, player),
+        // Read from the session rather than taken as a parameter: every caller
+        // already hands this function the authoritative session, and there is
+        // no caller that should publish anything else. A parameter every site
+        // fills identically from an argument it already passes is a hazard,
+        // not a choice. Populating `GameStarted` (not just `StateUpdate`) is
+        // what makes a reconnect mid-game see the list immediately.
+        rewind_targets: session.rewind_options(),
     }
 }
 
@@ -413,10 +423,15 @@ fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, Serv
         .collect()
 }
 
+/// `rewind_targets` is a parameter here, unlike in
+/// `build_game_started_message`, because this builder has no `GameSession` to
+/// read it from — the caller captures `session.rewind_options()` under the same
+/// lock as the transition and threads it through.
 fn build_state_update_message(
     result: &ActionResult,
     state_revision: u64,
     player: PlayerId,
+    rewind_targets: Vec<RewindOption>,
 ) -> Result<ServerMessage, String> {
     let (
         raw_state,
@@ -476,6 +491,7 @@ fn build_state_update_message(
         },
         derived,
         viewer_interaction,
+        rewind_targets,
     })
 }
 
@@ -510,6 +526,10 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
             .as_ref()
             .map(|runtime| runtime.key.clone()),
         events: Vec::new(),
+        // Always empty for spectators, deliberately — NOT `rewind_options()`.
+        // A spectator is a read-only viewer with no rollback affordance, and
+        // the list would only advertise targets they cannot request.
+        rewind_targets: Vec::new(),
     })
 }
 
@@ -546,6 +566,11 @@ fn build_spectator_state_update_message(
         legal_actions_by_object: HashMap::new(),
         derived,
         viewer_interaction,
+        // Empty for the same reason as the spectator `GameStarted` builder
+        // above: a spectator has no rollback affordance. This builder also
+        // takes a raw state rather than a session, so `rewind_options()` is
+        // not even in scope here.
+        rewind_targets: Vec::new(),
     })
 }
 
@@ -880,7 +905,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::AckTerminalDelivery { .. }
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }
-        | ClientMessage::RequestTakeback
+        | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => match mode {
             ServerMode::Full => None,
@@ -3443,11 +3468,147 @@ async fn draft_pack_generator_for_start(
         .ok_or_else(|| format!("No draft pool data for set: {set_code}"))
 }
 
+/// Per-AI-result fan-out for a batch of `run_ai` results.
+///
+/// Lifted verbatim out of `handle_full_game_submission` so the approved-takeback
+/// path can reuse it rather than duplicate 110 lines: a rollback can restore an
+/// AI seat to priority, and that AI's follow-up must reach clients with the same
+/// 100 ms pacing, size guard, `is_last` legal-action gating, per-player filter
+/// and spectator fan-out as a normal action's. Pure extraction — no behavioural
+/// delta on the shipped path.
+///
+/// `rewind_targets` and `eliminated` are both captured under the same lock as
+/// the results themselves, and both **after** `run_ai` — neither can be
+/// recomputed here because this function holds no session. Taking either from a
+/// pre-`run_ai` value would ship a list one transition stale: the AI's follow-up
+/// can cross a turn (adding a rewind boundary) or finish a player off (adding an
+/// elimination), and every `StateUpdate` in the batch would then contradict the
+/// state travelling with it.
+async fn broadcast_ai_results(
+    connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    player_count: u8,
+    eliminated: &[PlayerId],
+    ai_results: &[RevisionedActionResult],
+    rewind_targets: &[RewindOption],
+) {
+    // Broadcast AI follow-up results with delays
+    for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (
+            ai_raw_state,
+            ai_events,
+            ai_legal,
+            ai_log_entries,
+            _ai_auto_pass,
+            ai_spell_costs,
+            ai_by_object,
+        ) = result;
+        if guard_state_snapshot_broadcast(StateSnapshotParts {
+            state: ai_raw_state,
+            events: ai_events,
+            log_entries: ai_log_entries,
+            legal_actions: ai_legal,
+            legal_actions_by_object: ai_by_object,
+            spell_costs: ai_spell_costs,
+        })
+        .is_err()
+        {
+            continue;
+        }
+        let is_last = i == ai_results.len() - 1;
+
+        // Filter AI state per-player outside the lock
+        let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
+            .map(|j| {
+                let pid = PlayerId(j);
+                (pid, server_core::filter_state_for_player(ai_raw_state, pid))
+            })
+            .collect();
+
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(game_code) {
+            for (pid, pstate) in &ai_filtered {
+                if let Some(s) = players.get(pid) {
+                    let is_actor = server_core::is_acting(ai_raw_state, *pid);
+                    let player_legals = if is_last && is_actor {
+                        ai_legal.clone()
+                    } else {
+                        vec![]
+                    };
+                    let p_auto_pass = if is_last {
+                        engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
+                    } else {
+                        false
+                    };
+                    let p_end_continuous_effect_offers =
+                        engine_end_continuous_effect_offers(&player_legals);
+                    let p_mana_payment_shortcut_actions = if is_last && is_actor {
+                        engine_mana_payment_shortcut_actions(ai_raw_state, ai_by_object)
+                    } else {
+                        Vec::new()
+                    };
+                    let p_spell_costs = if is_last && is_actor {
+                        ai_spell_costs.clone()
+                    } else {
+                        HashMap::new()
+                    };
+                    let p_by_object = if is_last && is_actor {
+                        ai_by_object.clone()
+                    } else {
+                        HashMap::new()
+                    };
+                    let _ = s.send(ServerMessage::StateUpdate {
+                        state_revision: *ai_revision,
+                        state: pstate.clone(),
+                        events: server_core::filter_events_for_player(
+                            ai_events,
+                            ai_raw_state,
+                            *pid,
+                        ),
+                        legal_actions: player_legals,
+                        auto_pass_recommended: p_auto_pass,
+                        end_continuous_effect_offers: p_end_continuous_effect_offers,
+                        mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
+                        eliminated_players: eliminated.to_vec(),
+                        log_entries: ai_log_entries.clone(),
+                        spell_costs: p_spell_costs,
+                        legal_actions_by_object: object_action_payloads(&p_by_object),
+                        derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
+                        viewer_interaction: derive_viewer_interaction(ai_raw_state, pstate, *pid),
+                        rewind_targets: rewind_targets.to_vec(),
+                    });
+                }
+            }
+        }
+        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
+        if let Ok(spectator_msg) = build_spectator_state_update_message(
+            ai_raw_state,
+            ai_events,
+            ai_log_entries,
+            *ai_revision,
+        ) {
+            let mut specs = game_spectators.lock().await;
+            if let Some(spectators) = specs.get_mut(game_code) {
+                spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                if spectators.is_empty() {
+                    specs.remove(game_code);
+                }
+            }
+        }
+    }
+}
+
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
 /// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
 /// `resolved_by` is the player whose response concluded the request, or
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
+// Same shape as the sibling transport fan-outs at `:2010`/`:3767`/`:4071`:
+// every argument is a distinct broadcast input captured under the session lock,
+// and bundling them into a struct here would only move the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 async fn broadcast_takeback_approved(
     connections: &SharedConnections,
     game_spectators: &SharedGameSpectators,
@@ -3456,6 +3617,7 @@ async fn broadcast_takeback_approved(
     state_revision: u64,
     snapshot: server_core::BroadcastSnapshot,
     resolved_by: Option<PlayerId>,
+    rewind_targets: Vec<RewindOption>,
 ) {
     let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) = snapshot;
     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
@@ -3507,6 +3669,18 @@ async fn broadcast_takeback_approved(
                     legal_actions_by_object: object_action_payloads(&p_by_object),
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                     viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
+                    // Captured by the caller under the same lock as the
+                    // rollback, and — like the shipped action path's own
+                    // capture — *after* its `run_ai`, not before. Both halves
+                    // matter. Under the lock, because an approved rewind prunes
+                    // the ring and a list read outside it could advertise
+                    // boundaries that no longer exist. After `run_ai`, because
+                    // `run_ai` is itself a capture site: an AI follow-up that
+                    // crosses a turn adds a boundary, and a pre-`run_ai` read
+                    // would ship a list already one behind the state travelling
+                    // with it. The list is a live session affordance, not a
+                    // projection of `snapshot`.
+                    rewind_targets: rewind_targets.clone(),
                 });
             }
         }
@@ -3684,6 +3858,12 @@ async fn handle_full_game_submission(
                 };
                 let session = mgr.sessions.get(&game_code).unwrap();
                 let eliminated = session.state.eliminated_players.clone();
+                // Captured once, AFTER `run_ai`, and reused for both the human
+                // and the AI fan-out below: the list is a live session
+                // affordance rather than a per-snapshot projection, so the
+                // freshest value under this lock is the correct one for every
+                // message this transition produces.
+                let rewind_targets = session.rewind_options();
                 let player_count = session.player_count;
                 let game_over_winner = match &session.state.waiting_for {
                     engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
@@ -3719,6 +3899,7 @@ async fn handle_full_game_submission(
                         player_count,
                         game_over_winner,
                         terminal,
+                        rewind_targets,
                     )
                 })
             }
@@ -3743,6 +3924,7 @@ async fn handle_full_game_submission(
             player_count,
             game_over_winner,
             terminal,
+            rewind_targets,
         )) => {
             if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
                 state: &raw_state,
@@ -3840,6 +4022,7 @@ async fn handle_full_game_submission(
                                 viewer_interaction: derive_viewer_interaction(
                                     &raw_state, pstate, *pid,
                                 ),
+                                rewind_targets: rewind_targets.clone(),
                             });
                         }
                     }
@@ -3860,114 +4043,16 @@ async fn handle_full_game_submission(
                 }
             }
 
-            // Broadcast AI follow-up results with delays
-            for (i, (ai_revision, result)) in ai_results.iter().enumerate() {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let (
-                    ai_raw_state,
-                    ai_events,
-                    ai_legal,
-                    ai_log_entries,
-                    _ai_auto_pass,
-                    ai_spell_costs,
-                    ai_by_object,
-                ) = result;
-                if guard_state_snapshot_broadcast(StateSnapshotParts {
-                    state: ai_raw_state,
-                    events: ai_events,
-                    log_entries: ai_log_entries,
-                    legal_actions: ai_legal,
-                    legal_actions_by_object: ai_by_object,
-                    spell_costs: ai_spell_costs,
-                })
-                .is_err()
-                {
-                    continue;
-                }
-                let is_last = i == ai_results.len() - 1;
-
-                // Filter AI state per-player outside the lock
-                let ai_filtered: Vec<(PlayerId, GameState)> = (0..player_count)
-                    .map(|j| {
-                        let pid = PlayerId(j);
-                        (pid, server_core::filter_state_for_player(ai_raw_state, pid))
-                    })
-                    .collect();
-
-                let conns = connections.lock().await;
-                if let Some(players) = conns.get(&game_code) {
-                    for (pid, pstate) in &ai_filtered {
-                        if let Some(s) = players.get(pid) {
-                            let is_actor = server_core::is_acting(ai_raw_state, *pid);
-                            let player_legals = if is_last && is_actor {
-                                ai_legal.clone()
-                            } else {
-                                vec![]
-                            };
-                            let p_auto_pass = if is_last {
-                                engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
-                            } else {
-                                false
-                            };
-                            let p_end_continuous_effect_offers =
-                                engine_end_continuous_effect_offers(&player_legals);
-                            let p_mana_payment_shortcut_actions = if is_last && is_actor {
-                                engine_mana_payment_shortcut_actions(ai_raw_state, ai_by_object)
-                            } else {
-                                Vec::new()
-                            };
-                            let p_spell_costs = if is_last && is_actor {
-                                ai_spell_costs.clone()
-                            } else {
-                                HashMap::new()
-                            };
-                            let p_by_object = if is_last && is_actor {
-                                ai_by_object.clone()
-                            } else {
-                                HashMap::new()
-                            };
-                            let _ = s.send(ServerMessage::StateUpdate {
-                                state_revision: *ai_revision,
-                                state: pstate.clone(),
-                                events: server_core::filter_events_for_player(
-                                    ai_events,
-                                    ai_raw_state,
-                                    *pid,
-                                ),
-                                legal_actions: player_legals,
-                                auto_pass_recommended: p_auto_pass,
-                                end_continuous_effect_offers: p_end_continuous_effect_offers,
-                                mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
-                                eliminated_players: eliminated.clone(),
-                                log_entries: ai_log_entries.clone(),
-                                spell_costs: p_spell_costs,
-                                legal_actions_by_object: object_action_payloads(&p_by_object),
-                                derived: derive_transport_views(ai_raw_state, pstate, Some(*pid)),
-                                viewer_interaction: derive_viewer_interaction(
-                                    ai_raw_state,
-                                    pstate,
-                                    *pid,
-                                ),
-                            });
-                        }
-                    }
-                }
-                let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
-                if let Ok(spectator_msg) = build_spectator_state_update_message(
-                    ai_raw_state,
-                    ai_events,
-                    ai_log_entries,
-                    *ai_revision,
-                ) {
-                    let mut specs = game_spectators.lock().await;
-                    if let Some(spectators) = specs.get_mut(&game_code) {
-                        spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-                        if spectators.is_empty() {
-                            specs.remove(&game_code);
-                        }
-                    }
-                }
-            }
+            broadcast_ai_results(
+                connections,
+                game_spectators,
+                &game_code,
+                player_count,
+                &eliminated,
+                &ai_results,
+                &rewind_targets,
+            )
+            .await;
 
             if !terminal_deliveries.is_empty() {
                 let conns = connections.lock().await;
@@ -4441,6 +4526,11 @@ async fn handle_client_message(
                     /// so the reconnecting socket gets the same prompt it
                     /// would have received had it stayed connected.
                     pending_takeback_msg: Option<Box<ServerMessage>>,
+                    /// Captured under the same lock as `ai_result`, for the
+                    /// `StateUpdate` fan-out to the *other* seats below. The
+                    /// reconnecting socket gets its own copy inside
+                    /// `game_started_msg`.
+                    rewind_targets: Vec<RewindOption>,
                 },
                 Err(String),
             }
@@ -4491,11 +4581,13 @@ async fn handle_client_message(
                                 build_game_started_message(session, player, None, Vec::new());
                             let pending_takeback_msg =
                                 session.pending_takeback_message().map(Box::new);
+                            let rewind_targets = session.rewind_options();
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
                                 ai_result,
                                 pending_takeback_msg,
+                                rewind_targets,
                             }
                         }
                         Err(e) => ReconnectOutcome::Err(e),
@@ -4545,6 +4637,7 @@ async fn handle_client_message(
                     game_started_msg,
                     ai_result,
                     pending_takeback_msg,
+                    rewind_targets,
                 } => {
                     info!(game = %game_code, player = ?player, "reconnect succeeded");
                     identity.set_session(game_code.clone(), player, player_token);
@@ -4588,9 +4681,12 @@ async fn handle_client_message(
                         if let Some(game_conns) = conns.get(&game_code) {
                             for (&pid, sender) in game_conns.iter() {
                                 if pid != player {
-                                    if let Ok(msg) =
-                                        build_state_update_message(&result, state_revision, pid)
-                                    {
+                                    if let Ok(msg) = build_state_update_message(
+                                        &result,
+                                        state_revision,
+                                        pid,
+                                        rewind_targets.clone(),
+                                    ) {
                                         let _ = sender.send(msg);
                                     }
                                 }
@@ -5720,6 +5816,12 @@ async fn handle_client_message(
                         legal_actions_by_object: HashMap::new(),
                         derived,
                         viewer_interaction,
+                        // `JoinOutcome::Waiting` — the game has not started, so
+                        // no authoritative transition has happened and no turn
+                        // boundary can exist. Empty by construction, not by
+                        // omission; the first `GameStarted` publishes the real
+                        // list.
+                        rewind_targets: Vec::new(),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
@@ -5922,7 +6024,9 @@ async fn handle_client_message(
                             persist_full_session_async(game_db, session);
                             Ok(None)
                         };
-                        terminal.map(|terminal| (revision, result, winner, terminal))
+                        let rewind_targets = session.rewind_options();
+                        terminal
+                            .map(|terminal| (revision, result, winner, terminal, rewind_targets))
                     }
                     Err(error) => Err(error),
                 }
@@ -5936,7 +6040,7 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
-                Ok((revision, result, winner, terminal)) => {
+                Ok((revision, result, winner, terminal, rewind_targets)) => {
                     let terminal_deliveries = match terminal {
                         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
                             Ok(deliveries) => deliveries,
@@ -5951,9 +6055,12 @@ async fn handle_client_message(
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
                         for (player, sender) in players {
-                            if let Ok(update) =
-                                build_state_update_message(&result, revision, *player)
-                            {
+                            if let Ok(update) = build_state_update_message(
+                                &result,
+                                revision,
+                                *player,
+                                rewind_targets.clone(),
+                            ) {
                                 let _ = sender.send(update);
                             }
                             let _ = sender.send(ServerMessage::Conceded { player: player_id });
@@ -6006,13 +6113,14 @@ async fn handle_client_message(
                                 ranked_result_for_duel(game_db, &game_code, &players, Some(winner))
                             })
                         });
+                        let rewind_targets = session.rewind_options();
                         terminal_artifact(
                             session,
                             winner,
                             "Match conceded".to_string(),
                             ranked_result,
                         )
-                        .map(|terminal| (revision, result, winner, terminal))
+                        .map(|terminal| (revision, result, winner, terminal, rewind_targets))
                     }
                     Err(error) => Err(error),
                 }
@@ -6026,7 +6134,7 @@ async fn handle_client_message(
                         let _ = socket.send(Message::text(json)).await;
                     }
                 }
-                Ok((revision, result, winner, terminal)) => {
+                Ok((revision, result, winner, terminal, rewind_targets)) => {
                     let terminal_deliveries = match prepare_full_terminal(game_db, terminal).await {
                         Ok(deliveries) => deliveries,
                         Err(error) => {
@@ -6038,9 +6146,12 @@ async fn handle_client_message(
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
                         for (player, sender) in players {
-                            if let Ok(update) =
-                                build_state_update_message(&result, revision, *player)
-                            {
+                            if let Ok(update) = build_state_update_message(
+                                &result,
+                                revision,
+                                *player,
+                                rewind_targets.clone(),
+                            ) {
                                 let _ = sender.send(update);
                             }
                             if let Some((_, delivery)) =
@@ -6066,7 +6177,7 @@ async fn handle_client_message(
         // delegates to. None of these three arms touch `session.state`
         // directly; they only call into `GameSession` methods that own the
         // takeback/rollback invariants.
-        ClientMessage::RequestTakeback => {
+        ClientMessage::RequestTakeback(target) => {
             let (game_code, player_id) = match (&identity.game_code, identity.player_id) {
                 (Some(c), Some(p)) => (c.clone(), p),
                 _ => {
@@ -6083,7 +6194,10 @@ async fn handle_client_message(
                 drop(mgr);
                 return;
             };
-            let outcome = session.request_takeback(player_id);
+            // An absent payload is the frame every pre-rewind client sends;
+            // normalizing at the transport edge keeps `RewindTarget` — not
+            // `Option<RewindTarget>` — the session API's vocabulary.
+            let outcome = session.request_takeback(player_id, target.unwrap_or_default());
             // `pending_takeback_message` reads `session.pending_takeback`,
             // which `request_takeback` already cleared on an Approved
             // outcome — so this is `Some` exactly when we need it (the
@@ -6097,11 +6211,34 @@ async fn handle_client_message(
                         session.current_broadcast_snapshot(),
                     )
                 });
+            // A rollback can restore an AI seat to priority — most obviously a
+            // `TurnStart` rewind onto an AI turn, but a `LastAction` rewind can
+            // land there too. Without this the table freezes: nothing else on
+            // the approved path drives the AI. `run_ai` is a no-op when there
+            // are no AI seats, and its own pending-takeback guard is already
+            // cleared by the time we get here. Revisions stay contiguous: the
+            // rollback took R+1 above, `run_ai` allocates R+2..R+k.
+            let ai_results = if approved_snapshot.is_some() {
+                session.run_ai()
+            } else {
+                Vec::new()
+            };
+            // Both read AFTER `run_ai`, matching the shipped action path: an AI
+            // follow-up can cross a turn (new rewind boundary) or finish a
+            // player off (new elimination), and the AI fan-out below must not
+            // describe the state as it stood before its own results.
+            // `snapshot.0` is the *pre*-`run_ai` rollback state, so sourcing
+            // eliminations from it would be exactly that staleness.
+            let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately, in the
             // same lock as the rollback itself — otherwise SQLite still
             // holds the pre-rollback `GameState` until some later action
             // happens to persist, and a crash/restart in that window
-            // resurrects the branch the table just agreed to undo.
+            // resurrects the branch the table just agreed to undo. Ordered
+            // AFTER `run_ai`, matching the normal action path: otherwise a
+            // crash between the rollback and the next action resurrects a
+            // state the AI has already moved past.
             if approved_snapshot.is_some() {
                 persist_full_session_async(game_db, session);
             }
@@ -6151,6 +6288,17 @@ async fn handle_client_message(
                         state_revision,
                         snapshot,
                         None,
+                        rewind_targets.clone(),
+                    )
+                    .await;
+                    broadcast_ai_results(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        &eliminated,
+                        &ai_results,
+                        &rewind_targets,
                     )
                     .await;
                 }
@@ -6186,6 +6334,17 @@ async fn handle_client_message(
                         session.current_broadcast_snapshot(),
                     )
                 });
+            // Same reason, same ordering, as the `RequestTakeback` arm above:
+            // the rolled-back state can put an AI seat on priority.
+            let ai_results = if approved_snapshot.is_some() {
+                session.run_ai()
+            } else {
+                Vec::new()
+            };
+            // Read AFTER `run_ai` for the same reason as the `RequestTakeback`
+            // arm above.
+            let rewind_targets = session.rewind_options();
+            let eliminated = session.state.eliminated_players.clone();
             // GH #1507: persist the rolled-back state immediately — see the
             // matching comment in the `RequestTakeback` arm above.
             if approved_snapshot.is_some() {
@@ -6221,6 +6380,17 @@ async fn handle_client_message(
                         state_revision,
                         snapshot,
                         Some(player_id),
+                        rewind_targets.clone(),
+                    )
+                    .await;
+                    broadcast_ai_results(
+                        connections,
+                        game_spectators,
+                        &game_code,
+                        player_count,
+                        &eliminated,
+                        &ai_results,
+                        &rewind_targets,
                     )
                     .await;
                 }
@@ -7200,7 +7370,9 @@ mod state_transport_derived_tests {
     }
 
     fn state_update_action_fields(result: &ActionResult, viewer: PlayerId) -> (usize, bool) {
-        match build_state_update_message(result, 1, viewer).expect("fixture state update") {
+        match build_state_update_message(result, 1, viewer, Vec::new())
+            .expect("fixture state update")
+        {
             ServerMessage::StateUpdate {
                 legal_actions,
                 auto_pass_recommended,
@@ -8487,7 +8659,7 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 player_token: "t".into(),
             },
-            ClientMessage::RequestTakeback,
+            ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },
             ClientMessage::CancelTakeback,
         ];
@@ -8579,7 +8751,7 @@ mod mode_gate_tests {
                 draft_code: "X".into(),
                 action: draft_core::types::DraftAction::StartDraft,
             },
-            ClientMessage::RequestTakeback,
+            ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },
             ClientMessage::CancelTakeback,
         ];

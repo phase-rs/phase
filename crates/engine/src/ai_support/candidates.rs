@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::game::casting;
@@ -15,9 +16,9 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
-    CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
-    PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
+    CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
+    PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
@@ -902,12 +903,22 @@ pub fn candidate_actions_broad_with_probe(
             target_slots,
             selection,
             ..
-        } => target_step_actions(
-            *player,
-            target_slots,
-            selection.current_slot,
-            &selection.current_legal_targets,
-        ),
+        } => {
+            let mut actions = target_step_actions(
+                *player,
+                target_slots,
+                selection.current_slot,
+                &selection.current_legal_targets,
+            );
+            if state.waiting_for.allows_cancel_cast() {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         WaitingFor::TriggerTargetSelection {
             player,
             target_slots,
@@ -2075,6 +2086,14 @@ pub fn candidate_actions_broad_with_probe(
         ),
         WaitingFor::PayCost {
             player,
+            kind: PayCostKind::Sacrifice,
+            choices,
+            count,
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => bounded_select_card_candidates(*player, choices, [*count]),
+        WaitingFor::PayCost {
+            player,
             kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
             choices,
             count,
@@ -2226,25 +2245,9 @@ pub fn candidate_actions_broad_with_probe(
             player,
             legal_targets,
             min_targets,
+            max_targets,
             ..
-        } => {
-            let mut actions = Vec::new();
-            actions.push(candidate(
-                GameAction::SelectCards {
-                    cards: legal_targets.clone(),
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            ));
-            if *min_targets == 0 {
-                actions.push(candidate(
-                    GameAction::SelectCards { cards: vec![] },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ));
-            }
-            actions
-        }
+        } => bounded_select_card_candidates(*player, legal_targets, *min_targets..=*max_targets),
         WaitingFor::CastOffer {
             player,
             kind: CastOfferKind::Adventure { .. },
@@ -3456,7 +3459,10 @@ fn semantic_candidate_actions_with_probe(
     let allows_cancel_cast = state.waiting_for.allows_cancel_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some());
-    if has_pending_cast && allows_cancel_cast {
+    if has_pending_cast
+        && allows_cancel_cast
+        && !matches!(state.waiting_for, WaitingFor::TargetSelection { .. })
+    {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,
@@ -3508,6 +3514,7 @@ pub(crate) fn priority_actions_with_probe(
     // players can't cast spells or activate non-mana abilities. Special actions
     // (PlayLand, Foretell) and mana abilities remain permitted.
     let split_second_active = crate::game::keywords::stack_has_split_second(state);
+    let mana_source_selections = OnceCell::new();
 
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
@@ -3610,18 +3617,25 @@ pub(crate) fn priority_actions_with_probe(
 
     // CR 702.61a: Spells and non-mana activated abilities are suppressed by split second.
     if !split_second_active {
+        // CR 601.2g-h: Mana abilities are activated before the total cost is
+        // paid. When every available capability requires a sacrifice, retain
+        // the spell offer but stop at that irreversible source choice.
         for object_id in casting::spell_objects_available_to_cast(state, player) {
             let Some(obj) = state.objects.get(&object_id) else {
                 continue;
             };
-            if casting::can_cast_object_now_with_probe(state, player, object_id, probe) {
+            let selections = mana_source_selections
+                .get_or_init(|| mana_sources::activatable_mana_source_selections(state, player));
+            if let Some(payment_mode) = casting::castable_spell_payment_mode_with_probe(
+                state, player, object_id, selections, probe,
+            ) {
                 actions.push(candidate(
                     GameAction::CastSpell {
                         object_id,
                         card_id: obj.card_id,
                         targets: Vec::new(),
 
-                        payment_mode: CastPaymentMode::Auto,
+                        payment_mode,
                     },
                     TacticalClass::Spell,
                     Some(player),
@@ -4207,31 +4221,47 @@ pub(crate) fn priority_actions_with_probe(
                 .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             for hand_id in hand_ids {
-                let Some(cost) = keywords::effective_sneak_cost(state, hand_id) else {
-                    continue;
-                };
-                // CR 601.2f: Mana-cost affordability must consider mana that
-                // can be produced by activating mana abilities during the cost
-                // step, not just mana currently floating in the pool.
-                // Delegates to the same auto-tap aware check used by the
-                // normal `CastSpell` emitter (`can_cast_object_now` →
-                // `can_pay_cost_after_auto_tap`) so a Sneak cast with 0
-                // floating mana but enough untapped sources is surfaced.
-                if !crate::game::casting::can_pay_cost_after_auto_tap(state, player, hand_id, &cost)
-                {
+                if keywords::effective_sneak_cost(state, hand_id).is_none() {
                     continue;
                 }
+                // CR 601.2g-h: Mana abilities are activated before the total
+                // cost is paid, so affordability must consider mana that those
+                // activations can produce, including irreversible manual ones.
                 let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
                     continue;
                 };
                 for &creature_id in &unblocked {
+                    let Some(prepared_cost) = casting::effective_spell_cost_for_variant(
+                        state,
+                        player,
+                        hand_id,
+                        crate::types::game_state::CastingVariant::Sneak {
+                            returned_creature: creature_id,
+                            placement: None,
+                        },
+                    ) else {
+                        continue;
+                    };
+                    let selections = mana_source_selections.get_or_init(|| {
+                        mana_sources::activatable_mana_source_selections(state, player)
+                    });
+                    let Some(payment_mode) = casting::prepared_spell_payment_verdict_with_probe(
+                        state,
+                        player,
+                        hand_id,
+                        &prepared_cost,
+                        selections,
+                        probe,
+                    ) else {
+                        continue;
+                    };
                     actions.push(candidate(
                         GameAction::CastSpellAsSneak {
                             hand_object: hand_id,
                             card_id,
                             creature_to_return: creature_id,
 
-                            payment_mode: CastPaymentMode::Auto,
+                            payment_mode,
                         },
                         TacticalClass::Ability,
                         Some(player),
@@ -4272,21 +4302,36 @@ pub(crate) fn priority_actions_with_probe(
                     continue;
                 };
                 for &creature_id in &tapped_creatures {
-                    if !casting::can_cast_spell_as_web_slinging_now(
+                    let Some(prepared_cost) = casting::effective_spell_cost_for_variant(
                         state,
                         player,
                         hand_id,
-                        creature_id,
-                    ) {
+                        crate::types::game_state::CastingVariant::WebSlinging {
+                            returned_creature: creature_id,
+                        },
+                    ) else {
                         continue;
-                    }
+                    };
+                    let selections = mana_source_selections.get_or_init(|| {
+                        mana_sources::activatable_mana_source_selections(state, player)
+                    });
+                    let Some(payment_mode) = casting::prepared_spell_payment_verdict_with_probe(
+                        state,
+                        player,
+                        hand_id,
+                        &prepared_cost,
+                        selections,
+                        probe,
+                    ) else {
+                        continue;
+                    };
                     actions.push(candidate(
                         GameAction::CastSpellAsWebSlinging {
                             hand_object: hand_id,
                             card_id,
                             creature_to_return: creature_id,
 
-                            payment_mode: CastPaymentMode::Auto,
+                            payment_mode,
                         },
                         TacticalClass::Spell,
                         Some(player),
@@ -4305,17 +4350,9 @@ fn target_step_actions(
     current_slot: usize,
     current_legal_targets: &[TargetRef],
 ) -> Vec<CandidateAction> {
-    let legal_targets: Vec<TargetRef> = if !current_legal_targets.is_empty() {
-        current_legal_targets.to_vec()
-    } else {
-        target_slots
-            .get(current_slot)
-            .map(|slot| slot.legal_targets.clone())
-            .unwrap_or_default()
-    };
-
-    let mut actions: Vec<CandidateAction> = legal_targets
-        .into_iter()
+    let mut actions: Vec<CandidateAction> = current_legal_targets
+        .iter()
+        .cloned()
         .map(|target| {
             candidate(
                 GameAction::ChooseTarget {
@@ -5930,7 +5967,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_uses_current_slot_legality() {
+    fn target_selection_does_not_revive_stale_slot_targets() {
         let mut state = GameState::new_two_player(42);
         let p0 = PlayerId(0);
         let target_a = create_object(
@@ -5968,8 +6005,10 @@ mod tests {
         };
 
         let actions = candidate_actions(&state);
-        assert_eq!(actions.len(), 2);
-        assert!(matches!(actions[0].action, GameAction::ChooseTarget { .. }));
+        assert!(
+            actions.is_empty(),
+            "an empty current prompt must not fall back to historical slot targets"
+        );
     }
 
     /// CR 732.2a: at a `PayableResource::LoopCollapse` prompt the AI enumerates ONLY

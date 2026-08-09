@@ -13,7 +13,9 @@ import init, {
   get_game_state,
   get_filtered_game_state,
   get_ai_action_proposal,
+  get_ai_action_proposal_with_diagnostics,
   get_ai_action_proposal_from_scores,
+  get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
   submit_ai_action_proposal,
   get_legal_actions_js,
@@ -73,8 +75,10 @@ type EngineRequest =
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
+  | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
@@ -373,6 +377,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "getAiActionProposalWithDiagnostics": {
+        result(msg.id, get_ai_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
       case "getAiScoredCandidates": {
         result(msg.id, get_ai_scored_candidates(msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? []);
         break;
@@ -388,6 +397,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             BigInt(msg.seed),
           ) ?? null,
         );
+        break;
+      }
+
+      case "getAiActionProposalFromScoresWithDiagnostics": {
+        result(msg.id, get_ai_action_proposal_from_scores_with_diagnostics(msg.scoresJson, msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? null);
         break;
       }
 

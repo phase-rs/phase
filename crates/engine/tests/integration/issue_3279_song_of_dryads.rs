@@ -8,7 +8,7 @@ use engine::game::mana_sources::activatable_land_mana_options;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 
@@ -18,6 +18,18 @@ const SONG_ORACLE: &str = "Enchant permanent\nEnchanted permanent is a colorless
 
 #[test]
 fn issue_3279_song_of_dryads_strips_enchanted_permanent_abilities() {
+    let mut control = GameScenario::new();
+    control.at_phase(Phase::PreCombatMain);
+    control.add_creature_from_oracle(P0, "Obuun, Mul Daya Ancestor", 3, 3, OBUUN_ORACLE);
+    control.add_basic_land(P0, ManaColor::Green);
+    let mut control_runner = control.build();
+    control_runner.pass_both_players();
+    control_runner.pass_both_players();
+    assert!(matches!(
+        control_runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. } | WaitingFor::OrderTriggers { .. }
+    ));
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -94,6 +106,7 @@ fn issue_3279_song_of_dryads_strips_enchanted_permanent_abilities() {
         "Forest land must tap for {{G}}, got {mana_options:?}"
     );
 
+    runner.pass_both_players();
     runner.pass_both_players();
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert!(

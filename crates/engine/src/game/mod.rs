@@ -171,6 +171,12 @@ pub mod token_presets;
 pub mod topology;
 pub mod transform;
 pub mod trigger_index;
+// Tests for the `trigger_index` live-zone guard live in a sibling file
+// (declared here, not in `trigger_index.rs`, so that file stays
+// implementation-only).
+#[cfg(test)]
+#[path = "trigger_index_zone_guard_tests.rs"]
+mod trigger_index_zone_guard_tests;
 pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;

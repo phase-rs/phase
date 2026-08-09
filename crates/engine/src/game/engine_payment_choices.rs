@@ -636,7 +636,7 @@ pub(super) fn handle_unless_payment(
     let poll_cost = cost.clone();
 
     let mut payment_failed = !pay;
-    let mut post_action_event_start = None;
+    let post_action_event_start = None;
     if pay {
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost
@@ -727,6 +727,49 @@ pub(super) fn handle_unless_payment(
                     // lumped with `Failed` defensively (see PayLife arm note).
                     PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
                         payment_failed = true;
+                    }
+                }
+            }
+            // CR 702.21a + CR 122.1 + CR 104.3d: Unless-cost of giving
+            // yourself N counters (Ward's player-counter form). No
+            // affordability gate exists — route through the single payment
+            // authority exactly like PayLife/PayEnergy above. Unlike those
+            // two, a real `Paused` path exists here (a "can't get counters"
+            // replacement effect, or a CR 616.1 replacement-ordering choice,
+            // may need a live choice), so it is preserved rather than lumped
+            // with `Failed`.
+            AbilityCost::GetPlayerCounters { .. } => {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => {
+                        payment_failed = true;
+                    }
+                    // CR 702.21a + CR 122.1 + CR 616.1: the counter-placement
+                    // replacement needs the player's choice. Stash the FULL
+                    // unless-payment continuation here — nothing else records
+                    // `pending_effect`/`trigger_event`/`effect_description`/
+                    // `remaining` once `add_player_counter_with_replacement`
+                    // overwrites `state.waiting_for` with the ReplacementChoice
+                    // prompt below — so the choice's resolution can settle
+                    // this exact Ward payment (via `finish_unless_payment`,
+                    // resumed by `resume_get_player_counters_unless_payment`)
+                    // instead of leaving it orphaned at bare Priority.
+                    PaymentOutcome::Paused { .. } => {
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment {
+                                cost: poll_cost.clone(),
+                                pending_effect: pending_effect.clone(),
+                                trigger_event: trigger_event.clone(),
+                                effect_description: effect_description.clone(),
+                                remaining: remaining.clone(),
+                            });
+                        return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
             }
@@ -1204,6 +1247,42 @@ pub(super) fn handle_unless_payment(
         }
     }
 
+    finish_unless_payment(
+        state,
+        pay,
+        payment_failed,
+        poll_cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        post_action_event_start,
+        events,
+    )
+}
+
+/// CR 118.12 + CR 118.12a: The shared paid/failed epilogue for every
+/// unless-cost shape — poll re-emit for "unless any player pays", resolve the
+/// guarded ability's chain when the cost is unpaid/failed, and settle
+/// priority/continuations either way. Extracted from `handle_unless_payment`'s
+/// own tail so a cost shape that pauses on a nested replacement choice mid-payment
+/// (`AbilityCost::GetPlayerCounters`, via
+/// `PendingCostMoveResume::GetPlayerCountersUnlessPayment`) can resume through
+/// EXACTLY this same logic once the choice resolves, instead of duplicating it
+/// and risking drift between the immediate and deferred paths.
+#[allow(clippy::too_many_arguments)]
+fn finish_unless_payment(
+    state: &mut GameState,
+    pay: bool,
+    payment_failed: bool,
+    poll_cost: AbilityCost,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    effect_description: Option<String>,
+    remaining: Vec<PlayerId>,
+    mut post_action_event_start: Option<usize>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
     if !pay || payment_failed {
         // CR 118.12a: "[Effect] unless any player pays ..." poll — when the
         // current player declines (or cannot pay) and more players remain,
@@ -1569,6 +1648,7 @@ pub(super) fn handle_ward_discard_choice(
             chosen[0],
             player,
             Some(pending_effect.source_id),
+            None,
             std::collections::HashSet::new(),
             events,
         )
@@ -1754,6 +1834,46 @@ pub(super) fn resume_ward_sacrifice_payment(
             }
         }
     }
+}
+
+/// CR 702.21a + CR 122.1 + CR 616.1: Resume a Ward player-counter unless-payment
+/// after its `AddCounter` replacement choice settled. `payment_succeeded` comes
+/// from the exact boundary the replacement pipeline resolved to
+/// (`CostMoveDrainBoundary::ReplacementDelivered` = the counters were actually
+/// added = paid; `ReplacementPrevented` = a replacement fully suppressed the
+/// placement = failed — mirroring `PlayerCounterAdditionOutcome`'s established
+/// Applied/Prevented ↔ Paid/Failed mapping for the immediate-payment case).
+/// Delegates to the same `finish_unless_payment` tail every other unless-cost
+/// shape uses, so the Ward-guarded ability is settled exactly once, either way,
+/// instead of the game resetting to bare priority with its fate undetermined.
+pub(super) fn resume_get_player_counters_unless_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    payment_succeeded: bool,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("GetPlayerCounters unless-payment resume requires its typed continuation")
+    };
+    finish_unless_payment(
+        state,
+        true,
+        !payment_succeeded,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        None,
+        events,
+    )?;
+    Ok(state.waiting_for.clone())
 }
 
 pub(super) fn handle_ward_sacrifice_choice(

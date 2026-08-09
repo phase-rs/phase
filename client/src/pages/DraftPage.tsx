@@ -4,8 +4,8 @@ import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
-import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -300,6 +300,7 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
+  const draftView = useDraftStore((s) => s.view);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -372,7 +373,7 @@ export function DraftPage() {
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
-        <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+        <HoverCardPreview card={hoveredCard} />
       )}
 
       {/* Centered MenuShell column — identical framing to home/setup/online so
@@ -429,7 +430,12 @@ export function DraftPage() {
         )}
 
         {phase === "drafting" && !introDismissed && (
-          <DraftIntro mode="quick" onContinue={() => setIntroDismissed(true)} />
+          <DraftIntro
+            mode="quick"
+            packCount={draftView?.pack_count}
+            cardsPerPack={draftView?.cards_per_pack}
+            onContinue={() => setIntroDismissed(true)}
+          />
         )}
 
         {phase === "drafting" && introDismissed && (

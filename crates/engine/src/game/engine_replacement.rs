@@ -246,13 +246,14 @@ pub(super) fn handle_replacement_choice(
                 //     is restored structurally inside the shared delivery for
                 //     `Stack → Battlefield` events (`CastLinkSnapshot`).
                 event @ ProposedEvent::ZoneChange { .. } => {
-                    let (object_id, to, cause) = match &event {
+                    let (object_id, to, cause, discard_frame) = match &event {
                         ProposedEvent::ZoneChange {
                             object_id,
                             to,
                             cause,
+                            discard_frame,
                             ..
-                        } => (*object_id, *to, *cause),
+                        } => (*object_id, *to, *cause, *discard_frame),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
                     let Ok(approved) =
@@ -323,6 +324,13 @@ pub(super) fn handle_replacement_choice(
                                 player_id: provenance.player_id,
                             });
                         }
+                    }
+                    // CR 701.9a + CR 616.1: a discard move that paused for
+                    // replacement ordering reaches terminal delivery here.
+                    // Restore its exact continuation data before the common
+                    // epilogue drains the parked ability chain.
+                    if let Some(frame_id) = discard_frame {
+                        effects::discard::hand_off_recruit_discard_result(state, frame_id);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -613,12 +621,19 @@ pub(super) fn handle_replacement_choice(
                     player_id,
                     object_id,
                     source_id,
+                    discard_frame,
                     applied,
                     ..
                 } => {
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
                         effects::discard::complete_discard_to_graveyard(
-                            state, object_id, player_id, source_id, applied, events,
+                            state,
+                            object_id,
+                            player_id,
+                            source_id,
+                            discard_frame,
+                            applied,
+                            events,
                         )
                     {
                         state.waiting_for =
@@ -4127,6 +4142,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6044,6 +6060,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6248,6 +6265,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6368,6 +6386,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6682,6 +6701,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };

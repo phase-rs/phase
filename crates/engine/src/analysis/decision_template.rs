@@ -698,7 +698,16 @@ fn evaluate_schedule(
 }
 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
-/// free choice in the cycle is pinned (TOTAL COVERAGE). "No conditional on a prior
+/// free choice in the cycle is pinned (TOTAL COVERAGE).
+///
+/// THIS IS WHERE THE NO-CONDITIONAL-ACTIONS CLAUSE IS SATISFIED, AND IT IS SATISFIED BY
+/// CONSTRUCTION. CR 732.2a requires a proposal describe "the predictable results of the sequence of
+/// choices" and says it "can't include conditional actions, where the outcome of a game event
+/// determines the next action a player takes". Pins fix every free choice BEFORE the offer is made,
+/// so the sequence the table accepts is the sequence that runs. The two companion gates are
+/// `game::engine::try_offer_object_growth_shortcut`'s static rejection of coin flip / die roll /
+/// random discard, and `analysis::resource::elimination_bounds` stopping the count strictly short
+/// of every CR 704 loss threshold. "No conditional on a prior
 /// iteration's outcome" needs NO runtime check — it is unrepresentable in
 /// [`TargetSchedule`] by construction (see the type doc); a choice a player could only
 /// make reactively is one they cannot pin, which surfaces HERE as an unpinned slot.

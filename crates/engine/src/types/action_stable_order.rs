@@ -1205,6 +1205,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             zone: a2,
             attach_to: a3,
             run_etb: a4,
+            nonlegendary: a5,
         } => {
             let DebugAction::CreateCard {
                 card_name: b0,
@@ -1212,6 +1213,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 zone: b2,
                 attach_to: b3,
                 run_etb: b4,
+                nonlegendary: b5,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1221,6 +1223,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a2, b2))
                 .then_with(|| cmp_val(a3, b3))
                 .then_with(|| cmp_val(a4, b4))
+                .then_with(|| cmp_val(a5, b5))
         }
         DebugAction::RemoveObject { object_id: a0 } => {
             let DebugAction::RemoveObject { object_id: b0 } = b else {
@@ -1544,15 +1547,19 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
         DebugAction::CreateTokenCopy {
             source_id: a0,
             owner: a1,
+            nonlegendary: a2,
         } => {
             let DebugAction::CreateTokenCopy {
                 source_id: b0,
                 owner: b1,
+                nonlegendary: b2,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
         }
     }
 }

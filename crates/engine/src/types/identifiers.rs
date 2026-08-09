@@ -35,6 +35,13 @@ pub(crate) const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
 #[serde(transparent)]
 pub struct LogicalZoneChangeGroupId(pub u64);
 
+/// Monotonic identity for one operation-owned discard result frame. This is
+/// distinct from an object id: one discard instruction may be replaced or
+/// paused, while the frame remains the sole provenance authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DiscardFrameId(pub u64);
+
 /// Unique identifier for a set of objects tracked across delayed trigger boundaries.
 /// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -158,6 +165,18 @@ impl ObjectIncarnationRef {
             object_id: obj.id,
             incarnation: obj.incarnation,
         }
+    }
+
+    /// CR 400.7: True when this pinned reference still names the live object it
+    /// was captured from. An object that changed zones became a new object and
+    /// bumped its incarnation (`GameObject::bump_incarnation`), so a stale pin
+    /// matches nothing even though the engine reuses the `ObjectId` as storage
+    /// identity.
+    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        state
+            .objects
+            .get(&self.object_id)
+            .is_some_and(|object| Self::from_object(object) == *self)
     }
 }
 

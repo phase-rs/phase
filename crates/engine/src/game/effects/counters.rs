@@ -436,14 +436,16 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 player_id,
                 counter_kind,
                 count,
-            } => super::player_counter::add_player_counter_with_replacement(
-                state,
-                actor,
-                player_id,
-                counter_kind,
-                count,
-                events,
-            ),
+            } => {
+                super::player_counter::add_player_counter_with_replacement(
+                    state,
+                    actor,
+                    player_id,
+                    counter_kind,
+                    count,
+                    events,
+                ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+            }
             PendingCounterAddition::Energy {
                 actor,
                 player_id,
@@ -1845,6 +1847,12 @@ fn resolve_defined_or_targets(
     // local `ability.targets` may have been replaced with the most-recent parent
     // slot by chain propagation, so resolve against the flattened chain root
     // (single authority in `targeting`), then keep only the object at `index`.
+    //
+    // CR 400.7 + CR 603.7c: deliberately NOT pin-filtered — see the standing
+    // constraint recorded at the `ParentTargetSlot` arm in
+    // `targeting::resolved_object_ids_for_filter_with_context`. Slot numbering
+    // is declared, not live, so filtering here would renumber later slots. Do
+    // not "complete the pattern" by adding a pin check.
     if let Some(TargetFilter::ParentTargetSlot { index }) = target_spec {
         return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
             .into_iter()
@@ -1901,12 +1909,24 @@ fn resolve_defined_or_targets(
         }
     }
 
+    // CR 400.7 + CR 603.7c: a delayed counter effect's pinned referent that
+    // became a new object is dropped. Substitution only: the source-fallback
+    // arms and the attack-batch arm above all key off `has_object_target` /
+    // `has_choice_bookkeeping_player`, computed from the RAW `ability.targets`,
+    // so those preconditions stay intact and an emptied list here cannot
+    // re-bind to a different object. No early return, hence no EffectResolved
+    // question.
+    //
+    // This is `lagrella, the magpie`'s route: her delayed `PutCounter` reaches
+    // here with the returned card in `targets`. She is correct only because the
+    // pin is never STAMPED for her (her condition names the referent's own
+    // entry) — not because this read is exempted.
     ability
-        .targets
-        .iter()
+        .live_object_targets(state)
+        .into_iter()
         .filter_map(|t| {
             if let TargetRef::Object(id) = t {
-                Some(*id)
+                Some(id)
             } else {
                 None
             }

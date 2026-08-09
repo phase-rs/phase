@@ -202,7 +202,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "modal_modes_chosen_this_turn",
         "modal_modes_chosen_this_game",
         "revealed_cards",
-        "public_revealed_cards",
         "player_actions_this_way",
         "city_blessing",
     ] {
@@ -216,6 +215,24 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "public_revealed_cards",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "enduring_story",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
     add_spec(
         &mut specs,
         game_state,
@@ -834,7 +851,7 @@ fn unordered_map_key_types(ty: &Type) -> Vec<String> {
         return Vec::new();
     };
     match segment.ident.to_string().as_str() {
-        "Option" | "Vec" | "Arc" => first_type_argument(segment)
+        "Option" | "Vec" | "Arc" | "Box" => first_type_argument(segment)
             .map(unordered_map_key_types)
             .unwrap_or_default(),
         "HashMap" => {
@@ -859,7 +876,7 @@ fn hash_shape(ty: &Type) -> Option<String> {
     let segment = path.path.segments.last()?;
     let name = segment.ident.to_string();
     match name.as_str() {
-        "Option" | "Vec" | "Arc" => {
+        "Option" | "Vec" | "Arc" | "Box" => {
             hash_shape(first_type_argument(segment)?).map(|inner| format!("{name}<{inner}>"))
         }
         "HashSet" => Some(
@@ -1192,6 +1209,7 @@ fn build_populated_state(reverse: bool) -> GameState {
         token_creator_order.reverse();
     }
     state.players_who_created_token_this_turn = token_creator_order.into_iter().collect();
+    state.enduring_story = Box::new(player_order.iter().copied().collect());
     state.ring_level = player_order
         .into_iter()
         .map(|player| (player, player.0 + 1))
@@ -1331,6 +1349,7 @@ fn assert_representative_membership(state: &GameState) {
         assert!(state.players_who_created_token_this_turn.contains(&player));
     }
     assert_eq!(state.ring_level.len(), 2);
+    assert_eq!(state.enduring_story.len(), 2);
     assert_eq!(state.attacked_defenders_this_turn.len(), 2);
     assert_eq!(state.steps_to_skip.len(), 2);
     assert_eq!(state.objects.len(), 2);

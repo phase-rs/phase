@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameState } from "../../adapter/types";
+import { supportsServerRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
@@ -57,12 +58,21 @@ function patchConsole(): void {
 // Patch immediately so we capture logs from app startup
 patchConsole();
 
-export function DebugPanel() {
-  const { t } = useTranslation();
+export function DebugPanel({
+  aiDecisionDiagnosticsAvailable = false,
+}: {
+  aiDecisionDiagnosticsAvailable?: boolean;
+}) {
+  const { t } = useTranslation(["common", "game"]);
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
+  const rewindTargets = useGameStore((s) => s.rewindTargets);
+  const adapter = useGameStore((s) => s.adapter);
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
+  // The transport, not the mode, decides whether a rollback request can be
+  // bound to an authenticated session — same idiom as `supportsMatchConcede`.
+  const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
   const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -87,6 +97,8 @@ export function DebugPanel() {
   // can open the panel straight to "actions" via `openSandboxTools()`.
   const activeTab = useUiStore((s) => s.debugPanelTab);
   const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
+  const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
   // Deliberately NOT `!hasRemoteHumans(gameMode)`, despite reading like a
   // company question. This is the set of modes whose adapter implements
   // `restoreState`: `WasmAdapter` does; `WebSocketAdapter.restoreState`
@@ -342,6 +354,21 @@ export function DebugPanel() {
         </button>
       </section>
 
+      <section className="border-b border-gray-700 px-3 py-2">
+        <label className="flex items-center justify-between gap-2 text-xs text-gray-300">
+          <span>{t("game:debugPanel.aiDecisionVisibility")}</span>
+          <input
+            type="checkbox"
+            disabled={!aiDecisionDiagnosticsAvailable}
+            checked={aiDecisionCaptureEnabled}
+            onChange={(event) => setAiDecisionCaptureEnabled(event.target.checked)}
+          />
+        </label>
+        {!aiDecisionDiagnosticsAvailable ? (
+          <p className="mt-1 text-xs text-gray-500">{t("game:debugPanel.aiDecisionUnavailable")}</p>
+        ) : null}
+      </section>
+
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {activeTab === "actions" ? (
           <section className="flex-1 overflow-y-auto px-3 py-2">
@@ -354,7 +381,48 @@ export function DebugPanel() {
           <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
             Turn Checkpoints
           </h3>
-          {!canRestoreCheckpoints ? (
+          {rewindAdapter && rewindTargets.length > 0 ? (
+            /* Server-published boundaries. Labelled from the SNAPSHOT's own
+               fields — exactly like the local list below — so the label and
+               the state a player gets cannot disagree.
+
+               Gated on `length > 0` deliberately: an online table has the
+               capability but a permanently empty list (the server scopes turn
+               rewind to a `SingleUser` sidecar), so falling through leaves its
+               behaviour byte-identical to before rather than promising a list
+               that will never fill. */
+            <div className="flex flex-col gap-1">
+              {rewindTargets.map((target) => {
+                const activePlayerName = getPlayerDisplayName(target.active_player, localPlayerId);
+                const activePlayerColor = getSeatColor(
+                  target.active_player,
+                  gameState?.seat_order,
+                );
+                return (
+                  <button
+                    key={target.turn_number}
+                    onClick={() =>
+                      rewindAdapter.sendRequestTakeback({
+                        kind: "turn_start",
+                        turn_number: target.turn_number,
+                      })}
+                    className="flex min-h-11 items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                  >
+                    <span>Turn {target.turn_number}</span>
+                    <span
+                      className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
+                      style={{
+                        backgroundColor: `${activePlayerColor}22`,
+                        color: activePlayerColor,
+                      }}
+                    >
+                      {activePlayerName}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : !canRestoreCheckpoints ? (
             /* Misleading twice over before: desktop solo-vs-AI is not
                multiplayer, and the real reason is a transport limit rather
                than a mode policy. Names the actual cause and points at the
@@ -397,7 +465,10 @@ export function DebugPanel() {
           )}
         </section>
 
-        {/* Import — only available in AI/local modes */}
+        {/* Import — stays gated on `canRestoreCheckpoints`, deliberately.
+            Importing an arbitrary state over a wire session is a different
+            (and much larger) capability than rolling back to a state the
+            server itself published, and is out of scope here. */}
         {canRestoreCheckpoints && (
           <section className="border-b border-gray-800 px-3 py-2">
             <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
