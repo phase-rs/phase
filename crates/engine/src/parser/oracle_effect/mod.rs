@@ -5762,9 +5762,18 @@ fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
 /// together or as a disjunctive instruction, and an `or` choice is made while
 /// the effect resolves.
 fn split_bare_disjunctive_choice_list_items(input: &str) -> Option<Vec<&str>> {
-    let (rest, mut items) = separated_list1(tag(", "), parse_choice_list_item)
-        .parse(input)
-        .ok()?;
+    // Keep the final `, or ` intact for the disjunctive separator below. A
+    // generic `, ` list separator would otherwise consume its comma before the
+    // parser can recognize a three-or-more-item choice.
+    let (rest, mut items) = separated_list1(
+        terminated(
+            tag::<_, _, OracleError<'_>>(", "),
+            not(tag::<_, _, OracleError<'_>>("or ")),
+        ),
+        parse_choice_list_item,
+    )
+    .parse(input)
+    .ok()?;
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or ")))
         .parse(rest)
         .ok()?;

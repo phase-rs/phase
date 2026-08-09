@@ -40974,6 +40974,35 @@ fn dwarven_armorer_bare_distributed_counter_choice_preserves_cost_and_branches()
 }
 
 #[test]
+fn bare_shared_noun_counter_choice_keeps_final_comma_or_separator() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    // Reluctant Role Model's three-way bare choice exercises the final `, or`
+    // separator. It must remain visible to the disjunctive splitter rather than
+    // being consumed as a generic comma list separator.
+    let ability = parse_effect_chain(
+        "Put a flying, lifelink, or +1/+1 counter on it.",
+        AbilityKind::Triggered,
+    );
+    let Effect::ChooseOneOf { branches, .. } = &*ability.effect else {
+        panic!(
+            "expected a three-way counter choice, got {:?}",
+            ability.effect
+        );
+    };
+    assert_eq!(branches.len(), 3);
+    assert!(matches!(
+        &*branches[1].effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Keyword(KeywordKind::Lifelink),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    ));
+}
+
+#[test]
 fn mixed_case_counter_choice_validates_lowercase_and_keeps_branch_descriptions() {
     let ability = parse_effect_chain(
         "Put a +0/+1 Counter or a +1/+0 Counter on Target Creature.",
