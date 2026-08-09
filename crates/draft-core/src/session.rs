@@ -69,6 +69,20 @@ impl DraftSession {
                 reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
             });
         }
+        let valid_size = match self.config.tournament_format {
+            TournamentFormat::Swiss => (2..=8).contains(&(self.seats.len() as u8)),
+            TournamentFormat::SingleElimination => self.seats.len() == 8,
+        };
+        if !valid_size {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed tournament size is invalid".to_string(),
+            });
+        }
+        if self.status == DraftStatus::Drafting {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason: "sealed sessions cannot be in drafting status".to_string(),
+            });
+        }
         let seat_count = self.seats.len();
         if self.config.pod_size as usize != seat_count
             || self.pools.len() != seat_count
@@ -960,6 +974,29 @@ mod tests {
         let (mut session, _) = test_session(2);
         session.kind = DraftKind::Sealed;
 
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_invalid_tournament_size_and_drafting_status() {
+        let (mut session, _source) = test_session(1);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        session.status = DraftStatus::Drafting;
         assert!(matches!(
             session.validate_sealed_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })

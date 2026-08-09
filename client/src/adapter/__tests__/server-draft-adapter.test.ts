@@ -77,6 +77,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
     ...overrides,
   };
 }

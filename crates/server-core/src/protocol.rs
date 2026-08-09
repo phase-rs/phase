@@ -2106,6 +2106,7 @@ mod tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
+            match_config: DraftKind::Premier.match_config(),
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();

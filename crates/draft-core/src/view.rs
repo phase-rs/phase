@@ -2,6 +2,7 @@ use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+use engine::types::match_config::MatchConfig;
 
 /// A single entry in the standings table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +85,8 @@ pub struct DraftPlayerView {
     pub pod_policy: PodPolicy,
     /// Pairings for the current round.
     pub pairings: Vec<PairingView>,
+    /// Resolved match configuration owned by the draft engine.
+    pub match_config: MatchConfig,
 }
 
 /// Re-export SpectatorVisibility from types for convenience.
@@ -110,6 +113,8 @@ pub struct SpectatorDraftView {
     pub tournament_format: TournamentFormat,
     pub pod_policy: PodPolicy,
     pub pairings: Vec<PairingView>,
+    /// Resolved match configuration owned by the draft engine.
+    pub match_config: MatchConfig,
     /// Populated only in `Omniscient` mode. Each inner Vec is a seat's pool.
     pub pools: Option<Vec<Vec<DraftCardInstance>>>,
     /// Populated only in `Omniscient` mode. Each entry is a seat's current pack.
@@ -204,6 +209,7 @@ pub fn filter_for_spectator(
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
         pairings,
+        match_config: session.kind.match_config(),
         pools,
         current_packs,
     }
@@ -303,6 +309,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
         pairings,
+        match_config: session.kind.match_config(),
     }
 }
 

@@ -137,7 +137,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     setConfig: (partial) => {
       set((prev) => ({
         config: normalizePodConfig({ ...prev.config, ...partial }),
-        poolMode: partial.kind === "Sealed" ? "set" : prev.poolMode,
+        poolMode: (partial.kind ?? prev.config.kind) === "Sealed" ? "set" : prev.poolMode,
         configError: null,
       }));
     },
@@ -159,7 +159,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     setPoolMode: (mode) => {
-      set({ poolMode: mode, configError: null });
+      set((prev) => ({
+        poolMode: prev.config.kind === "Sealed" ? "set" : mode,
+        configError: null,
+      }));
     },
 
     setCubeForm: (form) => {
@@ -168,6 +171,11 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
 
     createPod: async () => {
       const { config, hostDisplayName, poolMode, cubeForm } = get();
+
+      if (config.kind === "Sealed" && poolMode !== "set") {
+        set({ configError: "Sealed pods require a set pool" });
+        return;
+      }
 
       if (!hostDisplayName.trim()) {
         set({ configError: "Enter a display name" });

@@ -225,6 +225,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
       case "complete":
         return t("quickPhase.runComplete", { wins: meta.runWins ?? 0, losses: meta.runLosses ?? 0 });
     }
+    return t("quickPhase.drafting");
   }
 
   function handleClick() {

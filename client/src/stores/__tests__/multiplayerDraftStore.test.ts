@@ -91,6 +91,7 @@ function mockView(status: string): DraftPlayerView {
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
   };
 }
 

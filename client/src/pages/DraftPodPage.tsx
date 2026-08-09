@@ -167,7 +167,7 @@ function PodSetup() {
             {t("podSetup.draftType")}
           </label>
           <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"

@@ -31,7 +31,7 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
 
 type DraftSetupMode = "set" | "cube";
 
-function FormatPicker({ onLaunch, sealed }: { onLaunch: () => void; sealed: boolean }) {
+function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -44,7 +44,7 @@ function FormatPicker({ onLaunch, sealed }: { onLaunch: () => void; sealed: bool
       </div>
 
       <div className="flex w-full max-w-lg flex-col gap-3">
-        {(sealed ? FORMAT_OPTIONS.filter((opt) => opt.value === "single") : FORMAT_OPTIONS).map((opt) => (
+        {(supportsBo3 ? FORMAT_OPTIONS : FORMAT_OPTIONS.filter((opt) => opt.value !== "bo3")).map((opt) => (
           <button
             key={opt.value}
             type="button"
@@ -312,7 +312,6 @@ export function DraftPage() {
     requestedSetupMode === "cube" ? "cube" : "set",
   );
   const [localKind, setLocalKind] = useState<LocalDraftKind>("Quick");
-  const draftKind = useDraftStore((s) => s.kind);
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -426,7 +425,7 @@ export function DraftPage() {
             {setupMode === "set" ? (
               <div className="flex flex-col gap-6">
                 <div className="flex items-center gap-4 text-sm text-white/70">
-                  <label className="flex items-center gap-2">
+                  <label className="flex min-h-11 items-center gap-2 py-2">
                     <input
                       type="radio"
                       name="localDraftKind"
@@ -435,7 +434,7 @@ export function DraftPage() {
                     />
                     {t("page.quickDraftTitle")}
                   </label>
-                  <label className="flex items-center gap-2">
+                  <label className="flex min-h-11 items-center gap-2 py-2">
                     <input
                       type="radio"
                       name="localDraftKind"
@@ -487,7 +486,10 @@ export function DraftPage() {
         )}
 
         {phase === "launching" && (
-          <FormatPicker onLaunch={handleLaunchMatch} sealed={draftKind === "Sealed"} />
+          <FormatPicker
+            onLaunch={handleLaunchMatch}
+            supportsBo3={draftView?.match_config.match_type === "Bo3"}
+          />
         )}
 
         {!resumeLoading && phase === "playing" && (

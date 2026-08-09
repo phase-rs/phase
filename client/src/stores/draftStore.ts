@@ -527,7 +527,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const gameId = crypto.randomUUID();
       storeDraftDeckData(gameId, fullDeck, botFullDeck);
 
-      const matchType = kind === "Sealed" || runFormat !== "bo3" ? "bo1" : "bo3";
+      const matchType = view?.match_config.match_type === "Bo3" && runFormat === "bo3" ? "bo3" : "bo1";
 
       const newRunState: DraftRunState = {
         format: runFormat,
@@ -613,7 +613,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const gameId = crypto.randomUUID();
       storeDraftDeckData(gameId, runState.playerDeck, botFullDeck);
 
-      const matchType = kind === "Sealed" || runFormat !== "bo3" ? "bo1" : "bo3";
+      const matchType = view?.match_config.match_type === "Bo3" && runFormat === "bo3" ? "bo3" : "bo1";
 
       const usedBotSeats = runState.usedBotSeats.length >= 7
         ? [botSeat]

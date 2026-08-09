@@ -1,4 +1,5 @@
 import type * as DraftWasm from "@wasm/draft";
+import type { MatchConfig } from "./types";
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -95,6 +96,7 @@ export interface SpectatorDraftView {
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
   /** Present only when the host enabled omniscient spectator visibility. */
   pools?: DraftCardInstance[][];
   current_packs?: (DraftCardInstance[] | null)[];
@@ -120,6 +122,7 @@ export interface DraftPlayerView {
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
 }
 
 export type MultiplayerSeatDescriptor =

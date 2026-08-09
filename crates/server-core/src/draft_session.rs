@@ -107,6 +107,15 @@ impl DraftSession {
         {
             return Err("persisted draft seat vectors do not match core seats".to_string());
         }
+        let mut tokens = std::collections::HashSet::new();
+        if ps
+            .player_tokens
+            .iter()
+            .filter(|token| !token.is_empty())
+            .any(|token| !tokens.insert(token))
+        {
+            return Err("persisted draft player tokens must be unique".to_string());
+        }
         core.validate_sealed_snapshot()
             .map_err(|error| format!("invalid persisted sealed snapshot: {error}"))?;
         Ok(Self::from_persisted(ps))
@@ -1232,6 +1241,18 @@ mod tests {
         let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
         let mut persisted = mgr.sessions[&code].to_persisted();
         persisted.display_names.pop();
+
+        let mut restored = DraftSessionManager::new();
+        assert!(restored.restore_persisted_session(persisted).is_err());
+        assert!(restored.sessions.is_empty());
+    }
+
+    #[test]
+    fn restore_persisted_session_rejects_duplicate_player_tokens() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let mut persisted = mgr.sessions[&code].to_persisted();
+        persisted.player_tokens[1] = token;
 
         let mut restored = DraftSessionManager::new();
         assert!(restored.restore_persisted_session(persisted).is_err());

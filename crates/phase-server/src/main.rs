@@ -6850,6 +6850,7 @@ async fn handle_client_message(
                 &password,
                 timer_seconds,
                 pod_size,
+                kind,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {

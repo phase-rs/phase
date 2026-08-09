@@ -50,6 +50,7 @@ const view: DraftPlayerView = {
   tournament_format: "Swiss",
   pod_policy: "Competitive",
   pairings: [],
+  match_config: { match_type: "Bo1" },
 };
 
 describe("PackDisplay pod state", () => {
