@@ -10752,11 +10752,11 @@ pub(crate) fn check_trigger_condition(
 /// not a later object reusing the same storage id. Death bumps the live
 /// incarnation, and the card can move again before an intervening-if recheck,
 /// so subtract the death move and every subsequent move of that object.
-/// CR 400.7: True when `record`'s source matches the trigger source's observed
-/// incarnation. The observation, rather than a later live object lookup, is
-/// authoritative: a source may die alongside the damaged creature (Rot Wolf),
-/// while a re-entered source is a distinct object. `None` recorded incarnation
-/// is lenient for legacy records and fixtures.
+/// CR 400.7 + CR 603.10a: True when `record`'s source matches the trigger
+/// source. A live battlefield source must have the same incarnation; a
+/// post-event off-battlefield context may have already bumped incarnation while
+/// observing a simultaneous death (Rot Wolf), so it remains valid LKI. `None`
+/// recorded incarnation is lenient for legacy records and fixtures.
 fn damage_record_source_incarnation_matches(
     record: &DamageRecord,
     source_context: &TriggerSourceContext,
@@ -10765,6 +10765,7 @@ fn damage_record_source_incarnation_matches(
         .source_incarnation
         .is_none_or(|recorded_incarnation| {
             source_context.identity.reference.incarnation == recorded_incarnation
+                || source_context.identity.expected_zone != Zone::Battlefield
         })
 }
 
