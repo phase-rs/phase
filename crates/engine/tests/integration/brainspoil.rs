@@ -45,11 +45,6 @@ fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: Object
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Regenerate targeting the creature");
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(target)],
-        })
-        .expect("select Regenerate's target");
     runner.advance_until_stack_empty();
 }
 
@@ -177,8 +172,8 @@ fn brainspoil_target_slot_excludes_enchanted_creatures_not_equipped_creatures() 
 fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let brainspoil_victim = scenario.add_creature(P1, "Brainspoil Victim", 2, 2).id();
-    let control_victim = scenario.add_creature(P1, "Control Victim", 2, 2).id();
+    let brainspoil_victim = scenario.add_creature(P0, "Brainspoil Victim", 2, 2).id();
+    let control_victim = scenario.add_creature(P0, "Control Victim", 2, 2).id();
     let regenerate_brainspoil = scenario
         .add_spell_to_hand_from_oracle(P0, "Regenerate", false, REGENERATE_ORACLE)
         .id();
