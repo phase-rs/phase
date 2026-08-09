@@ -1269,7 +1269,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget { target, source_id } => {
+        GameEvent::BecomesTarget {
+            target, source_id, ..
+        } => {
             let mut segments = Vec::new();
             match target {
                 TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),

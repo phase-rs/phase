@@ -653,7 +653,7 @@ pub(crate) fn emit_targeting_events(
     _state: &GameState,
     targets: &[TargetRef],
     source_id: ObjectId,
-    _controller: PlayerId,
+    controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
     for target in targets {
@@ -662,12 +662,14 @@ pub(crate) fn emit_targeting_events(
                 events.push(GameEvent::BecomesTarget {
                     target: TargetRef::Object(*obj_id),
                     source_id,
+                    source_controller: controller,
                 });
             }
             TargetRef::Player(pid) => {
                 events.push(GameEvent::BecomesTarget {
                     target: TargetRef::Player(*pid),
                     source_id,
+                    source_controller: controller,
                 });
             }
         }

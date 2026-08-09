@@ -900,8 +900,14 @@ impl GameSession {
     /// - card characteristics from the card database
     /// - `log_player_names` from the persisted display names
     /// - `rng` re-seeded with fresh randomness
-    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Self {
+    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
         let mut state = ps.state.into_game_state();
+        state
+            .format_config
+            .validate_for_player_count(ps.player_count)?;
+        state
+            .format_config
+            .reject_unimplemented_range_of_influence()?;
 
         // Restore #[serde(skip)] fields
         state.all_card_names = db.card_names().into();
@@ -944,7 +950,7 @@ impl GameSession {
 
         let rewind_game_number = state.game_number;
 
-        GameSession {
+        Ok(GameSession {
             game_code: ps.game_code,
             full_runtime: None,
             state_revision: ps.state_revision,
@@ -975,7 +981,7 @@ impl GameSession {
             takeback_history: VecDeque::new(),
             turn_rewind_history: VecDeque::new(),
             rewind_game_number,
-        }
+        })
     }
 }
 
@@ -1015,6 +1021,7 @@ impl SessionManager {
     /// Create a new game session (2-player default). Returns (game_code, player_token).
     pub fn create_game(&mut self, deck: PlayerDeckPayload) -> (String, String) {
         self.create_game_n_players(deck, String::new(), None, 2, MatchConfig::default(), None)
+            .expect("the standard format must be supported")
     }
 
     /// Create a new game session with lobby settings (2-player default). Returns (game_code, player_token).
@@ -1026,6 +1033,7 @@ impl SessionManager {
         match_config: MatchConfig,
     ) -> (String, String) {
         self.create_game_n_players(deck, display_name, timer_seconds, 2, match_config, None)
+            .expect("the standard format must be supported")
     }
 
     /// Create a new N-player game session. Returns (game_code, player_token).
@@ -1037,7 +1045,11 @@ impl SessionManager {
         player_count: u8,
         match_config: MatchConfig,
         format_config: Option<FormatConfig>,
-    ) -> (String, String) {
+    ) -> Result<(String, String), String> {
+        let format_config = format_config.unwrap_or_else(FormatConfig::standard);
+        format_config.validate_for_player_count(player_count)?;
+        format_config.reject_unimplemented_range_of_influence()?;
+
         let game_code = generate_game_code();
         let player_token = generate_player_token();
         let pc = player_count as usize;
@@ -1051,11 +1063,7 @@ impl SessionManager {
         let mut display_names = vec![String::new(); pc];
         display_names[0] = display_name;
 
-        let mut state = GameState::new(
-            format_config.unwrap_or_else(FormatConfig::standard),
-            player_count,
-            rand::rng().random(),
-        );
+        let mut state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: Bo3 is inherently 2-player, but the combo-detector opt-in is
         // player-count-agnostic (infinite loops are a Commander staple), so carry
         // `loop_detection` through for any table size while resetting `match_type`.
@@ -1120,7 +1128,7 @@ impl SessionManager {
 
         info!(game = %game_code, player_count, "game session created");
 
-        (game_code, player_token)
+        Ok((game_code, player_token))
     }
 
     /// Join an existing game. Returns (player_id, player_token, initial_state_for_joiner) on success.
@@ -1270,7 +1278,7 @@ impl SessionManager {
         card_names: Vec<String>,
         format_config: Option<FormatConfig>,
         db: &CardDatabase,
-    ) -> (String, String) {
+    ) -> Result<(String, String), String> {
         let total_players = 1 + ai_requests.len() as u8;
         let (game_code, player_token) = self.create_game_n_players(
             host_deck,
@@ -1279,7 +1287,7 @@ impl SessionManager {
             total_players,
             match_config,
             format_config,
-        );
+        )?;
 
         let session = self.sessions.get_mut(&game_code).unwrap();
         for (seat_index, difficulty, deck) in &ai_requests {
@@ -1302,7 +1310,7 @@ impl SessionManager {
             .start_game(db)
             .expect("start_game in tests should not hit cEDH validation");
 
-        (game_code, player_token)
+        Ok((game_code, player_token))
     }
 
     /// Returns the exact mana sources automatic payment would use without
@@ -1945,7 +1953,8 @@ mod tests {
         let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
 
         let db = CardDatabase::default();
-        let restored = GameSession::from_persisted(persisted, &db);
+        let restored =
+            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
 
         assert_eq!(
             restored.state.interaction_session_id,
@@ -1956,17 +1965,39 @@ mod tests {
     }
 
     #[test]
+    fn persisted_session_with_limited_range_is_rejected() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
+        let mut state = persisted.state.into_game_state();
+        state.format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+        persisted.state = PersistedGameState::capture(state);
+
+        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+            .err()
+            .expect("limited range must remain disabled at the restore boundary");
+
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
     fn player_slot_info_omits_team_metadata_for_individual_formats() {
         for format in [FormatConfig::standard(), FormatConfig::commander()] {
             let mut mgr = SessionManager::new();
-            let (code, _) = mgr.create_game_n_players(
-                make_deck(),
-                "Host".to_string(),
-                None,
-                2,
-                MatchConfig::default(),
-                Some(format),
-            );
+            let (code, _) = mgr
+                .create_game_n_players(
+                    make_deck(),
+                    "Host".to_string(),
+                    None,
+                    2,
+                    MatchConfig::default(),
+                    Some(format),
+                )
+                .expect("supported format config");
 
             let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
             assert_eq!(slots.len(), 2);
@@ -1980,14 +2011,16 @@ mod tests {
     #[test]
     fn player_slot_info_includes_two_headed_giant_team_metadata() {
         let mut mgr = SessionManager::new();
-        let (code, _) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            4,
-            MatchConfig::default(),
-            Some(FormatConfig::two_headed_giant()),
-        );
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                Some(FormatConfig::two_headed_giant()),
+            )
+            .expect("supported format config");
 
         let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
         let team_indices: Vec<u8> = slots
@@ -2001,6 +2034,30 @@ mod tests {
 
         assert_eq!(team_indices, vec![0, 0, 1, 1]);
         assert_eq!(positions, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn create_game_rejects_limited_range_until_supported() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::standard();
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+
+        assert!(mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect_err("limited range must remain disabled at the session boundary")
+            .contains("not supported"));
+        assert!(mgr.sessions.is_empty());
     }
 
     /// CR 732.2a (#4603 opt-in, Best-of-N): the combo-detector opt-in lives on the
@@ -2018,17 +2075,19 @@ mod tests {
         use engine::types::match_config::MatchType;
 
         let mut mgr = SessionManager::new();
-        let (code, _) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            2,
-            MatchConfig {
-                match_type: MatchType::Bo3,
-                loop_detection: LoopDetectionMode::On,
-            },
-            None,
-        );
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig {
+                    match_type: MatchType::Bo3,
+                    loop_detection: LoopDetectionMode::On,
+                },
+                None,
+            )
+            .expect("supported format config");
 
         // Game 1: the creation site projects the opt-in onto the runtime flag.
         assert!(
@@ -2739,7 +2798,8 @@ mod tests {
                 .join("../../data/mtgjson/test_fixture.json"),
         )
         .expect("parser fixture must contain Witherbloom Apprentice");
-        let legacy_restored = GameSession::from_persisted(legacy, &db);
+        let legacy_restored =
+            GameSession::from_persisted(legacy, &db).expect("supported persisted format config");
         assert!(matches!(
             legacy_restored.state.waiting_for,
             WaitingFor::Priority { player } if player == P0
@@ -2751,7 +2811,8 @@ mod tests {
         )
         .expect("trusted persisted session remains decodable");
         assert!(matches!(&trusted.state, PersistedGameState::Trusted(_)));
-        let trusted_restored = GameSession::from_persisted(trusted, &db);
+        let trusted_restored =
+            GameSession::from_persisted(trusted, &db).expect("supported persisted format config");
         let fresh_epoch = match trusted_restored.state.waiting_for {
             WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => epoch,
             ref other => panic!("trusted restore must reissue its offer, got {other:?}"),
@@ -2928,16 +2989,18 @@ mod tests {
     fn takeback_auto_approves_for_sole_human_seat() {
         let mut mgr = SessionManager::new();
         let db = engine::database::CardDatabase::default();
-        let (code, _token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
 
         let session = mgr.sessions.get_mut(&code).unwrap();
         // Force a known checkpoint to take back to, since the AI may have
@@ -3034,14 +3097,16 @@ mod tests {
     #[test]
     fn run_ai_is_noop_while_takeback_is_pending() {
         let mut mgr = SessionManager::new();
-        let (code, _token0) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            None,
-        );
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("supported format config");
         let (_token1, _) = mgr.join_game(&code, make_deck()).unwrap();
         let (_token2, _) = mgr.join_game(&code, make_deck()).unwrap();
 
@@ -3869,6 +3934,7 @@ mod tests {
             MatchConfig::default(),
             Some(sandbox_config),
         )
+        .expect("supported sandbox config")
     }
 
     #[test]
@@ -3942,16 +4008,18 @@ mod tests {
     /// than a restatement of the sandbox flag.
     fn single_ai_opponent_game(mgr: &mut SessionManager) -> String {
         let db = engine::database::CardDatabase::default();
-        let (code, _token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
         code
     }
 
@@ -4002,16 +4070,18 @@ mod tests {
         // SAME `session.state`.
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         let db = engine::database::CardDatabase::default();
-        let (code, host_token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, host_token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
 
         // POSITIVE, through the real wire gate. `ShuffleLibrary` (not
         // `CreateCard`) is the reach-guard: `CreateCard` is resolved at the
@@ -4080,14 +4150,16 @@ mod tests {
 
         let db = engine::database::CardDatabase::default();
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
-        let (code, _host) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            None,
-        );
+        let (code, _host) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("supported format config");
         // Seat 1 joins; seat 2 is left waiting, because the reducer rejects
         // removing a claimed seat (`SeatClaimed`).
         mgr.join_game(&code, make_deck()).unwrap();
@@ -4146,7 +4218,8 @@ mod tests {
         let mut origin = SessionManager::new();
         let code = single_ai_opponent_game(&mut origin);
         let persisted = origin.sessions.get(&code).unwrap().to_persisted();
-        let restored = GameSession::from_persisted(persisted, &db);
+        let restored =
+            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
         assert_eq!(
             restored.hosting,
             HostingMode::Shared,
@@ -4178,7 +4251,7 @@ mod tests {
     fn round_trip_through_disk(session: &GameSession, db: &CardDatabase) -> GameSession {
         let json = serde_json::to_string(&session.to_persisted()).unwrap();
         let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
-        GameSession::from_persisted(persisted, db)
+        GameSession::from_persisted(persisted, db).expect("supported persisted format config")
     }
 
     #[test]
@@ -5215,14 +5288,16 @@ mod tests {
         use engine::types::identifiers::CardId;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            Some(FormatConfig::standard()),
-        );
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(FormatConfig::standard()),
+            )
+            .expect("supported format config");
         let _ = mgr.join_game(&code, make_deck()).unwrap();
         let _ = mgr.join_game(&code, make_deck()).unwrap();
 
