@@ -158,6 +158,17 @@ fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> R
     config.reject_unimplemented_range_of_influence()
 }
 
+fn parse_initialize_format_config(
+    decoded: Result<FormatConfig, String>,
+) -> Result<FormatConfig, serde_json::Value> {
+    decoded.map_err(|error| {
+        serde_json::json!({
+            "error": true,
+            "reasons": [format!("Format config deserialization failed: {error}")],
+        })
+    })
+}
+
 #[cfg(test)]
 mod external_format_config_tests {
     use std::collections::BTreeMap;
@@ -176,6 +187,22 @@ mod external_format_config_tests {
         assert!(validate_external_format_config(&config, 2)
             .expect_err("limited range must remain disabled at the WASM boundary")
             .contains("not supported"));
+    }
+
+    #[test]
+    fn malformed_initialize_format_config_returns_an_error_envelope() {
+        let malformed_js_config = serde_json::json!(42);
+        let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
+            .map_err(|error| error.to_string());
+
+        let error = parse_initialize_format_config(decoded)
+            .expect_err("malformed JS config must not fall back to Standard");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
     }
 
     #[test]
@@ -996,14 +1023,12 @@ pub fn initialize_game(
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
     let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js) {
+        match parse_initialize_format_config(
+            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
+                .map_err(|error| error.to_string()),
+        ) {
             Ok(config) => config,
-            Err(error) => {
-                return to_js(&serde_json::json!({
-                    "error": true,
-                    "reasons": [format!("Format config deserialization failed: {error}")],
-                }));
-            }
+            Err(error) => return to_js(&error),
         }
     } else {
         FormatConfig::standard()

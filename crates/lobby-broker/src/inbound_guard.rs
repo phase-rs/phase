@@ -125,6 +125,7 @@ pub fn guard_create_game_settings_inbound(
     validate_create_game_settings_inbound_fields(&fields)?;
     if let Some(format_config) = fields.format_config {
         format_config.validate_for_player_count(fields.player_count.clamp(2, MAX_PLAYER_COUNT))?;
+        format_config.reject_unimplemented_range_of_influence()?;
     }
     validate_deck_payload("deck", fields.deck)
 }
@@ -270,6 +271,30 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("archenemy_player"));
+    }
+
+    #[test]
+    fn borrowed_create_guard_rejects_limited_range_until_supported() {
+        let mut format_config = FormatConfig::standard();
+        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: std::collections::BTreeMap::new(),
+        });
+
+        let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck: &deck(1, 0),
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: Some(&format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("range_of_influence"));
     }
 
     #[test]

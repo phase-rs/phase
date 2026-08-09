@@ -380,6 +380,9 @@ impl Broker {
             if let Err(reason) = format_config.validate_for_player_count(pc) {
                 return vec![error(&reason)];
             }
+            if let Err(reason) = format_config.reject_unimplemented_range_of_influence() {
+                return vec![error(&reason)];
+            }
         }
         let (host_version, host_build_commit) = conn
             .client_hello
@@ -1296,6 +1299,41 @@ mod tests {
                 start_when_full: true,
                 ranked: false,
             },
+            &env,
+        );
+
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert!(conn.host_game.is_none());
+    }
+
+    #[test]
+    fn create_rejects_limited_range_until_supported() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        let mut format_config = engine::types::format::FormatConfig::standard();
+        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: std::collections::BTreeMap::new(),
+        });
+
+        let out = broker.handle_create_game(
+            &mut conn,
+            "Host".into(),
+            true,
+            None,
+            None,
+            2,
+            Default::default(),
+            Some(format_config),
+            None,
+            Some("peer-host".into()),
+            None,
+            false,
             &env,
         );
 

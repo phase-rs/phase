@@ -59,6 +59,11 @@ export type GameFormat =
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
+export interface RangeOfInfluenceConfig {
+  default_range: number;
+  player_overrides: Record<string, number>;
+}
+
 export interface FormatConfig {
   format: GameFormat;
   starting_life: number;
@@ -68,7 +73,7 @@ export interface FormatConfig {
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
-  range_of_influence: number | null;
+  range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
   /**
    * Engine-derived predicate: true when the format uses a commander card
