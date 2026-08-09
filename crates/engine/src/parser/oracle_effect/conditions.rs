@@ -4531,6 +4531,8 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
         StaticCondition::IsInitiative => Some(AbilityCondition::IsInitiative),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
+        // CR 702.195b: The enduring story designation is available to effects.
+        StaticCondition::HasEnduringStory => Some(AbilityCondition::HasEnduringStory),
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(opponent_poison_at_least_as_quantity_check(*count))
@@ -4925,6 +4927,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::ConditionInstead { .. }
         | AbilityCondition::NthResolutionThisTurn { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 
         // No `StaticCondition` counterpart exists for these game-state
         // predicates.
@@ -4943,6 +4946,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::IsMonarch
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::WasStartingPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }

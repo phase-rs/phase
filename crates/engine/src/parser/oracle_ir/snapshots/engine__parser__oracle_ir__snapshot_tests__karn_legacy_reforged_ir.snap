@@ -228,8 +228,8 @@ expression: "&ir"
                     "parsed": {
                       "effect": {
                         "type": "Unimplemented",
-                        "name": "can't",
-                        "description": "can't be spent to cast nonartifact spells"
+                        "name": "unbound_subject",
+                        "description": "This mana can't be spent to cast nonartifact spells"
                       },
                       "duration": null,
                       "sub_ability": null,

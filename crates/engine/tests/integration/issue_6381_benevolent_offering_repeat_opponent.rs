@@ -291,19 +291,28 @@ fn intellectual_offering_second_draw_binds_to_chosen_opponent() {
     );
 }
 
-/// Regression guard for the fix above: `inject_subject_target`'s new
-/// `GainLife` arm must NOT rebind the recipient when the detected subject
-/// isn't a genuine player reference. Angel of Destiny's "you and that player
-/// each gain that much life" is a compound subject that `GainLife` doesn't
-/// support in `rewrite_recipient_on_link` (Token/Draw/Discard/Mill/Pump/
-/// GenericEffect only), so it falls through to a non-player-denoting subject
-/// filter; the safe no-subject `Controller` default must survive rather than
-/// being corrupted into an incoherent recipient. This is a pre-existing gap
-/// (the damaged player still doesn't gain life) — not fixed here — but the
-/// `player` field must stay a well-defined `Controller`, not silently swap to
-/// something meaningless.
+/// Regression guard for the fix above, restated by #6965. `inject_subject_target`'s
+/// `GainLife` arm must NOT rebind the recipient when the detected subject isn't a
+/// genuine player reference — Angel of Destiny's "you and that player each gain that
+/// much life" is a compound subject `rewrite_recipient_on_link` has no arm for
+/// (Token/Draw/Discard/Mill/Pump/GenericEffect only).
+///
+/// This used to assert the clause survived as `GainLife { player: Controller }`, and
+/// the comment conceded the gap in the same breath: the damaged player never gained
+/// life. That is a half-applied effect the caster benefits from, and it counted as
+/// SUPPORTED in coverage — the silent-misparse class #6965 exists to remove. It only
+/// reached `GainLife` at all because the unbindable subject fell open. With the
+/// fail-open gone the clause is an honest `unbound_subject` gap: still not playable,
+/// but now visible to coverage instead of masquerading as a working trigger.
+///
+/// The original intent is preserved and strengthened — the point was that a subject
+/// the parser cannot resolve must never be laundered into a concrete recipient. An
+/// `Unimplemented` gap satisfies that more completely than a `Controller` default did.
+///
+/// Forward-red: binding "that player" to the damage-event player will red this test,
+/// which is the intended prompt to assert the real two-recipient shape.
 #[test]
-fn angel_of_destiny_combat_damage_gain_life_keeps_well_defined_recipient() {
+fn angel_of_destiny_compound_subject_fails_closed_rather_than_half_applying() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let creature = scenario
@@ -327,16 +336,22 @@ fn angel_of_destiny_combat_damage_gain_life_keeps_well_defined_recipient() {
         .execute
         .as_ref()
         .expect("DamageDone trigger must have an execute body");
+    let Effect::Unimplemented { name, description } = execute.effect.as_ref() else {
+        panic!(
+            "`you and that player each gain that much life` must fail closed rather than \
+             bind half the clause to a recipient it cannot name, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        name, "unbound_subject",
+        "the gap must name the SUBJECT as the unbound part — a different name means the \
+         clause failed somewhere else and this test stopped covering the fail-closed path"
+    );
     assert!(
-        matches!(
-            execute.effect.as_ref(),
-            Effect::GainLife {
-                player: TargetFilter::Controller,
-                ..
-            }
-        ),
-        "GainLife.player must stay the well-defined Controller default, not an \
-         unresolved compound-subject filter like Any, got {:?}",
-        execute.effect
+        description
+            .as_deref()
+            .is_some_and(|text| text.contains("that player")),
+        "reach-guard: the gap must quote the conjunct it could not bind, got {description:?}"
     );
 }

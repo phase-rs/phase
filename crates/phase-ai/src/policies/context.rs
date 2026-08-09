@@ -83,6 +83,22 @@ impl<'a> PolicyContext<'a> {
     /// policies that project should gate their work behind this helper so
     /// the tightest-budget path (Medium, 1500ms) doesn't pay the ~1.5s
     /// simulation cost and blow its own budget.
+    ///
+    /// The `remaining().is_none_or(..)` resolving to `true` on a
+    /// `Deadline::none()` deadline is deliberate and load-bearing: measurement
+    /// runs have no wall clock and MUST still take projections, so `cargo
+    /// ai-gate` measures the same policy production runs. Changing it to
+    /// `is_some_and` would pin `velocity_score` to 0.0 for every uncached
+    /// projection in the gate — a far larger baseline move than any wall-clock
+    /// fix, measuring a policy that never ships.
+    ///
+    /// One production path also reaches here with a never-overwritten
+    /// `Deadline::none()`: `search::emit_decision_trace` builds its `AiContext`
+    /// via `build_ai_context_with_session` (which initializes `deadline` to
+    /// `none()`) and never routes through `PlannerServices::with_deadline`. That
+    /// path is diagnostic (gated on `phase_ai::decision_trace` DEBUG) and feeds
+    /// the duel suite's attribution mode, so a flip would also silently change
+    /// trace output.
     pub fn can_afford_projection(&self) -> bool {
         if self.context.deadline.expired() {
             return false;

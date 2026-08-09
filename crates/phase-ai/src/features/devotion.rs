@@ -344,6 +344,7 @@ fn mana_production_count(
         | MP::AnyOneColor { count, .. }
         | MP::AnyCombination { count, .. }
         | MP::ChosenColor { count, .. }
+        | MP::NotedType { count }
         | MP::OpponentLandColors { count }
         | MP::AnyCombinationOfObjectColors { count, .. }
         | MP::AnyTypeProduceableBy { count, .. }

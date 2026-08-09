@@ -441,6 +441,7 @@ fn complete_loyalty_activation(
     record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
+    let crime_candidate = super::casting::targets_commit_crime(state, &assigned_targets, player);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);
 
     let entry_id = ObjectId(state.next_object_id);
@@ -461,6 +462,7 @@ fn complete_loyalty_activation(
         },
         events,
     );
+    super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
     super::restrictions::record_ability_activation(state, pw_id, ability_index);
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`

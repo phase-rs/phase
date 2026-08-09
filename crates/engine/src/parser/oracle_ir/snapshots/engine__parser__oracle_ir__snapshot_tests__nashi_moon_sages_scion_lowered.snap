@@ -29,8 +29,12 @@ expression: "&lowered"
           "effect": {
             "type": "CastFromZone",
             "target": {
-              "type": "TrackedSet",
-              "id": 0
+              "type": "TrackedSetFiltered",
+              "id": 0,
+              "filter": {
+                "type": "Any"
+              },
+              "caused_by": "Exiled"
             },
             "without_paying_mana_cost": false,
             "mode": "Play",

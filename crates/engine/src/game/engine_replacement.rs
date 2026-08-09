@@ -246,13 +246,14 @@ pub(super) fn handle_replacement_choice(
                 //     is restored structurally inside the shared delivery for
                 //     `Stack → Battlefield` events (`CastLinkSnapshot`).
                 event @ ProposedEvent::ZoneChange { .. } => {
-                    let (object_id, to, cause) = match &event {
+                    let (object_id, to, cause, discard_frame) = match &event {
                         ProposedEvent::ZoneChange {
                             object_id,
                             to,
                             cause,
+                            discard_frame,
                             ..
-                        } => (*object_id, *to, *cause),
+                        } => (*object_id, *to, *cause, *discard_frame),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
                     let Ok(approved) =
@@ -323,6 +324,13 @@ pub(super) fn handle_replacement_choice(
                                 player_id: provenance.player_id,
                             });
                         }
+                    }
+                    // CR 701.9a + CR 616.1: a discard move that paused for
+                    // replacement ordering reaches terminal delivery here.
+                    // Restore its exact continuation data before the common
+                    // epilogue drains the parked ability chain.
+                    if let Some(frame_id) = discard_frame {
+                        effects::discard::hand_off_recruit_discard_result(state, frame_id);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -613,12 +621,19 @@ pub(super) fn handle_replacement_choice(
                     player_id,
                     object_id,
                     source_id,
+                    discard_frame,
                     applied,
                     ..
                 } => {
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
                         effects::discard::complete_discard_to_graveyard(
-                            state, object_id, player_id, source_id, applied, events,
+                            state,
+                            object_id,
+                            player_id,
+                            source_id,
+                            discard_frame,
+                            applied,
+                            events,
                         )
                     {
                         state.waiting_for =
@@ -1651,6 +1666,34 @@ pub(super) fn handle_copy_target_choice(
                 "Mismatched liminal entry resume".to_string(),
             ));
         }
+        // CR 614.12a: "If a replacement effect that modifies how a permanent enters the
+        // battlefield requires a choice, that choice is made before the permanent enters the
+        // battlefield." The choice has just been made, so the `CopyTargetChoice` that asked for it
+        // is spent and cannot be this action's outcome — every branch below either installs a
+        // genuine new pause (which overwrites `waiting_for`) or completes. MEASURED, not assumed:
+        // instrumenting all 9 exits of this branch over the full suite gives 16 entries → 16 exits,
+        // of which the 4 that carry a genuine pause (`NamedChoice`, `ReplacementChoice`) are
+        // byte-identical with and without this statement; only the 12 that returned the spent
+        // prompt now return `Priority`. No path that owed a pause returns one less.
+        //
+        // CR 603.3: "Once an ability has triggered, its controller puts it on the stack as an
+        // object that's not a card the next time a player would receive priority." Leaving the
+        // answered prompt resident made both liminal tails echo it via
+        // `if !Priority { return waiting_for }`, so the action never settled, `apply_action`
+        // skipped `run_post_action_pipeline`, and the CR 603.6a entry pair flushed by
+        // `finish_copy_target_choice_entry` never reached a priority boundary to be scanned —
+        // board ETB observers saw nothing, and the driver re-answered the spent prompt.
+        //
+        // Placed above the Token/Meld split because both sub-branches share that echo tail — the
+        // exit histogram covers both (11 Token, 1 Meld).
+        //
+        // Mirrors three existing clears, none of which is this handler's Aura tail: this handler's
+        // own non-liminal tail below, `handle_persist_chosen_attribute_choice` (which is where the
+        // Aura completion clear lives), and `effects::token::continue_liminal_copy_token_batch`,
+        // which opens by setting `Priority` exactly like this.
+        state.waiting_for = WaitingFor::Priority {
+            player: state.active_player,
+        };
         let mut ability = copy_effect_for_source(state, source_id)
             .map(|effect_def| {
                 build_resolved_from_def_with_targets(
@@ -4099,6 +4142,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6016,6 +6060,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6220,6 +6265,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6340,6 +6386,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };
@@ -6654,6 +6701,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
+            discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
         };

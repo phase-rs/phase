@@ -17,12 +17,16 @@ use engine::ai_support::{
 };
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_for_simulation, EngineError};
+use engine::game::priority;
 use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
+use engine::util::Deadline;
 
 use web_time::{Duration, Instant};
+
+use crate::config::ExecutionMode;
 
 /// How far into the opponent's upcoming turn to project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,21 +108,61 @@ pub struct ProjectionKey {
 /// Outer dispatch cap. Each dispatch may trigger up to 500 engine-internal
 /// auto-pass iterations.
 const STEP_CAP: u32 = 256;
-/// Wall-clock guard for projection. The combat path is a heuristic and must
-/// fail closed to the pre-projection behavior rather than monopolize the AI
-/// turn when the engine path is unusually expensive.
-const TIME_CAP: Duration = Duration::from_millis(15);
+/// Wall-clock guard for projection, in milliseconds. The combat path is a
+/// heuristic and must fail closed to the pre-projection behavior rather than
+/// monopolize the AI turn when the engine path is unusually expensive.
+///
+/// Interactive callers only. Measurement mode receives a non-expiring budget
+/// from [`projection_deadline`] and is bounded by `STEP_CAP` alone, so `cargo
+/// ai-gate` verdicts cannot depend on host speed.
+///
+/// Deliberately PRIVATE: `projection_deadline` is the only producer of a
+/// projection budget, so no other module can construct one from this value.
+const TIME_CAP_MS: u32 = 15;
+
+/// The wall-clock budget one `project_to` call runs under.
+///
+/// **Single source of truth** — no caller writes `TIME_CAP_MS` (it is private)
+/// and no caller constructs a projection `Deadline` itself.
+///
+/// Measurement mode is bounded by `STEP_CAP` only — never wall clock. A bail
+/// scores 0.0 where a completed projection scores up to +3.0
+/// (`policies::evasion_removal_priority::velocity_score`), and that term selects
+/// the removal target, so a clock-dependent bail would make host speed an input
+/// to `cargo ai-gate` verdicts. Mirrors
+/// `planner::PlannerServices::with_deadline`.
+///
+/// Call this at the point of consumption — the returned `Deadline` snapshots an
+/// absolute instant, so binding it to a `let` that outlives one `project_to`
+/// call silently shortens (and eventually zeroes) the budget.
+pub fn projection_deadline(execution_mode: ExecutionMode) -> Deadline {
+    if execution_mode.is_measurement() {
+        Deadline::none()
+    } else {
+        Deadline::after(TIME_CAP_MS)
+    }
+}
 
 /// Advance from `base` forward until `horizon` is reached on
 /// `target_opponent`'s next turn. `base` is cloned; never mutated.
-/// Deterministic given `(base_fingerprint, ai_player, target_opponent, horizon)`.
+/// Deterministic given `(base_fingerprint, ai_player, target_opponent, horizon)`
+/// **and** a non-expiring `deadline`, which [`projection_deadline`] supplies in
+/// measurement mode.
 pub fn project_to(
     base: &GameState,
     ai_player: PlayerId,
     target_opponent: PlayerId,
     horizon: ProjectionHorizon,
+    deadline: Deadline,
 ) -> Result<Projection, BailReason> {
     let started_turn = base.turn_number;
+    // Diagnostic only: feeds BailReason::TimeCapExceeded's `elapsed`. Never
+    // compared, never affects a decision. NOTE: it measures time spent INSIDE
+    // project_to, while the budget is anchored a few microseconds earlier at the
+    // caller's `projection_deadline(..)` call — so on a bail it under-reports the
+    // budget actually consumed by (caller-side hash + lock probe). Bounded by
+    // that, and it is a log field only. Unreachable in measurement mode, where
+    // `Deadline::none()` never expires.
     let started_at = Instant::now();
     let mut state = base.clone();
     let mut snapshots: Vec<(ProjectionHorizon, GameState)> = Vec::new();
@@ -136,9 +180,10 @@ pub fn project_to(
     }
 
     for step in 0..STEP_CAP {
-        let elapsed = started_at.elapsed();
-        if elapsed >= TIME_CAP {
-            return Err(BailReason::TimeCapExceeded { elapsed });
+        if deadline.expired() {
+            return Err(BailReason::TimeCapExceeded {
+                elapsed: started_at.elapsed(),
+            });
         }
 
         capture_snapshots(&state, target_opponent, started_turn, &mut snapshots);
@@ -311,6 +356,39 @@ fn resolve_choice(
         .ok_or_else(|| BailReason::NoLegalAction {
             waiting_for: format!("{:?}", state.waiting_for),
         })?;
+
+    // CR 117.3d: at a priority window whose pass the engine can decide without
+    // simulating the boundary, the projection's only policy is "pass if you can"
+    // (`pick_pass_or_first`). That is an O(1) question the engine answers
+    // directly, so skip the full `legal_actions` enumeration — which builds a
+    // `PriorityCastProbe` (a `GameState` clone + `flush_layers` + auto-tap
+    // cache), validates every castable spell, activatable ability and land
+    // drop, and discards a grouped per-object map.
+    //
+    // `pass_priority_structurally_legal` is the SAME predicate the engine's
+    // `SimulationFilter` pass hatch uses. Do not substitute a local
+    // approximation: in particular a `classify_payment_continuation(state) ==
+    // NotAffiliated` test is strictly WEAKER — that verdict is compatible with
+    // `pending_deferred_life_cost_resume` / `pending_cost_move_resume` still
+    // being `Some`, which is exactly when the pass boundary runs a fallible
+    // continuation drain.
+    //
+    // Each parked field carries its own CR annotation on `GameState`, and they
+    // are not the same rule: `pending_cost_move_resume` is CR 601.2h (a cost
+    // that moves objects, paid in a defined order), `pending_deferred_life_cost_resume`
+    // is CR 118.3b + CR 119.4 (a life payment already committed). That ordering,
+    // together with CR 601.2g's mana-ability window, is preserved without hoisting
+    // `classify_payment_continuation`: at a `Priority` window with both parked
+    // fields `None`, that classifier necessarily returns `NotAffiliated`
+    // (its deferred-life short-circuit needs a parked root, `Priority` matches
+    // none of its `waiting_for` arms, and its parked-cost-move fallback returns
+    // `NotAffiliated` when no root is parked), so this fast path can never steal
+    // a window the payment witness below owns.
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if priority::pass_priority_structurally_legal(state, player) {
+            return Ok((acting, GameAction::PassPriority, false, None));
+        }
+    }
 
     let actions = legal_actions(state);
     if actions.is_empty() {
@@ -627,12 +705,500 @@ pub fn threat_velocity(
     samples
 }
 
+/// Shared full-loop projection fixtures.
+///
+/// Every pre-existing projection fixture in this crate is *already at its
+/// horizon*, so `project_to` short-circuits at the `Confidence::Exact` branch
+/// above and never enters its loop. The states built here are deliberately the
+/// opposite class: they are NOT at a horizon on entry, so the loop runs real
+/// `apply_for_simulation` dispatches and returns
+/// `Confidence::Approximated { choice_count >= 1 }` — the witness that the loop
+/// ran rather than the short-circuit.
+///
+/// Lives beside `project_to` because the invariant these states encode ("this
+/// state traverses the loop to its requested horizon") is a property of
+/// `project_to`'s own resolution policy, not of any consumer.
+#[cfg(test)]
+pub(crate) mod projection_fixtures {
+    use super::*;
+    use engine::game::scenario::GameScenario;
+    use engine::game::zones::create_object;
+    use engine::types::identifiers::CardId;
+    use engine::types::triggers::TriggerMode;
+    use engine::types::zones::Zone;
+
+    /// A battlefield creature that can attack on the turn after it was placed:
+    /// untapped, not summoning-sick, `entered_battlefield_turn = 1`.
+    ///
+    /// Mirrors `GameScenario::add_creature` (`scenario.rs:355-391`), which is
+    /// the builder recipe for a "pre-existing" (therefore not sick) creature.
+    fn spawn_vanilla_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = false;
+        id
+    }
+
+    /// A state that is NOT at any horizon on entry and that `project_to`
+    /// traverses to `ProjectionHorizon::OpponentAttackersDeclared` in a handful
+    /// of dispatches, with `ai_player = P0` and `target_opponent = P1`.
+    ///
+    /// Placed at the OPPONENT's own precombat main phase, which is what makes it
+    /// cheap and robust:
+    ///   * `active_player == P1 == target_opponent`, so no turn boundary is
+    ///     crossed — `turns.rs`'s turn-advance never clears
+    ///     `creatures_attacked_this_turn` during the traversal.
+    ///   * `Phase::PreCombatMain` is AFTER the draw step (CR 500.1 phase order),
+    ///     so no library is ever read and both libraries may stay empty. A
+    ///     projected draw from an empty library would end the game (CR 704.5b)
+    ///     and return `BailReason::GameOverDuringProjection` — a red positive
+    ///     arm for the wrong reason.
+    ///   * No untap step runs, so tapped/untapped state is exactly as built.
+    ///
+    /// Traversal, all deterministic:
+    ///   0. `Priority { P1 }`  → `pick_pass_or_first` picks `PassPriority`
+    ///   1. `Priority { P0 }`  → `PassPriority`; both passed with an empty stack,
+    ///      so the engine advances the phase. `auto_advance_once`'s BeginCombat
+    ///      arm sees `has_potential_attackers(state) == true` and continues to
+    ///      `DeclareAttackers` WITHOUT opening a priority window.
+    ///   2. `WaitingFor::DeclareAttackers` with `acting == target_opponent`, so
+    ///      `resolve_choice` uses `pick_max_attackers_against(&actions, P0)` and
+    ///      declares the bear against P0. `finish_declare_attackers` returns
+    ///      `Priority { P1 }` with `creatures_attacked_this_turn` populated and
+    ///      an empty stack (CR 508.1 turn-based action).
+    ///   3. Loop head: `reached_horizon` is true → `Ok(Projection { .. })`.
+    ///
+    /// `choice_count >= 1` because the DeclareAttackers dispatch is not a
+    /// `PassPriority`, so the result is `Confidence::Approximated` — the witness
+    /// that the LOOP ran rather than the already-at-horizon short-circuit, which
+    /// hardcodes `Confidence::Exact`.
+    pub(crate) fn opponent_turn_precombat_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+        // The coherent triple `GameScenario::at_phase` maintains
+        // (`scenario.rs:212-222`): phase + waiting_for + priority_player.
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        state.stack.clear();
+        // creatures_attacked_this_turn stays EMPTY — this is what makes the
+        // fixture NOT already-at-horizon.
+        state.creatures_attacked_this_turn.clear();
+
+        // P1's attacker. `has_potential_attackers` (`combat.rs`) requires
+        // controller == active, Creature, !tapped, no Defender/can't-attack, and
+        // `entered_battlefield_turn < turn_number` (or Haste). 1 < 2 holds.
+        spawn_vanilla_creature(&mut state, PlayerId(1), "Projection Bear", 2, 2);
+        state
+    }
+
+    /// A state at P0's declare-attackers step from which BOTH of the following
+    /// hold:
+    ///   (i)  `search::deterministic_choice` routes to the combat branch and
+    ///        `combat_ai` reaches its crackback projection block, and
+    ///   (ii) `project_to(.., P0, P1, OpponentAttackersDeclared, ..)` traverses
+    ///        to its horizon.
+    ///
+    /// The tension the construction resolves: (i) needs P1 to have NO untapped
+    /// blocker, or `combat_ai`'s `if is_unblockable || opponent_blockers
+    /// .is_empty()` short-circuit does not fire and the value heuristic may
+    /// decline the attack, emptying `attacking_ids` and skipping the crackback
+    /// block. But (ii) needs P1 to HAVE an attack-capable creature on its own
+    /// next turn, or `has_potential_attackers` is false at P1's BeginCombat, the
+    /// declare-blockers and combat-damage steps are skipped (CR 508.8) and the
+    /// horizon is unreachable.
+    ///
+    /// Resolution: give P1 a **tapped** creature. `opponent_blockers` in
+    /// `combat_ai` filters on `!obj.tapped`, so it is invisible to (i); the
+    /// projected P1 untap step untaps it, so it satisfies (ii).
+    ///
+    /// Both libraries are stocked because the traversal crosses into P1's turn
+    /// and P1's draw step reads one card (CR 500.1 phase order; `should_skip_draw`
+    /// skips only on turn 1 in a 2-player game, and this fixture is on turn 2).
+    /// An empty library there ends the game (CR 704.5b) and returns
+    /// `BailReason::GameOverDuringProjection`. P0's library is stocked as cheap
+    /// insurance; the traversal is not expected to reach a P0 draw.
+    ///
+    /// Life totals are 20/20 and the lone attacker is 2 power, so neither
+    /// `determine_attack_objective` returns `PushLethal` nor
+    /// `adversarial_swarm_witness` (gated 2-player in `combat_ai`) certifies a
+    /// lethal, declaration-binding attack that would return before the crackback
+    /// block. **If either the attacker's power or P1's life is changed, both of
+    /// those reach conditions can silently flip.**
+    pub(crate) fn ai_turn_declare_attackers_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        state.stack.clear();
+        state.creatures_attacked_this_turn.clear();
+
+        // P0's attacker: untapped, not sick.
+        let attacker = spawn_vanilla_creature(&mut state, PlayerId(0), "AI Bear", 2, 2);
+        debug_assert!(!state.objects[&attacker].tapped);
+
+        // P1's FUTURE attacker: tapped now (so it is not an `opponent_blocker`),
+        // untaps during the projected P1 untap step.
+        let crackback = spawn_vanilla_creature(&mut state, PlayerId(1), "Crackback Bear", 2, 2);
+        state.objects.get_mut(&crackback).unwrap().tapped = true;
+
+        // CR 704.5b insurance for the projected P1 draw step.
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(950 + i),
+                PlayerId(1),
+                format!("Filler {i}"),
+                Zone::Library,
+            );
+        }
+
+        // The engine owns the DeclareAttackers payload shape — do not hand-write
+        // its five fields. `build_declare_attackers_waiting_for` derives every
+        // one of them from `state` via the single `AttackDeclarationConstraints`
+        // authority.
+        state.combat = Some(engine::game::combat::CombatState::default());
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        state
+    }
+
+    /// Fail loudly, with the engine's own bail reason in the message, if `state`
+    /// is ALREADY at `horizon` — which would make `project_to` short-circuit and
+    /// silently turn every "the loop ran" assertion vacuous.
+    ///
+    /// Implemented against the public primitive rather than the private
+    /// `reached_horizon`: a `Confidence::Exact` result from a fixture that is
+    /// supposed to traverse IS the short-circuit, so this is a direct
+    /// observation, not a proxy.
+    pub(crate) fn assert_traverses_to(
+        state: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) {
+        let result = project_to(state, ai_player, target_opponent, horizon, Deadline::none());
+        match &result {
+            Ok(projection) => {
+                assert_eq!(
+                    projection.horizon_reached, horizon,
+                    "fixture reached the wrong horizon"
+                );
+                assert!(
+                    matches!(
+                        projection.confidence,
+                        Confidence::Approximated { choice_count } if choice_count >= 1
+                    ),
+                    "FIXTURE DEFECT, not a wiring defect: this fixture must TRAVERSE \
+                     project_to's loop, but it returned Confidence::Exact — which the \
+                     already-at-horizon short-circuit hardcodes and a real traversal \
+                     through a DeclareAttackers dispatch cannot produce. Re-derive the \
+                     fixture; do not weaken this assertion."
+                );
+            }
+            Err(reason) => panic!(
+                "FIXTURE DEFECT, not a wiring defect: project_to could not reach \
+                 {horizon:?} under a non-expiring deadline. Bail reason: {reason:?}. \
+                 GameOverDuringProjection ⇒ stock the libraries; StepCapExceeded ⇒ the \
+                 horizon is not reachable from this state at all; NoLegalAction ⇒ the \
+                 waiting_for/priority_player triple is incoherent."
+            ),
+        }
+    }
+
+    /// Oracle text of the permanent that makes
+    /// `ProjectionHorizon::OpponentBeginCombat` reachable BY TRAVERSAL.
+    ///
+    /// Load-bearing, for a structural reason. The engine never RESTS at
+    /// `Phase::BeginCombat` holding `WaitingFor::Priority` unless a begin-combat
+    /// trigger fires: `auto_advance_once`'s `Phase::BeginCombat` arm
+    /// (`crates/engine/src/game/turns.rs`) opens a priority window only when
+    /// `process_phase_triggers` reports `triggers_fired`. With no trigger it
+    /// either advances straight to `DeclareAttackers` (when
+    /// `combat::has_potential_attackers`) or, per CR 508.8, enters
+    /// `PostCombatMain` — and neither path stops on `reached_horizon`'s
+    /// `OpponentBeginCombat` predicate (active player is the target opponent +
+    /// `Phase::BeginCombat` + empty stack + `Priority` held by the target
+    /// opponent). Measured, not assumed: with this permanent replaced by a
+    /// vanilla creature the traversal never stops at the horizon — it runs on
+    /// past the opponent's combat until a library empties and returns
+    /// `BailReason::GameOverDuringProjection`.
+    ///
+    /// With the trigger the traversal ends this way: the trigger fires and goes
+    /// on the stack, so the opponent's first `Priority` window fails the
+    /// empty-stack conjunct; both players pass; the trigger resolves; CR 117.3b
+    /// returns priority to the active player with an empty stack, which is the
+    /// horizon.
+    ///
+    /// The growth clause is not decoration either. It is exactly the
+    /// `threat_velocity` signal `policies::evasion_removal_priority::
+    /// velocity_score` exists to read, so the projected board differs from the
+    /// base board the way a production Ouroboroid-class board does.
+    const BEGIN_COMBAT_GROWTH_ORACLE: &str =
+        "At the beginning of combat on your turn, put a +1/+1 counter on this creature.";
+
+    /// Seed `scenario` so that a state built from it TRAVERSES `project_to`'s
+    /// loop to `ProjectionHorizon::OpponentBeginCombat` for
+    /// `(ai_player, target_opponent)`. Returns the growing permanent's id, which
+    /// doubles as a removal target whose threat genuinely grows before the
+    /// projected combat.
+    ///
+    /// Unlike Fixtures A and B this is a seeder rather than a whole `GameState`,
+    /// because its only consumer needs a state that ALSO satisfies a tactical
+    /// policy's own gates (a real pending cast at `WaitingFor::TargetSelection`).
+    /// Card-specific setup stays with the policy test; the projection-reachability
+    /// knowledge stays here.
+    ///
+    /// Preconditions the CALLER owns — the ordinary `GameScenario::at_phase`
+    /// recipe, not extra ceremony:
+    ///   * `ai_player` is the active player and holds priority, and
+    ///   * the scenario sits at `Phase::PreCombatMain` on `ai_player`'s turn,
+    ///     which is where the production evasion policy scores removal targets.
+    ///
+    /// What this adds, and why each piece is required:
+    ///   * `target_opponent`'s begin-combat trigger permanent — see
+    ///     [`BEGIN_COMBAT_GROWTH_ORACLE`]; without it the horizon is unreachable
+    ///     from any state at all, not merely awkward to reach.
+    ///   * an untapped, non-summoning-sick attacker for `ai_player`, so the
+    ///     traversal necessarily dispatches one `WaitingFor::DeclareAttackers`
+    ///     choice — `pick_empty_attackers`, since `acting != target_opponent`.
+    ///     That action is not `PassPriority`, so `choice_count >= 1` and the
+    ///     result is `Confidence::Approximated`: the typed witness
+    ///     [`assert_traverses_to`] checks, and the one the already-at-horizon
+    ///     short-circuit structurally cannot emit.
+    ///   * five cards in each library. The traversal crosses into
+    ///     `target_opponent`'s turn, and CR 504.1 has its active player draw a
+    ///     card in the draw step, which precedes the combat phase (CR 500.1
+    ///     phase order). An empty library there loses the game (CR 704.5b) and
+    ///     the projection returns `BailReason::GameOverDuringProjection` instead
+    ///     of reaching the horizon.
+    pub(crate) fn seed_opponent_begin_combat_horizon(
+        scenario: &mut GameScenario,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+    ) -> ObjectId {
+        let grower = scenario
+            .add_creature_from_oracle(
+                target_opponent,
+                "Projection Grower",
+                2,
+                2,
+                BEGIN_COMBAT_GROWTH_ORACLE,
+            )
+            .id();
+        scenario.add_creature(ai_player, "Projection Bear", 2, 2);
+        scenario.with_library_top(
+            ai_player,
+            &[
+                "AI Filler 0",
+                "AI Filler 1",
+                "AI Filler 2",
+                "AI Filler 3",
+                "AI Filler 4",
+            ],
+        );
+        scenario.with_library_top(
+            target_opponent,
+            &[
+                "Opp Filler 0",
+                "Opp Filler 1",
+                "Opp Filler 2",
+                "Opp Filler 3",
+                "Opp Filler 4",
+            ],
+        );
+        grower
+    }
+
+    /// Fail loudly if `permanent` no longer carries the parsed begin-combat
+    /// trigger that [`seed_opponent_begin_combat_horizon`]'s traversal depends
+    /// on.
+    ///
+    /// Cheaper and far more specific than waiting for the traversal to fail:
+    /// parser drift on [`BEGIN_COMBAT_GROWTH_ORACLE`] would otherwise surface
+    /// several hundred dispatches later as a
+    /// `BailReason::GameOverDuringProjection`, which reads like an unrelated
+    /// library-stocking defect.
+    pub(crate) fn assert_begin_combat_trigger_parsed(state: &GameState, permanent: ObjectId) {
+        let object = state
+            .objects
+            .get(&permanent)
+            .expect("FIXTURE DEFECT: the seeded begin-combat permanent no longer exists");
+        assert!(
+            object.base_trigger_definitions.iter().any(|trigger| {
+                matches!(trigger.mode, TriggerMode::Phase)
+                    && trigger.phase == Some(Phase::BeginCombat)
+            }),
+            "FIXTURE DEFECT, not a wiring defect: {} no longer parses a TriggerMode::Phase \
+             trigger on Phase::BeginCombat, so auto_advance_once's BeginCombat arm will not \
+             open the priority window the OpponentBeginCombat horizon needs and the traversal \
+             cannot reach it. Re-derive the fixture's Oracle text; do not weaken the guard.",
+            object.name
+        );
+    }
+
+    /// The already-at-horizon counterpart: assert the state short-circuits, so
+    /// the determinism claim of a fixture in that class is checked rather than
+    /// assumed.
+    pub(crate) fn assert_already_at_horizon(
+        state: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) {
+        let result = project_to(state, ai_player, target_opponent, horizon, Deadline::none());
+        assert!(
+            matches!(&result, Ok(p) if p.horizon_reached == horizon
+                && matches!(p.confidence, Confidence::Exact)),
+            "fixture must be already-at-horizon (Confidence::Exact, no simulation); got {result:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::scenario::{GameScenario, P0};
     use engine::game::zones::create_object;
+    use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use engine::types::game_state::{DeferredLifeCostResume, PendingCast, PendingCostMoveResume};
     use engine::types::identifiers::CardId;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::zones::Zone;
+
+    /// T1. Both directions in one test: measurement maps to a non-expiring
+    /// budget, interactive maps to a finite one no larger than the 15 ms cap.
+    ///
+    /// A stub returning `none()` for both modes fails the interactive half; a
+    /// stub returning `after(15)` for both fails the measurement half; deleting
+    /// the `is_measurement()` branch fails the measurement half.
+    ///
+    /// No strict lower bound on the interactive budget: `remaining()` uses
+    /// `saturating_duration_since`, so a >15 ms scheduling stall between
+    /// construction and assertion would yield `Some(0)` and a spurious red.
+    /// `is_some()` + `<= 15ms` still discriminates both stubs without the flake.
+    #[test]
+    fn projection_deadline_nulls_wall_clock_only_in_measurement() {
+        let measurement = projection_deadline(ExecutionMode::Measurement { seed: 7 });
+        assert!(
+            measurement.remaining().is_none(),
+            "measurement mode must receive a non-expiring budget, bounded by STEP_CAP alone"
+        );
+        assert!(
+            !measurement.expired(),
+            "a non-expiring budget must never report expiry"
+        );
+
+        let interactive = projection_deadline(ExecutionMode::Interactive);
+        let remaining = interactive
+            .remaining()
+            .expect("interactive mode must receive a finite wall-clock budget");
+        assert!(
+            remaining <= Duration::from_millis(15),
+            "the interactive budget must not exceed the 15 ms cap; got {remaining:?}"
+        );
+    }
+
+    /// T2a + T2b + T2c on one fixture: the full-loop state completes under a
+    /// non-expiring deadline and bails with the SPECIFIC `TimeCapExceeded`
+    /// reason under a pre-expired one.
+    ///
+    /// Pairing both directions on the identical fixture is what makes the
+    /// negative non-vacuous: a bare `is_err()` on a fixture that bails anyway
+    /// (`NoLegalAction`, `StepCapExceeded`, `GameOverDuringProjection`) would
+    /// pass without the deadline being read at all.
+    #[test]
+    fn project_to_completes_under_none_and_bails_under_expired() {
+        // T2c — instrument witness, asserted first so a broken injection fails
+        // here rather than silently downstream.
+        assert!(
+            Deadline::after(0).expired(),
+            "instrument: Deadline::after(0) must be expired on the next read"
+        );
+        assert!(
+            !Deadline::none().expired(),
+            "instrument: Deadline::none() must never expire"
+        );
+
+        let state = projection_fixtures::opponent_turn_precombat_fixture();
+
+        // Reach guard: this state must TRAVERSE the loop, not short-circuit.
+        projection_fixtures::assert_traverses_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+
+        // T2a — positive: with no wall clock the loop runs to the horizon.
+        let completed = project_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::none(),
+        )
+        .expect("a non-expiring deadline must let the projection complete");
+        assert_eq!(
+            completed.horizon_reached,
+            ProjectionHorizon::OpponentAttackersDeclared
+        );
+        assert!(
+            matches!(
+                completed.confidence,
+                Confidence::Approximated { choice_count } if choice_count >= 1
+            ),
+            "the loop must have run: the already-at-horizon short-circuit hardcodes \
+             Confidence::Exact and cannot produce Approximated"
+        );
+
+        // T2b — negative: a pre-expired deadline bails at the loop head with the
+        // specific wall-clock reason, on the SAME fixture proven completable above.
+        let bailed = project_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::after(0),
+        );
+        assert!(
+            matches!(bailed, Err(BailReason::TimeCapExceeded { .. })),
+            "a pre-expired deadline must bail with TimeCapExceeded specifically, \
+             not merely with some error; got {bailed:?}"
+        );
+    }
 
     #[test]
     fn projection_declines_optional_loop_shortcut_from_legal_actions() {
@@ -721,6 +1287,197 @@ mod tests {
             is_policy_choice,
             "declining an optional shortcut is a policy choice"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Priority fast path (CR 117.3d).
+    //
+    // Every assertion below is an exact `perf_counters` integer. Nothing here
+    // measures time: a wall-clock assertion is the defect class this change
+    // exists to remove.
+    // ------------------------------------------------------------------
+
+    /// A `Priority` window on P0 with a wide, fully-enumerable board: three
+    /// untapped lands and three castable instants. Mirrors the engine's own
+    /// `legal_actions_priority_cast_probe_reuses_one_flushed_state_and_one_auto_tap_cache`
+    /// fixture, so a full enumeration here demonstrably builds a
+    /// `PriorityCastProbe` and its auto-tap source cache.
+    fn wide_priority_board() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for i in 0..3 {
+            scenario
+                .add_spell_to_hand(P0, &format!("Blue Spell {i}"), true)
+                .with_ability(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                })
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                });
+        }
+        scenario.build().state().clone()
+    }
+
+    /// An empty `Priority` window on P0 outside a main phase.
+    ///
+    /// **Fixture pin (i) + (ii):** empty hand AND a non-main-phase window, so
+    /// `candidates::priority_actions_with_probe` cannot enumerate a `PlayLand`
+    /// candidate. `PlayLand` has no structural hatch, so each one would reach
+    /// `fallback_simulation` and inflate `state_clone_for_legality` even with a
+    /// correct implementation. Never relax the exact counter assertions below to
+    /// inequalities; repin the fixture instead.
+    fn bare_priority_window() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        scenario.build().state().clone()
+    }
+
+    /// T9. The fast path removes both clones AND the whole enumeration.
+    ///
+    /// The three action assertions pass either way and are reach-guards; the
+    /// three exact zero counters are the evidence. No fixture pin is needed —
+    /// the fast path returns before enumeration, so the lands and spells on this
+    /// board only make the test stronger.
+    #[test]
+    fn priority_fast_path_skips_enumeration_entirely() {
+        let state = wide_priority_board();
+
+        engine::game::perf_counters::reset();
+        let (_actor, action, is_policy_choice, successor) =
+            resolve_choice(&state, PlayerId(0), PlayerId(1)).expect("a bare pass is available");
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert_eq!(action, GameAction::PassPriority);
+        assert!(!is_policy_choice);
+        assert!(successor.is_none());
+        assert_eq!(
+            counters.priority_cast_probe_builds, 0,
+            "the fast path must not build a PriorityCastProbe"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 0,
+            "the fast path must not pay a legality clone"
+        );
+        assert_eq!(
+            counters.auto_tap_source_cache_builds, 0,
+            "the fast path must not build the auto-tap source cache"
+        );
+    }
+
+    /// T7p. The fast path's gate is a test on the two parked-continuation
+    /// FIELDS, not on `classify_payment_continuation`'s verdict.
+    ///
+    /// `DeferredLifeCostResume::PayAmount` is exactly the divergence: the
+    /// classifier reports `NotAffiliated` while the field is still `Some`, which
+    /// is the state in which the pass boundary would run a fallible continuation
+    /// drain. The explicit `NotAffiliated` assertion is the non-vacuity guard —
+    /// without it the test would not be exercising the divergence at all.
+    ///
+    /// Both counters go to `0` if the fast path is gated on the classifier's
+    /// verdict instead of on `pass_priority_structurally_legal`. The returned
+    /// action is deliberately NOT asserted: a successful drain legitimately
+    /// yields `PassPriority` with `is_policy_choice == false` and no successor,
+    /// which is indistinguishable from a fast-path return by shape alone.
+    #[test]
+    fn priority_fast_path_declines_on_a_parked_deferred_life_root() {
+        let mut state = bare_priority_window();
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 0,
+            resume_at_resolution_depth: 0,
+        });
+        assert_eq!(
+            classify_payment_continuation(&state),
+            PaymentContinuationState::NotAffiliated,
+            "non-vacuity: this fixture must be one where the verdict gate and the field gate disagree"
+        );
+
+        engine::game::perf_counters::reset();
+        let _ = resolve_choice(&state, PlayerId(0), PlayerId(1));
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert_eq!(
+            counters.priority_cast_probe_builds, 1,
+            "the fast path must have declined, so the full enumeration ran"
+        );
+        assert_eq!(
+            counters.state_clone_for_legality, 1,
+            "the hatch must also have declined, deferring the pass to one simulation"
+        );
+    }
+
+    /// T10. The fallback path does not drift when the fast path declines.
+    ///
+    /// Passes either way by construction — a no-drift guard, not evidence of the
+    /// fix. Assertion (i) goes red if the fast path is made unconditional;
+    /// assertion (ii) goes red if the enumeration path is removed.
+    ///
+    /// Asserted on the whole `Result`: with `priority_player` desynced every
+    /// candidate is refused by the reducer, so `Err(NoLegalAction)` is a
+    /// legitimate outcome and must not be unwrapped.
+    #[test]
+    fn priority_fallback_path_runs_when_the_fast_path_declines() {
+        let mut state = wide_priority_board();
+        state.priority_player = PlayerId(1);
+
+        engine::game::perf_counters::reset();
+        let result = resolve_choice(&state, PlayerId(0), PlayerId(1));
+        let counters = engine::game::perf_counters::snapshot();
+
+        assert!(
+            !matches!(result, Ok((_, GameAction::PassPriority, ..))),
+            "the fast path must not fire when `pass_priority_legality` refuses"
+        );
+        assert_eq!(
+            counters.priority_cast_probe_builds, 1,
+            "the enumeration path must actually have run"
+        );
+    }
+
+    /// T11. A parked payment carrier at a `Priority` window still routes to the
+    /// payment witness, not to the fast path.
+    ///
+    /// Passes on the unfixed tree — a no-drift guard. It is what fails if the
+    /// `waiting_for` dispatch is hoisted above `classify_payment_continuation`.
+    /// Under this change it is doubly protected (the field gate refuses this
+    /// state before the classifier is consulted), but it stays because it pins
+    /// the observable contract rather than the implementation route.
+    #[test]
+    fn parked_payment_carrier_still_routes_to_the_payment_witness() {
+        let mut state = bare_priority_window();
+        let pending = PendingCast::new(
+            ObjectId(9200),
+            CardId(9200),
+            ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(9200), PlayerId(0)),
+            ManaCost::NoCost,
+        );
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::ActivationMillPayment {
+            player: PlayerId(0),
+            pending: Box::new(pending),
+        });
+        assert!(
+            matches!(
+                classify_payment_continuation(&state),
+                PaymentContinuationState::Affiliated(_)
+            ),
+            "non-vacuity: the fixture must actually reach the witness branch"
+        );
+
+        match resolve_choice(&state, PlayerId(0), PlayerId(1)) {
+            Ok((_, action, _, successor)) => {
+                assert!(
+                    successor.is_some(),
+                    "an affiliated payment window must return a witnessed successor, got {action:?}"
+                );
+            }
+            Err(BailReason::NoLegalManaPayment) => {}
+            other => panic!("expected the payment-witness branch, got {other:?}"),
+        }
     }
 
     #[test]
