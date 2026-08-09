@@ -4963,6 +4963,22 @@ pub(super) fn apply_clause_continuation(
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
+            // CR 608.2c + CR 401.1: "look at the top card of each player's library,
+            // then exile those cards" — the `ScopedPlayer` owner marker set by
+            // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
+            // per-player `player_scope: All` fan-out, the same shape the direct
+            // "exile the top card of each player's library" path gets via the lift
+            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // seam: the direct path lifts where `parse_exile_ast` produces its
+            // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
+            // back-patched into one. The lift survives assembly because this
+            // back-patched def already passed the per-clause `player_scope` write,
+            // and the current clause's write only touches its own def. The
+            // after-scope play/cast tail (Extract Power's `CastFromZone`) is
+            // detached by `split_player_scope_chain` and runs once for the
+            // controller over the union of exiled cards.
+            let d = &mut defs[bound_index];
+            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
