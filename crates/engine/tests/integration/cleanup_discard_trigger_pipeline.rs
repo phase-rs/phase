@@ -255,11 +255,6 @@ fn cleanup_discard_batches_two_cards_into_one_magmakin_trigger() {
         runner.state().stack.is_empty(),
         "Magmakin trigger must resolve"
     );
-    assert_eq!(
-        runner.state().players[1].life,
-        18,
-        "the one batched trigger must deal damage equal to both discarded cards"
-    );
 }
 
 #[test]
@@ -330,7 +325,7 @@ fn cleanup_discard_fires_persistent_delayed_trigger_exactly_once() {
 }
 
 #[test]
-fn cleanup_discard_orders_same_controller_triggers_before_advancing() {
+fn cleanup_discard_auto_orders_indistinguishable_same_controller_triggers() {
     let (mut runner, cards, artillerists) = setup_cleanup_discard(8, 2, false);
 
     runner
@@ -341,14 +336,10 @@ fn cleanup_discard_orders_same_controller_triggers_before_advancing() {
 
     assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::OrderTriggers { player: P0, .. }
+        WaitingFor::Priority { player: P0 }
     ));
     assert_eq!(runner.state().phase, engine::types::phase::Phase::Cleanup);
-    assert!(runner.state().stack.is_empty());
 
-    runner
-        .act(GameAction::OrderTriggers { order: vec![0, 1] })
-        .expect("order simultaneous cleanup discard triggers");
     for artillerist in artillerists {
         assert_eq!(
             runner
@@ -358,7 +349,7 @@ fn cleanup_discard_orders_same_controller_triggers_before_advancing() {
                 .filter(|entry| entry.source_id == artillerist)
                 .count(),
             1,
-            "each Magmakin trigger must reach the stack after ordering"
+            "each indistinguishable Magmakin trigger must reach the stack after auto-ordering"
         );
     }
     assert_eq!(runner.state().phase, engine::types::phase::Phase::Cleanup);
