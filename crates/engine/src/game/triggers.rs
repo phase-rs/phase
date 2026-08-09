@@ -4288,6 +4288,40 @@ fn collect_pending_triggers_with_collection(
                 {
                     continue;
                 }
+                // CR 603.10a + CR 400.7: This observer left in the same
+                // departure batch, so its own ZoneChanged record—not the
+                // post-move object in `state`—owns the source identity. The
+                // latter has already bumped its incarnation and would force
+                // damage-history conditions to choose between accepting every
+                // off-battlefield same-id source or rejecting valid co-death
+                // LKI. The record context preserves both cases precisely.
+                let observer_source_context = events.iter().find_map(|observer_event| {
+                    let GameEvent::ZoneChanged {
+                        object_id,
+                        record,
+                        ..
+                    } = observer_event
+                    else {
+                        return None;
+                    };
+                    if *object_id != observer_id || !record.co_departed.contains(moved_id) {
+                        return None;
+                    }
+                    match crate::types::game_state::battlefield_departure_trigger_source_context(
+                        observer_event,
+                    ) {
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                            context,
+                        ) => Some(context),
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                            None
+                        }
+                    }
+                });
+                let Some(observer_source_context) = observer_source_context else {
+                    continue;
+                };
                 // CR 303.4b + CR 603.10a: Restore the observer's LKI
                 // `attached_to` so `ControllerRef::EnchantedPlayer` resolves
                 // correctly for co-departed Curse Auras whose live
@@ -4313,19 +4347,11 @@ fn collect_pending_triggers_with_collection(
                     }
                 }
                 let matched_triggers = {
-                    let Some(obj) = state.objects.get(&observer_id) else {
-                        // Restore before continuing.
-                        if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
-                            obs_obj.attached_to = saved_attached_to;
-                        }
-                        continue;
-                    };
-                    collect_matching_triggers(
+                    collect_matching_triggers_from_context(
                         state,
                         event,
                         events,
-                        obj,
-                        obj.entered_battlefield_turn.unwrap_or(0),
+                        observer_source_context,
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
