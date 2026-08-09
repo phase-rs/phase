@@ -9440,6 +9440,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("return")
                         && effective_lower.contains("graveyard")
                         && effective_lower.contains("hand")
+                        && (effective_lower.contains("return ~")
+                            || effective_lower.contains("return this card"))
                 }
                 _ => false,
             };
@@ -12966,6 +12968,33 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
             "targeted (non-SelfRef) graveyard-to-hand return must NOT be credited by the SelfRef arm: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_graveyard_recursion_does_not_cross_credit_targeted_return_line() {
+        let mut face = make_face();
+        let recursion =
+            "Whenever a Dragon enters, return this card from your graveyard to your hand.";
+        let targeted = "Return target creature card from your graveyard to your hand.";
+        let oracle = format!("{recursion}\n{targeted}");
+        face.oracle_text = Some(oracle.clone());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == recursion)),
+            "the self-reference line must be credited: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == targeted)),
+            "the SelfRef leaf must not credit a different targeted-return line: {findings:?}"
         );
     }
 
