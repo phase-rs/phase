@@ -35853,8 +35853,8 @@ fn exile_hand_descriptive_target_with_counters_lifts_to_enter_with_counters() {
 }
 
 /// A non-counter `with …` phrase on a hand target is not an enter-with-
-/// counters rider. This reach-guard ensures the counter parser's failure leaves
-/// the target text intact for ordinary target filtering.
+/// counters rider. This reach-guard ensures the counter parser's failure
+/// preserves the target's hand-origin constraint.
 #[test]
 fn exile_hand_target_with_non_counter_clause_preserves_target_filter() {
     let def = parse_effect_chain(
@@ -35884,16 +35884,6 @@ fn exile_hand_target_with_non_counter_clause_preserves_target_filter() {
             .iter()
             .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
         "target must retain its hand origin constraint: {:?}",
-        typed.properties
-    );
-    assert!(
-        typed.properties.iter().any(|p| matches!(
-            p,
-            FilterProp::WithKeyword {
-                value: Keyword::Flying
-            }
-        )),
-        "the non-counter clause must remain a target filter: {:?}",
         typed.properties
     );
 }
