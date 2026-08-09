@@ -1318,6 +1318,23 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         }
     }
 
+    if let GameAction::Debug(debug_action) = &action {
+        if debug_action.is_zero_count_create() {
+            return match with_state(|state| {
+                engine::game::preflight_debug_action(state, actor, debug_action)?;
+                Ok::<_, engine::game::EngineError>(engine::types::game_state::ActionResult {
+                    events: vec![],
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                })
+            }) {
+                Ok(Ok(result)) => to_js(&result),
+                Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {error}")),
+                Err(error) => error,
+            };
+        }
+    }
+
     if let GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
         ref card_name,
         owner,
@@ -1345,20 +1362,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     // reaches here.
     let action_for_replay = action.clone();
     let is_debug_action = matches!(action, GameAction::Debug(_));
-    let is_zero_count_debug_create = matches!(
-        &action,
-        GameAction::Debug(debug_action) if debug_action.is_zero_count_create()
-    );
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => {
-            record_replay_action(
-                is_debug_action && !is_zero_count_debug_create,
-                actor,
-                action_for_replay,
-            );
-            if !is_zero_count_debug_create {
-                invalidate_ai_proposals();
-            }
+            record_replay_action(is_debug_action, actor, action_for_replay);
+            invalidate_ai_proposals();
             to_js(&result)
         }
         Err(e) => {
@@ -1399,8 +1406,8 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
 /// Record a successfully-applied action into REPLAY_LOG, or invalidate any
 /// in-progress recording if it was a (non-CreateCard) debug action.
 ///
-/// Every `GameAction::Debug` variant other than `CreateCard` reaches this
-/// point (unlike CreateCard, they mutate state already tracked by
+/// Every successful nonzero `GameAction::Debug` variant other than
+/// `CreateCard` reaches this point (unlike CreateCard, they mutate state already tracked by
 /// `GameState` rather than resolving against the WASM-local `CardDatabase`,
 /// so they aren't intercepted earlier in `submit_action`) — but
 /// `reconstruct_initial_state` (`game/replay.rs`) never sets `debug_mode`
@@ -1442,7 +1449,7 @@ struct DebugCreateCardRequest<'a> {
 fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
     match handle_debug_create_card_inner(request) {
         Ok(result) => to_js(&result),
-        Err(msg) => JsValue::from_str(msg),
+        Err(msg) => JsValue::from_str(&msg),
     }
 }
 
@@ -1453,7 +1460,7 @@ fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
 /// for the same split.
 fn handle_debug_create_card_inner(
     request: DebugCreateCardRequest<'_>,
-) -> Result<engine::types::game_state::ActionResult, &'static str> {
+) -> Result<engine::types::game_state::ActionResult, String> {
     let DebugCreateCardRequest {
         actor,
         card_name,
@@ -1464,59 +1471,43 @@ fn handle_debug_create_card_inner(
         run_etb,
         nonlegendary,
     } = request;
-    if count > engine::types::actions::MAX_DEBUG_CREATE_COUNT {
-        return Err("Engine error: debug create count exceeds the maximum");
-    }
+    let debug_action = engine::types::actions::DebugAction::CreateCard {
+        card_name: card_name.to_string(),
+        owner,
+        zone,
+        count,
+        attach_to,
+        run_etb,
+        nonlegendary,
+    };
+    let waiting_for = with_state(|state| {
+        engine::game::preflight_debug_action(state, actor, &debug_action)
+            .map_err(|error| format!("Engine error: {error}"))?;
+        Ok(state.waiting_for.clone())
+    })
+    .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))?;
     if count == 0 {
-        return with_state(|state| {
-            if !state.debug_mode {
-                return Err("Engine error: Debug actions require debug_mode to be enabled");
-            }
-            if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
-                return Err("Engine error: Debug actions require debug permission");
-            }
-            if !state.players.iter().any(|player| player.id == owner) {
-                return Err("Engine error: Debug: invalid owner player id");
-            }
-            Ok(engine::types::game_state::ActionResult {
-                events: vec![],
-                waiting_for: state.waiting_for.clone(),
-                log_entries: vec![],
-            })
-        })
-        .unwrap_or(Err(NOT_INITIALIZED_ERR));
+        return Ok(engine::types::game_state::ActionResult {
+            events: vec![],
+            waiting_for,
+            log_entries: vec![],
+        });
     }
     let source = CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
-            return Err("Engine error: card database not loaded");
+            return Err("Engine error: card database not loaded".to_string());
         };
         match db.get_face_by_name(card_name) {
             Some(face) => Ok(engine::game::debug_card_entry_source(db, face)),
-            None => Err("Engine error: card not found in database"),
+            None => Err("Engine error: card not found in database".to_string()),
         }
     })?;
     with_state_mut(|state| {
-        if !state.debug_mode {
-            return Err("Engine error: Debug actions require debug_mode to be enabled");
-        }
-        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
-            return Err("Engine error: Debug actions require debug permission");
-        }
-        if !state.players.iter().any(|p| p.id == owner) {
-            return Err("Engine error: Debug: invalid owner player id");
-        }
-        // Debug-spawned cards are resolved against the WASM-local CARD_DB and
-        // never recorded into REPLAY_LOG (unlike normal actions in
-        // `submit_action`), so a faithful replay can't reconstruct this
-        // mutation. Invalidate any in-progress recording here, the same way
-        // `restore_game_state` invalidates on a history-breaking state swap,
-        // so `export_replay_log` can't produce a log that silently omits a
-        // debug spawn.
-        REPLAY_LOG.with(|cell| cell.set(None));
         let result = engine::game::create_debug_cards(
             state,
             engine::game::DebugCardCreateRequest {
+                actor,
                 source,
                 owner,
                 zone,
@@ -1525,14 +1516,23 @@ fn handle_debug_create_card_inner(
                 run_etb,
                 nonlegendary,
             },
-        );
+        )
+        .map_err(|error| format!("Engine error: {error}"))?;
+        // Debug-spawned cards are resolved against the WASM-local CARD_DB and
+        // never recorded into REPLAY_LOG (unlike normal actions in
+        // `submit_action`), so a faithful replay can't reconstruct this
+        // mutation. Invalidate any in-progress recording here, the same way
+        // `restore_game_state` invalidates on a history-breaking state swap,
+        // so `export_replay_log` can't produce a log that silently omits a
+        // debug spawn.
+        REPLAY_LOG.with(|cell| cell.set(None));
 
         engine::game::public_state::bump_state_revision(state);
         engine::game::public_state::mark_public_state_all_dirty(state);
         engine::game::public_state::finalize_public_state(state);
         Ok(result)
     })
-    .unwrap_or(Err(NOT_INITIALIZED_ERR))
+    .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))
 }
 
 /// Get the current game state as a `ClientGameState` wire envelope
@@ -4576,10 +4576,24 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: true,
-        });
-        assert!(
-            result.is_ok(),
-            "debug create-card should succeed in this fixture: {result:?}"
+        })
+        .expect("debug create-card should succeed in this fixture");
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    engine::types::events::GameEvent::DebugActionUsed { .. }
+                ))
+                .count(),
+            1,
+            "the engine source-bound creator owns the audit event"
+        );
+        assert_eq!(
+            result.log_entries.len(),
+            1,
+            "the engine source-bound creator resolves the local audit log entry"
         );
         with_state(|state| {
             assert_eq!(
@@ -4666,6 +4680,17 @@ mod replay_bridge_tests {
             result.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         ));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    engine::types::events::GameEvent::DebugActionUsed { .. }
+                ))
+                .count(),
+            1
+        );
         with_state(|state| {
             assert_eq!(
                 state
@@ -4689,8 +4714,10 @@ mod replay_bridge_tests {
     #[test]
     fn debug_create_card_zero_preserves_replay_recording_without_card_database() {
         clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
         let mut state = GameState::new_two_player(17);
         state.debug_mode = true;
+        let revision = state.state_revision;
         REPLAY_LOG.with(|cell| {
             cell.set(Some(ReplayLog::new(ReplayHeader {
                 format_config: state.format_config.clone(),
@@ -4712,10 +4739,88 @@ mod replay_bridge_tests {
             attach_to: None,
             run_etb: true,
             nonlegendary: false,
-        });
-        assert!(result.is_ok());
+        })
+        .expect("an authorized zero request is a no-op without a card database");
+        assert!(result.events.is_empty());
         assert!(has_replay_recording());
+        with_state(|state| {
+            assert_eq!(state.state_revision, revision);
+            assert!(state.objects.is_empty());
+        })
+        .expect("game state should remain initialized");
 
+        clear_game_state();
+    }
+
+    #[test]
+    fn debug_create_card_preflight_runs_before_card_database_lookup() {
+        clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let mut state = GameState::new_two_player(23);
+        state.debug_mode = true;
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let revision = state.state_revision;
+        let public_state_dirty = state.public_state_dirty.clone();
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let owner_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(9),
+            zone: engine::types::zones::Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("an invalid owner must fail before database access");
+        assert!(owner_error.contains("invalid owner player id"));
+        assert!(!owner_error.contains("database"));
+
+        let priority_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("a real entry off Priority must fail before database access");
+        assert!(priority_error.contains("Priority window"));
+        assert!(!priority_error.contains("database"));
+
+        let lookup_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("a missing database must reject a valid nonzero request");
+        assert!(lookup_error.contains("card database not loaded"));
+
+        assert!(has_replay_recording());
+        with_state(|state| {
+            assert_eq!(state.state_revision, revision);
+            assert_eq!(state.public_state_dirty, public_state_dirty);
+            assert!(state.objects.is_empty());
+        })
+        .expect("game state should remain initialized");
         clear_game_state();
     }
 

@@ -8,14 +8,13 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
-use engine::game::log::resolve_log_entries;
 use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::preview::preview_auto_payment_sources;
 use engine::game::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
 use engine::game::{
-    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks,
+    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks, preflight_debug_action,
     rehydrate_game_from_card_db, DebugCardCreateRequest,
 };
 use engine::types::actions::{DebugAction, GameAction};
@@ -1427,12 +1426,39 @@ impl SessionManager {
         // access; the engine validates actor authorization and action shape.
         // Candidate enumeration is advisory for clients and AI, not a second
         // legality gate: several legal action classes are combinatorial.
-        let records_takeback = !action.is_actor_scoped_preference();
-
         if let GameAction::Debug(debug_action) = &action {
-            debug_action.validate_create_count()?;
+            preflight_debug_action(&session.state, player, debug_action)
+                .map_err(|error| format!("Engine error: {error}"))?;
         }
+        if matches!(&action, GameAction::Debug(debug_action) if debug_action.is_zero_count_create())
+        {
+            let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
+            let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
+            return Ok((
+                session.state.clone(),
+                Vec::new(),
+                legal_actions,
+                Vec::new(),
+                auto_pass,
+                spell_costs,
+                by_object,
+            ));
+        }
+        let debug_card_source = match &action {
+            GameAction::Debug(DebugAction::CreateCard { card_name, .. }) => {
+                let card_db = card_db.ok_or_else(|| {
+                    "Debug::CreateCard requires a card database at the transport boundary"
+                        .to_string()
+                })?;
+                let face = card_db
+                    .get_face_by_name(card_name)
+                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
+                Some(debug_card_entry_source(card_db, face))
+            }
+            _ => None,
+        };
 
+        let records_takeback = !action.is_actor_scoped_preference();
         let pre_action_state = records_takeback.then(|| session.state.clone());
 
         // Set player names for log resolution.
@@ -1445,48 +1471,21 @@ impl SessionManager {
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
         let result = match action {
-            action @ GameAction::Debug(DebugAction::CreateCard { count: 0, .. }) => {
-                apply(&mut session.state, player, action).map_err(|e| {
-                    warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                    format!("Engine error: {}", e)
-                })?
-            }
             GameAction::Debug(DebugAction::CreateCard {
-                card_name,
                 owner,
                 zone,
                 count,
                 attach_to,
                 run_etb,
                 nonlegendary,
+                ..
             }) => {
-                if !session.state.debug_mode {
-                    return Err("Engine error: Debug actions require debug_mode to be enabled".to_string());
-                }
-                if !session.state.players.iter().any(|player| player.id == owner) {
-                    return Err("Engine error: Debug: invalid owner player id".to_string());
-                }
-                let card_db = card_db.ok_or_else(|| {
-                    "Debug::CreateCard requires a card database at the transport boundary".to_string()
-                })?;
-                let face = card_db
-                    .get_face_by_name(&card_name)
-                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
-                let debug_action = DebugAction::CreateCard {
-                    card_name: card_name.clone(),
-                    owner,
-                    zone,
-                    count,
-                    attach_to,
-                    run_etb,
-                    nonlegendary,
-                };
-                let description = debug_action.describe(&session.state);
-                let before = session.state.clone();
-                let mut result = create_debug_cards(
+                let result = create_debug_cards(
                     &mut session.state,
                     DebugCardCreateRequest {
-                        source: debug_card_entry_source(card_db, face),
+                        actor: player,
+                        source: debug_card_source
+                            .expect("nonzero debug CreateCard source was bound before mutation"),
                         owner,
                         zone,
                         count,
@@ -1494,15 +1493,11 @@ impl SessionManager {
                         run_etb,
                         nonlegendary,
                     },
-                );
-                result.events.push(GameEvent::DebugActionUsed {
-                    player_id: player,
-                    description,
-                });
+                )
+                .map_err(|error| format!("Engine error: {error}"))?;
                 bump_state_revision(&mut session.state);
                 mark_public_state_all_dirty(&mut session.state);
                 finalize_public_state(&mut session.state);
-                result.log_entries = resolve_log_entries(&result.events, &before, &session.state);
                 result
             }
             action => apply(&mut session.state, player, action).map_err(|e| {
@@ -4054,7 +4049,7 @@ mod tests {
                 &token,
                 GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
                     card_name: "Server Debug Creature".into(),
-                    owner: PlayerId(0),
+                    owner: PlayerId(1),
                     zone: Zone::Battlefield,
                     count: 2,
                     attach_to: None,
@@ -4065,12 +4060,22 @@ mod tests {
             )
             .expect("server transport resolves a debug CreateCard batch through its card database");
 
-        assert!(
+        assert_eq!(
             result
                 .1
                 .iter()
-                .any(|event| matches!(event, GameEvent::DebugActionUsed { .. })),
-            "source-bound server debug actions retain the engine audit event"
+                .filter(|event| {
+                    matches!(
+                        event,
+                        GameEvent::DebugActionUsed {
+                            player_id: PlayerId(0),
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            1,
+            "source-bound server debug actions retain exactly the engine audit event"
         );
         assert!(
             !result.3.is_empty(),
@@ -4083,11 +4088,156 @@ mod tests {
                 .objects
                 .values()
                 .filter(|object| {
-                    object.name == "Server Debug Creature" && object.zone == Zone::Battlefield
+                    object.name == "Server Debug Creature"
+                        && object.owner == PlayerId(1)
+                        && object.zone == Zone::Battlefield
                 })
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn server_debug_create_zeroes_skip_lifecycle_and_takeback_side_effects() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = create_sandbox_game(&mut mgr);
+        let session = &mgr.sessions[&code];
+        let history_depth = session.takeback_history.len();
+        let turn_history_depth = session.turn_rewind_history.len();
+        let rewind_game_number = session.rewind_game_number;
+        let session_revision = session.state_revision;
+        let revision = session.state.state_revision;
+        let object_count = session.state.objects.len();
+        let log_player_names = session.state.log_player_names.clone();
+
+        let actions = [
+            (
+                "card",
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "database deliberately absent".into(),
+                    owner: PlayerId(0),
+                    zone: Zone::Battlefield,
+                    count: 0,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+            ),
+            (
+                "token",
+                GameAction::Debug(DebugAction::CreateToken {
+                    request: engine::types::actions::DebugTokenRequest::Preset {
+                        preset_id: "not resolved for zero".into(),
+                        owner: PlayerId(0),
+                        power_override: None,
+                        toughness_override: None,
+                        enter_with_counters: Vec::new(),
+                    },
+                    count: 0,
+                    run_etb: true,
+                }),
+            ),
+            (
+                "token copy",
+                GameAction::Debug(DebugAction::CreateTokenCopy {
+                    source_id: ObjectId(u64::MAX),
+                    owner: PlayerId(0),
+                    count: 0,
+                    nonlegendary: false,
+                }),
+            ),
+        ];
+
+        for (label, action) in actions {
+            let result = mgr
+                .handle_action(&code, &token, action)
+                .unwrap_or_else(|error| panic!("authorized zero {label} must be a no-op: {error}"));
+
+            assert!(result.1.is_empty(), "zero {label} emitted events");
+            assert!(result.3.is_empty(), "zero {label} emitted log entries");
+        }
+        let session = &mgr.sessions[&code];
+        assert_eq!(session.takeback_history.len(), history_depth);
+        assert_eq!(session.turn_rewind_history.len(), turn_history_depth);
+        assert_eq!(session.rewind_game_number, rewind_game_number);
+        assert_eq!(session.state_revision, session_revision);
+        assert_eq!(session.state.state_revision, revision);
+        assert_eq!(session.state.objects.len(), object_count);
+        assert_eq!(session.state.log_player_names, log_player_names);
+    }
+
+    #[test]
+    fn server_debug_create_preflight_runs_before_database_lookup() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = create_sandbox_game(&mut mgr);
+
+        let owner_error = mgr
+            .handle_action(
+                &code,
+                &token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "database deliberately absent".into(),
+                    owner: PlayerId(9),
+                    zone: Zone::Hand,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+            )
+            .expect_err("an invalid owner must fail before database lookup");
+        assert!(owner_error.contains("invalid owner player id"));
+        assert!(!owner_error.contains("card database"));
+
+        let session = &mgr.sessions[&code];
+        let history_depth = session.takeback_history.len();
+        let revision = session.state.state_revision;
+        let public_state_dirty = session.state.public_state_dirty.clone();
+        let log_player_names = session.state.log_player_names.clone();
+        let lookup_error = mgr
+            .handle_action(
+                &code,
+                &token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "database deliberately absent".into(),
+                    owner: PlayerId(0),
+                    zone: Zone::Hand,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+            )
+            .expect_err("a valid nonzero request requires a database");
+        assert!(lookup_error.contains("requires a card database"));
+        let session = &mgr.sessions[&code];
+        assert_eq!(session.takeback_history.len(), history_depth);
+        assert_eq!(session.state.state_revision, revision);
+        assert_eq!(session.state.public_state_dirty, public_state_dirty);
+        assert_eq!(session.state.log_player_names, log_player_names);
+
+        mgr.sessions
+            .get_mut(&code)
+            .expect("sandbox session exists")
+            .state
+            .waiting_for = WaitingFor::GameOver { winner: None };
+        let priority_error = mgr
+            .handle_action(
+                &code,
+                &token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "database deliberately absent".into(),
+                    owner: PlayerId(0),
+                    zone: Zone::Battlefield,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+            )
+            .expect_err("a real entry off Priority must fail before database lookup");
+        assert!(priority_error.contains("Priority window"));
+        assert!(!priority_error.contains("card database"));
     }
 
     #[test]

@@ -147,6 +147,7 @@ interface CardFaceShape {
 }
 
 function CreateCardForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
@@ -232,7 +233,7 @@ function CreateCardForm({ onDispatch }: Props) {
       <FieldRow label="Zone">
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
-      <FieldRow label="Copies">
+      <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       {showAttachPicker && (
@@ -562,7 +563,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
       <FieldRow label="Search">
         <TextInput value={search} onChange={setSearch} placeholder="Token, source card, set" />
       </FieldRow>
-      <FieldRow label="Copies">
+      <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
@@ -651,6 +652,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
 }
 
 function CustomTokenForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [name, setName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [power, setPower] = useState(1);
@@ -728,7 +730,7 @@ function CustomTokenForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
-      <FieldRow label="Copies">
+      <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="Power">
@@ -794,6 +796,7 @@ function CustomTokenForm({ onDispatch }: Props) {
 // copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
 // form is a thin source+owner picker over the `CreateTokenCopy` debug action.
 function CopyPermanentForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
   const [nonlegendary, setNonlegendary] = useState(false);
@@ -813,7 +816,7 @@ function CopyPermanentForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
-      <FieldRow label="Copies">
+      <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="">

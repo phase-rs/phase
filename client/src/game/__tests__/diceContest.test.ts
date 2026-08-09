@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameEvent } from "../../adapter/types";
+import type { GameAction, GameEvent, SubmitResult } from "../../adapter/types";
+import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
+import { buildGameState } from "../../test/factories/gameStateFactory";
+import { dispatchAction } from "../dispatch";
 import { flashCompletedScry, flashInGameRolls, flashStartingPlayerContest } from "../diceContest";
 
 const die = (player_id: number, sides: number, result: number): GameEvent => ({
@@ -33,6 +37,7 @@ const scry = (player_id: number, top: number, bottom: number): GameEvent => ({
 
 beforeEach(() => {
   vi.useFakeTimers();
+  useGameStore.getState().reset();
   usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
   useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
   useUiStore.getState().resetScryOutcome();
@@ -157,6 +162,26 @@ describe("flashCompletedScry", () => {
     ]);
 
     expect(useUiStore.getState().scryOutcome).toBeNull();
+  });
+
+  it("is invoked by the production dispatch pipeline", async () => {
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
+    const state = buildGameState({ stack: [], players: [] });
+    const adapter = buildEngineAdapterMock(state, {
+      submitAction: vi.fn().mockResolvedValue({
+        events: [scry(0, 2, 1)],
+        log_entries: [],
+      } satisfies SubmitResult),
+    });
+    useGameStore.setState({ adapter, gameState: state, gameMode: "ai" });
+
+    await dispatchAction({ type: "PassPriority" } as GameAction, 0);
+
+    expect(useUiStore.getState().scryOutcome).toEqual({
+      playerId: 0,
+      topCount: 2,
+      bottomCount: 1,
+    });
   });
 });
 

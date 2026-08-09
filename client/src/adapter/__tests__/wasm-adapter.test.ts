@@ -380,6 +380,21 @@ describe("WasmAdapter", () => {
   });
 
   describe("submitAction", () => {
+    const createCard = (count: number) => ({
+      type: "Debug" as const,
+      data: {
+        type: "CreateCard" as const,
+        data: {
+          card_name: "Lightning Bolt",
+          owner: 0,
+          zone: "Hand" as const,
+          run_etb: false,
+          nonlegendary: false,
+          count,
+        },
+      },
+    });
+
     it("throws AdapterError with NOT_INITIALIZED if not initialized", async () => {
       await expect(
         adapter.submitAction({ type: "PassPriority" }, 0),
@@ -402,6 +417,51 @@ describe("WasmAdapter", () => {
         0,
         { type: "PassPriority" },
       );
+    });
+
+    it("submits a zero-count debug create without loading the card database", async () => {
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(0), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("does not load the card database when Rust rejects debug-create preflight", async () => {
+      mockWorkerClient.submitAction.mockRejectedValueOnce(
+        new Error("Engine error: DebugAction is only allowed in Sandbox mode"),
+      );
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).rejects.toThrow(
+        "DebugAction is only allowed in Sandbox mode",
+      );
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("loads the card database and retries only after Rust admits a nonzero create", async () => {
+      mockWorkerClient.submitAction
+        .mockRejectedValueOnce(new Error("Engine error: card database not loaded"))
+        .mockResolvedValueOnce({ events: [], log_entries: [] });
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledTimes(2);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.submitAction.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0]);
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.submitAction.mock.invocationCallOrder[1]);
     });
 
     // Regression: state-loss classification splits on whether the panic

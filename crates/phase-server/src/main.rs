@@ -3763,6 +3763,17 @@ impl GameSubmission {
         }
     }
 
+    /// Accepted zero-count debug creates are transport no-ops: server-core
+    /// still authenticates and preflights them, but the Full-mode wrapper must
+    /// not allocate a revision, run AI, persist, or broadcast unchanged state.
+    fn is_zero_count_debug_create(&self) -> bool {
+        matches!(
+            self,
+            GameSubmission::Action(GameAction::Debug(debug_action))
+                if debug_action.is_zero_count_create()
+        )
+    }
+
     fn payload_rejection(&self) -> Result<(), Box<ServerMessage>> {
         match self {
             GameSubmission::Action(action) => guard_game_action_payload(action)
@@ -3800,6 +3811,7 @@ async fn handle_full_game_submission(
     identity: &SocketIdentity,
 ) {
     let kind = submission.kind();
+    let is_zero_count_debug_create = submission.is_zero_count_debug_create();
     let game_code = match &identity.game_code {
         Some(c) => c.clone(),
         None => {
@@ -3850,6 +3862,13 @@ async fn handle_full_game_submission(
         };
         match applied {
             Ok(human_result) => {
+                if is_zero_count_debug_create {
+                    drop(mgr);
+                    if let Ok(json) = serde_json::to_string(&ServerMessage::ActionNoOp) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
                 let human_revision = mgr
                     .sessions
                     .get_mut(&game_code)
@@ -8236,13 +8255,34 @@ mod game_submission_tests {
     use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
+    use engine::types::actions::DebugAction;
     use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
+    use engine::types::zones::Zone;
     use futures_util::SinkExt;
     use server_core::game_action_payload_guard::MAX_ACTION_LIST_LEN;
     use server_core::protocol::DeckData;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
+
+    #[test]
+    fn zero_count_debug_create_is_the_only_submission_no_op() {
+        let create_card = |count| {
+            GameSubmission::Action(GameAction::Debug(DebugAction::CreateCard {
+                card_name: "Lightning Bolt".to_string(),
+                owner: PlayerId(0),
+                zone: Zone::Hand,
+                count,
+                attach_to: None,
+                run_etb: false,
+                nonlegendary: false,
+            }))
+        };
+
+        assert!(create_card(0).is_zero_count_debug_create());
+        assert!(!create_card(1).is_zero_count_debug_create());
+        assert!(!GameSubmission::Action(GameAction::PassPriority).is_zero_count_debug_create());
+    }
 
     /// Connect, handshake, and create a two-seat game so the socket carries an
     /// authenticated `SocketIdentity` with both a `game_code` and a

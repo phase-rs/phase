@@ -31852,6 +31852,360 @@ fn render_silent_its_controller_cant_cast_spells() {
     assert_no_unimplemented(&def);
 }
 
+/// CR 101.2 + CR 109.5: "You can't cast additional spells this turn" (Conduit of
+/// Worlds' rider) — bare "you" scopes the ban to the source controller
+/// (`SourceController`), and "additional spells" is an incremental BLANKET ban
+/// (`spell_filter: None`), not a spell-type filter. Reverting the Step 4 parser
+/// arms leaves "additional" mis-parsed as a type phrase, so
+/// `try_parse_cant_cast_spells_effect` returns `None` and the clause is swallowed
+/// into an `Effect::Unimplemented` — this assertion then fails.
+#[test]
+fn cant_cast_additional_spells_you_source_controller() {
+    let def = parse_effect_chain(
+        "You can't cast additional spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // Reach guard: the "additional spells" qualifier was consumed as a blanket,
+    // not dropped into an unimplemented tail.
+    assert!(!matches!(&*def.effect, Effect::Unimplemented { .. }));
+}
+
+/// CR 101.2: the "more spells" / "another spell" incremental qualifiers are the
+/// same blanket ban (`spell_filter: None`) as "additional spells".
+#[test]
+fn cant_cast_more_and_another_spell_variants() {
+    for text in [
+        "You can't cast more spells this turn.",
+        "You can't cast another spell this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::SourceController,
+                        activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                        ..
+                    }
+                }
+            ),
+            "{text} got {:?}",
+            def.effect
+        );
+    }
+}
+
+/// CR 101.2: the new last-ordered "you" subject arm must NOT shadow the longer
+/// "your opponents" possessive tag (Silence), and the "additional/more/another"
+/// blanket arms must NOT over-consume a genuine typed spell filter ("creature
+/// spells"). Both negatives are paired with the positive above.
+#[test]
+fn cant_cast_you_arm_does_not_shadow_opponents_or_typed_filter() {
+    // "your opponents" still binds to OpponentsOfSourceController, not swallowed
+    // by a "you" prefix match.
+    let opponents = parse_effect_chain(
+        "Your opponents can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*opponents.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "opponents got {:?}",
+        opponents.effect
+    );
+
+    // A genuine typed filter ("creature spells") is still parsed as a filter, not
+    // consumed by the blanket qualifier arm.
+    let creatures = parse_effect_chain(
+        "You can't cast creature spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*creatures.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_),
+                    },
+                    ..
+                }
+            }
+        ),
+        "creature spells got {:?}",
+        creatures.effect
+    );
+}
+
+/// Conduit of Worlds' full line-2 effect chain (verbatim, minus the `{T}` cost
+/// and "Activate only as a sorcery" which are cost/timing metadata parsed
+/// elsewhere). Each clause and the CR rule that governs it:
+///   CR 601.2c: TargetOnly{nonland permanent card in graveyard} — choose target.
+///     → CR 608.2g (+ CR 601.2a–i): CastFromZone{ParentTarget, DuringResolution,
+///        paid, normal mana} — an effect that allows casting a spell during
+///        resolution — gated on "if you haven't cast a spell this turn".
+///        → CR 608.2c + CR 101.2: AddRestriction{CastSpells{None},
+///           SourceController, EndOfTurn} — a later "if you do" instruction whose
+///           meaning depends on the earlier optional cast (608.2c: apply the
+///           instructions in written order), imposing a "can't" that takes
+///           precedence (101.2).
+/// Reverting Step 5 leaves the cast at `LingeringPermission`; reverting Step 4
+/// leaves the rider unimplemented. Both surface here.
+#[test]
+fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
+    let def = parse_effect_chain(
+        "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn.",
+        AbilityKind::Activated,
+    );
+
+    // Root: the chosen graveyard target.
+    assert!(
+        matches!(&*def.effect, Effect::TargetOnly { .. }),
+        "root got {:?}",
+        def.effect
+    );
+    let target_zone = def.effect.target_filter().and_then(|f| f.extract_in_zone());
+    assert_eq!(
+        target_zone,
+        Some(crate::types::zones::Zone::Graveyard),
+        "chosen target must be graveyard-scoped, got {:?}",
+        def.effect.target_filter()
+    );
+
+    // Clause 2: the paid, during-resolution graveyard cast of "that card".
+    let cast = def
+        .sub_ability
+        .as_deref()
+        .expect("TargetOnly must chain the cast clause");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: Cast,
+                driver: DuringResolution,
+                mana_spend_permission: None,
+                ..
+            }
+        ),
+        "cast clause got {:?}",
+        cast.effect
+    );
+    // The "if you haven't cast a spell this turn" resolution gate is present (not
+    // swallowed). Assert the concrete check — spells cast this turn by the
+    // controller (untyped) equal to zero — mirroring the rider-gate precision
+    // below, so a regression that flips the comparator or retargets the quantity
+    // is caught rather than passing on the variant alone.
+    assert!(
+        matches!(
+            cast.condition.as_ref(),
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Controller,
+                        filter: None,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ),
+        "cast condition got {:?}",
+        cast.condition
+    );
+
+    // Clause 3: the "if you do" self cast-ban rider.
+    let rider = cast
+        .sub_ability
+        .as_deref()
+        .expect("cast clause must chain the rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "rider got {:?}",
+        rider.effect
+    );
+    assert!(
+        matches!(
+            rider.condition.as_ref(),
+            Some(crate::types::ability::AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        ),
+        "rider gate got {:?}",
+        rider.condition
+    );
+
+    // Reach guard: no Effect::Unimplemented anywhere in the chain.
+    let mut node = Some(&def);
+    while let Some(d) = node {
+        assert!(
+            !matches!(&*d.effect, Effect::Unimplemented { .. }),
+            "unexpected Unimplemented: {:?}",
+            d.effect
+        );
+        node = d.sub_ability.as_deref();
+    }
+}
+
+#[test]
+fn paid_chosen_target_cast_is_during_resolution_for_each_supported_zone() {
+    for zone in ["hand", "exile", "library"] {
+        let def = parse_effect_chain(
+            &format!(
+                "Choose target nonland permanent card in your {zone}. You may cast that card."
+            ),
+            AbilityKind::Activated,
+        );
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("chosen target must chain to its cast instruction");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    without_paying_mana_cost: false,
+                    mode: Cast,
+                    driver: DuringResolution,
+                    duration: None,
+                    ..
+                }
+            ),
+            "a no-duration chosen-target cast from {zone} must be during resolution; got {:?}",
+            cast.effect
+        );
+    }
+}
+
+/// CR 305.1 + CR 602.5d + CR 608.2g: the WHOLE Conduit of Worlds card (verbatim
+/// Oracle text) parses to an honest, fully-supported AST — line 1 to a
+/// `GraveyardCastPermission` (play lands), line 2 to a sorcery-speed activated
+/// ability whose chain has NO `Effect::Unimplemented` anywhere. This is the
+/// coverage-honesty gate: any swallowed clause (the paid cast, the condition, the
+/// "if you do" rider, or the sorcery-speed restriction) surfaces here.
+#[test]
+fn conduit_of_worlds_full_card_is_supported_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "You may play lands from your graveyard.\n{T}: Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
+        "Conduit of Worlds",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+
+    // Line 1: the graveyard land-play permission static.
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            s.mode,
+            crate::types::statics::StaticMode::GraveyardCastPermission {
+                play_mode: Play,
+                ..
+            }
+        )),
+        "line 1 must parse to a Play GraveyardCastPermission, got {:?}",
+        parsed.statics
+    );
+
+    // Line 2: the sorcery-speed activated ability.
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.kind == AbilityKind::Activated)
+        .expect("line 2 must parse to an activated ability");
+    assert!(
+        activated
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::AsSorcery),
+        "line 2 must carry the AsSorcery restriction (CR 602.5d)"
+    );
+
+    // No Effect::Unimplemented anywhere in any parsed ability chain.
+    fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Unimplemented { .. })
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+    for a in &parsed.abilities {
+        assert!(
+            !chain_has_unimplemented(a),
+            "no ability chain may contain Effect::Unimplemented, got {:?}",
+            a.effect
+        );
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Emry, Lurker in the Loch — "Choose target artifact card
+/// in your graveyard. You may cast that card this turn." — is a graveyard-scoped
+/// chosen target too, but its "this turn" duration keeps it a
+/// `LingeringPermission` grant (a standing until-end-of-turn permission), NOT a
+/// during-resolution cast. This is the negative that proves the Step 5 upgrade is
+/// gated on `duration.is_none()`, and that Emry is not regressed.
+#[test]
+fn emry_this_turn_grant_stays_lingering_not_during_resolution() {
+    let def = parse_effect_chain(
+        "Choose target artifact card in your graveyard. You may cast that card this turn.",
+        AbilityKind::Activated,
+    );
+    let cast = def
+        .sub_ability
+        .as_deref()
+        .expect("TargetOnly must chain the cast clause");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "Emry cast clause got {:?}",
+        cast.effect
+    );
+}
+
 /// CR 305.1 + CR 101.2 + CR 201.2: Conjurer's Ban's compound restriction —
 /// "Until your next turn, spells with the chosen name can't be cast and lands
 /// with the chosen name can't be played." The PASSIVE-voice, card-scoped
@@ -52907,5 +53261,314 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
     assert!(
         matches!(real, Effect::ChangeZone { .. }),
         "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
+    );
+}
+
+const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \
+exile cards from the top of your library until you exile an instant or sorcery card with lesser mana \
+value. Until end of turn, you may cast that card without paying its mana cost. Put each other card \
+exiled this way on the bottom of your library in a random order.";
+
+/// T-B1 (plan-r18 §R18.1): a NON-`Emit` clause between a delayed installer and its
+/// continuations must close the open-payload run. In the adopted code the intervening
+/// clause is emitted by an early-exit producer that `continue`s past the registry block,
+/// so the mint-carrying antecedent stays open and `classify_continuation_clause`'s
+/// `|| antecedent.mint.is_some()` short-circuit nests both continuations anyway.
+///
+/// Text is two real printed sentences composed: Codie, Vociferous Codex's activated
+/// ability (the adopted `CODIE_CONTINUATION_TEXT`) with Kathril, Aspect Warper's
+/// "Repeat this process for ..." sentence spliced in after the installer. That sentence
+/// routes to the text-local producer at `mod.rs:30356`, which pushes
+/// `ClauseDisposition::ReplicatePerKeyword` and `continue`s (`:30367`/`:30368`).
+///
+/// PARSE-TIME ONLY. The composition is not a playable card — `ReplicatePerKeyword` is
+/// relational at lowering and Codie's installer is not a keyword-counter antecedent.
+/// Do NOT extend this test to `assemble_effect_chain`.
+#[test]
+fn a_non_emitted_clause_between_installer_and_continuation_closes_the_payload_run() {
+    const KATHRIL_REPEAT_SENTENCE: &str = "Repeat this process for first strike, double strike, \
+deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. ";
+
+    // Splice the non-`Emit` sentence in after the installer sentence, i.e. immediately
+    // before the first continuation. Located by content, not by a byte offset.
+    const FIRST_CONTINUATION: &str = "Until end of turn, you may cast that card";
+    let split_at = CODIE_CONTINUATION_TEXT
+        .find(FIRST_CONTINUATION)
+        .expect("T-B1 fixture: the adopted Codie constant must contain its first continuation");
+    let intervened_text = format!(
+        "{}{KATHRIL_REPEAT_SENTENCE}{}",
+        &CODIE_CONTINUATION_TEXT[..split_at],
+        &CODIE_CONTINUATION_TEXT[split_at..]
+    );
+
+    let mut intervened_context = ParseContext::default();
+    let intervened = parse_effect_chain_ir(
+        &intervened_text,
+        AbilityKind::Activated,
+        &mut intervened_context,
+    );
+
+    // Shape preconditions. A failure here means the fixture no longer routes as traced
+    // (plan-r18 §R18.1.3/§R18.1.4) — re-derive the fixture. Do NOT relax the assertion
+    // below to accommodate it.
+    assert_eq!(
+        intervened
+            .clauses
+            .iter()
+            .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+            .count(),
+        1,
+        "T-B1 precondition: the splice must leave exactly one delayed installer: {intervened:#?}"
+    );
+    assert_eq!(
+        intervened
+            .clauses
+            .iter()
+            .filter(|clause| !matches!(clause.disposition, ClauseDisposition::Emit { .. }))
+            .count(),
+        1,
+        "T-B1 precondition: the spliced sentence must be the chain's only non-emitted \
+         clause (producer mod.rs:30356 → ReplicatePerKeyword): {intervened:#?}"
+    );
+
+    let intervened_promoted = intervened
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+
+    // Paired positive reach-guard: the same text WITHOUT the intervening clause must
+    // still promote, so a 0 above cannot be a parse failure masquerading as a pass.
+    let mut baseline_context = ParseContext::default();
+    let baseline = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut baseline_context,
+    );
+    let baseline_promoted = baseline
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert!(
+        baseline_promoted > 0,
+        "T-B1 reach-guard: the un-intervened chain must still reach the promotion path"
+    );
+
+    assert_eq!(
+        intervened_promoted, 0,
+        "T-B1: a non-emitted clause must close the open-payload run, so no later clause \
+         may be promoted (plan-r18 §R18.1). Baseline promoted {baseline_promoted}; got \
+         {intervened_promoted}: {intervened:#?}"
+    );
+}
+
+#[test]
+fn delayed_payload_continuation_binds_the_nearest_open_installer() {
+    const DELAYED_INSTALLER: &str =
+        "When you next cast a spell this turn, exile cards from the top of \
+your library until you exile an instant or sorcery card with lesser mana value.";
+    const CONTINUATION: &str =
+        "Until end of turn, you may cast that card without paying its mana cost.";
+    let text = format!(
+        "Add {{W}}{{U}}{{B}}{{R}}{{G}}. {DELAYED_INSTALLER} {DELAYED_INSTALLER} {CONTINUATION}"
+    );
+    let mut context = ParseContext::default();
+    let chain = parse_effect_chain_ir(&text, AbilityKind::Activated, &mut context);
+
+    let installers: Vec<_> = chain
+        .clauses
+        .iter()
+        .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+        .collect();
+    assert_eq!(
+        installers.len(),
+        2,
+        "T-PEER precondition: the fixture must produce two delayed installers: {chain:#?}"
+    );
+    assert_eq!(
+        installers[0].placement,
+        ClausePlacement::Sibling,
+        "T-PEER: the earlier installer stays a sibling while the continuation binds the nearer one"
+    );
+    let promoted = chain
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        promoted, 1,
+        "T-PEER: exactly the continuation binds the nearest open delayed payload: {chain:#?}"
+    );
+}
+
+#[test]
+fn delayed_payload_placement_defaults_to_siblings_and_promotes_only_continuations() {
+    let mut ordinary_context = ParseContext::default();
+    let ordinary = parse_effect_chain_ir(
+        "Draw a card. You gain 3 life.",
+        AbilityKind::Spell,
+        &mut ordinary_context,
+    );
+    assert!(
+        ordinary
+            .clauses
+            .iter()
+            .all(|clause| clause.placement == ClausePlacement::Sibling),
+        "T-PL1: an ordinary chain must retain the construction default"
+    );
+
+    let mut codie_context = ParseContext::default();
+    let codie = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut codie_context,
+    );
+    let promoted = codie
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        promoted, 2,
+        "T-PL1 positive control: Codie's two payload continuations must be observable"
+    );
+}
+
+#[test]
+fn delayed_payload_placement_requires_an_emitted_clause() {
+    let mut codie_context = ParseContext::default();
+    let codie = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut codie_context,
+    );
+    let mut flickerform_context = ParseContext::default();
+    let flickerform = parse_effect_chain_ir(
+        "Exile enchanted creature and all Auras attached to it. At the beginning of the next end step, \
+         return that card to the battlefield under its owner's control. If you do, return the other cards \
+         exiled this way to the battlefield under their owners' control attached to that creature.",
+        AbilityKind::Activated,
+        &mut flickerform_context,
+    );
+    let mut ordinary_context = ParseContext::default();
+    let ordinary = parse_effect_chain_ir(
+        "Draw a card. You gain 3 life.",
+        AbilityKind::Spell,
+        &mut ordinary_context,
+    );
+
+    for chain in [&codie, &flickerform, &ordinary] {
+        assert!(
+            chain.clauses.iter().all(|clause| {
+                clause.placement != ClausePlacement::NestedInDelayedPayload
+                    || matches!(clause.disposition, ClauseDisposition::Emit { .. })
+            }),
+            "T-DP1: nested placement is valid only on an emitted clause: {chain:#?}"
+        );
+    }
+    assert_eq!(
+        codie
+            .clauses
+            .iter()
+            .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+            .count(),
+        2,
+        "T-DP1 positive control: the universal must observe promoted clauses"
+    );
+}
+
+#[test]
+fn absorbed_nested_chain_recomputes_delayed_payload_placement_in_its_outer_context() {
+    let mut nested_context = ParseContext::default();
+    let nested = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Spell,
+        &mut nested_context,
+    );
+    assert!(
+        nested
+            .clauses
+            .iter()
+            .any(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload),
+        "T-DP2 positive control: the nested body must reach the promotion path"
+    );
+
+    let mut outer_context = ParseContext::default();
+    let outer = parse_effect_chain_ir(
+        &format!("If you control an artifact, {CODIE_CONTINUATION_TEXT}"),
+        AbilityKind::Spell,
+        &mut outer_context,
+    );
+    let nested_promoted = nested
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    let outer_promoted = outer
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        outer_promoted, nested_promoted,
+        "T-DP2′: an absorbed nested chain's continuations must be re-promoted against the OUTER \
+         registry (plan-r17 §R17.4.1; closes the leading-if deferral at assembly.rs:2781)"
+    );
+}
+
+/// A replacement shield remains an emitted top-level definition, so a following
+/// continuation cannot be relocated past it into the preceding delayed payload.
+/// This composes Codie's delayed installer and cast continuation with Riot
+/// Control's printed damage-prevention rider to drive parse and assembly end-to-end.
+#[test]
+fn replacement_shield_between_installer_and_continuation_stays_a_sibling() {
+    const DELAYED_INSTALLER: &str =
+        "When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value.";
+    const REPLACEMENT_SHIELD: &str = "Prevent all damage that would be dealt to you this turn.";
+    const CONTINUATION: &str =
+        "Until end of turn, you may cast that card without paying its mana cost.";
+    let text = format!("{DELAYED_INSTALLER} {REPLACEMENT_SHIELD} {CONTINUATION}");
+    let mut context = ParseContext::default();
+    let chain = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut context);
+
+    assert_eq!(
+        chain
+            .clauses
+            .iter()
+            .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+            .count(),
+        1,
+        "fixture must produce exactly one delayed installer: {chain:#?}"
+    );
+    let shield_index = chain
+        .clauses
+        .iter()
+        .position(|clause| effect_installs_replacement_shield(&clause.parsed.effect))
+        .expect("fixture must produce an emitted replacement-shield clause");
+    assert!(
+        matches!(
+            chain.clauses[shield_index].disposition,
+            ClauseDisposition::Emit { .. }
+        ),
+        "fixture's shield must remain a top-level emitted definition: {chain:#?}"
+    );
+    let continuation = chain
+        .clauses
+        .get(shield_index + 1)
+        .expect("fixture must retain a continuation after the shield");
+    assert!(
+        matches!(continuation.parsed.effect, Effect::CastFromZone { .. }),
+        "fixture's post-shield clause must be the intended cast continuation: {chain:#?}"
+    );
+
+    // The adopted placement marks this continuation as nested. Assembly must then
+    // reject the relocation because the shield, not the installer, precedes it.
+    let _ = lower_effect_chain_ir(&chain);
+
+    assert_eq!(
+        continuation.placement,
+        ClausePlacement::Sibling,
+        "an emitted replacement shield breaks the relocation run"
     );
 }

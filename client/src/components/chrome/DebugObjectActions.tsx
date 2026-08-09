@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type {
   AttachTarget,
@@ -10,7 +11,6 @@ import type {
   Zone,
 } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
-import { formatCounterType } from "../../viewmodel/cardProps";
 import {
   AccordionItem,
   CheckboxInput,
@@ -136,6 +136,7 @@ function RemoveObjectForm({ onDispatch }: Props) {
 }
 
 function CreateTokenCopyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
   const [nonlegendary, setNonlegendary] = useState(false);
@@ -152,7 +153,7 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
-      <FieldRow label="Copies">
+      <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="">
@@ -228,7 +229,6 @@ function ModifyCountersForm({ onDispatch }: Props) {
           value={counterType}
           onChange={setCounterType}
           options={counterTypes}
-          getOptionLabel={formatCounterType}
         />
       </FieldRow>
       <FieldRow label="Delta">

@@ -9548,6 +9548,40 @@ impl GameState {
         }
     }
 
+    /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
+    /// is still the raw `RestrictionPlayerScope::SourceController` placeholder
+    /// (Conduit of Worlds' "you can't cast additional spells this turn").
+    /// `add_restriction` ALWAYS lowers this scope to
+    /// `SpecificPlayer(original_controller)` at the instant the restriction is
+    /// created, so a live — and therefore any legitimately-captured — state never
+    /// carries the raw scope; for those states this is a no-op. Only an
+    /// untrusted, corrupt, or forged snapshot can serialize the raw placeholder,
+    /// and both runtime consumers (`casting.rs`, `combat.rs`) fail OPEN on it
+    /// (returning `false`, silently bypassing the prohibition in release, and the
+    /// casting consumer's `debug_assert!(false)` would panic in debug/test builds
+    /// after such a restore). The original activator cannot be recovered from the
+    /// restored state — per CR 109.5 the "you" of an activated ability is the
+    /// player who activated it, and per CR 611.2a the restriction lasts until end
+    /// of turn regardless of the source, so the source's CURRENT controller is
+    /// not necessarily the original activator and must not be inferred — so the
+    /// only safe repair is to discard the unbindable restriction, which yields
+    /// the same inert outcome the consumers already produce, minus the panic
+    /// hazard. Called from `PersistedGameState::into_game_state`, the single
+    /// production restore chokepoint, so both the Raw and Trusted paths are
+    /// hardened.
+    pub fn drop_unresolved_source_controller_restrictions(&mut self) {
+        use crate::types::ability::{GameRestriction, RestrictionPlayerScope};
+        self.restrictions.retain(|restriction| {
+            !matches!(
+                restriction,
+                GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    ..
+                }
+            )
+        });
+    }
+
     /// CR 732.2a: the seat whose driving period `last_loop_action_sequence` currently records.
     ///
     /// CR 732.2a lets "the player with priority … suggest a shortcut by describing a sequence of
@@ -9669,6 +9703,11 @@ impl PersistedGameState {
         // CR 732.2a (FIX-3): drop stale transient loop-detection bookkeeping on load unless the save
         // sits in an object-growth shortcut window whose pending resolution still consumes it.
         state.migrate_transient_loop_sequence();
+        // CR 109.5 + CR 611.2a: discard any restriction still carrying the raw
+        // `SourceController` placeholder — a legitimately-captured state never has
+        // one (it is lowered to the activator at creation), so this only sanitizes
+        // corrupt/forged snapshots and closes the fail-open path in both consumers.
+        state.drop_unresolved_source_controller_restrictions();
         state
     }
 }
@@ -23654,6 +23693,73 @@ mod tests {
                     .to_string()
                     .contains("triggered stack entry has no firing carrier"),
                 "expected fail-closed stack-trigger migration, got {error}"
+            );
+        }
+    }
+
+    /// CR 109.5 + CR 611.2a: a restored restriction still carrying the raw
+    /// `SourceController` placeholder (which `add_restriction` always lowers to
+    /// `SpecificPlayer` at creation, so it can only appear in a corrupt or forged
+    /// snapshot) is dropped on restore through BOTH the Raw and Trusted paths,
+    /// closing the fail-open hole in the casting/combat consumers. A sibling
+    /// `SpecificPlayer` ban — the lowered form a legitimate capture carries —
+    /// survives untouched, proving the sanitizer targets only the unbindable
+    /// placeholder.
+    #[test]
+    fn raw_source_controller_restriction_is_dropped_on_restore_in_both_envelopes() {
+        use crate::types::ability::{
+            GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        };
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        // Corrupt/forged: the unbindable raw scope that must never survive restore.
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source: ObjectId(5),
+            affected_players: RestrictionPlayerScope::SourceController,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells { spell_filter: None },
+        });
+        // The lowered ban a legitimate capture carries — must be preserved.
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source: ObjectId(6),
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells { spell_filter: None },
+        });
+
+        let raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("serialize raw fixture");
+        let trusted = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("serialize trusted fixture");
+
+        for persisted in [raw, trusted] {
+            let restored = serde_json::from_value::<PersistedGameState>(persisted)
+                .expect("restriction fixture restores")
+                .into_game_state();
+
+            assert!(
+                !restored.restrictions.iter().any(|restriction| matches!(
+                    restriction,
+                    GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::SourceController,
+                        ..
+                    }
+                )),
+                "raw SourceController restriction must be dropped on restore, got {:?}",
+                restored.restrictions
+            );
+            assert!(
+                restored.restrictions.iter().any(|restriction| matches!(
+                    restriction,
+                    GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+                        ..
+                    }
+                )),
+                "the lowered SpecificPlayer ban must survive restore, got {:?}",
+                restored.restrictions
             );
         }
     }

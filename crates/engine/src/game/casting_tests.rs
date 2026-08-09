@@ -28624,6 +28624,73 @@ fn cast_only_from_zones_allows_hand_casts_for_affected_player() {
 }
 
 #[test]
+fn source_controller_scope_is_locked_to_activator_not_source() {
+    // CR 109.5 + CR 611.2a: a `CastSpells` prohibition scoped to
+    // `SourceController` (Conduit of Worlds' "you can't cast additional spells
+    // this turn") comes from the resolution of an ACTIVATED ability, so "you" is
+    // the player who activated it (CR 109.5), fixed at resolution. The resulting
+    // rules-modifying continuous effect lasts until end of turn (CR 611.2a) — a
+    // source-independent turn-based duration — so it must keep affecting the
+    // original activator even after the source changes controller or leaves play.
+    // `add_restriction` lowers `SourceController` to `SpecificPlayer` at creation
+    // to lock that activator.
+    let mut state = setup_game_at_main_phase();
+    let next_id = state.next_object_id;
+    let source = create_object(
+        &mut state,
+        CardId(next_id),
+        PlayerId(0),
+        "Conduit of Worlds".to_string(),
+        Zone::Battlefield,
+    );
+
+    // Resolve the rider through add_restriction so the scope is lowered exactly
+    // as it is in play (P0 is the activator/controller).
+    let ability = ResolvedAbility::new(
+        Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::SourceController,
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::CastSpells { spell_filter: None },
+            },
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    );
+    let mut events = Vec::new();
+    crate::game::effects::add_restriction::resolve(&mut state, &ability, &mut events).unwrap();
+
+    // The scope was lowered to the activator, not left as a live `SourceController`.
+    assert!(matches!(
+        &state.restrictions[0],
+        GameRestriction::ProhibitActivity {
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            ..
+        }
+    ));
+
+    // The activator (P0) is banned; the opponent (P1) is not.
+    assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
+
+    // CR 109.5: the "you" is the activator, fixed at resolution. Changing the
+    // source's controller does NOT move the ban to the new controller.
+    state.objects.get_mut(&source).unwrap().controller = PlayerId(1);
+    assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
+
+    // CR 611.2a: the effect also survives the source leaving play — its
+    // turn-based duration is independent of the source. Conduit is a fragile 1/1
+    // artifact creature that can be sacrificed / bounced
+    // / killed the same turn, but the ban on the activator persists this turn.
+    state.objects.remove(&source);
+    assert!(is_blocked_by_cant_cast_spells(&state, PlayerId(0), None));
+    assert!(!is_blocked_by_cant_cast_spells(&state, PlayerId(1), None));
+}
+
+#[test]
 fn creature_in_hand_castable_with_untapped_lands() {
     use crate::ai_support::{candidate_actions, legal_actions};
     use crate::game::derived::derive_display_state;
@@ -50271,6 +50338,69 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
 }
 
 #[test]
+fn paid_during_resolution_cast_router_is_independent_of_chosen_card_zone() {
+    for zone in [Zone::Hand, Zone::Exile, Zone::Library] {
+        let mut state = setup_game_at_main_phase();
+        let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+        state.objects.get_mut(&spell).expect("spell exists").zone = zone;
+
+        resolve_graveyard_paid_grant(&mut state, spell);
+
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::CastOffer {
+                    kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        hit_card,
+                        ..
+                    },
+                    ..
+                } if *hit_card == spell
+            ),
+            "a paid during-resolution cast from {zone:?} must open the one-shot offer; got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.objects[&spell].casting_permissions.is_empty(),
+            "a no-duration cast from {zone:?} must not become a lingering permission"
+        );
+    }
+}
+
+#[test]
+fn paid_cast_with_explicit_duration_remains_a_lingering_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(9200),
+        PlayerId(0),
+    );
+
+    crate::game::effects::cast_from_zone::resolve(&mut state, &grant, &mut Vec::new()).unwrap();
+
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CastOffer { .. }),
+        "an explicit duration must prevent a one-shot resolution offer"
+    );
+    assert!(
+        !state.objects[&spell].casting_permissions.is_empty(),
+        "the duration-bearing permission must remain available after resolution"
+    );
+}
+
+#[test]
 fn graveyard_paid_manual_cast_remains_offered_and_reaches_mana_payment() {
     let mut state = setup_game_at_main_phase();
     let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
@@ -50606,6 +50736,200 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
     assert!(
         state.stack.iter().any(|e| e.source_id == spell),
         "a Free cast must reach the stack with no mana paid"
+    );
+}
+
+// --- Conduit of Worlds line-2 end-to-end (Steps 5/6/7) --------------------
+
+/// Conduit of Worlds' `{T}` ability, verbatim minus the (separately-tested) line
+/// 1 static, built with ONLY the activated ability so `ability_index == 0` is
+/// unambiguous.
+const CONDUIT_LINE2: &str = "{T}: Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.";
+
+/// Build a scenario with Conduit's `{T}` ability on the battlefield for P0
+/// (untapped, no summoning sickness), a `{1}` creature card in P0's graveyard,
+/// and a green mana pool that covers the graveyard card's cost. Returns the
+/// runner, Conduit's id, and the graveyard creature's id.
+fn setup_conduit_activation() -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        PlayerId(0),
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let conduit = {
+        let mut b = scenario.add_creature(PlayerId(0), "Conduit of Worlds", 1, 1);
+        b.from_oracle_text(CONDUIT_LINE2);
+        b.id()
+    };
+    let gy_creature = {
+        let mut b = scenario.add_creature_to_graveyard(PlayerId(0), "Grave Bear", 2, 2);
+        b.with_mana_cost(ManaCost::generic(1));
+        b.id()
+    };
+    let runner = scenario.build();
+    (runner, conduit, gy_creature)
+}
+
+/// Drive Conduit's `{T}` ability from activation through resolution up to the
+/// `GraveyardPaidCast` offer, targeting `gy_creature`. Asserts the offer opens
+/// (the Step 5/6 reach-guard: without the paid during-resolution driver + the
+/// relaxed gate, no such offer is presented).
+fn activate_conduit_to_offer(
+    runner: &mut crate::game::scenario::GameRunner,
+    conduit: ObjectId,
+    gy_creature: ObjectId,
+) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: conduit,
+            ability_index: 0,
+        })
+        .expect("activating Conduit's {T} ability must succeed");
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::CastOffer {
+                kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast { hit_card, .. },
+                ..
+            } => {
+                assert_eq!(hit_card, gy_creature, "offer must target the chosen card");
+                return;
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(gy_creature)),
+                    })
+                    .expect("choosing the graveyard target must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority to resolve the ability must succeed");
+            }
+            other => panic!("unexpected pre-offer waiting_for: {other:?}"),
+        }
+    }
+    panic!("Conduit activation never reached the GraveyardPaidCast offer");
+}
+
+fn has_source_controller_cant_cast(state: &GameState) -> bool {
+    // CR 109.5: Conduit's self-scoped "you can't cast additional
+    // spells this turn" rider is lowered to `SpecificPlayer(activator)` at
+    // creation (the activator is PlayerId(0) in this fixture), so the installed
+    // ban carries that concrete player — not the parse-time `SourceController`
+    // scope, which is never stored.
+    state.restrictions.iter().any(|r| {
+        matches!(
+            r,
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+                activity: ProhibitedActivity::CastSpells { .. },
+                ..
+            }
+        )
+    })
+}
+
+/// CR 608.2g + CR 608.2c + CR 601.2i (Steps 5/6/7): accepting Conduit's paid
+/// during-resolution graveyard cast and completing payment casts the targeted
+/// card (it leaves the graveyard onto the stack) AND — because the cast
+/// committed — latches the "If you do" rider, installing the self-scoped
+/// `SourceController` cast-ban. The rider must NOT be installed before the cast
+/// commits.
+#[test]
+fn conduit_accept_commits_cast_and_installs_self_cast_ban() {
+    let (mut runner, conduit, gy_creature) = setup_conduit_activation();
+    activate_conduit_to_offer(&mut runner, conduit, gy_creature);
+
+    // Positive reach-guard: the offer is open (Step 6). The ban is NOT yet
+    // installed — the rider latches only on commit, not at offer time.
+    assert!(
+        !has_source_controller_cant_cast(runner.state()),
+        "the self cast-ban must not be installed before the paid cast commits"
+    );
+
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        })
+        .expect("accepting the paid cast must succeed");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "FullCost accept must open a manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Finalize the {1} payment from the pool: the card commits to the stack.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("finalizing the payment must succeed");
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|e| e.source_id == gy_creature),
+        "the paid cast card must commit to the stack"
+    );
+    assert_ne!(
+        runner.state().objects[&gy_creature].zone,
+        Zone::Graveyard,
+        "the cast card must have left the graveyard"
+    );
+
+    // CR 608.2g: pass priority so the paid cast resolves and Conduit's stashed
+    // continuation resumes, firing the commit-latched "if you do" rider. Stop as
+    // soon as the ban is installed — passing beyond the turn boundary would prune
+    // the EndOfTurn restriction.
+    for _ in 0..8 {
+        if has_source_controller_cant_cast(runner.state()) {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    assert!(
+        has_source_controller_cant_cast(runner.state()),
+        "committing the paid cast must install the 'you can't cast additional spells' rider"
+    );
+}
+
+/// CR 608.2c + CR 608.2g (Step 7 hostile fixture): declining the offer casts
+/// nothing and — because the optional cast was NOT performed — leaves the "If you
+/// do" rider un-fired, so no self cast-ban is installed and the card stays in the
+/// graveyard. Paired with the accept test above, this proves the rider is gated
+/// on the cast actually committing, not on merely reaching the offer.
+#[test]
+fn conduit_decline_casts_nothing_and_installs_no_ban() {
+    let (mut runner, conduit, gy_creature) = setup_conduit_activation();
+    activate_conduit_to_offer(&mut runner, conduit, gy_creature);
+
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Decline,
+        })
+        .expect("declining the paid cast must succeed");
+
+    assert_eq!(
+        runner.state().objects[&gy_creature].zone,
+        Zone::Graveyard,
+        "declining must leave the card in the graveyard"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|e| e.source_id == gy_creature),
+        "declining must not put the card on the stack"
+    );
+    assert!(
+        !has_source_controller_cant_cast(runner.state()),
+        "declining must not install the self cast-ban (the rider's 'if you do' is false)"
     );
 }
 

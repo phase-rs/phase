@@ -494,6 +494,10 @@ pub enum ServerMessage {
     ActionRejected {
         reason: String,
     },
+    /// Confirms an authenticated action that intentionally produced no state
+    /// transition. The submitting adapter resolves its pending request without
+    /// caching or publishing a replacement snapshot.
+    ActionNoOp,
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
         game_code: String,
@@ -2257,18 +2261,18 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_25() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+    fn protocol_version_is_26() {
+        assert_eq!(PROTOCOL_VERSION, 26);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
     /// pairing. This is the assertion with teeth: full-game servers accept ONLY
     /// the current protocol, so an older peer cannot complete a handshake with
-    /// a server that may persist a paused DebugCardEntries frame it cannot
-    /// deserialize.
+    /// a server that may answer an accepted action on a variant it does not
+    /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_24` stays
+    /// this guards — and this test reds while `protocol_version_is_26` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2418,6 +2422,16 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::CancelTakeback));
+    }
+
+    #[test]
+    fn server_message_action_no_op_roundtrips() {
+        let json = serde_json::to_string(&ServerMessage::ActionNoOp).unwrap();
+        assert_eq!(json, r#"{"type":"ActionNoOp"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            ServerMessage::ActionNoOp
+        ));
     }
 
     #[test]

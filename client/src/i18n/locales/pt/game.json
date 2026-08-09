@@ -45,6 +45,7 @@
     "expand": "Expandir progresso de resolução"
   },
   "debugCreate": {
+    "copies": "Cópias",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",

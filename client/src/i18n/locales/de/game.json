@@ -45,6 +45,7 @@
     "expand": "Auflösungsfortschritt ausklappen"
   },
   "debugCreate": {
+    "copies": "Kopien",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",

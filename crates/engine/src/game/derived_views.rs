@@ -2148,10 +2148,14 @@ fn restriction_affected_players(
         // restriction never carries an unresolved placeholder scope here.
         // CR 109.4: `ParentObjectTargetController` is likewise resolved to
         // `SpecificPlayer` by `add_restriction` at creation time.
+        // CR 611.2c: `SourceController` (Conduit of Worlds' "you") is likewise
+        // lowered to `SpecificPlayer(original_controller)` at creation so the
+        // affected player stays the activator independently of the source.
         RestrictionPlayerScope::TargetedPlayer
         | RestrictionPlayerScope::ParentTargetedPlayer
         | RestrictionPlayerScope::ParentObjectTargetController
-        | RestrictionPlayerScope::ScopedPlayer => Vec::new(),
+        | RestrictionPlayerScope::ScopedPlayer
+        | RestrictionPlayerScope::SourceController => Vec::new(),
         // CR 508.5a: `add_restriction` resolves the defending player to
         // `SpecificPlayer` when the restriction is created, so a stored
         // restriction never carries an unresolved `DefendingPlayer` scope here.
