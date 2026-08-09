@@ -5,6 +5,11 @@
     "close": "Fermer",
     "closeNamed": "Fermer {{name}}"
   },
+  "scryOutcome": {
+    "title": "Regard terminé",
+    "you": "Vous",
+    "result": "{{player}} — {{top}} au-dessus · {{bottom}} au-dessous"
+  },
   "modal": {
     "defaultEyebrow": "Outil d'espace de travail"
   },

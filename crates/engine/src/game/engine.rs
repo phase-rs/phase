@@ -978,6 +978,22 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    // A zero-count debug create is intentionally a true no-op. It still passes
+    // both the ordinary action-authority check and the sandbox capability
+    // gate, but must not enter an action lifecycle frame: doing so would bump
+    // revisions, run finalization, and make the WASM adapter invalidate a
+    // replay despite no object having been requested.
+    if let GameAction::Debug(debug_action) = &action {
+        if debug_action.is_zero_count_create() {
+            check_actor_authorization(state, authenticated_actor, &action)?;
+            check_debug_action_access(state, semantic_owner)?;
+            return Ok(ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            });
+        }
+    }
     let raw = apply_action_boundary_core(
         state,
         authenticated_actor,
@@ -1190,7 +1206,7 @@ fn finish_action_boundary_with_lifecycle(
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
     }
-    result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    result.log_entries = super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
     if preserve_interaction && !auto_pass_advanced {
         interaction::preserve_interaction_slots(state, previous_interaction_slots);
     } else {
@@ -4346,7 +4362,7 @@ fn drive_loop_action_iteration(
                 let source = match &context {
                     crate::types::game_state::ManaChoiceContext::ManaAbility(p) => p.source_id,
                     crate::types::game_state::ManaChoiceContext::ResolvingEffect(_) => {
-                        return Err(RecastAbort)
+                        return Err(RecastAbort);
                     }
                 };
                 let color = pinned_mana_color_for_source(template, iteration, clone, source)?;
@@ -4541,8 +4557,9 @@ struct PeriodFodder {
 /// CR 732.2a / CR 111.1: seed a `Priority{controller}` window and drive ONE iteration of
 /// `last_loop_action_sequence` on THROWAWAY clones, returning the `(before, after)` frames.
 /// The shared seed+drive kernel of the accept-time re-derivations — `current_period_fodder`
-/// (object-growth ∞ pile) and `current_period_counter_targets` (counter-growth ∞ targets)
-/// both diff these two frames. `None` when the sequence is empty. Mirrors the detection
+/// (object-growth ∞ pile), `current_period_counter_growth` (beneficial counter δ, feeding both
+/// the batched stash and the ∞ counter pills) and `current_period_life_growth` (life δ) all diff
+/// these two frames. `None` when the sequence is empty. Mirrors the detection
 /// drive exactly: same `SimulationProbeGuard` re-entrancy guard (HELD across the drive so
 /// the injector's internal `apply_action` never recurses into the shortcut hooks), same
 /// `drive_loop_sequence_iteration`.
@@ -4602,33 +4619,19 @@ fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
     Some(PeriodFodder { class, taps_fodder })
 }
 
-/// CR 732.2a / CR 701.34a (proliferate): re-derive the per-object `(ObjectId, CounterType)`
-/// targets whose PRESERVED `Generic` counters strictly grew across one accepted
-/// counter-growth period — the DISPLAY-only `∞` counter channel. The offer certificate's
-/// unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the concrete object id /
-/// counter type is NOT recoverable from the axis; re-derive it the same way
-/// `current_period_fodder` derives the fodder class — drive ONE period on a clone (shared
-/// `drive_one_period_frames`) and diff `Generic` counters (`grown_generic_counter_targets`).
-/// Empty when the sequence is empty or the period grows no `Generic` counter (a mana / token
-/// / object-growth loop). General over the class (proliferate charge / One-Ring burden),
-/// never one card. DISPLAY-ONLY: the caller marks the pill to render `∞` without mutating the
-/// real counter count.
-fn current_period_counter_targets(
-    state: &GameState,
-) -> Vec<(ObjectId, crate::types::counter::CounterType)> {
-    let Some((before, after)) = drive_one_period_frames(state) else {
-        return Vec::new();
-    };
-    crate::analysis::resource::grown_generic_counter_targets(&before, &after)
-}
-
-/// CR 122.1 + CR 732.2a: re-derive the per-object BENEFICIAL counter growth (with per-cycle
-/// δ) of the accepted period by driving ONE iteration on a clone (`drive_one_period_frames`)
-/// and diffing beneficial-materializable counters (`grown_beneficial_counter_deltas`). The
-/// batched-collapse δ source for the whole beneficial class (+1/+1 / loyalty / defense /
-/// charge) — the widened analog of `current_period_counter_targets` (DISPLAY, Generic-only).
-/// Empty when the sequence is empty or the period grows no beneficial counter (a mana / token
-/// / life loop). Only reached in the UNOBSERVED batched route (the firewall gates it).
+/// CR 122.1 + CR 732.2a: THE SINGLE per-object counter derivation of an accepted period — drive
+/// ONE iteration on a clone (`drive_one_period_frames`) and diff beneficial-materializable
+/// counters (`grown_beneficial_counter_deltas`), yielding per-cycle δ for the whole beneficial
+/// class (+1/+1 / loyalty / defense / charge). Feeds BOTH consumers: the batched-collapse δ stash,
+/// and (projected to `(object, counter)`) the `∞` DISPLAY counter channel. The display half used
+/// to run a SECOND, `Generic`-only diff of its own, so a +1/+1 or loyalty loop collapsed correctly
+/// and never rendered an `∞` pill; one derivation is what makes that class of disagreement
+/// unrepresentable. The offer certificate's unbounded axis is object-AGNOSTIC, so the concrete
+/// object id / counter type is NOT recoverable from the axis and must be re-derived here, the same
+/// way `current_period_fodder` re-derives the fodder class. Empty when the sequence is empty or
+/// the period grows no beneficial counter (a mana / token / life loop). The batched-collapse
+/// consumer is only reached in the UNOBSERVED route (the firewall gates it); the display
+/// registration is unconditional on both routes.
 fn current_period_counter_growth(
     state: &GameState,
 ) -> Vec<crate::types::game_state::CounterGrowth> {
@@ -4917,11 +4920,34 @@ fn try_offer_object_growth_shortcut(
     // CR 732.2a: an UNBOUNDED object-growth offer is not repeated a CR 704-limited number of
     // times — it is materialized once as an unbounded axis — so it states no narrowed count
     // bound and keeps the global safety limit.
+    //
+    // CR 732.2a + CR 732.2c: the count this offer STATES is the count the table binds. There is
+    // no declare-time picker (the frontend echoes `iteration_count` verbatim), and once the last
+    // player accepts, "the shortcut is taken" at that count, which then caps the CR 500.5
+    // collapse prompt. An offer that narrows no bound must therefore STATE the global limit it
+    // publishes as its ceiling; stating less silently caps the controller's collapse choice.
+    // This mirrors `certified_bounded_cycle_offer`, which already states `Fixed(max_iterations)`.
+    //
+    // CR 704.5a / CR 704.5c: the `UntilLethal` arm is UNREACHABLE FROM THIS PRODUCER — `delta` is
+    // a two-`snapshot` diff, and `ResourceVector::snapshot` writes neither `damage_dealt` nor
+    // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while
+    // `has_no_loss_axis` just above forces `life >= 0`, `library_delta >= 0`, `poison <= 0` on
+    // every seat; together those negate every non-`Advantage` branch of `classify_win_kind`. The
+    // arm is kept anyway so `shortcut_iteration_count` stays the SINGLE authority for that
+    // classification, and so this wildcard-free match build-breaks on a future third
+    // `IterationCount` variant — the guard `handle_declare_shortcut` states for its own cap. The
+    // unreachability is editorial, not structural: this function already event-feeds
+    // `tokens_created` into the same delta, so feeding `damage_dealt` would make the arm live.
+    use crate::analysis::decision_template::IterationCount;
+    let iteration_count = match shortcut_iteration_count(certificate.win_kind) {
+        IterationCount::UntilLethal => IterationCount::UntilLethal,
+        IterationCount::Fixed(_) => IterationCount::Fixed(MAX_SHORTCUT_CYCLES),
+    };
     let schema = build_shortcut_schema(
         // CR 732.2a: an unresolvable pin WITHDRAWS the offer rather than publishing an
         // undeclarable point — see `pinned_decisions_to_points`.
         pinned_decisions_to_points(&schema_template.decisions, state, caster)?,
-        shortcut_iteration_count(certificate.win_kind),
+        iteration_count,
         MAX_SHORTCUT_CYCLES,
     );
     Some((certificate, schema))
@@ -5010,18 +5036,7 @@ fn materialize_object_growth_shortcut(
         } else {
             None
         };
-    // CR 732.2a / CR 701.34a: snapshot the per-object ∞ COUNTER targets for DISPLAY
-    // (DerivedViews::unbounded_counters). Distinct from the object-growth ∞ pile above: a
-    // counter-growth loop's certified unbounded axis is object-agnostic (Counter(Other,
-    // Other)), so re-derive the concrete (object, counter) pairs by driving one period on a
-    // clone and diffing Generic counters — WHILE the recast sequence is still intact (the
-    // `.clear()` below wipes it). DISPLAY-ONLY: the object's real counter count is NOT mutated
-    // (CR 701.34a already added the real counter on each live cycle; this only marks the pill
-    // to render ∞). A mana / token / object-growth loop grows no Generic counter ⇒ empty ⇒
-    // no-op writer. Runs in BOTH routes (display is unconditional).
-    let counter_targets = current_period_counter_targets(state);
-    state.register_unbounded_counter_targets(proposal.proposer, counter_targets);
-    // ROUTE the STASH element only (the DISPLAY above is unconditional). `proposal.unbounded` IS
+    // ROUTE the STASH element only (the DISPLAY below is unconditional). `proposal.unbounded` IS
     // the ∞-mark set `mark_unbounded_loop` wrote. Capture-before-clear: `last_loop_action_sequence`
     // and the δ derivations all read BEFORE the `.clear()` tail below.
     //
@@ -5034,6 +5049,23 @@ fn materialize_object_growth_shortcut(
     // carries an unrelated life/counter observer (plan §5 Note; the observedness firewall is
     // AXIS-SPECIFIC so an incidental board observer never mis-routes a disjoint-axis loop).
     let growths = current_period_counter_growth(state);
+    // CR 732.2a / CR 122.1: the ∞ counter DISPLAY targets are the SAME per-object growth the
+    // batched stash carries — ONE derivation, projected. Registering from `growths` (rather than a
+    // second, `Generic`-only diff) is what makes `clear_collapsed_materializations`'
+    // `collapsed_pairs` a superset of the registered set on the batched route, so the boundary
+    // clear is unchanged; on the `DriveSequence` route a pair whose derived axis was not collapsed
+    // survives, which is the disclosed display over-keep on `UnboundedFamilyView`. DISPLAY-ONLY:
+    // the object's real counter count is NOT mutated (CR 701.34a already added the real counter on
+    // each live cycle; this only marks the pill to render ∞). Derived WHILE the recast sequence is
+    // still intact (the `.clear()` tail below wipes it). Unconditional on both routes; a mana /
+    // token / object-growth loop grows no beneficial counter ⇒ empty ⇒ no-op writer.
+    state.register_unbounded_counter_targets(
+        proposal.proposer,
+        growths
+            .iter()
+            .map(|g| (g.object, g.counter.clone()))
+            .collect(),
+    );
     let life = current_period_life_growth(state);
     let counter_observed =
         !growths.is_empty() && crate::analysis::resource::counter_growth_is_observed(state);
@@ -6993,16 +7025,10 @@ fn apply_action(
     // a defense-in-depth invariant — a player not in `debug_permitted` should
     // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
-        if !state.debug_mode {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug_mode to be enabled".into(),
-            ));
-        }
-        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
-            return Err(EngineError::InvalidAction(
-                "Debug actions require debug permission".into(),
-            ));
-        }
+        check_debug_action_access(state, actor)?;
+        debug_action
+            .validate_create_count()
+            .map_err(EngineError::InvalidAction)?;
         let description = debug_action.describe(state);
         let mut result =
             super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
@@ -10779,6 +10805,7 @@ fn apply_action(
                 action: PlayerActionKind::Proliferate,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()
@@ -11549,6 +11576,23 @@ fn apply_action(
         waiting_for,
         log_entries: vec![],
     })
+}
+
+/// Sandbox capability check shared by normal debug actions and a zero-count
+/// create no-op. Keeping it at the engine boundary means transports cannot use
+/// a no-op payload to probe or bypass debug authorization.
+fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
+    if !state.debug_mode {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug_mode to be enabled".into(),
+        ));
+    }
+    if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+        return Err(EngineError::InvalidAction(
+            "Debug actions require debug permission".into(),
+        ));
+    }
+    Ok(())
 }
 
 struct RetargetSubmission<'a> {
@@ -13632,6 +13676,7 @@ fn build_contest_rounds(
 /// `start_game_with_starting_player` directly — that path runs no contest and
 /// emits no `StartingPlayerContest` event.
 pub fn start_game(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     if state.seat_order.is_empty() {
         return start_game_with_starting_player(state, PlayerId(0));
     }
@@ -13662,6 +13707,7 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
             winner: starting_player,
         },
     );
+    result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
     result
 }
 
@@ -13670,6 +13716,7 @@ pub fn start_game_with_starting_player(
     state: &mut GameState,
     starting_player: PlayerId,
 ) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
@@ -13723,7 +13770,7 @@ pub fn start_game_with_starting_player(
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,
@@ -13733,6 +13780,7 @@ pub fn start_game_with_starting_player(
 
 /// Start game without mulligan (for backward compatibility with existing tests).
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
+    let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
     let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
@@ -13757,7 +13805,7 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
 
-    let log_entries = super::log::resolve_log_entries(&events, state);
+    let log_entries = super::log::resolve_log_entries(&events, &before, state);
     ActionResult {
         events,
         waiting_for,
@@ -15814,7 +15862,12 @@ mod stage2_injector_tests {
                 .strip_prefix(&root)
                 .expect("under src")
                 .display()
-                .to_string();
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
             let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
             for (n, line) in lines.iter().enumerate() {
                 if !line.contains(&needle) || line.contains("..") {
@@ -15936,9 +15989,13 @@ mod stage2_injector_tests {
                 // and is offered as a follow-up rather than taken unannounced mid-review.
                 // #6812 noted-mana support inserts two lines above all three producers:
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
-                "game/effects/mod.rs:6212".to_string(),
-                "game/effects/mod.rs:6289".to_string(),
-                "game/effects/mod.rs:9477".to_string(),
+                // #7018 adds the 16-line distinct-player-scope continuation gate above all
+                // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
+                // This PR's three-frame debug-entry resumer extends the same
+                // shift: `:6228/:6305/:9493 => :6231/:6308/:9496`.
+                "game/effects/mod.rs:6231".to_string(),
+                "game/effects/mod.rs:6308".to_string(),
+                "game/effects/mod.rs:9496".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16156,10 +16213,104 @@ mod stage2_injector_tests {
                 // Search-observer dispatch: `:11828 ⇒ :11821`, −7. Removing the retired
                 // `WaitingForWithParkedObservers` match arm is the only hunk above this
                 // producer; it changes trigger-drain timing but does not add a prompt.
+                //
+                // ∞ AXIS-SCOPED REVOCATION ROUND (re-application of the ∞ badge/axis change onto
+                // `b5b8f4ecf`): `:11821 ⇒ :11814`, `-7`. This entry is written the way the
+                // doctrine at the head of this log demands and the way the two rounds above did
+                // NOT get for free: the coordinate was LOCATED BY CONTENT FIRST and the arithmetic
+                // was computed afterwards as a CHECK. Two incoming numbers were available and both
+                // were stale — this file's own `:11828` (pre-edit) and the original branch's
+                // `:11700` (pre-rebase) — which is exactly the situation in which inheriting a
+                // number is wrong. That judgement was vindicated a second time on the rebase onto
+                // `b5b8f4ecf`: the search-observer entry directly above ALSO landed its producer
+                // on `:11821`, from an unrelated hunk, so the 3-way merge saw both sides write the
+                // same coordinate and silently accepted it as AGREEMENT — when in fact the two
+                // shifts are independent and must COMPOSE: `11828 -7 (search-observer) -7 (here)`
+                // = `11814`. A conflict-free auto-merge of this pin would have been wrong by 7.
+                // Four hunks in this file, ALL above the producer, sum to this entry's own `-7`:
+                // the `drive_one_period_frames` caller-list doc going from two lines to three
+                // (`+1`), the deletion of `current_period_counter_targets` plus the rewrite of
+                // `current_period_counter_growth`'s doc into the single-derivation statement
+                // (27 lines to 13, `-14`), the deletion of the second display-registration block
+                // in `materialize_object_growth_shortcut` (12 lines to 1, `-11`), and its
+                // re-insertion below `let growths = …` as one derivation projected to two
+                // consumers (`+17`). Predicted `11821-7` equals the observed coordinate exactly.
+                //
+                // Identity re-established on three axes rather than assumed: the line at `:11814`
+                // is sha256-identical (WITH its trailing newline) to every earlier coordinate this
+                // row has carried —
+                // `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63`, the prefix
+                // carried since `a6d1a0e62`; that hash is UNIQUE in the file under a whole-file
+                // scan, so the coordinate is unambiguous; and it is still inside
+                // `begin_pending_trigger_target_selection`, which itself moved by the same `-7`
+                // and therefore did not change functions.
+                //
+                // HASHING CONVENTION, recorded because this branch produced the near-miss once:
+                // the line is hashed WITH its trailing newline. Piping through `tr -d '\n'` first
+                // yields `a6d7f2f9d1e15de538f5c2c5803f28e76e86ccd60898c7602a089345a25cb032` — a
+                // DIFFERENT digest for the SAME line. Both are written out in full here so a
+                // future reader who reproduces the wrong one identifies the convention instead of
+                // re-litigating the coordinate.
+                //
+                // SET PRESERVATION: unchanged. The other four entries live in `game/effects/` and
+                // `scoped_library_search.rs`; this change touches neither, and its own new tests
+                // live in `types/game_state.rs`, `derived_views.rs` and `tests/integration/`, so
+                // no line matching the needle is added to this file at all — total still 37,
+                // partition still 5/7/25.
+                //
+                // COLLISION NOTE: a separate in-flight CR 500.5 `max` bugfix also edits this file
+                // above this producer. Whichever lands second MUST re-derive by content; it cannot
+                // reuse this number, and neither entry's arithmetic is authority for the other's.
+                //
+                // CR 500.5 `max` BUGFIX (WB-7048): `:11814 ⇒ :11837`, `+23`. This IS the in-flight
+                // bugfix the COLLISION NOTE directly above anticipated, and it is the one landing
+                // SECOND — so the coordinate was re-derived BY CONTENT exactly as that note
+                // requires, and the arithmetic was computed afterwards as a CHECK, never as the
+                // source. The number above was NOT reused. The insertion is a single expression in
+                // `try_offer_object_growth_shortcut` — the unbounded object-growth producer now
+                // STATES the ceiling it publishes (`Fixed(MAX_SHORTCUT_CYCLES)`) instead of seeding
+                // `Fixed(1)`, since CR 732.2c makes the accepted count binding and that count caps
+                // the CR 500.5 collapse prompt. Its 33 lines replace 10 (23 of the 33 are comment),
+                // netting `+23`; the shift is LOCAL, originating in this diff, not rebase-induced.
+                // That insertion sits ABOVE this producer and BELOW nothing else pinned by this
+                // row. Predicted `11814+23` equals the observed coordinate exactly.
+                //
+                // Identity re-established, hashing convention per the entry above (hashed WITH the
+                // trailing newline — not restated here): the line at `:11837` is sha256-identical
+                // to every earlier coordinate this row has carried, that digest is still UNIQUE
+                // under a whole-file scan, and it is still inside
+                // `begin_pending_trigger_target_selection`.
+                //
+                // SET PRESERVATION: unchanged. The other four entries live in `game/effects/mod.rs`
+                // and `game/effects/scoped_library_search.rs`, neither of which this change touches,
+                // and the inserted expression adds no line matching the needle — total still 37,
+                // partition still 5/7/25.
+                //
                 // The Ward continuation port independently inserts +13 lines above the same
                 // producer, while this branch's durable-knowledge hooks add another 24, so the
                 // combined tree is `:11828 - 7 + 13 + 24 = :11858`.
-                "game/engine.rs:11858".to_string(),
+                //
+                // MERGE OF `upstream/main` 117b430c2 INTO THIS BRANCH: `:11837` / `:11858` => `:11874`.
+                // This is the case the COLLISION NOTE above was written for, and it arrived as a real
+                // conflict rather than a silent auto-merge. BOTH incoming numbers were stale, each
+                // correct only for its own side: this branch's `:11837` counts the search-observer `-7`,
+                // the axis-scoped `-7` and the CR 500.5 `+23`, but not upstream's insertions; upstream's
+                // `:11858` counts the Ward continuation `+13` and the durable-knowledge hooks `+24`, but
+                // not this branch's. The shifts are INDEPENDENT and COMPOSE, so accepting either side
+                // verbatim would have been wrong by `37` or `16` respectively.
+                //
+                // Resolved BY CONTENT FIRST, arithmetic afterwards as a CHECK, per the doctrine at the
+                // head of this log. The line whose sha256 (WITH trailing newline) is
+                // `8a544e878d3e77fb80391b95af8f74059540d5ce4ad6fb83559f364df5cc7d63` sits at `:11874`
+                // in the merged tree; that digest matches exactly ONE line under a whole-file scan, and
+                // the literal text is likewise unique, so the coordinate is unambiguous. The check:
+                // `11828 -7 (search-observer) -7 (axis-scoped) +23 (CR 500.5) +13 (Ward) +24 (durable
+                // knowledge) = 11874`, which equals the located coordinate exactly. The conflict markers
+                // sat BELOW the producer, so resolving them could not have shifted it.
+                //
+                // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
+                // neither does this branch — total still 37, partition still 5/7/25.
+                "game/engine.rs:11902".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

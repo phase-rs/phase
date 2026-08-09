@@ -7403,18 +7403,22 @@ fn parse_for_each_object_copy_parts(
 /// repeat an earlier choice (confirmed by the "Offering" cycle ruling —
 /// Benevolent/Infernal/Intellectual/Sylvan Offering — issue #6381). Either
 /// way, the engine index is derived from chain position, not the ordinal.
-/// CR 102.3 + CR 608.2d: Recognize the "with the most life [among
+/// CR 102.2 / CR 102.3 + CR 608.2d: Recognize the "with the most life [among
 /// your opponents]" qualifier on a "choose an opponent" instruction and lower it
 /// to the equivalent `PlayerFilter::PlayerAttribute` restriction: each candidate
 /// opponent whose life total is `>=` the maximum life total across all opponents.
-/// CR 102.3 scopes the candidate set to opponents; CR 608.2d lets the controller
-/// pick ONE qualifying opponent (resolving ties) when multiple share the maximum.
+/// CR 102.2 (two-player) / CR 102.3 (team multiplayer) scope the candidate set to
+/// opponents. For the resolution-time "choose an opponent …" consumers, CR 608.2d
+/// lets the controller pick ONE qualifying opponent (resolving ties) when multiple
+/// share the maximum. (The static forced-attack consumer reuses this SAME filter
+/// but is not a resolution-time choice — there a most-life tie is resolved under
+/// CR 508.1b/d at declare-attackers; see `parse_required_defender_selector`.)
 /// The candidate's life is read PER-CANDIDATE (`PlayerScope::ScopedPlayer`); the
 /// `value` threshold is the controller-relative max (`PlayerScope::Opponent {
 /// aggregate: Max }`), composed from existing typed enums rather than a bespoke
 /// `MostLife` sibling. Consumes the qualifier text; returns the parsed
 /// restriction so the caller can attach it to `ChoiceType::Opponent`.
-fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
+pub(crate) fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = preceded(
         tag(" with the most life"),
         opt(tag(" among your opponents")),
@@ -16874,7 +16878,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     }
 
     // CR 109.4 + CR 109.5: Probe for controller-suffix variants on the object
-    // half, or the battle-specific "they protect" suffix (CR 310.8a).
+    // half, or the battle-specific "they protect" suffix (CR 310.9e).
     fn set_opponent_controller(filter: &mut TargetFilter) {
         match filter {
             TargetFilter::Typed(tf) => {
@@ -34678,6 +34682,47 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         Some(Zone::Graveyard)
     } else {
         None
+    }
+}
+
+/// CR 122.2 (docs/MagicCompRules.txt): "Counters on an object are not retained
+/// if that object moves from one zone to another … they simply cease to exist";
+/// CR 400.7 makes the moved object a new object. So a card selected from a
+/// COUNTERLESS origin zone (graveyard / hand / library) has no counters, and a
+/// trailing "with N <type> counter(s) on it" clause on an exile of such a card
+/// cannot be a target FILTER (that reading is vacuous — nothing there ever
+/// bears counters). It is instead the ENTER-WITH-COUNTERS rider the object is
+/// given as it enters Exile, exactly the suspend template of CR 702.62a
+/// ("…exile it with N time counters on it") and CR 122.1: Doom's Time Platform
+/// ("exile target nonland card from your graveyard with two time counters on
+/// it"); the descriptive-target sibling of Taigam's anaphoric "exile the spell
+/// you cast with four time counters on it".
+///
+/// Returns `(target_text_without_rider, lifted_counters)`. For exile /
+/// battlefield / unknown origins — where a card CAN bear counters (suspend time
+/// counters; "a creature card in exile with a takeover counter on it") — the
+/// clause is returned UNCHANGED so it remains a filter.
+///
+/// The origin gate (`infer_origin_zone`) and the counter clause detection
+/// (`parse_with_counters_suffix_spanned`, a nom `scan_preceded`) are both the
+/// parser acting as detector: a non-counter "with …" (e.g. "with flying") fails
+/// the counter body and is left in place. `off` indexes the ASCII-lowercase
+/// copy; `to_ascii_lowercase` is byte-length preserving, so it is a valid char
+/// boundary in `clause` (same offset-slice invariant as `parse_exile_ast`).
+pub(super) fn split_counterless_enter_counters(
+    clause: &str,
+) -> (&str, Vec<(CounterType, QuantityExpr)>) {
+    let lower = clause.to_ascii_lowercase();
+    if !matches!(
+        infer_origin_zone(&lower),
+        Some(Zone::Graveyard | Zone::Hand | Zone::Library)
+    ) {
+        return (clause, Vec::new());
+    }
+    let (counters, offset) = parse_with_counters_suffix_spanned(&lower);
+    match offset {
+        Some(off) if !counters.is_empty() => (clause[..off].trim_end(), counters),
+        _ => (clause, Vec::new()),
     }
 }
 

@@ -449,16 +449,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             HashSet::new()
         };
 
-    // Debug exposure: a viewer with an active debug capability (CR is silent;
-    // this is an out-of-game capability) sees the names of cards in their own
-    // library, so the debug "move card from library to hand" picker can identify
-    // a specific card. This includes native single-user games, whose debug
-    // capability is intentionally independent of the multiplayer sandbox
-    // format flag. Opponents' libraries remain hidden. The FE alphabetizes the
-    // picker within each zone bucket, so name exposure does not leak draw order.
-    // The actual `library` Vec order on the wire is left untouched (preserving
-    // simulate-mode draw semantics) but is never surfaced as draw order.
-    let debug_self_library_visible = state.debug_mode && state.debug_permitted.contains(&viewer);
     // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
     // specified player." A player with a continuous "you may look at the top
     // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
@@ -482,7 +472,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|p| p.library.iter().copied())
         .collect();
     for obj_id in all_library_ids {
-        let owner = state.objects.get(&obj_id).map(|o| o.owner);
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
             || scry_visible.contains(&obj_id)
@@ -501,8 +490,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || state.viewer_knows_card_identity(viewer, obj_id)
             // CR 701.20e: own (or controlled-turn) library top under a
             // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
-            || look_top_visible.contains(&obj_id)
-            || (debug_self_library_visible && owner == Some(viewer));
+            || look_top_visible.contains(&obj_id);
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
             && !drawn_choice_hand_cards.contains(&obj_id)
@@ -3094,10 +3082,10 @@ mod tests {
         );
     }
 
-    /// Debug capability exposure lets a viewer identify cards in their own
-    /// library for debug actions, without exposing an opponent's library.
+    /// Debug permission does not alter normal hidden-zone visibility. The
+    /// explicit debug browser receives its separately authorized projection.
     #[test]
-    fn debug_permitted_sees_own_library_but_not_opponent_library() {
+    fn debug_permission_keeps_all_unrevealed_library_cards_hidden() {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
         state.debug_mode = true;
         state.debug_permitted.insert(PlayerId(0));
@@ -3120,8 +3108,8 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(
             filtered.objects.get(&own).map(|obj| obj.name.as_str()),
-            Some("My Library Card"),
-            "viewer must see their own library names with debug capability"
+            Some("Hidden Card"),
+            "debug permission must not make normal library objects visible"
         );
         assert_eq!(
             filtered.objects.get(&opp).map(|obj| obj.name.as_str()),

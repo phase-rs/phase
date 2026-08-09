@@ -68,7 +68,7 @@ use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
-use crate::game::game_object::{AttachTarget, CaseState, GameObject, PhaseStatus};
+use crate::game::game_object::{AttachTarget, BackFaceData, CaseState, GameObject, PhaseStatus};
 
 fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
@@ -3564,11 +3564,13 @@ pub enum PersistentAxisMaterialization {
 
 /// CR 732.2a: the `unbounded_resources` axis a counter of `ct` on `obj_id` backs — mirrors
 /// `ResourceVector::snapshot`'s `(CounterClass, ObjectClass)` keying. SINGLE mapping from a
-/// counter target to its axis, with exactly three production call sites, all in this file:
-/// `scheduled_collapse_axes`, and `clear_collapsed_materializations`' surviving-target guard
-/// (twice). The ∞ counter-pill projection in `game::derived_views` is NOT one of them — it
-/// projects the battlefield-surviving entries of `unbounded_counter_targets` directly and
-/// never maps them to an axis.
+/// counter target to its axis, with exactly four production call sites: `scheduled_collapse_axes`
+/// and `clear_collapsed_materializations`' surviving-target guard (twice) in this file, plus
+/// `game::derived_views::object_growth_backing`, which derives each registered pair's own axis to
+/// decide whether THIS axis still has live board backing. The counter-DISPLAY projection in
+/// `game::derived_views` is NOT one of them — `counter_display_views` unions the
+/// BATTLEFIELD-SURVIVING entries of `unbounded_counter_targets` (as the ∞ ANNOTATION) with every
+/// object's own positive counters (as `Finite` rows, in every zone), and maps neither to an axis.
 ///
 /// LIVE RE-DERIVATION — DELIBERATE DISPLAY-ONLY TOLERANCE. The class is read from the
 /// object as it stands NOW, not snapshotted at accept. `state.objects` retains an object
@@ -3592,15 +3594,19 @@ pub enum PersistentAxisMaterialization {
 /// Two further removes operate on DISCARDED COMPARISON CLONES, never live state
 /// (`game::engine::normalize_recast_frame`, `analysis::resource`'s frame projection).
 ///
-/// REACHABILITY BY CONSUMER — with the pill projection no longer mapping to an axis, both
+/// REACHABILITY BY CONSUMER — with the pill projection still not mapping to an axis, all THREE
 /// remaining consumers are LIVE, and byte-identical to the pre-extraction nested
 /// `counter_axis` helper they already used:
 ///   • `scheduled_collapse_axes` — read by `clear_collapsed_materializations` to pick the
-///     removals, AND by `derive_views` (through `scheduled_display_axes`) to flag each `∞` row.
+///     removals, AND by `derive_views` (through `accepted_collapse_axes`) to flag each `∞` row.
 ///     Exactly the fail-open described above: a removal that finds nothing, and an axis that
 ///     flags no row. An unflagged row renders plain `∞` rather than `∞→N`, so the polarity is
 ///     unchanged — nothing is hidden, one affordance is merely not offered.
 ///   • `clear_collapsed_materializations`' own surviving-target guard.
+///   • `game::derived_views::object_growth_backing`'s `Counter(..)` arm — same fail-open: a
+///     drifted bearer derives `Counter(_, Other)`, which matches no registered pair for the axis
+///     being asked about, so nothing answers, the arm returns `None`, and the badge is KEPT.
+///     Never `Some(false)`, which is the only answer that could drop a row.
 ///
 /// That fail-open polarity is the SAME one this phase mandates everywhere else (an axis
 /// with no registration renders ∞): it can only ever leave an ∞ standing one boundary longer
@@ -3640,6 +3646,31 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+}
+
+/// Private, face-complete source for a debug-created card that has not yet
+/// materialized as a game object. This lives only inside a resolution frame so
+/// a paused batch neither allocates an object identity nor exposes a future
+/// card in a public zone before its own entry begins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DebugCardEntrySource {
+    pub face: CardFace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<BackFaceData>,
+}
+
+/// CR 400.7 + CR 614.1: Remaining real battlefield entries for one debug
+/// Create Card request. Each item is materialized immediately before its own
+/// entry attempt, so replacement and as-enters choices can suspend without
+/// staging later cards in a visible zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingDebugCardEntries {
+    pub source: DebugCardEntrySource,
+    pub owner: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_to: Option<AttachTarget>,
+    pub nonlegendary: bool,
+    pub remaining: u32,
 }
 
 /// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
@@ -9778,12 +9809,15 @@ pub enum WaitingFor {
         valid_attacker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_attack_targets: Vec<crate::game::combat::AttackTarget>,
-        /// CR 508.1a–d: engine-authoritative per-attacker legal `AttackTarget`s.
+        /// CR 508.1a–d: engine-authoritative per-attacker selectable
+        /// `AttackTarget` support. Each listed pair occurs in at least one
+        /// complete declaration accepted by the engine; this is not a standalone
+        /// hard-legality verdict.
         /// `None` = legacy serialized state (consumers fall back to the aggregate
         /// `valid_attack_targets`). `Some(map)` = authoritative; a missing attacker
-        /// key means "no legal targets" (no fallback). New prompts always emit
-        /// `Some` — computed by the same engine constraints model that enforces
-        /// legality in `validate_attack_declaration`.
+        /// key means "no selectable targets" (no fallback). New prompts always
+        /// emit `Some` — computed by the same engine constraints model that
+        /// enforces legality in `validate_attack_declaration`.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -13357,7 +13391,7 @@ pub struct StackPaidSnapshot {
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
     pub casting_variant: CastingVariant,
-    /// CR 310.11b + CR 712.14a: Exile alt-cost casts that were explicitly cast
+    /// CR 310.12b + CR 712.14a: Exile alt-cost casts that were explicitly cast
     /// transformed resolve onto the battlefield back face up.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_transformed: bool,
@@ -14495,17 +14529,28 @@ declare_game_state! {
 
     /// CR 732.2a / CR 701.34a display state: for the winning controller of an
     /// accepted COUNTER-growth loop shortcut (proliferate charge on Pentad Prism,
-    /// burden on The One Ring), the `(ObjectId, CounterType)` pairs whose preserved
-    /// `Generic` counters the certified-unbounded loop pumps each cycle. The
-    /// counter analog of `unbounded_loop_pile`: object-growth marks a per-OBJECT
-    /// pile, but the counter-growth cover's unbounded axis is object-agnostic
-    /// (`ResourceAxis::Counter(Other, Other)`), so this per-object channel is what
-    /// lets the frontend render `∞` on the specific pumped counter pill instead of
-    /// the literal count. Re-derived once at loop materialization (by driving one
-    /// period on a clone and diffing `Generic` counters) and projected to
-    /// `DerivedViews::unbounded_counters`. Written ONLY by
-    /// `register_unbounded_counter_targets`; cleared (in lockstep with
-    /// `unbounded_resources` / `unbounded_loop_pile`) by `clear_unbounded_loop`.
+    /// burden on The One Ring, a +1/+1 or loyalty pump loop), the
+    /// `(ObjectId, CounterType)` pairs whose preserved BENEFICIAL counters the
+    /// certified-unbounded loop pumps each cycle — the wildcard-free partition
+    /// `analysis::resource::counter_is_beneficial_materializable` names
+    /// (`Generic(_)`, `Plus1Plus1`, `Loyalty`, `Defense`). The counter analog of
+    /// `unbounded_loop_pile`: object-growth marks a per-OBJECT pile, but the
+    /// counter-growth cover's unbounded axis MAY be object-agnostic
+    /// (`ResourceAxis::Counter(Other, Other)`) — one accepted proposal can carry both
+    /// that display axis and an object-classed one, which is why the universal was
+    /// weakened here — so this per-object channel is what lets the frontend render
+    /// `∞` on the specific pumped counter pill instead of the literal count.
+    /// Re-derived once at loop materialization by
+    /// `game::engine::current_period_counter_growth` (drive one period on a clone,
+    /// diff beneficial counters) — the SAME single derivation the batched-collapse δ
+    /// stash carries, projected to `(object, counter)` — and projected again, as the ∞
+    /// ANNOTATION half only, into `DerivedViews::counter_display`, whose rows also exist
+    /// for objects this store never names. Written ONLY by
+    /// `register_unbounded_counter_targets`. Cleared by TWO authorities:
+    /// `clear_unbounded_loop` (whole-map, in lockstep with `unbounded_resources` /
+    /// `unbounded_loop_pile`) and `clear_collapsed_materializations`, which filters
+    /// the pairs by the collapsed axes and either removes the entry or re-inserts the
+    /// survivors.
     ///
     /// DISPLAY-ONLY: the object's real counter count is NEVER mutated by this field —
     /// CR 701.34a proliferate still adds a real counter each cycle; the `∞` is a
@@ -17367,6 +17412,36 @@ impl GameState {
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack
             .insert_copy_token_parent_at_child_boundary(pending, child_stack_start)
+    }
+
+    /// Returns the debug-card batch owner only when its typed frame owns the
+    /// stack top.
+    pub fn active_debug_card_entries(&self) -> Option<&PendingDebugCardEntries> {
+        self.resolution_stack.active_debug_card_entries()
+    }
+
+    /// Consume exactly the active debug-card batch after its current entry
+    /// finishes. A buried batch is a parent dependency, not a fallback.
+    pub fn take_active_debug_card_entries(
+        &mut self,
+    ) -> Result<Option<PendingDebugCardEntries>, ResolutionStackError> {
+        self.resolution_stack.take_active_debug_card_entries()
+    }
+
+    /// Park a debug-card batch as the active inner frame.
+    pub fn push_debug_card_entries(&mut self, pending: PendingDebugCardEntries) {
+        self.resolution_stack.push_debug_card_entries(pending);
+    }
+
+    /// Insert a debug-card batch below the complete child stack its current
+    /// entry attempt created after recording the pre-entry boundary.
+    pub fn insert_debug_card_entries_parent_at_child_boundary(
+        &mut self,
+        pending: PendingDebugCardEntries,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_debug_card_entries_parent_at_child_boundary(pending, child_stack_start)
     }
 
     /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
@@ -20556,17 +20631,20 @@ impl GameState {
     /// CR 732.2a: the exact `ResourceAxis` set a deferred materialization stash will
     /// collapse at the next CR 500.5 boundary. SINGLE AUTHORITY with TWO production callers:
     /// `clear_collapsed_materializations`, which REMOVES these axes once the growth was applied,
-    /// and `game::derived_views::scheduled_display_axes`, which flags each `∞` row's `scheduled`
-    /// field.
+    /// and `game::derived_views`, which projects it onto the `(player, family)` collapse-state
+    /// channel (`UnboundedFamilyView::state`).
     ///
-    /// NOT a display FILTER. `derive_views` reads this to ANNOTATE a row, never to decide whether
-    /// the row exists. Which surfaces exist is gated on their own stores and on live battlefield
-    /// membership, never on this set. (This doc has been stale twice — it once said "ONE
-    /// production caller" and "deliberately not read by `game::derived_views`"; then it named a
-    /// since-removed tag loop as the caller. Each time the mirror sentence in `derived_views` was
-    /// updated and this one — the doc a future caller reads first — was not. Hence it now names
-    /// the FUNCTION, not the consumer, so adding a consumer inside `derived_views` cannot make it
-    /// stale again.)
+    /// NOT a display FILTER. `derive_views` reads this to ANNOTATE a row, and — since CR 732.2c
+    /// binds an accepted shortcut the instant the last player accepts — to KEEP a row whose board
+    /// backing has died; never to decide that a row should not exist. Which surfaces exist is
+    /// gated on their own stores and on live battlefield membership, never on this set alone.
+    /// (This doc has been stale THREE times — it once said "ONE production caller" and
+    /// "deliberately not read by `game::derived_views`"; then it named a since-removed tag loop as
+    /// the caller; then it named both a function that has since been split in two and a row
+    /// `scheduled` field that no longer exists. Each time the mirror sentence in `derived_views`
+    /// was updated and this one — the doc a future caller reads first — was not. Hence it now
+    /// names the CHANNEL and the rule, not a function and not a field: a channel name survives a
+    /// rename, and a function name has now demonstrably not survived three.)
     ///
     /// CR 732.2a + CR 732.2c — WHAT THIS STASH IS, STATED AS THE RULE RATHER THAN AS A CONCESSION.
     /// This doc previously called the stash an engine deviation "that no CR licenses". That was
@@ -25289,6 +25367,224 @@ mod tests {
         );
     }
 
+    /// Shared rig for the two widened-registration boundary tests below. ONE builder, two
+    /// `#[test]`s: a single four-arm test masks its own later arms, because a mutant that reds an
+    /// early arm aborts before the rest run — which is exactly how the polarity of one of these
+    /// probes was got wrong once already.
+    ///
+    /// Returns `(state, driven_axis, widened_axis)`.
+    ///
+    /// EVERY LINE HERE IS LOAD-BEARING:
+    /// - CR 122.1: `collapsed_counter_axis` takes `CounterClass` from the COUNTER and
+    ///   `ObjectClass` from the BEARER. On a CREATURE bearer `Generic("charge")` derives
+    ///   `Counter(Other, CREATURE)` — NOT `Counter(Other, Other)`. Getting that wrong makes the
+    ///   matched negative assert about an axis nothing derives.
+    /// - `GameObject::new` sets `card_types: CardType::default()` (EMPTY `core_types`), so the
+    ///   bearer's creature-ness must be assigned explicitly. A name string does nothing; without
+    ///   the assignment every axis below is `ObjectClass::Other` and the REACH arm is false.
+    /// - `mark_unbounded_loop` writes `unbounded_resources` ONLY.
+    ///   `register_unbounded_loop_enablers` is the sole write authority for
+    ///   `unbounded_loop_enablers` and no-ops on an empty set, so without the explicit call the
+    ///   enabler-absence assertion would measure a map NOTHING in the rig can populate — a
+    ///   zero-census with no positive control.
+    fn widened_counter_rig(ct: CounterType) -> (GameState, ResourceAxis, ResourceAxis) {
+        use crate::analysis::resource::{CounterClass, ObjectClass};
+
+        let driven_axis = ResourceAxis::Counter(CounterClass::Other, ObjectClass::Creature);
+        let widened_axis = ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature);
+
+        let mut state = GameState::new_two_player(7);
+        let mut bearer = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            PlayerId(0),
+            "Beast".to_string(),
+            Zone::Battlefield,
+        );
+        bearer.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(10), bearer);
+        state.battlefield.push_back(ObjectId(10));
+
+        state.mark_unbounded_loop(PlayerId(0), &[driven_axis]);
+        state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(10)]));
+        state.register_unbounded_counter_targets(PlayerId(0), vec![(ObjectId(10), ct)]);
+        (state, driven_axis, widened_axis)
+    }
+
+    /// The stash a `DriveSequence` accept leaves, naming exactly the driven axis.
+    fn widened_counter_driven_stash(
+        driven_axis: ResourceAxis,
+    ) -> Vec<PersistentAxisMaterialization> {
+        vec![PersistentAxisMaterialization::DriveSequence {
+            sequence: vec![],
+            collapsed_axes: vec![driven_axis],
+        }]
+    }
+
+    /// CR 732.2a: widening the `∞` counter registration from `Generic`-only to the whole
+    /// beneficial partition can register a pair whose derived axis the accepted collapse never
+    /// names. This pins what that does at the boundary, on BOTH halves of
+    /// `clear_collapsed_materializations`:
+    ///
+    /// - arm 1 REACH — the two axes really differ, and BOTH derivations are asserted, so a rig
+    ///   whose bearer silently lost its creature type fails here instead of passing vacuously.
+    /// - arm 2 SUBJECT (display) — the widened pair SURVIVES the driven collapse, and the `∞`
+    ///   counter pill really is still projected for it.
+    /// - arm 3 THE ANSWER (rules state) — a surviving DISPLAY pair does NOT suppress the axis
+    ///   removal and does NOT hold the `unbounded_loop_enablers` lockstep open. Both absences are
+    ///   preceded, in the same frame, by a PRESENCE assertion on the same key, so each measures a
+    ///   REMOVAL rather than a map nothing populated.
+    ///
+    /// Its matched negative is `a_counter_pair_on_the_driven_axis_is_dropped_at_the_boundary`,
+    /// which shares this rig builder and asserts the complementary outcome on the same map.
+    ///
+    /// REVERT-PROBES, each with the arm it flips and the direction (all GREEN → RED):
+    /// - delete `&& !driven_axes.contains(&collapsed_counter_axis(..))` from the surviving-target
+    ///   filter ⇒ flips the MATCHED NEGATIVE's arm 4, not this test: the filter is `P && Q`, so
+    ///   dropping `Q` is strictly MORE permissive, more pairs survive, and only a REMOVAL
+    ///   assertion can red.
+    /// - replace `axes_to_remove.retain(|ax| !backed.contains(ax))` with
+    ///   `if !surviving_targets.is_empty() { axes_to_remove.clear(); }` — a surviving display pair
+    ///   holding the whole rules-state removal open ⇒ arm 3 reds (both halves), arm 2 stays green.
+    /// - replace the survivors if/else with an unconditional
+    ///   `self.unbounded_counter_targets.remove(&controller);` ⇒ arm 2 reds, arm 3 stays green.
+    ///
+    /// HONEST BOUND: this drives `clear_collapsed_materializations` directly with a hand-built
+    /// stash, so it is a CONTRACT test of the boundary algebra, not a live-game repro. The
+    /// mixed-stash shape in which a surviving pair CAN suppress an axis removal (two accepts by
+    /// one controller before one boundary, taking different routes) pre-exists this widening for
+    /// `Generic` pairs; the widening enlarges its domain to the beneficial partition and is
+    /// recorded as a follow-up, not fixed here.
+    #[test]
+    fn widened_counter_registration_survives_a_driven_collapse_without_moving_the_axis_set() {
+        let (mut state, driven_axis, widened_axis) = widened_counter_rig(CounterType::Plus1Plus1);
+        let bearer = ObjectId(10);
+
+        // ARM 1 — REACH. Both derivations asserted, and their difference.
+        assert_eq!(
+            collapsed_counter_axis(&state, bearer, &CounterType::Plus1Plus1),
+            widened_axis,
+            "reach: on a CREATURE bearer a +1/+1 counter derives Counter(Plus1Plus1, Creature)"
+        );
+        assert_eq!(
+            collapsed_counter_axis(&state, bearer, &CounterType::Generic("charge".to_string())),
+            driven_axis,
+            "reach: on the SAME creature bearer a Generic counter derives Counter(Other, Creature) \
+             — the ObjectClass comes from the BEARER, so this is NOT Counter(Other, Other)"
+        );
+        assert_ne!(
+            widened_axis, driven_axis,
+            "reach: the widened pair's axis is not the one the collapse drives — without this the \
+             whole fixture is about one axis"
+        );
+
+        // PRE-CLEAR PRESENCE — the positive controls. Each absence asserted after the clear is a
+        // REMOVAL because the same key is proven present here, in the same frame.
+        assert_eq!(
+            state.unbounded_counter_targets.get(&PlayerId(0)),
+            Some(&BTreeSet::from([(bearer, CounterType::Plus1Plus1)])),
+            "pre-clear: the widened pair is registered"
+        );
+        assert_eq!(
+            state.unbounded_resources.get(&PlayerId(0)),
+            Some(&BTreeSet::from([driven_axis])),
+            "pre-clear: the marked axis set is exactly the driven axis"
+        );
+        assert!(
+            state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "pre-clear: the enabler map is POPULATED — without this the arm-3 absence below \
+             measures a map nothing in the rig can write"
+        );
+
+        state.clear_collapsed_materializations(
+            PlayerId(0),
+            &widened_counter_driven_stash(driven_axis),
+        );
+
+        // ARM 2 — SUBJECT (display). The widened pair survives, and its pill is still projected.
+        assert_eq!(
+            state.unbounded_counter_targets.get(&PlayerId(0)),
+            Some(&BTreeSet::from([(bearer, CounterType::Plus1Plus1)])),
+            "ARM2 widened pair survives: its derived axis was not collapsed, so per CR 732.2c \
+             nothing about it has ended"
+        );
+        let pills =
+            crate::game::derived_views::derive_views(&state, Some(PlayerId(0))).counter_display;
+        assert_eq!(
+            pills.get(&bearer),
+            Some(&crate::game::derived_views::ObjectCounterDisplay {
+                pills: vec![crate::game::derived_views::CounterRowView {
+                    counter: CounterType::Plus1Plus1,
+                    count: state
+                        .objects
+                        .get(&bearer)
+                        .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+                        .unwrap_or(0),
+                    magnitude: crate::game::derived_views::CounterMagnitude::Unbounded,
+                }],
+                loyalty: None,
+            }),
+            "ARM2 pill projection: the surviving pair really reaches `counter_display` — the \
+             store half alone would not prove the display over-keep is visible, got {pills:?}"
+        );
+
+        // ARM 3 — THE ANSWER (rules state). Both halves are REMOVALS, not absences.
+        assert!(
+            !state.unbounded_resources.contains_key(&PlayerId(0)),
+            "ARM3a axis set emptied: a surviving DISPLAY pair does not suppress the removal of an \
+             axis the collapse actually drove"
+        );
+        assert!(
+            !state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
+            "ARM3b enabler dropped: the axis set emptied, so the lockstep drop fires — a surviving \
+             display pair does not hold it open"
+        );
+    }
+
+    /// The MATCHED NEGATIVE of
+    /// `widened_counter_registration_survives_a_driven_collapse_without_moving_the_axis_set`,
+    /// on the SAME rig builder and the SAME map: a registered pair whose derived axis IS the
+    /// driven one is filtered out and its entry removed. Without this arm, the survival assertion
+    /// next door would pass against a boundary that never filters anything.
+    ///
+    /// REVERT-PROBE: delete `&& !driven_axes.contains(&collapsed_counter_axis(..))` from the
+    /// surviving-target filter ⇒ this test reds (the pair survives, the entry is re-inserted, and
+    /// `contains_key` is true) while the survival test stays green. That is the only mutation of
+    /// the three that flips THIS arm, and it flips no other.
+    #[test]
+    fn a_counter_pair_on_the_driven_axis_is_dropped_at_the_boundary() {
+        let (mut state, driven_axis, widened_axis) =
+            widened_counter_rig(CounterType::Generic("charge".to_string()));
+        let bearer = ObjectId(10);
+
+        // ARM 1 — REACH, identical to its twin: this pair's axis IS the driven one.
+        assert_eq!(
+            collapsed_counter_axis(&state, bearer, &CounterType::Generic("charge".to_string())),
+            driven_axis,
+            "reach: the Generic pair on a creature bearer derives the DRIVEN axis"
+        );
+        assert_ne!(
+            widened_axis, driven_axis,
+            "reach: the two axes this pair of tests separates really are distinct"
+        );
+        assert!(
+            state.unbounded_counter_targets.contains_key(&PlayerId(0)),
+            "pre-clear: the pair is registered — the absence below is a REMOVAL"
+        );
+
+        state.clear_collapsed_materializations(
+            PlayerId(0),
+            &widened_counter_driven_stash(driven_axis),
+        );
+
+        // ARM 4 — the pair derives a driven axis, so it is filtered and the entry removed.
+        assert!(
+            !state.unbounded_counter_targets.contains_key(&PlayerId(0)),
+            "ARM4 generic pair filtered out, entry removed: its derived axis WAS collapsed, so its \
+             ∞ has genuinely ended"
+        );
+    }
+
     /// `register_unbounded_loop_enablers` is a no-op for an empty set — no entry to
     /// defuse on later (mirrors `mark_unbounded_loop`'s idempotent set-union contract).
     #[test]
@@ -25713,7 +26009,7 @@ mod tests {
         );
         object.static_definitions.push(
             StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1),
+                player: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -25728,7 +26024,7 @@ mod tests {
             .get_mut(&ObjectId(500))
             .unwrap()
             .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1),
+            player: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]

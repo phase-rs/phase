@@ -94,12 +94,15 @@ function seed(options: {
   abilities?: unknown[];
   legalActionsByObject?: Record<string, GameAction[]>;
   waitingFor?: WaitingFor;
+  counters?: GameObject["counters"];
+  derived?: GameState["derived"];
 }) {
-  const curse = makeCurse(options.abilities ?? [{ effect: { type: "Tap" } }]);
+  const base = makeCurse(options.abilities ?? [{ effect: { type: "Tap" } }]);
+  const curse = options.counters ? { ...base, counters: options.counters } : base;
   const waitingFor = options.waitingFor ?? buildPriorityWaitingFor();
   useGameStore.setState({
     gameMode: "local",
-    gameState: makeState(curse, waitingFor),
+    gameState: { ...makeState(curse, waitingFor), derived: options.derived },
     waitingFor,
     legalActions: [],
     legalActionsByObject: options.legalActionsByObject ?? {},
@@ -208,5 +211,48 @@ describe("DialogAttachmentCard activation gate", () => {
     expect(dispatchAction).toHaveBeenCalledWith(CURSE_TAP);
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
     expect(benign.onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  // FU-B: this site now consumes `derived.counter_display` with NO raw-map fallback and no
+  // filter. The raw map and the projection DISAGREE on every axis, so a reintroduced
+  // `Object.entries(obj.counters)` read (or a join back to it) fails at least one assertion.
+  //
+  // MEASURED (drop side): restoring the raw-map read fails with
+  //   `Unable to find an element with the text: charge x4` (the projection count is gone,
+  //   `charge x99` renders instead).
+  it("renders finite pills from the engine projection, never the raw counters map (CR 122.1)", () => {
+    seed({
+      counters: { charge: 99, stun: 2 },
+      derived: { counter_display: { [String(CURSE_ID)]: { pills: [{ counter: "charge", count: 4 }] } } },
+    });
+
+    // Projection count wins over the raw map's disagreeing count.
+    expect(screen.getByText("charge x4")).toBeTruthy();
+    expect(screen.queryByText("charge x99")).toBeNull();
+    // Raw-map-only entry the projection dropped must NOT render.
+    expect(screen.queryByText("stun x2")).toBeNull();
+  });
+
+  // CR 732.2a / CR 701.34a: the pill the superseded raw-map renderer could not express at all.
+  // `count: 0` is deliberate — the UNBOUNDED pass of `counter_display_views` has no zero filter,
+  // so a 0 -> 1 growth loop legitimately publishes an Unbounded row whose live count is still 0.
+  //
+  // MEASURED (drop side): restoring the raw-map read fails with
+  //   `Unable to find an element with the text: charge ∞` — the map has no `charge` key at all,
+  //   and even seeded it could only ever render a finite `x0`, which the old `> 0` filter dropped.
+  it("renders an Unbounded pill as ∞ even at count 0 (CR 732.2a)", () => {
+    seed({
+      counters: {},
+      derived: {
+        counter_display: {
+          [String(CURSE_ID)]: {
+            pills: [{ counter: "charge", count: 0, magnitude: "Unbounded" }],
+          },
+        },
+      },
+    });
+
+    expect(screen.getByText("charge ∞")).toBeTruthy();
+    expect(screen.queryByText("charge x0")).toBeNull();
   });
 });

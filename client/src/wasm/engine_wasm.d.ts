@@ -143,6 +143,18 @@ export function get_ai_action_proposal_with_diagnostics(difficulty: string, play
 export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
 
 /**
+ * Mint a proposal using the existing tactical floor without entering
+ * rollout search. This is the engine-owned escape for a timed-out optional
+ * scorer; it still issues and validates the current decision contract.
+ */
+export function get_ai_tactical_action_proposal(difficulty: string, player_id: number): any;
+
+/**
+ * Diagnostic counterpart of [`get_ai_tactical_action_proposal`].
+ */
+export function get_ai_tactical_action_proposal_with_diagnostics(difficulty: string, player_id: number): any;
+
+/**
  * Look up a card face by name from the loaded card database.
  * Returns the serialized `CardFace` (keywords, abilities, triggers, static_abilities,
  * replacements, card_type, oracle_text, etc.) or null if not found.
@@ -503,6 +515,8 @@ export interface InitOutput {
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_with_diagnostics: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly get_ai_tactical_action_proposal: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_tactical_action_proposal_with_diagnostics: (a: number, b: number, c: number) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;

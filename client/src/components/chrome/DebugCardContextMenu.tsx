@@ -8,6 +8,7 @@ import type {
   ObjectId,
   Zone,
 } from "../../adapter/types";
+import { formatCounterType } from "../../viewmodel/cardProps";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
@@ -145,10 +146,6 @@ function DebugCardContextMenuInner({
 
   const onBattlefield = obj.zone === "Battlefield";
   const isCreature = obj.card_types?.core_types?.includes("Creature") ?? false;
-  const isPlaneswalker = obj.card_types?.core_types?.includes("Planeswalker") ?? false;
-  const isClass = obj.card_types?.subtypes?.includes("Class") ?? false;
-  const isSaga = obj.card_types?.subtypes?.includes("Saga") ?? false;
-  const hasLoreCounters = isClass || isSaga;
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
   const currentKeywords = obj.keywords ?? [];
 
@@ -248,18 +245,22 @@ function DebugCardContextMenuInner({
       {/* Counter actions */}
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
-          {isCreature && (
-            <>
-              <CounterRow label="+1/+1" objectId={objectId} counterType="P1P1" current={obj.counters?.P1P1 ?? 0} onDispatch={dispatchDebugKeepOpen} />
-              <CounterRow label="-1/-1" objectId={objectId} counterType="M1M1" current={obj.counters?.M1M1 ?? 0} onDispatch={dispatchDebugKeepOpen} />
-            </>
-          )}
-          {isPlaneswalker && (
-            <CounterRow label="Loyalty" objectId={objectId} counterType="loyalty" current={obj.counters?.loyalty ?? 0} onDispatch={dispatchDebugKeepOpen} />
-          )}
-          {hasLoreCounters && (
-            <CounterRow label="Lore" objectId={objectId} counterType="lore" current={obj.counters?.lore ?? 0} onDispatch={dispatchDebugKeepOpen} />
-          )}
+          {Object.entries(obj.counters ?? {})
+            .flatMap(([counterType, count]) => {
+              const current = count ?? 0;
+              return current > 0
+                ? [
+                    <CounterRow
+                      key={counterType}
+                      label={formatCounterType(counterType)}
+                      objectId={objectId}
+                      counterType={counterType}
+                      current={current}
+                      onDispatch={dispatchDebugKeepOpen}
+                    />,
+                  ]
+                : [];
+            })}
         </div>
       )}
 

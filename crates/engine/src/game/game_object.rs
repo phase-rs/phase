@@ -211,7 +211,7 @@ pub enum PhaseOutCause {
 
 /// Stored back-face data for double-faced cards (DFCs).
 /// Populated when a Transform-layout card enters the game.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
@@ -2812,7 +2812,7 @@ impl GameObject {
         })
     }
 
-    /// CR 310.8a + CR 310.8e: Return this battle's protector, if any. Derived
+    /// CR 310.9 + CR 310.9a: Return this battle's protector, if any. Derived
     /// from `ChosenAttribute::Player` stored when the Siege's "As ~ enters"
     /// replacement resolved. Non-battle permanents return `None`.
     pub fn protector(&self) -> Option<PlayerId> {

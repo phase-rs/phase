@@ -65,6 +65,14 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
     };
 
+/** A completed, public scry outcome. Counts originate in the engine event; the
+ * UI only controls how long the outcome remains visible. */
+export interface ScryOutcomePayload {
+  playerId: PlayerId;
+  topCount: number;
+  bottomCount: number;
+}
+
 /** Direct-manipulation state for the mobile hand's held-card preview. The
  * engine-authored action set determines `playable` / whether `castReady` may
  * ever become true; offsets and the release threshold are presentation only. */
@@ -119,6 +127,7 @@ function flushPendingShow(): void {
 // payload; `diceRollQueue` holds the pending ones. Distinct from the board-event
 // step queue (animationStore) — that coordinates spatial per-object effects.
 let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+let scryOutcomeTimer: ReturnType<typeof setTimeout> | null = null;
 
 // CR 103.1: the starting-player contest determines who's on the play — a moment
 // the player should acknowledge, not one that flashes by. It holds on screen
@@ -191,6 +200,8 @@ interface UiStoreState {
   /** Pending dice/coin overlays behind the active one. Simultaneous or
    *  back-to-back rolls play serially instead of clobbering. */
   diceRollQueue: DiceRollPayload[];
+  /** Latest engine-authored public scry result, temporarily shown on board. */
+  scryOutcome: ScryOutcomePayload | null;
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: ObjectAction[] } | null;
   /** When non-null, the AttachmentsDialog is open showing every Aura
@@ -302,6 +313,10 @@ interface UiStoreActions {
   /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
    *  advancing to the next queued roll if any. */
   skipDiceRoll: () => void;
+  /** Surface one public scry outcome for a short, non-interactive board notice. */
+  flashScryOutcome: (payload: ScryOutcomePayload) => void;
+  /** Clear a visible scry result on a game-session boundary. */
+  resetScryOutcome: () => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: ObjectAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
@@ -361,6 +376,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   turnBannerNumber: null,
   diceRoll: null,
   diceRollQueue: [],
+  scryOutcome: null,
   focusedOpponent: null,
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
@@ -669,6 +685,21 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       diceAdvanceTimer = null;
     }
     advanceDiceQueue();
+  },
+  flashScryOutcome: (payload) => {
+    if (scryOutcomeTimer) clearTimeout(scryOutcomeTimer);
+    set({ scryOutcome: payload });
+    scryOutcomeTimer = setTimeout(() => {
+      scryOutcomeTimer = null;
+      set({ scryOutcome: null });
+    }, 4_000);
+  },
+  resetScryOutcome: () => {
+    if (scryOutcomeTimer) {
+      clearTimeout(scryOutcomeTimer);
+      scryOutcomeTimer = null;
+    }
+    set({ scryOutcome: null });
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),

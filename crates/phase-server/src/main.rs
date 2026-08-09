@@ -185,7 +185,7 @@ type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
-    Ok(GameSession::from_persisted(persisted, db.as_ref()))
+    GameSession::from_persisted(persisted, db.as_ref())
 }
 
 async fn reserve_lobby_subscriber_slot(
@@ -947,6 +947,7 @@ fn guard_full_create_game_settings_inbound(
     lobby_broker::validate_create_game_settings_inbound_fields(&fields)?;
     if let Some(format_config) = fields.format_config {
         format_config.validate_for_player_count(pc)?;
+        format_config.reject_unimplemented_range_of_influence()?;
     }
     guard_create_ai_seats(ai_seats, pc)?;
     lobby_broker::validate_deck_payload("deck", fields.deck)?;
@@ -2663,7 +2664,7 @@ async fn create_and_connect_multiplayer_session(
             pc,
             match_config,
             format_config,
-        );
+        )?;
         let full_key = match game_db.create_full_session_key(&game_code) {
             Ok(key) => key,
             Err(error) => {
@@ -3786,6 +3787,7 @@ async fn handle_full_game_submission(
     submission: GameSubmission,
     socket: &mut WebSocket,
     state: &SharedState,
+    db: &SharedDb,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
     game_db: &SharedGameDb,
@@ -3839,7 +3841,9 @@ async fn handle_full_game_submission(
         let lock_start = std::time::Instant::now();
         let mut mgr = state.lock().await;
         let applied = match submission {
-            GameSubmission::Action(action) => mgr.handle_action(&game_code, &player_token, action),
+            GameSubmission::Action(action) => {
+                mgr.handle_action_with_card_db(&game_code, &player_token, action, Some(db.as_ref()))
+            }
             GameSubmission::Interaction(submission) => {
                 mgr.handle_interaction(&game_code, &player_token, submission)
             }
@@ -4452,6 +4456,7 @@ async fn handle_client_message(
                 GameSubmission::Action(action),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
                 game_db,
@@ -4466,6 +4471,7 @@ async fn handle_client_message(
                 GameSubmission::Interaction(submission),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
                 game_db,
@@ -4970,7 +4976,7 @@ async fn handle_client_message(
                 // --- AI game path: create, start, and run initial AI actions ---
                 let (game_code, player_token, full_key, game_started_msg) = {
                     let mut mgr = state.lock().await;
-                    let (game_code, player_token) = mgr.create_game_with_ai(
+                    let (game_code, player_token) = match mgr.create_game_with_ai(
                         resolved,
                         display_name.clone(),
                         timer_seconds,
@@ -4979,7 +4985,13 @@ async fn handle_client_message(
                         db.card_names(),
                         format_config.clone(),
                         db.as_ref(),
-                    );
+                    ) {
+                        Ok(created) => created,
+                        Err(error) => {
+                            let _ = tx.send(ServerMessage::error(error));
+                            return;
+                        }
+                    };
 
                     let full_key = match game_db.create_full_session_key(&game_code) {
                         Ok(key) => key,
@@ -7876,6 +7888,23 @@ mod full_create_guard_tests {
         let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
 
         assert!(err.contains("archenemy_player"));
+    }
+
+    #[test]
+    fn full_create_guard_rejects_limited_range_until_supported() {
+        let deck = deck();
+        let mut fields = fields(&deck, None, None);
+        let mut format_config = engine::types::format::FormatConfig::standard();
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+        fields.format_config = Some(&format_config);
+
+        let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
+
+        assert!(err.contains("range_of_influence"));
     }
 
     #[test]

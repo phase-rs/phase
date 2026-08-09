@@ -920,6 +920,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::CopyToken(_) => {
             token_copy::drain_pending_copy_token_resolution(state, events);
         }
+        ResolutionFrame::DebugCardEntries(_) => {
+            crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -3622,8 +3625,24 @@ fn detach_after_player_scope_local_chain(
     // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
     // optional for that opponent. Keep the continuation inside the scoped
     // template so accepting the offer performs both instructions.
-    let next_is_optional_clause_continuation =
-        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
+    //
+    // CR 608.2c + CR 109.5: EXCEPT a child that carries its OWN distinct
+    // `player_scope` (a different population than this fan-out's) is a SEPARATE
+    // scoped instruction, not a continuation of this optional clause — e.g.
+    // Kwain, Itinerant Meddler's "each player may draw a card, then each player
+    // who drew a card this way gains 1 life": the GainLife is scoped to the
+    // drawers (`PerformedActionThisWay`), not to this "each player" (`All`)
+    // fan-out. Keeping it co-scoped would re-enter the fan-out driver once per
+    // outer iteration and re-count the incrementally growing this-way ledger,
+    // over-applying to the earlier-iterated players (a triangular over-gain). It
+    // must detach and resolve ONCE over its own population after the parent
+    // fan-out completes.
+    let next_is_optional_clause_continuation = node.optional
+        && next.sub_link == SubAbilityLink::ContinuationStep
+        && next
+            .player_scope
+            .as_ref()
+            .is_none_or(|child_scope| child_scope == scope);
     // CR 701.23i + CR 701.24a: A shuffle explicitly scoped to players who
     // searched this way is a once-after-all-searches tail, not the ordinary
     // per-player SearchLibrary → ChangeZone → Shuffle continuation. Keep the
@@ -14283,6 +14302,7 @@ mod tests {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {

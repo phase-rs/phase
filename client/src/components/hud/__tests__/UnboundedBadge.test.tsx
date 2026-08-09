@@ -28,12 +28,19 @@ import tokenWire from "../../../test/fixtures/unbounded-token-wire.json";
 import { PlayerHud } from "../PlayerHud.tsx";
 
 const PLAIN_TOKENS = "Unbounded tokens (∞)";
-// Passive voice on purpose: the badge renders on opponent HUDs, and a victim-attributed axis puts
-// it on the victim's seat while the loop's CONTROLLER is the one prompted to name N — so any
-// second-person phrasing here is addressed to the wrong player.
+// TWO VOICES, and which one renders is an engine fact, not a style choice. The engine publishes
+// `state.data.prompted` — the loop's CONTROLLER, the seat that will be asked to name N. The badge
+// says "you" only when that seat IS the viewer AND the viewer is not spectating; otherwise it
+// keeps the passive voice, because the row is keyed by the ATTRIBUTION player, which for a
+// victim-attributed axis is the victim, and the badge also renders on opponent HUDs.
 const COMMITTED_COUNTERS =
   "Unbounded counters (∞) — collapse pending; a finite amount will be chosen";
 const CONDITIONAL_TOKENS = "Unbounded tokens (∞) — collapse pending; this may stay unbounded";
+const COMMITTED_COUNTERS_YOU = "Unbounded counters (∞) — collapse pending; you'll name the count";
+const CONDITIONAL_TOKENS_YOU =
+  "Unbounded tokens (∞) — collapse pending; this may stay unbounded, and you'll name the count if it doesn't";
+const COMMITTED_TOKENS_YOU = "Unbounded tokens (∞) — collapse pending; you'll name the count";
+const COMMITTED_TOKENS = "Unbounded tokens (∞) — collapse pending; a finite amount will be chosen";
 const MIXED_COUNTERS =
   "Unbounded counters (∞) — part of this group has a pending collapse; part remains unbounded";
 const PLAIN_COUNTERS = "Unbounded counters (∞)";
@@ -47,8 +54,10 @@ const fam = (
 
 describe("UnboundedBadge + usePlayerDesignations", () => {
   beforeEach(() => {
-    useMultiplayerStore.setState({ activePlayerId: 0 });
-    useGameStore.setState({ gameState: buildGameState() });
+    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    // `gameMode` is reset explicitly because U8/U9/U10 set it, and a leaked `"spectate"` would
+    // silently suppress every second-person assertion in the rows that follow.
+    useGameStore.setState({ gameMode: null, gameState: buildGameState() });
   });
 
   afterEach(() => {
@@ -68,9 +77,17 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     // engine frames, two different glyphs. A component that mapped every `Scheduled` to the
     // scheduled glyph passes the second half and fails the first; one that never renders `∞→N`
     // fails the second.
+    //
+    // BOTH LABELS ARE SECOND-PERSON, and the HONEST BOUND for that is worth stating: both goldens
+    // carry `prompted: 0`, and the default test viewer is seat 0, so this fixture pins "the viewer
+    // really is the seat that will be asked ⇒ address them" and NOTHING about the divergent case.
+    // It CANNOT witness a prompted seat that differs from the badge's seat — the token golden's
+    // only axis is `TokensCreated`, an aggregate axis that attributes to its own controller, so
+    // badge seat == prompted seat == viewer by construction. U8 composes the divergence, and the
+    // engine-side pin is `two_controllers_draining_one_victim_do_not_cross_schedule` arms B/C.
     seed(tokenWire as unknown as DerivedViews);
     expect(screen.getAllByLabelText(/Unbounded/)).toHaveLength(1);
-    const conditional = screen.getByLabelText(CONDITIONAL_TOKENS);
+    const conditional = screen.getByLabelText(CONDITIONAL_TOKENS_YOU);
     expect(conditional).toBeInTheDocument();
     expect(conditional.textContent).toContain("∞→?");
     expect(conditional.textContent).not.toContain("∞→N");
@@ -79,7 +96,7 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     // frame in the suite.
     cleanup();
     seed(counterWire as unknown as DerivedViews);
-    const committed = screen.getByLabelText(COMMITTED_COUNTERS);
+    const committed = screen.getByLabelText(COMMITTED_COUNTERS_YOU);
     expect(committed).toBeInTheDocument();
     expect(committed.textContent).toContain("∞→N");
   });
@@ -103,10 +120,12 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
   it("U3/families: the engine's rows are rendered one badge per family, unmodified", () => {
     // COMPOSED — no single golden frame carries two families. The point of the row is that the FE
     // performs no fold at all now: two engine rows in, two badges out, each with its own state.
+    // `prompted` is deliberately OMITTED on both rows: this row is about family fan-out, not about
+    // voice, and an omitted seat renders the third person for everyone (pinned by U9).
     seed({
       unbounded_families: [
-        fam("tokens", { type: "Scheduled", data: "Conditional" }),
-        fam("counters", { type: "Scheduled", data: "Committed" }),
+        fam("tokens", { type: "Scheduled", data: { certainty: "Conditional" } }),
+        fam("counters", { type: "Scheduled", data: { certainty: "Committed" } }),
       ],
     } as DerivedViews);
     expect(screen.getAllByLabelText(/Unbounded/)).toHaveLength(2);
@@ -147,7 +166,7 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     // above are not satisfied by a component that renders a bare `∞` for everything.
     cleanup();
     seed(counterWire as unknown as DerivedViews);
-    expect(screen.getByLabelText(COMMITTED_COUNTERS).textContent).toContain("∞→N");
+    expect(screen.getByLabelText(COMMITTED_COUNTERS_YOU).textContent).toContain("∞→N");
   });
 
   it("U4/viewer: another seat's SCHEDULED family does not schedule this seat's badge", () => {
@@ -158,7 +177,8 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     seed({
       unbounded_families: [
         fam("tokens", { type: "Unscheduled" }, 0),
-        fam("tokens", { type: "Scheduled", data: "Committed" }, 1),
+        // `prompted` omitted — this row tests the SEAT FILTER, not the voice.
+        fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 1),
       ],
     } as DerivedViews);
     expect(screen.getAllByLabelText(/Unbounded/)).toHaveLength(1);
@@ -171,10 +191,75 @@ describe("UnboundedBadge + usePlayerDesignations", () => {
     cleanup();
     seed({
       unbounded_families: [
-        fam("tokens", { type: "Scheduled", data: "Committed" }, 0),
+        fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 0),
         fam("tokens", { type: "Unscheduled" }, 1),
       ],
     } as DerivedViews);
     expect(screen.getByLabelText(/collapse pending; a finite amount will be chosen/)).toBeInTheDocument();
+  });
+
+  it("U8/agency: the badge addresses the prompted seat, and only the prompted seat", () => {
+    // COMPOSED, and a MATCHED PAIR inside one `it` so neither half can stand alone. Identical
+    // family row; the ONLY thing that changes is `prompted`. Reds from both sides:
+    //   - delete the `you` branch          ⇒ the second-person half below fails;
+    //   - hardcode the second person       ⇒ the third-person half below fails.
+    //
+    // Seat 2 is deliberately NOT a seat this viewer can be: the badge sits on seat 0's HUD while
+    // the engine says seat 2 will be asked. That is the divergent shape the goldens cannot
+    // produce, and it is exactly the case a naive "the badge is on my HUD, so it's my prompt"
+    // implementation gets wrong.
+    act(() => {
+      useGameStore.setState({ gameMode: "online" });
+      useMultiplayerStore.setState({ activePlayerId: 0 });
+    });
+    seed({
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 2 } }, 0)],
+    } as DerivedViews);
+    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+
+    // MATCHED POSITIVE: same row, same viewer, prompted seat is now the viewer.
+    cleanup();
+    seed({
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } }, 0)],
+    } as DerivedViews);
+    expect(screen.getByLabelText(COMMITTED_TOKENS_YOU)).toBeInTheDocument();
+    expect(screen.queryByLabelText(COMMITTED_TOKENS)).toBeNull();
+  });
+
+  it("U9/ambiguous: an omitted prompted seat reads third person even for the viewer", () => {
+    // COMPOSED. `prompted` is omitted when the family's scheduled axes name TWO OR MORE distinct
+    // seats (the engine's seat meet fell to ⊥) — never "nobody". One glyph cannot address two
+    // players, so the badge must fall back to the seat-neutral voice rather than pick a winner,
+    // and it must do so even though the viewer is one of the candidates.
+    act(() => {
+      useGameStore.setState({ gameMode: "online" });
+      useMultiplayerStore.setState({ activePlayerId: 0 });
+    });
+    seed({
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed" } }, 0)],
+    } as DerivedViews);
+    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
+  });
+
+  it("U10/spectator: a spectator reads third person even when the prompted seat equals their resolved id", () => {
+    // COMPOSED, and this is the FALSE-POSITIVE GATE — the one error class this design must not
+    // have. `usePlayerId()` returns `PLAYER_ID` (0) in spectate mode, NOT `SPECTATOR_PLAYER_ID`,
+    // so a loop prompted to seat 0 resolves `prompted === viewer` for EVERY spectator watching.
+    // Only the `!spectating &&` conjunct stops the badge telling a spectator they will name the
+    // count.
+    //
+    // REVERT-PROBE: drop `!spectating &&` from the `you` predicate ⇒ this reds, because the
+    // equality it guards genuinely holds here. U8's second-person half is the matched positive
+    // proving the gate does not simply suppress every "you".
+    act(() => {
+      useGameStore.setState({ gameMode: "spectate" });
+    });
+    seed({
+      unbounded_families: [fam("tokens", { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } }, 0)],
+    } as DerivedViews);
+    expect(screen.getByLabelText(COMMITTED_TOKENS)).toBeInTheDocument();
+    expect(screen.queryByLabelText(COMMITTED_TOKENS_YOU)).toBeNull();
   });
 });

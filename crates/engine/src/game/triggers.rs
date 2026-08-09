@@ -3834,6 +3834,7 @@ fn collect_pending_triggers_with_collection(
                 if let GameEvent::BecomesTarget {
                     target: TargetRef::Object(targeted_id),
                     source_id: targeting_source_id,
+                    ..
                 } = event
                 {
                     if *targeted_id == obj_id {
@@ -20570,6 +20571,7 @@ pub mod tests {
         let events = vec![GameEvent::BecomesTarget {
             target: TargetRef::Object(creature),
             source_id: spell,
+            source_controller: PlayerId(0),
         }];
 
         process_triggers(&mut state, &events);
@@ -20640,6 +20642,7 @@ pub mod tests {
         let events = vec![GameEvent::BecomesTarget {
             target: TargetRef::Object(creature),
             source_id: spell,
+            source_controller: PlayerId(0),
         }];
 
         process_triggers(&mut state, &events);
@@ -20687,6 +20690,7 @@ pub mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(ward_target),
             source_id: prepared_source,
+            source_controller: PlayerId(0),
         };
         assert!(
             collect_pending_triggers(&mut without_overlay, std::slice::from_ref(&event)).is_empty(),
@@ -20697,6 +20701,7 @@ pub mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(ward_target),
             source_id: prepared_source,
+            source_controller: PlayerId(0),
         };
         let pending = collect_pending_triggers_with_overlay(
             &mut with_overlay,
@@ -20784,6 +20789,7 @@ pub mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(observer),
             source_id: source,
+            source_controller: PlayerId(0),
         };
         assert!(crate::game::trigger_matchers::match_becomes_target(
             &event,
@@ -20825,6 +20831,7 @@ pub mod tests {
             &[GameEvent::BecomesTarget {
                 target: TargetRef::Object(ward_target),
                 source_id: source,
+                source_controller: PlayerId(0),
             }],
         );
         let serialized = serde_json::to_string(&pending)
@@ -20926,6 +20933,7 @@ pub mod tests {
         let events = vec![GameEvent::BecomesTarget {
             target: TargetRef::Object(creature),
             source_id: spell,
+            source_controller: PlayerId(0),
         }];
 
         process_triggers(&mut state, &events);
@@ -21030,6 +21038,7 @@ pub mod tests {
             &[GameEvent::BecomesTarget {
                 target: TargetRef::Object(p1_ward),
                 source_id: spell0,
+                source_controller: PlayerId(0),
             }],
         );
         assert!(
@@ -21046,6 +21055,7 @@ pub mod tests {
             &[GameEvent::BecomesTarget {
                 target: TargetRef::Object(p0_ward),
                 source_id: spell1,
+                source_controller: PlayerId(0),
             }],
         );
         assert!(
@@ -21099,6 +21109,7 @@ pub mod tests {
         let events = vec![GameEvent::BecomesTarget {
             target: TargetRef::Object(creature),
             source_id: spell,
+            source_controller: PlayerId(0),
         }];
 
         process_triggers(&mut state, &events);

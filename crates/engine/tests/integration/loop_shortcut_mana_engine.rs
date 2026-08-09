@@ -1215,7 +1215,10 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
         );
         assert_eq!(
             state_of(UnboundedFamily::Life),
-            FamilyCollapseState::Scheduled(CollapseCertainty::Committed),
+            FamilyCollapseState::Scheduled {
+                certainty: CollapseCertainty::Committed,
+                prompted: Some(P0),
+            },
             "R4/agree positive: the deferred life family of the SAME stash IS scheduled, so the \
              mana assertion above is discriminating rather than vacuous. It is COMMITTED because \
              a `DriveSequence` replays real cycles and has no non-push exit (viewer {viewer:?})"

@@ -2014,8 +2014,16 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let mut actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
-        .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+    let mut actions: Vec<GameAction> =
+        if context::target_selection_requires_reducer_validation(state) {
+            validated_candidate_actions(state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        } else {
+            target_selection_actions_without_simulation(state)
+                .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe))
+        };
 
     // This preference-setting action is intentionally excluded from AI candidate
     // generation: it changes future prompt behavior rather than making a tactical
@@ -5985,7 +5993,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_do_not_simulate_each_target() {
+    fn target_selection_legal_actions_use_current_targets_without_simulation() {
         let mut state = setup_priority();
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
@@ -6033,6 +6041,14 @@ mod tests {
 
         assert_eq!(counters.state_clone_for_legality, 0);
         assert_eq!(counters.priority_cast_probe_builds, 0);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) }))
+                .count(),
+            25
+        );
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
         assert_eq!(actions.len(), 26);
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
@@ -6408,7 +6424,7 @@ mod tests {
             player: PlayerId(0),
             pending_cast,
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: vec![target],
+                legal_targets: vec![target.clone()],
                 optional: true,
                 chooser: None,
                 effect_kind: EffectKind::NoOp,

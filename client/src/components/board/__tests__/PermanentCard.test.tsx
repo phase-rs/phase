@@ -340,13 +340,15 @@ describe("PermanentCard", () => {
   });
 
   // CR 732.2a / CR 701.34a: an accepted counter-growth ∞ loop (Kilo proliferate → Pentad
-  // charge) marks the pumped counter in `derived.unbounded_counters`; the pill renders ∞
+  // charge) annotates the pumped row in `derived.counter_display`; the pill renders ∞
   // instead of the (still-finite) real count. Matched pair — the ONLY difference between the
-  // two cases is the presence of the engine mark, so it is the discriminator.
+  // two cases is the row's `magnitude`, so it is the discriminator.
   it("renders ∞ on a counter the engine marks as unbounded", () => {
     const gameState = makeState();
     gameState.objects[1].counters = { charge: 4 };
-    gameState.derived = { unbounded_counters: { 1: ["charge"] } };
+    gameState.derived = {
+      counter_display: { 1: { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] } },
+    };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     const { container } = renderPermanent();
@@ -358,13 +360,111 @@ describe("PermanentCard", () => {
   it("renders the finite ×N count when the counter is not marked unbounded", () => {
     const gameState = makeState();
     gameState.objects[1].counters = { charge: 4 };
-    gameState.derived = {}; // no unbounded_counters mark
+    // `magnitude` omitted exactly as the engine omits the serde default.
+    gameState.derived = { counter_display: { 1: { pills: [{ counter: "charge", count: 4 }] } } };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 
     const { container } = renderPermanent();
 
     expect(container.textContent).toContain("x4");
     expect(container.textContent).not.toContain("∞");
+  });
+
+  // THE NO-FALLBACK MATCHED PAIR. `counter_display` is the SINGLE authority: an object carrying
+  // real counters with no projection entry renders NO pill. This is the only test that catches a
+  // render site re-introducing `Object.entries(obj.counters)`, and it is worthless without its
+  // positive twin — alone it would also pass on a component that rendered nothing at all.
+  it("renders no pill for an object with counters but no projection entry", () => {
+    const gameState = makeState();
+    gameState.objects[1].counters = { charge: 4 };
+    gameState.derived = {}; // a frame that arrived without `derived.counter_display`
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.textContent).not.toContain("x4");
+    expect(container.textContent).not.toContain("∞");
+  });
+
+  it("renders the pill for that SAME object once the projection carries it", () => {
+    const gameState = makeState();
+    gameState.objects[1].counters = { charge: 4 };
+    gameState.derived = { counter_display: { 1: { pills: [{ counter: "charge", count: 4 }] } } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.textContent).toContain("x4");
+  });
+
+  // THE `0 -> 1` ROW, at the render layer. The engine registers a pumped pair while the
+  // object carries NONE of that counter, so the row's `count` is 0 and there is no entry in
+  // `obj.counters` to join back to. Before the channel published rows, this pill could not be
+  // drawn at all — the display had nothing to hang `∞` on.
+  //
+  // DISCRIMINATOR: the finite `burden` pill in the SAME frame proves the component did not
+  // simply start rendering `∞` for everything, and it is a positive reach-guard for the
+  // negative assertion below — without it, "no x0" would pass on a card that rendered no
+  // pills whatsoever.
+  it("renders ∞ for a marked counter the object does not yet carry (count 0)", () => {
+    const gameState = makeState();
+    gameState.objects[1].counters = { burden: 2 };
+    gameState.derived = {
+      counter_display: {
+        1: {
+          pills: [
+            { counter: "charge", count: 0, magnitude: "Unbounded" },
+            { counter: "burden", count: 2 },
+          ],
+        },
+      },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.textContent).toContain("∞");
+    expect(container.textContent).toContain("x2");
+    expect(container.textContent).not.toContain("x0");
+  });
+
+  // CR 306.5c: a planeswalker's loyalty IS its loyalty-counter count, so the engine routes that
+  // row to `loyalty` rather than to `pills` and an `Unbounded` one means the TOTAL is unbounded.
+  // The partition is engine-side now, so there is no ∞ pill beside a stale numeric badge.
+  it("renders ∞ on the loyalty TOTAL badge when the engine marks a loyalty row", () => {
+    const gameState = makeState();
+    gameState.objects[1].loyalty = 4;
+    gameState.objects[1].counters = { loyalty: 4 };
+    gameState.derived = {
+      counter_display: { 1: { loyalty: { counter: "loyalty", count: 4, magnitude: "Unbounded" } } },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+    const badge = container.querySelector('[data-loyalty-badge="total"]') as HTMLElement;
+
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain("∞");
+    expect(badge.textContent).not.toContain("4");
+    // The DOM attribute stays truthful — selectors keep working.
+    expect(badge.getAttribute("data-loyalty-value")).toBe("4");
+  });
+
+  it("renders the finite loyalty total when no loyalty row is marked", () => {
+    const gameState = makeState();
+    gameState.objects[1].loyalty = 4;
+    gameState.objects[1].counters = { loyalty: 4 };
+    gameState.derived = {
+      counter_display: { 1: { loyalty: { counter: "loyalty", count: 4 } } },
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+    const badge = container.querySelector('[data-loyalty-badge="total"]') as HTMLElement;
+
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain("4");
+    expect(badge.textContent).not.toContain("∞");
   });
 
   it("lifts the permanent tree above siblings while keeping attachments behind the host", () => {

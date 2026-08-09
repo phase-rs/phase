@@ -32,7 +32,8 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{
-    parse_number as nom_parse_number, scan_at_word_boundaries, scan_contains, scan_preceded,
+    parse_number as nom_parse_number, parse_object_recipient_pronoun, scan_at_word_boundaries,
+    scan_contains, scan_preceded,
 };
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -558,9 +559,9 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             ))
             .parse(input)?;
             let (input, _) = tag("begin the game with ").parse(input)?;
-            // Self-reference: `~` after normalization, or an object pronoun.
-            let (input, _) =
-                alt((tag("~"), tag("it"), tag("him"), tag("her"), tag("them"))).parse(input)?;
+            // Self-reference: `~` after normalization, or an object pronoun
+            // (routed through the shared recipient-pronoun combinator).
+            let (input, _) = alt((tag("~"), parse_object_recipient_pronoun)).parse(input)?;
             let (input, _) = tag(" on the battlefield").parse(input)?;
 
             // Optional "with [N] [type] counter(s) on it" clause (CR 122.1).

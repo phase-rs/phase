@@ -5,6 +5,11 @@
     "close": "Fechar",
     "closeNamed": "Fechar {{name}}"
   },
+  "scryOutcome": {
+    "title": "Vidência concluída",
+    "you": "Você",
+    "result": "{{player}} — {{top}} no topo · {{bottom}} no fundo"
+  },
   "modal": {
     "defaultEyebrow": "Ferramenta de Workspace"
   },

@@ -17,6 +17,8 @@ import type {
   UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
 
 interface StatusBadgeProps {
@@ -477,15 +479,39 @@ export function UnboundedBadge({
 }) {
   const { t } = useTranslation("game");
   const resource = t(UNBOUNDED_FAMILY_LABEL_KEY[family]);
+  // Both hooks are called UNCONDITIONALLY, before any branch — rules of hooks. No render site
+  // changed: the badge resolves the viewer itself rather than taking it as a prop.
+  const viewer = usePlayerId();
+  const spectating = useSpectatorMode();
   // A `Committed` scheduled collapse is an accepted-but-unapplied bound, and N is named at the
-  // next step/phase end by the loop's CONTROLLER — who is not necessarily the seat this badge sits
-  // on. `Conditional` promises no bound at all, which is why it gets its own copy. The row is
-  // keyed by the engine's attribution player, which for `Life`/`DamageDealt`/`LibraryDelta`/
-  // `Poison` axes is the victim, and the badge also renders on opponent HUDs. So the copy stays in
-  // the passive voice: a second-person promise here would be addressed to the wrong seat in both
-  // cases. Emitting the prompted seat is the engine's to add, and is owned by the follow-on PR.
+  // next step/phase end by the loop's CONTROLLER — who is NOT necessarily the seat this badge sits
+  // on: the row is keyed by the engine's attribution player, which for `Life`/`DamageDealt`/
+  // `LibraryDelta`/`Poison` axes is the victim, and the badge also renders on opponent HUDs. The
+  // engine now publishes that controller as `state.data.prompted`, so the copy can address the
+  // seat that will actually be asked, and falls back to the passive voice for everyone else.
+  // `Conditional` promises no bound at all, which is why it keeps its own copy in both voices.
   // The window itself is CR 732.2c's advance to the shortcut's ending point; this only reports
   // what the engine says is pending.
+  //
+  // `usePlayerId()` is the RAW seat, mirroring `useTurnStatus`'s documented rule — `prompted` is a
+  // seat, so it compares against seat identity and NOT against `usePerspectivePlayerId()`, which
+  // returns the seat whose turn is being controlled. TWO BOUNDS ARE DISCLOSED, not fixed here:
+  //  (i) under a turn-control effect where viewer V controls seat A's turn and A is prompted, V
+  //      personally answers the prompt but reads the third-person copy. Conservative by
+  //      construction — the same fallback the `prompted === undefined` case takes, and never a
+  //      false "you". Closing it needs the engine to publish "seat X may submit for seat Y",
+  //      which is a turn-control question, not a CR 732 one.
+  // (ii) `game::turns` raises ONE `PayAmountChoice` for the controller's WHOLE stash, so a
+  //      tokens+counters+life collapse shows the second-person badge on THREE families for ONE
+  //      joint count. The copy says "you'll name the count", which is true of every family that
+  //      count collapses, rather than "you'll choose how many of these", which would not be.
+  //
+  // The spectator gate is REQUIRED, not defensive: `usePlayerId()` returns `PLAYER_ID` (0) in
+  // spectate mode — never `SPECTATOR_PLAYER_ID` — so a loop prompted to seat 0 would otherwise
+  // read "you'll name the count" to every spectator. `useSpectatorMode()`'s predicate is exactly
+  // the union of `useCanActForWaitingState`'s two spectator gates, so this badge is never more
+  // permissive than the submit authority it is describing.
+  const you = !spectating && state.type === "Scheduled" && state.data.prompted === viewer;
   const title = ((): string => {
     switch (state.type) {
       case "Unscheduled":
@@ -493,9 +519,14 @@ export function UnboundedBadge({
       case "Mixed":
         return t("badges.unboundedMixedTooltip", { resource });
       case "Scheduled":
-        return state.data === "Committed"
-          ? t("badges.unboundedScheduledTooltip", { resource })
-          : t("badges.unboundedConditionalTooltip", { resource });
+        return state.data.certainty === "Committed"
+          ? t(you ? "badges.unboundedScheduledYouTooltip" : "badges.unboundedScheduledTooltip", {
+              resource,
+            })
+          : t(
+              you ? "badges.unboundedConditionalYouTooltip" : "badges.unboundedConditionalTooltip",
+              { resource },
+            );
     }
   })();
   return (
@@ -520,8 +551,10 @@ export function UnboundedBadge({
               case "Unscheduled":
               case "Mixed":
                 return "∞";
+              // The GLYPH is not person-dependent: `∞→N` / `∞→?` says what will land, not who is
+              // asked. Only the tooltip changes voice.
               case "Scheduled":
-                return state.data === "Committed"
+                return state.data.certainty === "Committed"
                   ? t("badges.unboundedScheduledGlyph")
                   : t("badges.unboundedConditionalGlyph");
             }

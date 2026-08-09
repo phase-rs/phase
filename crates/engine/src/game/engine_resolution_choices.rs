@@ -22,7 +22,7 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs, mana_abilities};
+use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
 
 /// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
 /// Original survivors remain in the printed search continuation; modified cards
@@ -1575,6 +1575,7 @@ pub(super) fn handle_resolution_choice(
                 action: crate::types::events::PlayerActionKind::Scry,
                 look_count: Some(all_cards.len() as u32),
                 scry_bottom_count: Some(bottom_cards.len() as u32),
+                scry_top_count: Some(all_cards.len() as u32 - bottom_cards.len() as u32),
             });
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
@@ -2737,6 +2738,13 @@ pub(super) fn handle_resolution_choice(
                     // The DISPLAY half of follow-up F2 is instead covered live at the projection by
                     // `derived_views::object_growth_backing`, which drops an ∞ row whose entire
                     // registered display set has left the battlefield without touching the stash.
+                    // That cover now spans BOTH object-backed families — the token axis reads the
+                    // ∞ pile, and the counter axes read the registered `(object, counter)` pairs
+                    // that derive each axis — and it applies ONLY while the collapse is still
+                    // UNACCEPTED. Once a stash exists for the axis, CR 732.2c has already taken the
+                    // shortcut, so the projection's acceptance gate keeps the row even with its
+                    // whole backing gone: the growth still lands here, and a row that vanished
+                    // before it landed would be the display lying about an agreed result.
                     state.clear_collapsed_materializations(player, &collapsed);
                     // Continue the boundary fixpoint (§7): re-draining either prompts the
                     // next APNAP player with a stash or restores Priority now.
@@ -4451,14 +4459,39 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let event_start = events.len();
             if turns::finish_cleanup_discard(state, player, &chosen, events) {
                 return Ok(action_result_outcome(events, state.waiting_for.clone()));
             }
 
-            let _ = turns::advance_phase_once(state, events);
-            return Ok(ResolutionChoiceOutcome::WaitingFor(turns::auto_advance(
-                state, events,
-            )));
+            // CR 514.3a + CR 603.3 + CR 117.5: cleanup-discard events must pass
+            // through the ordinary SBA/trigger settlement before cleanup can end.
+            // Synchronize the provisional priority first: this is the authority
+            // that normalizes legacy waiting states and derives the authorized
+            // priority submitter under turn control.
+            let provisional_cleanup_priority = WaitingFor::Priority { player };
+            public_state::sync_waiting_for(state, &provisional_cleanup_priority);
+            let settled = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &provisional_cleanup_priority,
+                false, // skip_trigger_scan
+                false, // skip_deferred_trigger_drain
+            )?;
+            public_state::sync_waiting_for(state, &settled);
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty() {
+                let _ = turns::advance_phase_once(state, events);
+                let advanced = turns::auto_advance(state, events);
+                public_state::sync_waiting_for(state, &advanced);
+            }
+
+            // The suffix pipeline above already processed this action's discard
+            // events, including persistent delayed triggers. Return the completed
+            // action rather than entering apply_action's outer full-buffer pipeline,
+            // which would otherwise scan those discard events a second time.
+            return Ok(action_result_outcome(events, state.waiting_for.clone()));
         }
         (
             WaitingFor::ConniveDiscard {

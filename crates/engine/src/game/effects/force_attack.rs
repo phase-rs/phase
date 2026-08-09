@@ -5,7 +5,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{RequiredDefender, StaticMode};
 
 /// CR 508.1d: Force attack — the target creature must attack the required player
 /// this turn/combat if able.
@@ -35,7 +35,10 @@ pub fn resolve(
             duration.clone(),
             TargetFilter::SpecificObject { id: obj_id },
             vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::MustAttackPlayer { player },
+                // CR 611.2: the required defender is snapshotted at resolution.
+                mode: StaticMode::MustAttackPlayer {
+                    player: RequiredDefender::Fixed { player },
+                },
             }],
             None,
         );
@@ -110,7 +113,9 @@ mod tests {
             matches!(
                 m,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer { player },
+                    mode: StaticMode::MustAttackPlayer {
+                        player: RequiredDefender::Fixed { player },
+                    },
                 } if *player == PlayerId(0)
             )
         }));
@@ -161,7 +166,9 @@ mod tests {
             matches!(
                 m,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer { player },
+                    mode: StaticMode::MustAttackPlayer {
+                        player: RequiredDefender::Fixed { player },
+                    },
                 } if *player == PlayerId(1)
             )
         }));

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { EngineSnapshot, GameLogEntry, GameState, LegalActionsResult } from "../../adapter/types";
 import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { logPresentation } from "../../viewmodel/logFormatting";
 import { processRemoteUpdate } from "../dispatch";
 
 function priorityState(): GameState {
@@ -68,6 +69,27 @@ describe("processRemoteUpdate", () => {
       },
     ]);
     expect(useGameStore.getState().nextLogSeq).toBe(1);
+  });
+
+  it("accepts a legacy remote log payload without presentation metadata", async () => {
+    const legacyLog: GameLogEntry = {
+      seq: 99,
+      turn: 1,
+      phase: "PreCombatMain",
+      category: "Stack",
+      segments: [{ type: "Text", value: "Legacy cast" }],
+    };
+
+    await processRemoteUpdate(prioritySnapshot(), [], [legacyLog]);
+
+    const [stored] = useGameStore.getState().logHistory;
+    expect(stored.category).toBe("Stack");
+    expect(logPresentation(stored)).toEqual({
+      importance: "Detail",
+      tone: "Neutral",
+      boundary: "None",
+      visibility: "Public",
+    });
   });
 
   // F3. The server-published rewind list must reach the store through the SAME

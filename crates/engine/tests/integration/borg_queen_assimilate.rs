@@ -17,8 +17,10 @@
 //!
 //! These are RUNTIME tests: they cast through `GameRunner::cast(..).resolve()`
 //! and read back EFFECTIVE post-`evaluate_layers` characteristics. The AST-shape
-//! coverage lives in `parser/oracle_effect/tests.rs`
-//! (`borg_queen_assimilate_lowers_to_reanimate_then_retype_chain`).
+//! coverage lives in `parser/oracle_effect/tests.rs` — both the positive
+//! lowering (`borg_queen_assimilate_lowers_to_reanimate_then_retype_chain`) and
+//! the fail-closed negative
+//! (`assimilate_without_a_graveyard_target_stays_unimplemented`).
 //!
 //! FOOT-GUN, load-bearing in every test here: `layers.rs`'s
 //! `RemoveAllSubtypes { SubtypeSet::Creature }` arm retains any subtype NOT in
@@ -40,8 +42,6 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
-use engine::parser::oracle_effect::parse_effect;
-use engine::types::ability::Effect;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
@@ -173,8 +173,9 @@ fn seed_hostile_creature_types(runner: &mut GameRunner) {
 /// supertype, and non-creature subtype. Plus CR 110.2a's controller override,
 /// CR 108.3's unchanged ownership, and CR 122.1's entry counter.
 ///
-/// Revert-failing: at BASE_SHA the ETB trigger is `Effect::Unimplemented`, so
-/// the victim never leaves the graveyard and reach-guard 2.1 fails first.
+/// Revert-failing: with the assimilate lowering (PR #7096) reverted the ETB
+/// trigger is `Effect::Unimplemented`, so the victim never leaves the graveyard
+/// and reach-guard 2.1 fails first.
 #[test]
 fn assimilate_applies_the_full_cr_205_1b_type_change() {
     let mut scenario = GameScenario::new();
@@ -285,78 +286,112 @@ fn assimilate_applies_the_full_cr_205_1b_type_change() {
 // Test 3 — fail-closed / negative-sibling coverage
 // ---------------------------------------------------------------------------
 
-/// 3a. CR 115.2: the filter's `Creature` leg. With only a LAND card in the
-/// opponent's graveyard the ETB trigger has no legal target, so nothing enters.
-/// Paired positive reach-guard: Borg Queen herself IS on the battlefield, so the
-/// cast demonstrably resolved.
-#[test]
-fn assimilate_finds_no_target_when_the_opponent_graveyard_holds_only_a_land() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let land = scenario.add_land_to_graveyard(P1, "Wastes").id();
-    let borg_queen = borg_queen_in_hand(&mut scenario);
-    let mut runner = scenario.build();
-    seed_hostile_creature_types(&mut runner);
-
-    let outcome = runner.cast(borg_queen).resolve();
-
-    // Positive reach-guard: the cast resolved.
-    outcome.assert_zone(&[borg_queen], Zone::Battlefield);
-    // CR 115.2: a land card is not a legal `target creature card`.
-    outcome.assert_zone(&[land], Zone::Graveyard);
-}
-
-/// 3b. CR 108.3: the `Owned { controller: Opponent }` leg. A creature card in
-/// P0's OWN graveyard is not a legal target.
+/// 3a. CR 115.2: the filter's `Creature` type leg, POSITIVELY discriminated.
 ///
-/// This case also passes at BASE_SHA (where nothing moves at all), so it is a
-/// GUARD against a future filter regression, not a revert-failing test. The
-/// paired positive reach-guard keeps it from being vacuous about the cast.
+/// P1's graveyard holds BOTH an illegal land card and a legal creature card,
+/// and the cast declares them IN THAT ORDER — illegal first. The three
+/// reachable states are distinct, and the pair below is red in two of them:
+///   * CORRECT filter -> the legal set is the singleton {creature}, so
+///     `prepare_trigger_targets` (`game/triggers.rs`) auto-assigns it:
+///     `ability_utils::auto_select_targets_for_ability` returns the sole
+///     assignment and the trigger is `PreparedTriggerTargets::AutoAssigned`.
+///     NO prompt is raised, so the declared objects are never consumed here —
+///     declaring them is inert in this state, and safe, because nothing checks
+///     for unconsumed declarations. The creature enters; the land stays put.
+///   * `Creature` leg OVER-matches -> the legal set becomes {creature, land},
+///     auto-selection declines (two assignments), a required slot IS created,
+///     and `pick_slot_target` (`game/scenario.rs`) fills it with the FIRST
+///     DECLARED legal object — the land. BOTH assertions below flip.
+///   * `Creature` leg UNDER-matches to empty -> CR 603.3d removes the trigger
+///     before any slot exists (`DroppedNoLegalRequiredTarget`), nothing moves,
+///     and the POSITIVE leg below fails.
+///
+/// Declaration order is therefore a REGRESSION-ONLY instrument: it makes the
+/// over-match case fail cleanly on assertions instead of on `pick_slot_target`'s
+/// no-declared-target panic. There is no nondeterminism to design around — the
+/// legal candidate is unique in the passing state, and pinned by declaration
+/// order in the over-matching one.
+///
+/// ISOLATED AXIS: both candidates are cards in the SAME opponent's graveyard, so
+/// `Owned { Opponent }` and `InZone { Graveyard }` are held constant and ONLY
+/// `type_filters: [Creature]` varies between them. (The ownership leg is
+/// isolated by 3b; `InZone { Graveyard }` is isolated by neither.)
+///
+/// Revert-failing: with the assimilate lowering (PR #7096) reverted the ETB
+/// trigger is `Effect::Unimplemented`, nothing leaves the graveyard, and the
+/// battlefield assertion fails first.
 #[test]
-fn assimilate_cannot_take_a_card_from_its_own_controllers_graveyard() {
+fn assimilate_discriminates_a_creature_card_from_a_land_in_the_same_graveyard() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let own_card = scenario
-        .add_creature_to_graveyard(P0, "Own Graveyard Wizard", 2, 2)
+    // Declared FIRST so an over-matching `Creature` leg is forced to consume it.
+    let land = scenario.add_land_to_graveyard(P1, "Wastes").id();
+    let creature = scenario
+        .add_creature_to_graveyard(P1, "Graveyard Wizard", 2, 2)
         .with_subtypes(vec!["Human", "Wizard"])
         .id();
     let borg_queen = borg_queen_in_hand(&mut scenario);
     let mut runner = scenario.build();
     seed_hostile_creature_types(&mut runner);
 
-    let outcome = runner.cast(borg_queen).resolve();
+    let outcome = runner
+        .cast(borg_queen)
+        .target_objects(&[land, creature])
+        .resolve();
 
     // Positive reach-guard: the cast resolved.
     outcome.assert_zone(&[borg_queen], Zone::Battlefield);
-    // CR 108.3: "an opponent's graveyard" restricts by OWNERSHIP.
-    outcome.assert_zone(&[own_card], Zone::Graveyard);
+    // POSITIVE leg (CR 115.2): the creature card IS a legal `target creature
+    // card` and was taken, so the production demonstrably fired on this fixture.
+    outcome.assert_zone(&[creature], Zone::Battlefield);
+    // NEGATIVE leg, paired with the above: a land card is NOT a legal
+    // `target creature card`, so it was skipped despite being declared first.
+    outcome.assert_zone(&[land], Zone::Graveyard);
 }
 
-/// 3c. Parser fail-closed: an `assimilate` phrasing whose target is NOT a
-/// graveyard card is a shape this production does not model, so it must keep
-/// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
-/// than be silently lowered into a reanimation. `name` is `"assimilate"` because
-/// the imperative fallback derives it from the clause's first word.
+/// 3b. CR 108.3: the `Owned { controller: Opponent }` leg, POSITIVELY
+/// discriminated, by the same three-state instrument as 3a (see 3a's comment
+/// for the auto-assign / over-match / under-match breakdown).
 ///
-/// Paired positive: the real card's phrasing in the same test produces a
-/// `ChangeZone`, so the negative is about the graveyard guard and not about a
-/// production that never fires.
+/// ISOLATED AXIS: both candidates are CREATURE cards in a GRAVEYARD, so
+/// `type_filters: [Creature]` and `InZone { Graveyard }` are held constant and
+/// ONLY the owner varies (P0's own graveyard vs P1's). CR 109.4: a graveyard
+/// card has no controller, so "an opponent's graveyard" rides as OWNERSHIP.
+///
+/// Revert-failing (CHANGED by this strengthening): the previous
+/// single-candidate form also passed with the assimilate lowering (PR #7096)
+/// reverted, because nothing moved at all, so it was only a forward guard. This
+/// form asserts that the OPPONENT-owned card reaches the battlefield, so a
+/// revert now fails it.
 #[test]
-fn assimilate_without_a_graveyard_target_stays_unimplemented() {
-    let non_graveyard = parse_effect("assimilate target creature you control");
-    assert!(
-        matches!(
-            &non_graveyard,
-            Effect::Unimplemented { name, .. } if name == "assimilate"
-        ),
-        "a non-graveyard assimilate phrasing must stay honestly unsupported, got {non_graveyard:?}"
-    );
+fn assimilate_discriminates_an_opponents_graveyard_from_its_own_controllers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Declared FIRST so an over-matching ownership leg is forced to consume it.
+    let own_card = scenario
+        .add_creature_to_graveyard(P0, "Own Graveyard Wizard", 2, 2)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .id();
+    let opponent_card = scenario
+        .add_creature_to_graveyard(P1, "Opponent Graveyard Wizard", 2, 2)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .id();
+    let borg_queen = borg_queen_in_hand(&mut scenario);
+    let mut runner = scenario.build();
+    seed_hostile_creature_types(&mut runner);
 
-    let real = parse_effect("assimilate target creature card from an opponent's graveyard");
-    assert!(
-        matches!(real, Effect::ChangeZone { .. }),
-        "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
-    );
+    let outcome = runner
+        .cast(borg_queen)
+        .target_objects(&[own_card, opponent_card])
+        .resolve();
+
+    // Positive reach-guard: the cast resolved.
+    outcome.assert_zone(&[borg_queen], Zone::Battlefield);
+    // POSITIVE leg (CR 108.3): the OPPONENT-owned card is legal and was taken.
+    outcome.assert_zone(&[opponent_card], Zone::Battlefield);
+    // NEGATIVE leg, paired with the above: P0's OWN card is not legal and was
+    // skipped despite being declared first.
+    outcome.assert_zone(&[own_card], Zone::Graveyard);
 }
 
 // ---------------------------------------------------------------------------

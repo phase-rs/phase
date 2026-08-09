@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 188,
+      "date": "2026-08-08",
+      "title": "Assimilate the Borg arrives",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Assimilate now reanimates an opponent’s creature as a Borg artifact creature with a +1/+1 counter, while keeping its other card types intact\n• Storied and recruit are now supported, including their story and discard interactions\n• Jeweled Amulet now records the mana used to charge it and produces that noted color later\n\n🛠️ Cards That Now Work Right\n• Player-counter Ward costs now work as printed (The Serpent Society): poison-counter payments are shown clearly, respect counter replacements, and can’t be paid for free when prevented\n• Sauron, Dino Devotee restores its Dinosaur form correctly; delayed effects such as Goryo’s Vengeance no longer affect a creature that left and returned as a new object\n• Library reorders no longer masquerade as zone moves, and revealed-card information remains available for the effects that need it\n• Crime tracking, discard provenance, and offered free or alternate casts now retain the correct game context\n\n⚔️ Combat & Gameplay\n• Players receive priority at the beginning of combat as the rules require, enabling beginning-of-combat plays and triggers\n• Forced attacks keep their required defenders and the interface prevents confirming an incomplete attack declaration\n• Infinite-resource badges now mark an accepted finite collapse as ∞→N, making the pending resolution clearer\n\n🖥️ Interface\n• Draft deck suggestions now show nonbasic lands, and hover previews stay open over castable graveyard and exile cards\n\n🌍 Localization\n• Switching the UI language now also shows matching localized card art when that printing is available\n\n🤖 AI\n• AI prefers lethal targets for source-based damage, evaluates poison-counter Ward costs safely, and handles free, alternate, and mana-payment casting offers more reliably",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1535709506737016992"
+    },
+    {
       "id": 187,
       "date": "2026-08-06",
       "title": "Library searches stop double-triggering",

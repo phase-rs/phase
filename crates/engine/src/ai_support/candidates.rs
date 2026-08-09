@@ -16,9 +16,9 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
-    CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
-    PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
+    CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
+    PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
@@ -903,12 +903,22 @@ pub fn candidate_actions_broad_with_probe(
             target_slots,
             selection,
             ..
-        } => target_step_actions(
-            *player,
-            target_slots,
-            selection.current_slot,
-            &selection.current_legal_targets,
-        ),
+        } => {
+            let mut actions = target_step_actions(
+                *player,
+                target_slots,
+                selection.current_slot,
+                &selection.current_legal_targets,
+            );
+            if state.waiting_for.allows_cancel_cast() {
+                actions.push(candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         WaitingFor::TriggerTargetSelection {
             player,
             target_slots,
@@ -2076,6 +2086,14 @@ pub fn candidate_actions_broad_with_probe(
         ),
         WaitingFor::PayCost {
             player,
+            kind: PayCostKind::Sacrifice,
+            choices,
+            count,
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => bounded_select_card_candidates(*player, choices, [*count]),
+        WaitingFor::PayCost {
+            player,
             kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
             choices,
             count,
@@ -2227,25 +2245,9 @@ pub fn candidate_actions_broad_with_probe(
             player,
             legal_targets,
             min_targets,
+            max_targets,
             ..
-        } => {
-            let mut actions = Vec::new();
-            actions.push(candidate(
-                GameAction::SelectCards {
-                    cards: legal_targets.clone(),
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            ));
-            if *min_targets == 0 {
-                actions.push(candidate(
-                    GameAction::SelectCards { cards: vec![] },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ));
-            }
-            actions
-        }
+        } => bounded_select_card_candidates(*player, legal_targets, *min_targets..=*max_targets),
         WaitingFor::CastOffer {
             player,
             kind: CastOfferKind::Adventure { .. },
@@ -3457,7 +3459,10 @@ fn semantic_candidate_actions_with_probe(
     let allows_cancel_cast = state.waiting_for.allows_cancel_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })
             && state.pending_cast.is_some());
-    if has_pending_cast && allows_cancel_cast {
+    if has_pending_cast
+        && allows_cancel_cast
+        && !matches!(state.waiting_for, WaitingFor::TargetSelection { .. })
+    {
         if let Some(player) = state.waiting_for.acting_player() {
             actions.push(candidate(
                 GameAction::CancelCast,
@@ -4345,17 +4350,9 @@ fn target_step_actions(
     current_slot: usize,
     current_legal_targets: &[TargetRef],
 ) -> Vec<CandidateAction> {
-    let legal_targets: Vec<TargetRef> = if !current_legal_targets.is_empty() {
-        current_legal_targets.to_vec()
-    } else {
-        target_slots
-            .get(current_slot)
-            .map(|slot| slot.legal_targets.clone())
-            .unwrap_or_default()
-    };
-
-    let mut actions: Vec<CandidateAction> = legal_targets
-        .into_iter()
+    let mut actions: Vec<CandidateAction> = current_legal_targets
+        .iter()
+        .cloned()
         .map(|target| {
             candidate(
                 GameAction::ChooseTarget {
@@ -5970,7 +5967,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_uses_current_slot_legality() {
+    fn target_selection_does_not_revive_stale_slot_targets() {
         let mut state = GameState::new_two_player(42);
         let p0 = PlayerId(0);
         let target_a = create_object(
@@ -6008,8 +6005,10 @@ mod tests {
         };
 
         let actions = candidate_actions(&state);
-        assert_eq!(actions.len(), 2);
-        assert!(matches!(actions[0].action, GameAction::ChooseTarget { .. }));
+        assert!(
+            actions.is_empty(),
+            "an empty current prompt must not fall back to historical slot targets"
+        );
     }
 
     /// CR 732.2a: at a `PayableResource::LoopCollapse` prompt the AI enumerates ONLY
@@ -6256,7 +6255,7 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::new(
                 crate::types::statics::StaticMode::MustAttackPlayer {
-                    player: PlayerId(1),
+                    player: PlayerId(1).into(),
                 },
             ));
         let goaded = make_creature(&mut state, 2);

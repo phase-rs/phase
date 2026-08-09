@@ -14,6 +14,8 @@ import init, {
   get_filtered_game_state,
   get_ai_action_proposal,
   get_ai_action_proposal_with_diagnostics,
+  get_ai_tactical_action_proposal,
+  get_ai_tactical_action_proposal_with_diagnostics,
   get_ai_action_proposal_from_scores,
   get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
@@ -76,6 +78,8 @@ type EngineRequest =
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
@@ -379,6 +383,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getAiActionProposalWithDiagnostics": {
         result(msg.id, get_ai_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposal": {
+        result(msg.id, get_ai_tactical_action_proposal(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposalWithDiagnostics": {
+        result(msg.id, get_ai_tactical_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
         break;
       }
 

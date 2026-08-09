@@ -14,7 +14,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
-import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -1323,9 +1323,6 @@ function CardInfoPanel({
 }) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).flatMap(([type, count]) =>
-    type === "loyalty" || count == null ? [] : [[type, count] as const],
-  );
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||
@@ -1341,10 +1338,12 @@ function CardInfoPanel({
   const transientContinuousEffects = useGameStore(
     (s) => s.gameState?.transient_continuous_effects,
   );
-  // CR 732.2a / CR 701.34a: the ∞ mark for this object. Same engine channel
-  // PermanentCard's pill and ArtCropCard's badge read — every counter display mode
-  // must agree, or the ∞ silently drops in one of them.
-  const unboundedCounterTypes = useUnboundedCounterTypes(obj.id);
+  // CR 122.1 + CR 306.5c: the engine's complete counter projection for this object. Same channel
+  // PermanentCard's pill and ArtCropCard's badge read — every counter display mode must agree, or
+  // a row silently drops in one of them. The loyalty TOTAL is already partitioned out by the
+  // engine; this site renders no loyalty badge, so it takes the pills alone.
+  const counterDisplay = useCounterDisplay(obj.id);
+  const counters = pillsOf(counterDisplay);
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
@@ -1512,15 +1511,16 @@ function CardInfoPanel({
       {/* Counters */}
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
-          {counters.map(([type, count]) => {
+          {counters.map((row) => {
+            const type = row.counter;
             // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
             // unboundedly — render ∞ instead of the (still-finite) real count, and tell the
             // tooltip so its summary can't contradict the row.
-            const isUnbounded = unboundedCounterTypes.includes(type);
+            const unbounded = isUnbounded(row);
             return (
-              <CounterTooltip key={type} type={type} count={count} isUnbounded={isUnbounded}>
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
                 <span>
-                  {formatCounterType(type)}: {isUnbounded ? "∞" : count}
+                  {formatCounterType(type)}: {unbounded ? "∞" : row.count}
                 </span>
               </CounterTooltip>
             );

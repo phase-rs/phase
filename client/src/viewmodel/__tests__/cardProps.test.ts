@@ -128,16 +128,6 @@ describe("toCardProps", () => {
     expect(props.toughness).toBe(4);
   });
 
-  it("extracts counters as typed array", () => {
-    const obj = makeGameObject({ counters: { P1P1: 2, loyalty: 3 } });
-    const props = toCardProps(obj);
-
-    expect(props.counters).toEqual([
-      { type: "P1P1", count: 2 },
-      { type: "loyalty", count: 3 },
-    ]);
-  });
-
   it("detects creature and land types", () => {
     const creature = makeGameObject({
       card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Elf"] },
@@ -189,8 +179,10 @@ describe("toRoman", () => {
 
 // LOW-4 (CR 732.2a / CR 701.34a): while an accepted counter-growth loop pumps a counter, the
 // badge renders `∞` — the tooltip summary must say "unbounded" and NOT leak the still-finite
-// count. `isUnbounded` is the display-only flag threaded from the engine's `unbounded_counters`
-// membership set (never computed in the frontend).
+// count. `isUnbounded` is the display-only distinction read off the engine's `counter_display`
+// projection (never computed in the frontend): each `CounterRowView` names an (object, counter)
+// pair, carries the live count — which is `0` when the loop pumps a counter the object does not
+// carry — and carries a typed `magnitude`, absent on the wire for the dominant `Finite` case.
 describe("formatCounterTooltip — unbounded summary", () => {
   it("says ∞ and hides the finite count when unbounded (fallback, no translator)", () => {
     const summary = formatCounterTooltip("charge", 4, undefined, true);

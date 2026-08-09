@@ -5,6 +5,11 @@
     "close": "Schließen",
     "closeNamed": "{{name}} schließen"
   },
+  "scryOutcome": {
+    "title": "Spähen abgeschlossen",
+    "you": "Du",
+    "result": "{{player}} — {{top}} oben · {{bottom}} unten"
+  },
   "modal": {
     "defaultEyebrow": "Workspace-Werkzeug"
   },

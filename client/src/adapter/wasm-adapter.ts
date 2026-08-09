@@ -37,6 +37,17 @@ function isMemoryConstrainedDevice(): boolean {
   return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
 }
 
+// Parallel scoring is optional. Bound its queued restore-and-score work so a
+// stalled score worker cannot make a healthy local game appear hung.
+const AI_POOL_SCORE_TIMEOUT_MS = 5_000;
+
+class AiPoolScoreTimeoutError extends Error {
+  constructor() {
+    super(`AI worker pool timed out after ${AI_POOL_SCORE_TIMEOUT_MS}ms`);
+    this.name = "AiPoolScoreTimeoutError";
+  }
+}
+
 /**
  * Flatten the `ClientGameState { state, derived }` wire envelope produced
  * by the engine's WASM getters into the store-side `GameState` shape with
@@ -432,29 +443,32 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           try {
             const state = await this.engine!.getState();
             if (state.waiting_for.type === "Priority") {
-              const pool = await this.ensureAiPool();
-              if (pool) {
-                const scores = await pool.getAiScoredCandidates(
-                  await this.engine!.exportState(),
+              const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+              if (scores?.length) {
+                const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
+                  JSON.stringify(scores),
                   difficulty,
                   playerId,
+                  Date.now(),
                 );
-                if (scores?.length) {
-                  const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
-                    JSON.stringify(scores),
-                    difficulty,
-                    playerId,
-                    Date.now(),
-                  );
-                  if (captured) {
-                    this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
-                    return captured.proposal;
-                  }
+                if (captured) {
+                  this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                  return captured.proposal;
                 }
               }
             }
           } catch (error) {
             if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+            if (error instanceof AiPoolScoreTimeoutError) {
+              const captured = await this.engine!.getAiTacticalActionProposalWithDiagnostics(
+                difficulty,
+                playerId,
+              );
+              if (captured) {
+                this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                return captured.proposal;
+              }
+            }
             console.warn("AI worker pool failed; using authoritative single worker", error);
           }
         }
@@ -470,26 +484,23 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           // worker rebinds every score against a newly-issued contract below.
           const state = await this.engine.getState();
           if (state.waiting_for.type === "Priority") {
-            const pool = await this.ensureAiPool();
-            if (pool) {
-              const scores = await pool.getAiScoredCandidates(
-                await this.engine.exportState(),
+            const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+            if (scores?.length) {
+              const proposal = await this.engine.getAiActionProposalFromScores(
+                JSON.stringify(scores),
                 difficulty,
                 playerId,
+                Date.now(),
               );
-              if (scores?.length) {
-                const proposal = await this.engine.getAiActionProposalFromScores(
-                  JSON.stringify(scores),
-                  difficulty,
-                  playerId,
-                  Date.now(),
-                );
-                if (proposal) return proposal;
-              }
+              if (proposal) return proposal;
             }
           }
         } catch (error) {
           if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+          if (error instanceof AiPoolScoreTimeoutError) {
+            const proposal = await this.engine.getAiTacticalActionProposal(difficulty, playerId);
+            if (proposal) return proposal;
+          }
           console.warn("AI worker pool failed; using authoritative single worker", error);
         }
       }
@@ -530,6 +541,45 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     };
     void pending.then(clear, clear);
     return pending;
+  }
+
+  /** Discard an optional scorer without affecting the authoritative worker. */
+  private disableAiPool(generation: number): void {
+    if (generation !== this.aiPoolGeneration) return;
+    this.aiPoolGeneration += 1;
+    this.aiPoolPromise = null;
+    this.aiPool?.dispose();
+    this.aiPool = null;
+    this.aiPoolFailed = true;
+  }
+
+  private async getAiPoolScores(
+    engine: EngineWorkerClient,
+    difficulty: string,
+    playerId: number,
+  ): Promise<[GameAction, number][] | null> {
+    const pool = await this.ensureAiPool();
+    if (!pool) return null;
+    const generation = this.aiPoolGeneration;
+    const stateJson = await engine.exportState();
+    if (generation !== this.aiPoolGeneration) return null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      return await Promise.race([
+        pool.getAiScoredCandidates(stateJson, difficulty, playerId),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new AiPoolScoreTimeoutError());
+          }, AI_POOL_SCORE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      this.disableAiPool(generation);
+      throw error;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
   }
 
   private async reloadAiPoolGameDb(

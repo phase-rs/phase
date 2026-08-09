@@ -2959,9 +2959,13 @@ enum CounterGrowthDisposition {
 /// of the counter-growth cover (charge / burden / oil / quest)? This `match` IS the
 /// SINGLE-SOURCE per-`CounterType` classification table, WILDCARD-FREE by
 /// construction, so a new `CounterType` variant will not compile until it is
-/// explicitly classified here. Shared by BOTH `classify_generic_counter_growth` (the
-/// ω-cover direction gate) and `grown_generic_counter_targets` (the display
-/// re-derivation) so the two can never drift out of lockstep. Kept in lockstep with
+/// explicitly classified here. Scoped to the ω-COVER DIRECTION GATE alone
+/// (`classify_generic_counter_growth`) — it is NOT the display partition. Sharing one
+/// partition between the cover and the ∞ display channel WAS the bug: it made every
+/// non-`Generic` beneficial counter loop (+1/+1, loyalty, defense) collapse correctly
+/// while rendering no `∞` pill at all. The display and batched-collapse channels use
+/// `counter_is_beneficial_materializable` instead, and the two partitions are now
+/// deliberately different rather than accidentally shared. Kept in lockstep with
 /// `CounterType::is_monotone_loop_resource`, which governs the projection: monotone
 /// P/T / loyalty / defense counters are `project_out_resources`'d away, the
 /// non-`Generic` preserved counters gate SBAs/durations and so must compare
@@ -3035,45 +3039,6 @@ fn classify_generic_counter_growth(
     }
 }
 
-/// CR 122.1 + CR 701.34a + CR 732.2a: the per-object `(ObjectId, CounterType)` pairs
-/// whose PRESERVED `Generic` counters STRICTLY GREW across one cycle (`current` vs
-/// `prior`) — the concrete DISPLAY targets of an accepted counter-growth loop
-/// (proliferate charge on Pentad Prism, burden on The One Ring). The offer
-/// certificate's unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the
-/// specific object id / counter type is NOT recoverable from the axis; this
-/// re-derives them by diffing each SHARED object's growable counters — the display
-/// analog of `classify_generic_counter_growth`, sharing its SAME wildcard-free
-/// `generic_counter_is_growable` partition (single-source, so they can't drift).
-///
-/// Iterates the CURRENT side only: strict growth requires `a > b >= 0`, so a grown
-/// counter is necessarily present in `current`'s map — this both captures every
-/// grown pair (no false negatives) and is duplicate-free (unlike a two-sided key
-/// chain). An object absent from `prior` is caught by the object-set cover, not this
-/// axis, so only SHARED objects contribute. DISPLAY-ONLY: the caller renders `∞`
-/// from these pairs without mutating the real counter count (CR 701.34a still adds a
-/// real counter each cycle; the `∞` is a render of the certified-unbounded loop).
-pub(crate) fn grown_generic_counter_targets(
-    prior: &GameState,
-    current: &GameState,
-) -> Vec<(ObjectId, CounterType)> {
-    let mut targets = Vec::new();
-    for (id, co) in current.objects.iter() {
-        let Some(po) = prior.objects.get(id) else {
-            continue;
-        };
-        for (ct, &a) in co.counters.iter() {
-            if !generic_counter_is_growable(ct) {
-                continue;
-            }
-            let b = po.counters.get(ct).copied().unwrap_or(0);
-            if a > b {
-                targets.push((*id, ct.clone()));
-            }
-        }
-    }
-    targets
-}
-
 /// CR 122.1 + CR 732.2a: the wildcard-free partition of `CounterType`s whose per-cycle
 /// growth is a BENEFICIAL persistent artifact materializable N×δ at the CR 500.5 boundary
 /// (the batched-collapse path). SEPARATE from `generic_counter_is_growable` (the cover
@@ -3110,13 +3075,15 @@ pub(crate) fn counter_is_beneficial_materializable(ct: &CounterType) -> bool {
     }
 }
 
-/// CR 122.1 + CR 732.2a: the per-object `(ObjectId, CounterType, delta)` triples whose
-/// BENEFICIAL-materializable counters strictly grew across one accepted period (`current`
-/// vs `prior`) — the batched-collapse δ source. The beneficial analog of
-/// `grown_generic_counter_targets` (Generic-only for the DISPLAY channel); this widens to
-/// +1/+1 / loyalty / defense via `counter_is_beneficial_materializable`. A CLONE, not a
-/// refactor: the display/cover Generic partition must stay narrow. Iterates the CURRENT
-/// side (strict growth ⇒ the grown counter is present in `current`); only SHARED objects
+/// CR 122.1 + CR 732.2a: THE per-object counter derivation of an accepted period — the
+/// `(ObjectId, CounterType, delta)` triples whose BENEFICIAL-materializable counters strictly
+/// grew across it (`current` vs `prior`), feeding BOTH the batched-collapse δ stash AND (projected
+/// to `(object, counter)`) the `∞` DISPLAY channel. ONE derivation, two consumers, so the pills
+/// and the growth that lands cannot disagree; the display channel used to run its own Generic-only
+/// diff, which is why beneficial non-`Generic` loops collapsed without ever rendering `∞`.
+/// Partitioned by `counter_is_beneficial_materializable` (`Generic(_)` / +1/+1 / loyalty /
+/// defense), deliberately WIDER than the ω-cover's `generic_counter_is_growable`. Iterates the
+/// CURRENT side (strict growth ⇒ the grown counter is present in `current`); only SHARED objects
 /// contribute (a fresh object is caught by the object-set cover, not this axis).
 pub(crate) fn grown_beneficial_counter_deltas(
     prior: &GameState,

@@ -57,6 +57,24 @@ use std::collections::BTreeSet;
 
 use super::support::shared_card_db;
 
+/// The `DerivedViews` channels both client wire goldens are lifted from, declared ONCE and
+/// referenced by path from `kilo_live_offer_from_real_dump` so the two emitters cannot drift.
+/// Previously each file hard-coded its own copy of these four names with only a comment coupling
+/// them: `filter_map` silently DROPS a name that matches no field, and each file's drift compare
+/// then reads a committed golden written by the same typo, so both sides omit the channel and
+/// agree with themselves. One shared array makes an edit land on both emitters at once.
+///
+/// Neither frame carries all four (this file's has no `counter_display`; kilo's has no
+/// `unbounded_pile`), so each non-vacuity guard asserts this set MINUS the one name its frame
+/// legitimately lacks — which is what makes the union of the two guards span all four by
+/// construction rather than by comment.
+pub(crate) const WIRE_GOLDEN_CHANNELS: [&str; 4] = [
+    "unbounded_pile",
+    "unbounded_resources",
+    "counter_display",
+    "unbounded_families",
+];
+
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
@@ -246,20 +264,16 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
     // able to regenerate the client goldens with `UPDATE_WIRE_GOLDEN=1`, or the client-side half of
     // that probe (RP-1b, RP-2) is unreachable. An assert panic aborts the test.
     //
-    // DETERMINISM: `unbounded_counters` is a std `HashMap` (derived_views.rs), but
-    // `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
+    // DETERMINISM: `counter_display` is a std `HashMap<ObjectId, ObjectCounterDisplay>`
+    // (derived_views.rs) — the VALUE is a pre-partitioned row set, not a bare counter-type list —
+    // but `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
     // workspace — see Cargo.lock), so `to_value` re-sorts every map key. Measured byte-identical
     // across independent test processes. No normalization needed.
     let wire = serde_json::to_value(&derived).expect("derived views serialize");
-    let golden: serde_json::Map<String, serde_json::Value> = [
-        "unbounded_pile",
-        "unbounded_resources",
-        "unbounded_counters",
-        "unbounded_families",
-    ]
-    .into_iter()
-    .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
-    .collect();
+    let golden: serde_json::Map<String, serde_json::Value> = WIRE_GOLDEN_CHANNELS
+        .into_iter()
+        .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
+        .collect();
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../client/src/test/fixtures/unbounded-token-wire.json"
@@ -282,6 +296,29 @@ fn real_4p_object_growth_accept_writes_infinite_pile() {
     assert_eq!(
         derived_set, oracle,
         "derive_views().unbounded_pile must equal the pile set (battlefield-filtered)"
+    );
+
+    // NON-VACUITY GUARD for the key list above, and it sits HERE — below the WRITE — under this
+    // emitter's own stated rule, because it reads `golden`, which is derived from `derived`.
+    // `filter_map` DROPS a name that matches no `DerivedViews` field, and the drift compare below
+    // then reads a committed file the same typo wrote — so both sides omit the channel and the
+    // compare agrees with itself. Asserting the exact key SET turns a mistyped name into a RED.
+    // `BTreeSet` so this does not depend on which container backs `serde_json::Map`.
+    //
+    // PER-FILE RESIDUAL, CLOSED BY THE PAIR: this frame legitimately carries no `counter_display`,
+    // and a name a frame never populates is indistinguishable from a mistyped one from inside that
+    // frame. `kilo_live_offer_from_real_dump`'s twin guard covers `counter_display` (and this file
+    // covers the `unbounded_pile` its frame lacks). The union spans all four BY CONSTRUCTION: both
+    // guards are `WIRE_GOLDEN_CHANNELS` minus the one name their own frame lacks, so a name added
+    // to the shared array reds whichever frame does not carry it instead of being silently dropped.
+    let channels: BTreeSet<&str> = golden.keys().map(String::as_str).collect();
+    let mut expected = BTreeSet::from(WIRE_GOLDEN_CHANNELS);
+    expected.remove("counter_display");
+    assert_eq!(
+        channels, expected,
+        "the golden key list names a field `DerivedViews` does not have, or this frame stopped \
+         carrying one it must: a mistyped name is dropped silently and the drift compare below \
+         then agrees with itself. Check every name against `DerivedViews`."
     );
 
     // Cross-seam wire pin, PART 2 — the drift COMPARE (see PART 1 for why it sits here).
@@ -835,7 +872,10 @@ fn real_4p_observed_drive_sequence_replays_captured_period_n_times() {
         .map(|f| f.state);
     assert_eq!(
         tokens_state,
-        Some(FamilyCollapseState::Scheduled(CollapseCertainty::Committed)),
+        Some(FamilyCollapseState::Scheduled {
+            certainty: CollapseCertainty::Committed,
+            prompted: Some(P0),
+        }),
         "a DriveSequence replays real cycles and cannot park, so its tokens family is Committed \
          (∞→N) — contrast the batched Tokens stash behind unbounded-token-wire.json, which is \
          Conditional (∞→?)"
@@ -1614,7 +1654,10 @@ fn one_shot_bootstrap_accepted_state() -> GameState {
     runner.state().clone()
 }
 
-/// MED-1 (CR 732.2a + CR 110.1): an object-growth `∞` ROW dies with its registered backing.
+/// MED-1 (CR 732.2c + CR 110.1): an ACCEPTED object-growth `∞` ROW SURVIVES losing its entire
+/// registered backing. Once the last player accepts, the shortcut is taken and the growth will
+/// land at the boundary, so a row that vanished with the pile would have the HUD deny a result the
+/// table already agreed to.
 ///
 /// ONE rig, TWO arms, THE SAME assertion — `derive_views(..).unbounded_resources` contains
 /// `ResourceAxis::TokensCreated`:
@@ -1622,33 +1665,34 @@ fn one_shot_bootstrap_accepted_state() -> GameState {
 /// | arm (in run order) | what leaves the battlefield       | THE assertion |
 /// |--------------------|-----------------------------------|---------------|
 /// | control            | a non-pile untapped Saproling     | **present**   |
-/// | subject            | the pile's ONLY member (the seed) | **absent**    |
+/// | subject            | the pile's ONLY member (the seed) | **present**   |
 ///
 /// The control is the matched pair, not a second scenario: same fixture, same cast, same
-/// accept, same `move_to_zone` chokepoint, differing only in WHICH object departs. That is
-/// what makes the subject arm's absence attributable to the backing check rather than to the
-/// zone move. It runs FIRST on purpose — see the comment at that arm.
+/// accept, same `move_to_zone` chokepoint, differing only in WHICH object departs. It runs FIRST
+/// on purpose — see the comment at that arm.
 ///
-/// MUTATIONS (two-sided, RUN):
-/// - **DROP** the `object_growth_backing(..) == Some(false)` guard in `derive_views`' resource
-///   row loop ⇒ the SUBJECT arm reds ("…must be dropped, got [TokensCreated]" — the pre-fix
-///   behaviour: an ∞ row beside an already-empty ∞ pile); the control stays green, and no
-///   other test in the loop/∞ blast radius moves (1 failure / 164).
-/// - **TRIVIALIZE** that guard to an unconditional `continue` ⇒ the CONTROL arm reds ("…must
-///   persist, got []"); the subject arm's own assertions still pass. Collateral is 7 further
-///   ∞-row-presence tests (8 failed / 156 passed), which is correct: hiding every row breaks
-///   every test that asserts one is shown.
-/// - Third probe, for the `Some(false)`/`None` asymmetry the helper's doc comment claims:
-///   return `Some(false)` from `object_growth_backing`'s never-registered arm ⇒ 4 tests red,
-///   including both `loop_shortcut_mana_engine` badge tests. The `None` branch is load-bearing,
-///   not decorative.
+/// THE ROW IS NOT KEPT BY ACCIDENT. This state is ACCEPTED, so the projection's FIRST conjunct
+/// (`!accepted_axes.contains_key(&axis)`) is false and the backing check is never consulted — and
+/// the schedule half asserted below proves the stash really does name this axis, so the conjunct
+/// is decided by a live fact rather than by an empty map. The UNACCEPTED half of the same gate,
+/// where a dead pile really does revoke the row, is pinned by
+/// `derived_views::tests::an_accepted_token_collapse_keeps_its_row_when_its_pile_dies`'
+/// NON-VACUITY arm.
 ///
-/// The store guards below are the anti-"register enablers instead" tripwire: routing this
+/// MUTATION (RUN, and the reason this test exists in this shape): **DROP** the
+/// `!accepted_axes.contains_key(&axis)` conjunct from the row loop's gate ⇒ the SUBJECT arm reds
+/// with an empty row set (the pre-fix behaviour: an accepted collapse silently losing its badge
+/// before it lands), while the CONTROL arm stays green because its backing is still live.
+///
+/// The store and cash-out guards below are what make the surviving row HONEST rather than merely
+/// present, and they are more load-bearing here than they were when this arm asserted absence: a
+/// kept row is a claim about growth that will still land, so the test drives the real CR 500.5
+/// boundary and mints. They are also the anti-"register enablers instead" tripwire: routing this
 /// through `zones`' defuse would call `clear_unbounded_loop`, which also wipes
 /// `pending_unbounded_materialization` and its CR 732.2c bound — i.e. one dying token would
 /// cancel the collapse the whole table accepted. These rows go red the moment that happens.
 #[test]
-fn object_growth_infinity_row_dies_with_its_last_pile_member() {
+fn accepted_object_growth_row_survives_losing_its_entire_pile() {
     use engine::analysis::resource::ResourceAxis;
     use engine::game::zones::move_to_zone;
     use engine::types::events::GameEvent;
@@ -1734,9 +1778,10 @@ fn object_growth_infinity_row_dies_with_its_last_pile_member() {
     );
     let subject_rows = rows(&subject);
     assert!(
-        !subject_rows.contains(&ResourceAxis::TokensCreated),
-        "THE assertion (subject): with its ENTIRE registered pile off the battlefield the \
-         TokensCreated ∞ row must be dropped, got {subject_rows:?}"
+        subject_rows.contains(&ResourceAxis::TokensCreated),
+        "THE assertion (subject): the table ACCEPTED this collapse (CR 732.2c), so the \
+         TokensCreated ∞ row survives its ENTIRE registered pile leaving the battlefield — the \
+         growth still lands at the boundary below, got {subject_rows:?}"
     );
 
     // THE CR 732.2c PIN: a dropped ROW does not cancel the accepted collapse. Doc blocks cite
@@ -1789,21 +1834,18 @@ fn object_growth_infinity_row_dies_with_its_last_pile_member() {
          growth the table unanimously accepted still lands at the boundary (CR 732.2c)"
     );
 
-    // SCOPE: only the BACKED axis is dropped — the wire is exactly the marked set minus
-    // `TokensCreated`, so a guard that hid MORE than the unbacked axis fails here. Stated
-    // honestly: this rig marks few axes, so this row is weak on its own. The load-bearing
-    // control for the `None` (never-registered ⇒ badge unchanged) branch is
-    // `loop_shortcut_mana_engine::mana_engine_accept_still_renders_its_infinity_badge`, which
-    // reds if `object_growth_backing`'s catch-all arm returns `Some(false)` instead of `None`.
-    let expected_after: BTreeSet<ResourceAxis> = marked
-        .iter()
-        .copied()
-        .filter(|axis| *axis != ResourceAxis::TokensCreated)
-        .collect();
+    // SCOPE: NOTHING leaves the wire — the projected axis set is exactly the marked set. An
+    // acceptance gate that is too broad (keeping rows it should not) cannot be caught here, but
+    // one that is too NARROW is: any axis this rig marks and the projection drops reds this
+    // equality. The load-bearing control for the `None` (never-registered ⇒ badge unchanged)
+    // branch is `loop_shortcut_mana_engine::mana_engine_accept_still_renders_its_infinity_badge`,
+    // which reds if `object_growth_backing`'s catch-all arm returns `Some(false)` instead of
+    // `None`; the UNACCEPTED revocation half is
+    // `derived_views::tests::an_accepted_token_collapse_keeps_its_row_when_its_pile_dies`.
     assert_eq!(
         subject_rows.iter().copied().collect::<BTreeSet<_>>(),
-        expected_after,
-        "scope: exactly the backed axis leaves the wire; every unbacked axis keeps its ∞"
+        marked,
+        "scope: with the collapse accepted, every marked axis keeps its ∞ row"
     );
 
     // STORE: a DISPLAY revocation only. Nothing here may touch the accepted-collapse stash,
@@ -2224,7 +2266,11 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
     assert!(
         pre_boundary_families.iter().any(|f| f.player == P0
             && f.family == UnboundedFamily::Counters
-            && f.state == FamilyCollapseState::Scheduled(CollapseCertainty::Conditional)),
+            && f.state
+                == FamilyCollapseState::Scheduled {
+                    certainty: CollapseCertainty::Conditional,
+                    prompted: Some(P0),
+                }),
         "in the accept→boundary window the counters family is Scheduled(Conditional) — a batched \
          Counters collapse can still be declined, so ∞→? not ∞→N; got {pre_boundary_families:?}"
     );
@@ -2618,7 +2664,11 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
             .iter()
             .any(|f| f.player == P0
                 && f.family == UnboundedFamily::Tokens
-                && f.state == FamilyCollapseState::Scheduled(CollapseCertainty::Conditional)),
+                && f.state
+                    == FamilyCollapseState::Scheduled {
+                        certainty: CollapseCertainty::Conditional,
+                        prompted: Some(P0),
+                    }),
         "pre-submit: an accepted Tokens collapse is Scheduled(Conditional) — its boundary mint can \
          park on a replacement choice, which is exactly what happens below; got {:?}",
         derive_views(&state, None).unbounded_families

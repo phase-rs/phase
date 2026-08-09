@@ -4,7 +4,10 @@
       "family": "tokens",
       "player": 0,
       "state": {
-        "data": "Conditional",
+        "data": {
+          "certainty": "Conditional",
+          "prompted": 0
+        },
         "type": "Scheduled"
       }
     }

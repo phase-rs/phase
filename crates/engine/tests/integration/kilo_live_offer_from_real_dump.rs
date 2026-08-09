@@ -20,8 +20,13 @@
 //! The `kilo_reinjected_pinless_history_suppresses_offer` test is the matched-pair proof that the
 //! migration is load-bearing (re-injecting the stale prefix flips the offer OFF).
 
+use engine::analysis::decision_template::IterationCount;
 use engine::game::derived_views::{CollapseCertainty, FamilyCollapseState, UnboundedFamily};
 use engine::game::engine::apply;
+use engine::game::interaction::{
+    bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
+};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -29,8 +34,14 @@ use engine::types::game_state::{
     PayableResource, PersistedGameState, PersistentAxisMaterialization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::{
+    InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
+    InteractionSessionId, InteractionShortcutCountSpec, InteractionShortcutDecision,
+    InteractionShortcutPin, InteractionSubmission,
+};
 use engine::types::mana::ManaType;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
 const KILO: ObjectId = ObjectId(402);
@@ -41,6 +52,30 @@ const PENTAD: ObjectId = ObjectId(405);
 /// mana of any color"; Freed from the Real ability index 1 = "{U}: Untap enchanted creature".
 const RELIC_TAP_MANA: usize = 1;
 const FREED_UNTAP: usize = 1;
+
+/// The four loop permanents, per dump. Both real captures hold the same Kilo/Freed/Relic/Pentad
+/// board under P0; only the `ObjectId`s differ, so ONE drive authority serves both and the
+/// regression row cannot silently diverge from the rows that already pin this loop's behavior.
+struct LoopIds {
+    kilo: ObjectId,
+    freed: ObjectId,
+    relic: ObjectId,
+    pentad: ObjectId,
+}
+const FIXTURE_IDS: LoopIds = LoopIds {
+    kilo: KILO,
+    freed: FREED,
+    relic: RELIC,
+    pentad: PENTAD,
+};
+/// MEASURED off the reported capture, not guessed: Kilo 406, Relic 407, Freed 408, Pentad 409.
+/// Note the Freed/Relic order is TRANSPOSED relative to the older fixture (403/404).
+const CAPTURE_IDS: LoopIds = LoopIds {
+    kilo: ObjectId(406),
+    freed: ObjectId(408),
+    relic: ObjectId(407),
+    pentad: ObjectId(409),
+};
 
 fn gunzip(gz: &[u8]) -> String {
     use std::io::Read;
@@ -73,6 +108,22 @@ fn load_migrated_dump() -> GameState {
         .into_game_state()
 }
 
+/// Load the REPORTED playtest capture — the dump the "offer says ∞, collapse allows 1" bug was
+/// filed from — through the same production restore chokepoint `load_migrated_dump` uses. It is a
+/// DIFFERENT game from `kilo_freed_relic_pentad_4p.json.gz` (different seed, board size, phase and
+/// ObjectIds); this is the one the regression row drives, so nobody has to argue that the older
+/// fixture stands in for it.
+fn load_reported_capture() -> GameState {
+    let json = gunzip(include_bytes!(
+        "../fixtures/kilo_freed_relic_pentad_max_of_one_4p.json.gz"
+    ));
+    let envelope: serde_json::Value =
+        serde_json::from_str(&json).expect("capture envelope parses as JSON");
+    serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
+        .expect("the reported capture's gameState deserializes through the production decoder")
+        .into_game_state()
+}
+
 /// The acting player for the current beat (choice prompts carry their own `player`; a priority beat
 /// is answered by the live holder so the multiplayer APNAP pass is authorized).
 fn beat_actor(state: &GameState) -> PlayerId {
@@ -90,12 +141,12 @@ fn beat_actor(state: &GameState) -> PlayerId {
 /// fire live — this is NOT a simulation probe). Answers each fixed choice with the loop's demanded
 /// value (tap Kilo, Blue mana, proliferate Pentad), activates Freed once, and settles at the first
 /// of `{empty-stack Priority, LoopShortcut}` reached after Freed resolves.
-fn drive_one_live_cycle(state: &mut GameState) {
+fn drive_one_live_cycle(state: &mut GameState, ids: &LoopIds) {
     apply(
         state,
         P0,
         GameAction::ActivateAbility {
-            source_id: RELIC,
+            source_id: ids.relic,
             ability_index: RELIC_TAP_MANA,
         },
     )
@@ -111,8 +162,14 @@ fn drive_one_live_cycle(state: &mut GameState) {
                 kind: PayCostKind::TapCreatures { .. },
                 ..
             } => {
-                apply(state, actor, GameAction::SelectCards { cards: vec![KILO] })
-                    .expect("tap Kilo for the Relic mana ability");
+                apply(
+                    state,
+                    actor,
+                    GameAction::SelectCards {
+                        cards: vec![ids.kilo],
+                    },
+                )
+                .expect("tap Kilo for the Relic mana ability");
             }
             // Relic's "add one mana of any color": choose BLUE to pay Freed's {U}.
             WaitingFor::ChooseManaColor { .. } => {
@@ -132,7 +189,7 @@ fn drive_one_live_cycle(state: &mut GameState) {
                     state,
                     actor,
                     GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(PENTAD)],
+                        targets: vec![TargetRef::Object(ids.pentad)],
                     },
                 )
                 .expect("proliferate Pentad");
@@ -147,7 +204,7 @@ fn drive_one_live_cycle(state: &mut GameState) {
                         state,
                         P0,
                         GameAction::ActivateAbility {
-                            source_id: FREED,
+                            source_id: ids.freed,
                             ability_index: FREED_UNTAP,
                         },
                     )
@@ -213,7 +270,7 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
         "Pentad carries 3 charge counters in the real dump"
     );
 
-    drive_one_live_cycle(&mut state);
+    drive_one_live_cycle(&mut state, &FIXTURE_IDS);
 
     // Non-vacuous reach-guard: the live drive rebuilt a clean, fully-recorded 2-step period.
     assert_eq!(
@@ -302,7 +359,7 @@ fn kilo_reinjected_pinless_history_suppresses_offer() {
     }
     state.last_loop_action_sequence = pinless;
 
-    drive_one_live_cycle(&mut state);
+    drive_one_live_cycle(&mut state, &FIXTURE_IDS);
 
     // The stale pinless prefix makes `try_offer` re-drive from a pinless `seq[0]` and abort ⇒
     // no offer surfaces (the C2 / R3.0-A baseline).
@@ -349,6 +406,45 @@ fn drive_all_accept_n(state: &mut GameState, n: u32) {
     }
 }
 
+/// Declare the offer's OWN stated count — exactly what the real frontend dispatches
+/// (`LoopShortcutModal`'s `handleConfirm` sends `count: schema.iteration_count`, there being no
+/// declare-time picker) — then accept in APNAP order. Returns the ceiling the SAME offer
+/// published, so a caller can compare the CR 500.5 collapse range against it without restating a
+/// literal that would pass on both sides of a regression.
+fn drive_all_accept_as_offered(state: &mut GameState) -> u32 {
+    use engine::analysis::loop_check::ShortcutResponse;
+    let (proposer, ceiling, offered) = match &state.waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer, schema, ..
+        } => (
+            *proposer,
+            schema.max_iterations,
+            schema.iteration_count.clone(),
+        ),
+        other => panic!("expected a CR 732.2a loop-shortcut offer, got {other:?}"),
+    };
+    apply(
+        state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: offered,
+            template: None,
+        },
+    )
+    .expect("the proposer declares the offer's own stated count, as the modal does");
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("each living opponent accepts the as-offered ∞-charge shortcut");
+    }
+    ceiling
+}
+
 /// Pass priority (for whichever seat holds it) until the next CR 500.5 phase/step boundary raises
 /// the deferred-collapse prompt. No player re-drives the loop — the accept cleared the recorded
 /// `last_loop_action_sequence` — so the phase simply ends and the boundary drain surfaces the
@@ -375,22 +471,25 @@ fn drive_to_collapse_boundary(state: &mut GameState) {
 /// loop marks Pentad Prism's charge counter as an unbounded DISPLAY target — so the frontend
 /// renders `∞` on that pill — WITHOUT mutating the real charge count. Composite of the new
 /// field write (`register_unbounded_counter_targets`), the derived-view projection
-/// (`DerivedViews::unbounded_counters`), and the serde wire shape, all driven through the real
+/// (`DerivedViews::counter_display`), and the serde wire shape, all driven through the real
 /// accept pipeline from the real 4p dump.
 ///
 /// REVERT-PROBE (measured, non-vacuous): deleting the `register_unbounded_counter_targets`
-/// write in `materialize_object_growth_shortcut` (or the `grown_generic_counter_targets`
-/// re-derivation) leaves `unbounded_counter_targets` empty ⇒ assertions (2) the field write,
+/// write in `materialize_object_growth_shortcut` (or the `current_period_counter_growth`
+/// derivation it projects from) leaves `unbounded_counter_targets` empty ⇒ assertions (2) the
+/// field write,
 /// (3) the derived-view projection, and (4) the wire round-trip all FLIP to fail. The
 /// offer-fires reach-guard (1) and the `charge == Some(4)` rules-correctness anchor
 /// (display-only: the real count is untouched) HOLD BOTH WAYS.
 #[test]
 fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
-    use engine::game::derived_views::{derive_views, DerivedViews};
+    use engine::game::derived_views::{
+        derive_views, CounterMagnitude, CounterRowView, DerivedViews, ObjectCounterDisplay,
+    };
     use engine::types::counter::CounterType;
 
     let mut state = load_migrated_dump();
-    drive_one_live_cycle(&mut state);
+    drive_one_live_cycle(&mut state, &FIXTURE_IDS);
 
     // (1) Reach-guard (holds both ways under revert): the ∞-charge offer surfaced for P0. If
     // this ever regresses, every downstream assertion is vacuous — so it gates them.
@@ -490,20 +589,19 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
     // Where a pre-WRITE frame must be asserted, CAPTURE it into a local above and assert the local
     // below (see combo_infinite_pile.rs's declined-wire emitter).
     //
-    // DETERMINISM: `unbounded_counters` is a std `HashMap` (derived_views.rs), but
-    // `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
+    // DETERMINISM: `counter_display` is a std `HashMap<ObjectId, ObjectCounterDisplay>`
+    // (derived_views.rs) — the VALUE is a pre-partitioned row set, not a bare counter-type list —
+    // but `serde_json::Map` is BTreeMap-backed (serde_json has no `preserve_order` feature in this
     // workspace — see Cargo.lock), so `to_value` re-sorts every map key. Measured byte-identical
     // across independent test processes. No normalization needed.
     let wire = serde_json::to_value(&views).expect("derived views serialize");
-    let golden: serde_json::Map<String, serde_json::Value> = [
-        "unbounded_pile",
-        "unbounded_resources",
-        "unbounded_counters",
-        "unbounded_families",
-    ]
-    .into_iter()
-    .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
-    .collect();
+    // Shared with `combo_infinite_pile`'s emitter — see `WIRE_GOLDEN_CHANNELS` for why the two
+    // copies of this list had to become one.
+    let golden: serde_json::Map<String, serde_json::Value> =
+        crate::combo_infinite_pile::WIRE_GOLDEN_CHANNELS
+            .into_iter()
+            .filter_map(|k| wire.get(k).map(|v| (k.to_string(), v.clone())))
+            .collect();
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../client/src/test/fixtures/unbounded-counter-wire.json"
@@ -523,16 +621,40 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
         .expect("write the wire golden");
     }
 
+    // The row's count is READ FROM THE DUMP, never invented — this frame's Pentad really carries
+    // this many charge counters, and the committed wire golden compared below carries that literal.
+    let pentad_charge = state
+        .objects
+        .get(&PENTAD)
+        .and_then(|o| o.counters.get(&charge).copied())
+        .unwrap_or(0);
+    assert!(
+        pentad_charge >= 1,
+        "reach-guard: this real-dump frame's Pentad must actually carry charge counters, so the \
+         row's `count` below is a NONZERO live value and not vacuously 0; got {pentad_charge}"
+    );
     assert_eq!(
-        views.unbounded_counters.get(&PENTAD),
-        Some(&vec![charge.clone()]),
-        "the ∞ charge pill stays projected while the collapse is merely SCHEDULED"
+        views.counter_display.get(&PENTAD),
+        Some(&ObjectCounterDisplay {
+            pills: vec![CounterRowView {
+                counter: charge.clone(),
+                count: pentad_charge,
+                magnitude: CounterMagnitude::Unbounded,
+            }],
+            loyalty: None,
+        }),
+        "the ∞ charge pill stays projected while the collapse is merely SCHEDULED, and it carries \
+         the LIVE count so the display never has to join back to `objects[..].counters`"
     );
 
     assert!(
         views.unbounded_families.iter().any(|f| f.player == P0
             && f.family == UnboundedFamily::Counters
-            && f.state == FamilyCollapseState::Scheduled(CollapseCertainty::Committed)),
+            && f.state
+                == FamilyCollapseState::Scheduled {
+                    certainty: CollapseCertainty::Committed,
+                    prompted: Some(P0),
+                }),
         "the real kilo accept's single DriveSequence yields a Committed family on a REAL \
          production dump — that is this witness's distinct property, NOT uniqueness: two other \
          Committed witnesses exist on synthetic boards (combo_infinite_pile's grafted \
@@ -541,6 +663,30 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
          unbounded-counter-wire.json; it sits AFTER the WRITE so a mutation that reds it can \
          still regenerate the golden (M1-e(c), M2-d(b) depend on that). got={:?}",
         views.unbounded_families
+    );
+
+    // NON-VACUITY GUARD for the key list above, and it sits HERE — below the WRITE — under this
+    // emitter's own stated rule, because it reads `golden`, which is derived from `views`.
+    // `filter_map` DROPS a name that matches no `DerivedViews` field, and the drift compare below
+    // then reads a committed file the same typo wrote — so both sides omit the channel and the
+    // compare agrees with itself. Asserting the exact key SET turns a mistyped name into a RED.
+    // `BTreeSet` so this does not depend on which container backs `serde_json::Map`.
+    //
+    // PER-FILE RESIDUAL, CLOSED BY THE PAIR: this frame legitimately carries no `unbounded_pile`,
+    // and a name a frame never populates is indistinguishable from a mistyped one from inside that
+    // frame. `combo_infinite_pile`'s twin guard covers `unbounded_pile` (and this file covers the
+    // `counter_display` its frame lacks). The union spans all four BY CONSTRUCTION: both guards are
+    // `WIRE_GOLDEN_CHANNELS` minus the one name their own frame lacks, so a name added to the
+    // shared array reds whichever frame does not carry it instead of being silently dropped.
+    let channels: std::collections::BTreeSet<&str> = golden.keys().map(String::as_str).collect();
+    let mut expected =
+        std::collections::BTreeSet::from(crate::combo_infinite_pile::WIRE_GOLDEN_CHANNELS);
+    expected.remove("unbounded_pile");
+    assert_eq!(
+        channels, expected,
+        "the golden key list names a field `DerivedViews` does not have, or this frame stopped \
+         carrying one it must: a mistyped name is dropped silently and the drift compare below \
+         then agrees with itself. Check every name against `DerivedViews`."
     );
 
     // Cross-seam wire pin, PART 2 — the drift COMPARE (see PART 1 for why it sits here).
@@ -557,20 +703,186 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
     // the wire, and survives a round-trip; an EMPTY derived view omits it (skip_serializing_if).
     let json = serde_json::to_string(&views).expect("derived views serialize");
     assert!(
-        json.contains("unbounded_counters"),
-        "the populated ∞-counter channel is present on the wire"
+        json.contains("counter_display"),
+        "the populated counter-display channel is present on the wire"
     );
     let round: DerivedViews = serde_json::from_str(&json).expect("derived views round-trip");
     assert_eq!(
-        round.unbounded_counters.get(&PENTAD),
-        Some(&vec![charge]),
-        "the ∞ counter channel survives a serde round-trip"
+        round.counter_display.get(&PENTAD),
+        Some(&ObjectCounterDisplay {
+            pills: vec![CounterRowView {
+                counter: charge,
+                count: pentad_charge,
+                magnitude: CounterMagnitude::Unbounded,
+            }],
+            loyalty: None,
+        }),
+        "the counter-display channel survives a serde round-trip, count and magnitude included"
     );
     let empty_json =
         serde_json::to_string(&DerivedViews::default()).expect("empty derived views serialize");
     assert!(
-        !empty_json.contains("unbounded_counters"),
+        !empty_json.contains("counter_display"),
         "the field is omitted (skip_serializing_if) when empty"
+    );
+}
+
+/// TARGET-DEPARTURE RELATION (CR 732.2a / CR 110.1), pinned end-to-end on the real 4p dump: when a
+/// registered ∞ counter target leaves the battlefield, the per-object PILL disappears from the wire
+/// while the aggregate counter ROW remains — and the STORE keeps the departed pair.
+///
+/// That the pill and the row disagree is the point, and the REASON has changed — the assertion
+/// outlived its original justification, which is why the discriminator arm below now exists.
+///
+/// A pill is keyed by `ObjectId` and departure is an OBJECT event, so a pill has the identity it
+/// needs to filter itself, and it filters unconditionally. A row is keyed by `ResourceAxis`. This
+/// test used to explain the row's survival by "no axis-scoped backing authority exists" — that is
+/// no longer true: `object_growth_backing` answers `Counter(..)` by deriving each registered
+/// `(ObjectId, CounterType)` pair's own axis (`collapsed_counter_axis`), and on this very state
+/// that answer is `Some(false)`. The row survives for a DIFFERENT reason: this fixture's collapse
+/// was ACCEPTED (`drive_all_accept` above), and CR 732.2c makes an accepted shortcut binding, so
+/// the acceptance conjunct keeps the row regardless of what happened to its targets.
+///
+/// THAT DISTINCTION IS WHY (6) IS LOAD-BEARING. With the stash present, (4) passes whether or not
+/// the counter authority works at all — every wrong answer in that subsystem (`None` from an
+/// unmatched axis, an unregistered axis, a drifted bridge) also keeps the badge. So (4) alone is
+/// vacuous in the direction that matters, and (6) is the arm that removes the acceptance and
+/// requires the row to DIE. Only (6) proves the accept registered a pair whose derived axis equals
+/// a marked axis — i.e. that the bridge join succeeds on PRODUCTION-DERIVED data rather than on
+/// hand-built state, which no building-block test can establish.
+///
+/// Nothing pinned this relation before: the token family's analog
+/// (`loop_shortcut::stale_pile_member_is_omitted_from_the_wire_but_kept_in_the_store`) covers the
+/// pile, and the counter pill's battlefield filter had no runnable guard on a real accept.
+///
+/// MUTATIONS (to be RUN and recorded, one expected red each — if any reds more than its own row
+/// that is reported, not trimmed):
+/// - delete the `!state.battlefield.contains(id)` filter in `derive_views`' counter-pill loop
+///   => (3) reds alone;
+/// - restore the controller-keyed `Some(false)` `Counter(..)` arm in `object_growth_backing`
+///   => (4) reds alone;
+/// - "fix" it by pruning the STORE instead of the wire => (5) reds alone. (5) is the discriminator
+///   against that wrong fix: the boundary collapse reads the store;
+/// - revert the `Counter(..)` arm to `None` (the refusing revision) => (6) reds ALONE, and
+///   nothing else here moves. That isolation is the proof (6) is measuring the authority and not
+///   the acceptance gate.
+#[test]
+fn departed_counter_target_drops_its_pill_but_keeps_its_row_and_store_entry() {
+    use engine::analysis::resource::ResourceAxis;
+    use engine::game::derived_views::derive_views;
+    use engine::game::zones::move_to_zone;
+    use engine::types::counter::CounterType;
+    use engine::types::events::GameEvent;
+    use engine::types::zones::Zone;
+
+    let mut state = load_migrated_dump();
+    drive_one_live_cycle(&mut state, &FIXTURE_IDS);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: at the CR 732.2a ∞-charge offer for P0, got {:?}",
+        state.waiting_for
+    );
+    drive_all_accept(&mut state);
+
+    let charge = CounterType::Generic("charge".into());
+
+    // (1) REACH-GUARD, holds under every mutation below: the accept registered the target AND it
+    // is on the battlefield right now — so any divergence after the move is caused by the
+    // departure and by nothing else.
+    assert!(
+        state
+            .unbounded_counter_targets
+            .get(&P0)
+            .is_some_and(|t| t.contains(&(PENTAD, charge.clone()))),
+        "reach-guard: the accept registered (Pentad, charge) as a ∞ display target"
+    );
+    assert!(
+        state.battlefield.contains(&PENTAD),
+        "reach-guard: BEFORE the departure the target is on the battlefield"
+    );
+
+    // (2) REACH-GUARD: the pill and the row are BOTH present beforehand. Without this the
+    // post-departure assertions could pass on a wire that never carried either.
+    let before = derive_views(&state, None);
+    assert!(
+        before
+            .counter_display
+            .get(&PENTAD)
+            .is_some_and(|display| display.pills.iter().any(|r| r.counter == charge)),
+        "reach-guard: the pill is on the wire before the departure"
+    );
+    let row_axes_before: Vec<_> = before.unbounded_resources.iter().map(|r| r.axis).collect();
+    assert!(
+        row_axes_before
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::Counter(..))),
+        "reach-guard: a counter ROW is on the wire before the departure, got {row_axes_before:?}"
+    );
+
+    // The departure itself, through the production chokepoint (CR 110.1: it stops being a
+    // permanent).
+    let mut events: Vec<GameEvent> = Vec::new();
+    move_to_zone(&mut state, PENTAD, Zone::Graveyard, &mut events);
+    assert!(
+        !state.battlefield.contains(&PENTAD),
+        "the departure really happened"
+    );
+
+    let after = derive_views(&state, None);
+
+    // (3) THE PILL IS GONE — departure is an object event and the pill has object identity.
+    assert!(
+        !after.counter_display.contains_key(&PENTAD),
+        "(3) the departed target's ∞ pill must leave the wire, got {:?}",
+        after.counter_display
+    );
+
+    // (4) THE ROW REMAINS — because the collapse was ACCEPTED (CR 732.2c), not because nothing
+    // could revoke it. (6) below is what distinguishes those two explanations.
+    let row_axes_after: Vec<_> = after.unbounded_resources.iter().map(|r| r.axis).collect();
+    assert!(
+        row_axes_after
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::Counter(..))),
+        "(4) the counter ROW must survive its target's departure — the table already accepted \
+         this collapse and it still lands at the boundary, got {row_axes_after:?}"
+    );
+
+    // (5) THE STORE IS NOT PRUNED — discriminator against "fixing" this by mutating the store:
+    // the CR 500.5 boundary collapse reads it.
+    assert!(
+        state
+            .unbounded_counter_targets
+            .get(&P0)
+            .is_some_and(|t| t.contains(&(PENTAD, charge.clone()))),
+        "(5) the STORE must still carry the departed (object, counter) pair — only the wire filters"
+    );
+
+    // (6) THE DISCRIMINATOR, and the only non-vacuous half of (4). Same post-departure state with
+    // the ACCEPTANCE removed: the row must now DIE. This is the single assertion in this file that
+    // requires the counter authority to actually work — it forces `object_growth_backing` to
+    // derive the departed pair's axis through `collapsed_counter_axis` and match it against a
+    // MARKED axis, both sides produced by the real accept on a real dump. Nothing hand-built can
+    // show that the two agree on production-derived data; that is why this arm lives here rather
+    // than at building-block level.
+    //
+    // `pending_unbounded_materialization` is a public field and this is a local clone, so removing
+    // it mutates nothing the rest of the test observes.
+    let mut unaccepted = state.clone();
+    unaccepted.pending_unbounded_materialization.clear();
+    let after_unaccepted = derive_views(&unaccepted, None);
+    let unaccepted_axes: Vec<_> = after_unaccepted
+        .unbounded_resources
+        .iter()
+        .map(|r| r.axis)
+        .collect();
+    assert!(
+        !unaccepted_axes
+            .iter()
+            .any(|a| matches!(a, ResourceAxis::Counter(..))),
+        "(6) with the accepted collapse removed, the departed targets leave the counter row with \
+         no live backing and it MUST be revoked — if it survives here, (4) above is passing for \
+         no reason and the counter authority is not working, got {unaccepted_axes:?}"
     );
 }
 
@@ -596,14 +908,16 @@ fn kilo_accept_marks_pentad_charge_as_unbounded_display_target() {
 /// (priority advances straight into combat) ⇒ the boundary reach-guard (2) FLIPS to a panic.
 #[test]
 fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
-    use engine::game::derived_views::derive_views;
+    use engine::game::derived_views::{
+        derive_views, CounterMagnitude, CounterRowView, ObjectCounterDisplay,
+    };
     use engine::types::counter::CounterType;
 
     const N: u32 = 5;
     let charge = CounterType::Generic("charge".into());
 
     let mut state = load_migrated_dump();
-    drive_one_live_cycle(&mut state);
+    drive_one_live_cycle(&mut state, &FIXTURE_IDS);
 
     // (1) Reach-guard (gates everything downstream): the ∞-charge offer surfaced for P0.
     assert!(
@@ -676,10 +990,29 @@ fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
         "the collapsed ∞ counter target is cleared for P0, got {:?}",
         state.unbounded_counter_targets.get(&P0)
     );
+    // (5b) THE ∞ ANNOTATION CLEARS BUT THE FINITE ROW SURVIVES, on an object that never left the
+    // battlefield: `clear_collapsed_materializations` drops the registered pair, and the finite
+    // pass in `counter_display_views` keeps publishing the now-real count — so the pill renders
+    // the real number rather than `∞`, and it does not vanish.
+    let display = derive_views(&state, None)
+        .counter_display
+        .get(&PENTAD)
+        .cloned()
+        .expect(
+            "after the collapse Pentad still renders a FINITE charge row — the `∞` ANNOTATION is \
+             what `clear_collapsed_materializations` clears, not the row itself",
+        );
     assert_eq!(
-        derive_views(&state, None).unbounded_counters.get(&PENTAD),
-        None,
-        "the derived ∞-counter view no longer projects Pentad after the collapse"
+        display,
+        ObjectCounterDisplay {
+            pills: vec![CounterRowView {
+                counter: charge.clone(),
+                count: baseline + N,
+                magnitude: CounterMagnitude::Finite,
+            }],
+            loyalty: None,
+        },
+        "the collapsed pair renders as EXACTLY one FINITE row carrying the real collapsed count"
     );
 
     // (6) The boundary protocol closed cleanly back to ordinary priority (CR 800.4a).
@@ -687,5 +1020,224 @@ fn kilo_accept_collapses_at_boundary_to_exactly_n_counters() {
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "after the collapse submit, priority is restored, got {:?}",
         state.waiting_for
+    );
+}
+
+/// CR 732.2a + CR 732.2c REGRESSION, driven from the ACTUAL REPORTED PLAYTEST CAPTURE (the dump the
+/// "the offer says ∞ but the collapse only allows 1" report was filed from — a DIFFERENT game from
+/// the older fixture the rows above drive).
+///
+/// The unbounded object-growth producer publishes the global safety limit as its ceiling but seeded
+/// its stated count with a bare 1. The frontend echoes that stated count verbatim (there is no
+/// declare-time picker), CR 732.2c makes the accepted count binding, and the accepted count caps the
+/// CR 500.5 collapse prompt — so a stated count below the published ceiling silently picks the
+/// controller's number for them.
+///
+/// ONE flipping conjunct and THREE reach-guards. The flipping one is the boundary range: it reads
+/// the ceiling off the SAME live offer rather than restating a literal, so no arm of it can pass on
+/// both sides of the regression. Pre-fix it reads a collapse max of 1 against a published ceiling of
+/// 1000.
+///
+/// Never hard-code the declared count here: `drive_all_accept_as_offered` reads
+/// `schema.iteration_count` to reproduce the frontend echo exactly, and that echo is what makes the
+/// row discriminating. Never submit the amount either — the row stops at the prompt, because
+/// asserting the offered RANGE is both the claim under test and the cheap path.
+#[test]
+fn kilo_reported_capture_offer_states_the_full_ceiling_it_publishes() {
+    let mut state = load_reported_capture();
+
+    // (1) LOAD REACH-GUARD (holds both ways): the reported capture is what loaded, not a stand-in
+    // for it. The board is the untouched 4p playtest capture, with the loop's four permanents on
+    // the controller's battlefield under the MEASURED ids.
+    assert_eq!(
+        state.objects.len(),
+        409,
+        "the reported 4p playtest capture loads intact"
+    );
+    for (label, id) in [
+        ("Kilo", CAPTURE_IDS.kilo),
+        ("Freed", CAPTURE_IDS.freed),
+        ("Relic", CAPTURE_IDS.relic),
+        ("Pentad", CAPTURE_IDS.pentad),
+    ] {
+        let permanent = &state.objects[&id];
+        assert_eq!(
+            (permanent.zone, permanent.controller),
+            (Zone::Battlefield, P0),
+            "{label} is on the loop controller's battlefield in the reported capture"
+        );
+    }
+
+    drive_one_live_cycle(&mut state, &CAPTURE_IDS);
+
+    // (2) OFFER REACH-GUARD (holds both ways; gates 3 and 4). This assertion MUST sit here, between
+    // the live drive and the accept: `drive_all_accept_as_offered` CONSUMES the offer, and its own
+    // first statement panics on any non-offer beat, so placed after the accept this guard would be
+    // dead code and its failure mode unreadable.
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { proposer, .. } if proposer == P0),
+        "reach-guard: the CR 732.2a ∞-charge offer surfaced for the loop's controller, got {:?}",
+        state.waiting_for
+    );
+
+    // Declare the offer's OWN stated count and accept in APNAP order — the exact dispatch the modal
+    // makes. Returns the ceiling that same offer published.
+    let ceiling = drive_all_accept_as_offered(&mut state);
+
+    // (3) NON-VACUITY FLOOR (holds both ways): a published ceiling of 1 could not tell a capped
+    // boundary apart from an honest one.
+    assert!(
+        ceiling > 1,
+        "the offer publishes a ceiling above 1, so a capped boundary is a real narrowing"
+    );
+
+    drive_to_collapse_boundary(&mut state);
+
+    // (4) THE FLIPPING ASSERTION. CR 732.2c binds the accepted count, and CR 500.5's collapse prompt
+    // is capped by it — so the range the controller is offered must reach the ceiling the offer
+    // itself published. Pre-fix this reads a max of 1 against a ceiling of 1000.
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource: PayableResource::LoopCollapse { .. },
+        min,
+        max,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "the boundary drive must end at the deferred-collapse prompt it exists to reach, \
+             got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        *player, P0,
+        "the loop's controller is the seat asked to name the collapse count"
+    );
+    assert_eq!(
+        *min, 0,
+        "CR 732.2b: declining to shorten at every place makes every prefix consented to"
+    );
+    assert_eq!(
+        *max, ceiling,
+        "CR 732.2c: the collapse prompt offers the very ceiling the accepted offer published"
+    );
+}
+
+/// CR 732.2a + CR 732.2c: the offer has TWO live declare authorities, and they must state the same
+/// count. `LoopShortcutModal` echoes `schema.iteration_count` verbatim; the interaction wire echoes
+/// it through the published `suggested`, and `AcceptSuggested` turns that `suggested` into the
+/// declared `IterationCount`. If they disagree, a client on the wire binds a different CR 732.2c
+/// count than the React client binds for the SAME offer.
+///
+/// Driven from the REPORTED capture through the real producer — no hand-built schema anywhere, which
+/// is exactly what the two `interaction_contract` rows this replaces could not offer.
+///
+/// TWO assertions, with DIFFERENT jobs — do not read them as two revert-failing conjuncts.
+/// The first is the revert-failing one: pre-fix the published pair reads a suggestion of 1 against a
+/// max of 1000, it fails, and because a failing assertion panics, the second never evaluates on that
+/// arm. The second is a MUTATION GUARD on the arm that maps the published suggestion to the declared
+/// count: post-fix both are green, and forcing that arm to declare a bare 1 reds this row and only
+/// this row. Without the second assertion that mutation leaves the row green, which would move the
+/// coverage gap by one line instead of closing it.
+#[test]
+fn kilo_reported_capture_interaction_picker_suggests_the_full_ceiling() {
+    let mut state = load_reported_capture();
+    drive_one_live_cycle(&mut state, &CAPTURE_IDS);
+
+    // Reach-guard (holds both ways): the live offer is what we are about to project.
+    let WaitingFor::LoopShortcut {
+        proposer, schema, ..
+    } = &state.waiting_for
+    else {
+        // Wording is deliberately unlike every other abort message in this file — the regression
+        // triage procedure routes on message text, so two sites must never print a near-match.
+        panic!(
+            "the interaction-picker row needs the offer still live at this beat, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*proposer, P0, "the loop's controller proposes the shortcut");
+    let ceiling = schema.max_iterations;
+    // Non-vacuity floor (holds both ways): a ceiling of 1 could not discriminate.
+    assert!(ceiling > 1, "the offer publishes a ceiling above 1");
+
+    // Probe on a CLONE. `bind_interaction_authority` takes `&mut GameState`, and nothing in this
+    // row may perturb a drive; cloning makes the whole projection provably inert.
+    let mut probe = state.clone();
+    bind_interaction_authority(
+        &mut probe,
+        InteractionSessionId("wb7048-ceiling".to_string()),
+    )
+    .expect("bind the interaction authority over the live offer");
+    let filtered = filter_state_for_viewer(&probe, P0);
+    let view = derive_viewer_interaction(&probe, &filtered, P0);
+    let opportunity = view
+        .opportunities
+        .first()
+        .expect("the live offer publishes an interaction opportunity");
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { count, points, .. },
+        ..
+    } = &opportunity.response
+    else {
+        panic!(
+            "the live offer publishes a Shortcut response schema, got {:?}",
+            opportunity.response
+        );
+    };
+    let InteractionShortcutCountSpec::Fixed { suggested, max, .. } = count else {
+        panic!("an Advantage offer publishes a Fixed count spec, got {count:?}");
+    };
+
+    // ASSERTION 1 — THE REVERT-FAILING ONE (hops 1-3): the producer's seed survives the clamp, at
+    // the offer's own bound. Pre-fix this reads a suggestion of 1 against a max of 1000, fails, and
+    // panics — so assertion 2 below does not evaluate on the pre-fix arm.
+    assert_eq!(
+        (*suggested, *max),
+        (ceiling, ceiling),
+        "CR 732.2a: the picker suggests the very ceiling this offer publishes"
+    );
+
+    // ASSERTION 2 — THE MUTATION GUARD (hop 4): `AcceptSuggested` declares that suggestion. It is
+    // green on BOTH arms of the seed fix; what it catches is a change to the arm that maps the
+    // published suggestion onto the declared count, which assertion 1 cannot see at all. Pins are
+    // derived from the PUBLISHED points, never by index — one pin per non-read-only point, holding
+    // exactly that point's `min` choices, which is what the materializer validates.
+    let pins: Vec<InteractionShortcutPin> = points
+        .iter()
+        .filter(|point| !point.read_only)
+        .map(|point| InteractionShortcutPin {
+            group: point.group,
+            choice_ids: point
+                .candidate_ids
+                .iter()
+                .take(point.min as usize)
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    let action = resolve_interaction_response(
+        &probe,
+        P0,
+        &InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::AcceptSuggested,
+                pins,
+            },
+        },
+    )
+    .expect("AcceptSuggested materializes a declare against the live offer");
+    let GameAction::DeclareShortcut {
+        count: declared, ..
+    } = &action
+    else {
+        panic!("AcceptSuggested materializes a DeclareShortcut, got {action:?}");
+    };
+    assert_eq!(
+        *declared,
+        IterationCount::Fixed(ceiling),
+        "CR 732.2c: the wire declare binds the same count the React echo binds"
     );
 }

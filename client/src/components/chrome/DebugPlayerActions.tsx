@@ -225,10 +225,9 @@ function ModifyEnergyForm({ onDispatch }: Props) {
 }
 
 // Opens the debug library browser for the local (perspective) player. The
-// engine only exposes the viewer's OWN library names while that viewer has an
-// active debug capability (`visibility.rs`), so this is intentionally scoped
-// to the perspective seat rather than offering a player picker that would
-// render opponent backs.
+// engine supplies its separately authorized OWN-library debug projection, so
+// this remains scoped to the perspective seat rather than offering a picker
+// that could expose opponent library identities.
 function BrowseLibraryForm() {
   const openDebugLibraryViewer = useUiStore((s) => s.openDebugLibraryViewer);
   const perspectivePlayerId = usePerspectivePlayerId();

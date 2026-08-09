@@ -1789,10 +1789,10 @@ fn incompatible_must_attack_player_accepts_max_score_declaration() {
         let attacker = {
             let mut b = scenario.add_creature(P0, "Doubly Lured Bear", 2, 2);
             b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+                player: P1.into(),
             }));
             b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P2,
+                player: P2.into(),
             }));
             b.id()
         };
@@ -2282,7 +2282,7 @@ fn must_attack_whose_only_target_is_taxed_does_not_force_payment() {
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
             b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+                player: P1.into(),
             }));
             b.id()
         };
@@ -2487,7 +2487,7 @@ fn shared_scaled_tax_taxes_each_attacker_independently() {
         let lure = |scenario: &mut GameScenario, name: &str| {
             let mut b = scenario.add_creature(P0, name, 2, 2);
             b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+                player: P1.into(),
             }));
             b.id()
         };

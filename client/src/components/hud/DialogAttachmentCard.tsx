@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { ObjectId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useCanActForWaitingState, usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -108,14 +109,15 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
 
   const { handlers, firedRef } = useCardHover(objectId);
 
+  // CR 122.1 + CR 306.5c: the engine's counter-display projection is the single authority —
+  // it already dropped zero FINITE rows, split the loyalty total out of the pill strip, and
+  // ordered the pills, so nothing is filtered or sorted here. Called ABOVE the `!obj` early
+  // return: a hook below it would be conditional and break render order (`tsc` cannot see it).
+  const counters = pillsOf(useCounterDisplay(objectId));
+
   if (!obj) return null;
 
   const lookup = cardImageLookup(obj);
-  // Non-loyalty counters only — loyalty applies to planeswalkers, never Auras.
-  const counters = Object.entries(obj.counters).filter(
-    (entry): entry is [string, number] =>
-      entry[0] !== "loyalty" && entry[1] != null && entry[1] > 0,
-  );
 
   const sizeVars: CSSProperties = {
     "--card-w": `${widthPx}px`,
@@ -211,15 +213,21 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
       )}
       {counters.length > 0 && (
         <div className="absolute right-1 top-1 z-[60] flex flex-col gap-0.5">
-          {counters.map(([type, count]) => (
-            <CounterTooltip key={type} type={type} count={count}>
-              <span
-                className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-              >
-                {formatCounterType(type)} x{count}
-              </span>
-            </CounterTooltip>
-          ))}
+          {counters.map((row) => {
+            const type = row.counter;
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count.
+            const unbounded = isUnbounded(row);
+            return (
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+                <span
+                  className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                >
+                  {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
     </div>

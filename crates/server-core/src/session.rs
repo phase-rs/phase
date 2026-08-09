@@ -7,12 +7,18 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
-use engine::game::finalize_public_state;
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
+use engine::game::log::resolve_log_entries;
 use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::preview::preview_auto_payment_sources;
-use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
-use engine::types::actions::GameAction;
+use engine::game::public_state::{
+    bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
+};
+use engine::game::{
+    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks,
+    rehydrate_game_from_card_db, DebugCardCreateRequest,
+};
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, PersistedGameState};
@@ -900,8 +906,14 @@ impl GameSession {
     /// - card characteristics from the card database
     /// - `log_player_names` from the persisted display names
     /// - `rng` re-seeded with fresh randomness
-    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Self {
+    pub fn from_persisted(ps: PersistedSession, db: &CardDatabase) -> Result<Self, String> {
         let mut state = ps.state.into_game_state();
+        state
+            .format_config
+            .validate_for_player_count(ps.player_count)?;
+        state
+            .format_config
+            .reject_unimplemented_range_of_influence()?;
 
         // Restore #[serde(skip)] fields
         state.all_card_names = db.card_names().into();
@@ -944,7 +956,7 @@ impl GameSession {
 
         let rewind_game_number = state.game_number;
 
-        GameSession {
+        Ok(GameSession {
             game_code: ps.game_code,
             full_runtime: None,
             state_revision: ps.state_revision,
@@ -975,7 +987,7 @@ impl GameSession {
             takeback_history: VecDeque::new(),
             turn_rewind_history: VecDeque::new(),
             rewind_game_number,
-        }
+        })
     }
 }
 
@@ -1015,6 +1027,7 @@ impl SessionManager {
     /// Create a new game session (2-player default). Returns (game_code, player_token).
     pub fn create_game(&mut self, deck: PlayerDeckPayload) -> (String, String) {
         self.create_game_n_players(deck, String::new(), None, 2, MatchConfig::default(), None)
+            .expect("the standard format must be supported")
     }
 
     /// Create a new game session with lobby settings (2-player default). Returns (game_code, player_token).
@@ -1026,6 +1039,7 @@ impl SessionManager {
         match_config: MatchConfig,
     ) -> (String, String) {
         self.create_game_n_players(deck, display_name, timer_seconds, 2, match_config, None)
+            .expect("the standard format must be supported")
     }
 
     /// Create a new N-player game session. Returns (game_code, player_token).
@@ -1037,7 +1051,11 @@ impl SessionManager {
         player_count: u8,
         match_config: MatchConfig,
         format_config: Option<FormatConfig>,
-    ) -> (String, String) {
+    ) -> Result<(String, String), String> {
+        let format_config = format_config.unwrap_or_else(FormatConfig::standard);
+        format_config.validate_for_player_count(player_count)?;
+        format_config.reject_unimplemented_range_of_influence()?;
+
         let game_code = generate_game_code();
         let player_token = generate_player_token();
         let pc = player_count as usize;
@@ -1051,11 +1069,7 @@ impl SessionManager {
         let mut display_names = vec![String::new(); pc];
         display_names[0] = display_name;
 
-        let mut state = GameState::new(
-            format_config.unwrap_or_else(FormatConfig::standard),
-            player_count,
-            rand::rng().random(),
-        );
+        let mut state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: Bo3 is inherently 2-player, but the combo-detector opt-in is
         // player-count-agnostic (infinite loops are a Commander staple), so carry
         // `loop_detection` through for any table size while resetting `match_type`.
@@ -1120,7 +1134,7 @@ impl SessionManager {
 
         info!(game = %game_code, player_count, "game session created");
 
-        (game_code, player_token)
+        Ok((game_code, player_token))
     }
 
     /// Join an existing game. Returns (player_id, player_token, initial_state_for_joiner) on success.
@@ -1270,7 +1284,7 @@ impl SessionManager {
         card_names: Vec<String>,
         format_config: Option<FormatConfig>,
         db: &CardDatabase,
-    ) -> (String, String) {
+    ) -> Result<(String, String), String> {
         let total_players = 1 + ai_requests.len() as u8;
         let (game_code, player_token) = self.create_game_n_players(
             host_deck,
@@ -1279,7 +1293,7 @@ impl SessionManager {
             total_players,
             match_config,
             format_config,
-        );
+        )?;
 
         let session = self.sessions.get_mut(&game_code).unwrap();
         for (seat_index, difficulty, deck) in &ai_requests {
@@ -1302,7 +1316,7 @@ impl SessionManager {
             .start_game(db)
             .expect("start_game in tests should not hit cEDH validation");
 
-        (game_code, player_token)
+        Ok((game_code, player_token))
     }
 
     /// Returns the exact mana sources automatic payment would use without
@@ -1333,6 +1347,20 @@ impl SessionManager {
         game_code: &str,
         player_token: &str,
         action: GameAction,
+    ) -> Result<ActionResult, String> {
+        self.handle_action_with_card_db(game_code, player_token, action, None)
+    }
+
+    /// Handle a game action whose transport can resolve debug card names through
+    /// its live card database. The engine owns materialization and entry; this
+    /// boundary only resolves the player-entered card name into a card face.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action_with_card_db(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
     ) -> Result<ActionResult, String> {
         let session = self
             .sessions
@@ -1401,6 +1429,10 @@ impl SessionManager {
         // legality gate: several legal action classes are combinatorial.
         let records_takeback = !action.is_actor_scoped_preference();
 
+        if let GameAction::Debug(debug_action) = &action {
+            debug_action.validate_create_count()?;
+        }
+
         let pre_action_state = records_takeback.then(|| session.state.clone());
 
         // Set player names for log resolution.
@@ -1412,10 +1444,72 @@ impl SessionManager {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        let result = apply(&mut session.state, player, action).map_err(|e| {
-            warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-            format!("Engine error: {}", e)
-        })?;
+        let result = match action {
+            action @ GameAction::Debug(DebugAction::CreateCard { count: 0, .. }) => {
+                apply(&mut session.state, player, action).map_err(|e| {
+                    warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                    format!("Engine error: {}", e)
+                })?
+            }
+            GameAction::Debug(DebugAction::CreateCard {
+                card_name,
+                owner,
+                zone,
+                count,
+                attach_to,
+                run_etb,
+                nonlegendary,
+            }) => {
+                if !session.state.debug_mode {
+                    return Err("Engine error: Debug actions require debug_mode to be enabled".to_string());
+                }
+                if !session.state.players.iter().any(|player| player.id == owner) {
+                    return Err("Engine error: Debug: invalid owner player id".to_string());
+                }
+                let card_db = card_db.ok_or_else(|| {
+                    "Debug::CreateCard requires a card database at the transport boundary".to_string()
+                })?;
+                let face = card_db
+                    .get_face_by_name(&card_name)
+                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
+                let debug_action = DebugAction::CreateCard {
+                    card_name: card_name.clone(),
+                    owner,
+                    zone,
+                    count,
+                    attach_to,
+                    run_etb,
+                    nonlegendary,
+                };
+                let description = debug_action.describe(&session.state);
+                let before = session.state.clone();
+                let mut result = create_debug_cards(
+                    &mut session.state,
+                    DebugCardCreateRequest {
+                        source: debug_card_entry_source(card_db, face),
+                        owner,
+                        zone,
+                        count,
+                        attach_to,
+                        run_etb,
+                        nonlegendary,
+                    },
+                );
+                result.events.push(GameEvent::DebugActionUsed {
+                    player_id: player,
+                    description,
+                });
+                bump_state_revision(&mut session.state);
+                mark_public_state_all_dirty(&mut session.state);
+                finalize_public_state(&mut session.state);
+                result.log_entries = resolve_log_entries(&result.events, &before, &session.state);
+                result
+            }
+            action => apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?,
+        };
         if let Some(snapshot) = pre_action_state {
             session.push_takeback_state(player, snapshot);
         }
@@ -1945,7 +2039,8 @@ mod tests {
         let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
 
         let db = CardDatabase::default();
-        let restored = GameSession::from_persisted(persisted, &db);
+        let restored =
+            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
 
         assert_eq!(
             restored.state.interaction_session_id,
@@ -1956,17 +2051,39 @@ mod tests {
     }
 
     #[test]
+    fn persisted_session_with_limited_range_is_rejected() {
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck());
+        let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
+        let mut state = persisted.state.into_game_state();
+        state.format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+        persisted.state = PersistedGameState::capture(state);
+
+        let error = GameSession::from_persisted(persisted, &CardDatabase::default())
+            .err()
+            .expect("limited range must remain disabled at the restore boundary");
+
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
     fn player_slot_info_omits_team_metadata_for_individual_formats() {
         for format in [FormatConfig::standard(), FormatConfig::commander()] {
             let mut mgr = SessionManager::new();
-            let (code, _) = mgr.create_game_n_players(
-                make_deck(),
-                "Host".to_string(),
-                None,
-                2,
-                MatchConfig::default(),
-                Some(format),
-            );
+            let (code, _) = mgr
+                .create_game_n_players(
+                    make_deck(),
+                    "Host".to_string(),
+                    None,
+                    2,
+                    MatchConfig::default(),
+                    Some(format),
+                )
+                .expect("supported format config");
 
             let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
             assert_eq!(slots.len(), 2);
@@ -1980,14 +2097,16 @@ mod tests {
     #[test]
     fn player_slot_info_includes_two_headed_giant_team_metadata() {
         let mut mgr = SessionManager::new();
-        let (code, _) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            4,
-            MatchConfig::default(),
-            Some(FormatConfig::two_headed_giant()),
-        );
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                Some(FormatConfig::two_headed_giant()),
+            )
+            .expect("supported format config");
 
         let slots = mgr.sessions.get(&code).unwrap().player_slot_info();
         let team_indices: Vec<u8> = slots
@@ -2001,6 +2120,30 @@ mod tests {
 
         assert_eq!(team_indices, vec![0, 0, 1, 1]);
         assert_eq!(positions, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn create_game_rejects_limited_range_until_supported() {
+        let mut mgr = SessionManager::new();
+        let mut format_config = FormatConfig::standard();
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+
+        assert!(mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig::default(),
+                Some(format_config),
+            )
+            .expect_err("limited range must remain disabled at the session boundary")
+            .contains("not supported"));
+        assert!(mgr.sessions.is_empty());
     }
 
     /// CR 732.2a (#4603 opt-in, Best-of-N): the combo-detector opt-in lives on the
@@ -2018,17 +2161,19 @@ mod tests {
         use engine::types::match_config::MatchType;
 
         let mut mgr = SessionManager::new();
-        let (code, _) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            2,
-            MatchConfig {
-                match_type: MatchType::Bo3,
-                loop_detection: LoopDetectionMode::On,
-            },
-            None,
-        );
+        let (code, _) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                2,
+                MatchConfig {
+                    match_type: MatchType::Bo3,
+                    loop_detection: LoopDetectionMode::On,
+                },
+                None,
+            )
+            .expect("supported format config");
 
         // Game 1: the creation site projects the opt-in onto the runtime flag.
         assert!(
@@ -2739,7 +2884,8 @@ mod tests {
                 .join("../../data/mtgjson/test_fixture.json"),
         )
         .expect("parser fixture must contain Witherbloom Apprentice");
-        let legacy_restored = GameSession::from_persisted(legacy, &db);
+        let legacy_restored =
+            GameSession::from_persisted(legacy, &db).expect("supported persisted format config");
         assert!(matches!(
             legacy_restored.state.waiting_for,
             WaitingFor::Priority { player } if player == P0
@@ -2751,7 +2897,8 @@ mod tests {
         )
         .expect("trusted persisted session remains decodable");
         assert!(matches!(&trusted.state, PersistedGameState::Trusted(_)));
-        let trusted_restored = GameSession::from_persisted(trusted, &db);
+        let trusted_restored =
+            GameSession::from_persisted(trusted, &db).expect("supported persisted format config");
         let fresh_epoch = match trusted_restored.state.waiting_for {
             WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => epoch,
             ref other => panic!("trusted restore must reissue its offer, got {other:?}"),
@@ -2928,16 +3075,18 @@ mod tests {
     fn takeback_auto_approves_for_sole_human_seat() {
         let mut mgr = SessionManager::new();
         let db = engine::database::CardDatabase::default();
-        let (code, _token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
 
         let session = mgr.sessions.get_mut(&code).unwrap();
         // Force a known checkpoint to take back to, since the AI may have
@@ -3034,14 +3183,16 @@ mod tests {
     #[test]
     fn run_ai_is_noop_while_takeback_is_pending() {
         let mut mgr = SessionManager::new();
-        let (code, _token0) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            None,
-        );
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("supported format config");
         let (_token1, _) = mgr.join_game(&code, make_deck()).unwrap();
         let (_token2, _) = mgr.join_game(&code, make_deck()).unwrap();
 
@@ -3869,6 +4020,74 @@ mod tests {
             MatchConfig::default(),
             Some(sandbox_config),
         )
+        .expect("supported sandbox config")
+    }
+
+    #[test]
+    fn server_card_database_resolves_debug_card_batches() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = create_sandbox_game(&mut mgr);
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "server debug creature": {
+                    "name": "Server Debug Creature",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "power": "1",
+                    "toughness": "1",
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("debug-card fixture database parses");
+
+        let result = mgr
+            .handle_action_with_card_db(
+                &code,
+                &token,
+                GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
+                    card_name: "Server Debug Creature".into(),
+                    owner: PlayerId(0),
+                    zone: Zone::Battlefield,
+                    count: 2,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+                Some(&db),
+            )
+            .expect("server transport resolves a debug CreateCard batch through its card database");
+
+        assert!(
+            result
+                .1
+                .iter()
+                .any(|event| matches!(event, GameEvent::DebugActionUsed { .. })),
+            "source-bound server debug actions retain the engine audit event"
+        );
+        assert!(
+            !result.3.is_empty(),
+            "the audit event resolves to a player-visible game-log entry"
+        );
+
+        assert_eq!(
+            mgr.sessions[&code]
+                .state
+                .objects
+                .values()
+                .filter(|object| {
+                    object.name == "Server Debug Creature" && object.zone == Zone::Battlefield
+                })
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -3942,16 +4161,18 @@ mod tests {
     /// than a restatement of the sandbox flag.
     fn single_ai_opponent_game(mgr: &mut SessionManager) -> String {
         let db = engine::database::CardDatabase::default();
-        let (code, _token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, _token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
         code
     }
 
@@ -4002,16 +4223,18 @@ mod tests {
         // SAME `session.state`.
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
         let db = engine::database::CardDatabase::default();
-        let (code, host_token) = mgr.create_game_with_ai(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            MatchConfig::default(),
-            vec![(1, AiDifficulty::Easy, make_deck())],
-            Vec::new(),
-            None,
-            &db,
-        );
+        let (code, host_token) = mgr
+            .create_game_with_ai(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                MatchConfig::default(),
+                vec![(1, AiDifficulty::Easy, make_deck())],
+                Vec::new(),
+                None,
+                &db,
+            )
+            .expect("supported format config");
 
         // POSITIVE, through the real wire gate. `ShuffleLibrary` (not
         // `CreateCard`) is the reach-guard: `CreateCard` is resolved at the
@@ -4080,14 +4303,16 @@ mod tests {
 
         let db = engine::database::CardDatabase::default();
         let mut mgr = SessionManager::single_user(Duration::from_secs(60));
-        let (code, _host) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            None,
-        );
+        let (code, _host) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("supported format config");
         // Seat 1 joins; seat 2 is left waiting, because the reducer rejects
         // removing a claimed seat (`SeatClaimed`).
         mgr.join_game(&code, make_deck()).unwrap();
@@ -4146,7 +4371,8 @@ mod tests {
         let mut origin = SessionManager::new();
         let code = single_ai_opponent_game(&mut origin);
         let persisted = origin.sessions.get(&code).unwrap().to_persisted();
-        let restored = GameSession::from_persisted(persisted, &db);
+        let restored =
+            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
         assert_eq!(
             restored.hosting,
             HostingMode::Shared,
@@ -4178,7 +4404,7 @@ mod tests {
     fn round_trip_through_disk(session: &GameSession, db: &CardDatabase) -> GameSession {
         let json = serde_json::to_string(&session.to_persisted()).unwrap();
         let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
-        GameSession::from_persisted(persisted, db)
+        GameSession::from_persisted(persisted, db).expect("supported persisted format config")
     }
 
     #[test]
@@ -4420,6 +4646,44 @@ mod tests {
             }),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn revoked_seat_cannot_create_debug_cards_through_server_card_database() {
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+
+        mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("host revokes the guest's debug permission");
+
+        // The server's source-bound CreateCard path must not skip the shared
+        // Debug(_) admission gate before attempting card-database resolution.
+        let err = mgr
+            .handle_action_with_card_db(
+                &code,
+                &guest_token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "Any Card".to_string(),
+                    owner: PlayerId(1),
+                    zone: Zone::Battlefield,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+                None,
+            )
+            .expect_err("revoked guests cannot reach the server CreateCard path");
+        assert_eq!(err, "Debug actions are not permitted for this seat");
     }
 
     #[test]
@@ -5215,14 +5479,16 @@ mod tests {
         use engine::types::identifiers::CardId;
 
         let mut mgr = SessionManager::new();
-        let (code, token0) = mgr.create_game_n_players(
-            make_deck(),
-            "Host".to_string(),
-            None,
-            3,
-            MatchConfig::default(),
-            Some(FormatConfig::standard()),
-        );
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(FormatConfig::standard()),
+            )
+            .expect("supported format config");
         let _ = mgr.join_game(&code, make_deck()).unwrap();
         let _ = mgr.join_game(&code, make_deck()).unwrap();
 

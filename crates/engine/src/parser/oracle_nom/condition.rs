@@ -16,7 +16,7 @@ use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
-    parse_property_keyword, parse_superlative_adjective,
+    parse_object_recipient_pronoun, parse_property_keyword, parse_superlative_adjective,
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
@@ -2217,12 +2217,9 @@ fn parse_has_counters_axes(
     // CR 122.1: "on him/her/them" — animate/gendered possessive of the
     // counter-bearing source, identical semantics to "on it". Marvel cards use
     // gendered pronouns (Captain America "a shield counter on him"); the layer
-    // system never inspects the pronoun, only the counter-bearing object.
-    let (rest, _) = preceded(
-        tag(" on "),
-        alt((tag("it"), tag("him"), tag("her"), tag("them"))),
-    )
-    .parse(rest)?;
+    // system never inspects the pronoun, only the counter-bearing object. Routed
+    // through the shared recipient-pronoun combinator (single authority).
+    let (rest, _) = preceded(tag(" on "), parse_object_recipient_pronoun).parse(rest)?;
 
     Ok((rest, (subject, counters, minimum, maximum)))
 }
