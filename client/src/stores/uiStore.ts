@@ -121,11 +121,11 @@ function flushPendingShow(): void {
   apply();
 }
 
-// Serial FIFO for dice/coin overlays. Full-screen "moment" overlays are mutually
-// exclusive (you can't show two rolls at once), so simultaneous/back-to-back
-// rolls play one after another rather than clobbering. `diceRoll` is the active
-// payload; `diceRollQueue` holds the pending ones. Distinct from the board-event
-// step queue (animationStore) — that coordinates spatial per-object effects.
+// Serial FIFOs for transient game outcomes. Full-screen dice/coin overlays and
+// board-visible scry notices each show one payload at a time, so simultaneous
+// outcomes play in event order instead of clobbering one another. The queues are
+// distinct from the board-event step queue (animationStore), which coordinates
+// spatial per-object effects.
 let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
 let scryOutcomeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -167,6 +167,25 @@ function advanceDiceQueue(): void {
   scheduleDiceAdvance(next);
 }
 
+function scheduleScryOutcomeAdvance(): void {
+  if (scryOutcomeTimer) {
+    clearTimeout(scryOutcomeTimer);
+  }
+  scryOutcomeTimer = setTimeout(advanceScryOutcomeQueue, 4_000);
+}
+
+function advanceScryOutcomeQueue(): void {
+  const queue = useUiStore.getState().scryOutcomeQueue;
+  if (queue.length === 0) {
+    useUiStore.setState({ scryOutcome: null });
+    scryOutcomeTimer = null;
+    return;
+  }
+  const next = queue[0];
+  useUiStore.setState({ scryOutcome: next, scryOutcomeQueue: queue.slice(1) });
+  scheduleScryOutcomeAdvance();
+}
+
 interface UiStoreState {
   selectedObjectId: ObjectId | null;
   hoveredObjectId: ObjectId | null;
@@ -200,8 +219,10 @@ interface UiStoreState {
   /** Pending dice/coin overlays behind the active one. Simultaneous or
    *  back-to-back rolls play serially instead of clobbering. */
   diceRollQueue: DiceRollPayload[];
-  /** Latest engine-authored public scry result, temporarily shown on board. */
+  /** Active engine-authored public scry result, temporarily shown on board. */
   scryOutcome: ScryOutcomePayload | null;
+  /** Pending public scry notices, shown FIFO after the active outcome. */
+  scryOutcomeQueue: ScryOutcomePayload[];
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: ObjectAction[] } | null;
   /** When non-null, the AttachmentsDialog is open showing every Aura
@@ -313,9 +334,9 @@ interface UiStoreActions {
   /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
    *  advancing to the next queued roll if any. */
   skipDiceRoll: () => void;
-  /** Surface one public scry outcome for a short, non-interactive board notice. */
+  /** Queue one public scry outcome for a short, non-interactive board notice. */
   flashScryOutcome: (payload: ScryOutcomePayload) => void;
-  /** Clear a visible scry result on a game-session boundary. */
+  /** Clear the active and queued scry results on a game-session boundary. */
   resetScryOutcome: () => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: ObjectAction[] } | null) => void;
@@ -377,6 +398,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   diceRoll: null,
   diceRollQueue: [],
   scryOutcome: null,
+  scryOutcomeQueue: [],
   focusedOpponent: null,
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
@@ -687,19 +709,19 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     advanceDiceQueue();
   },
   flashScryOutcome: (payload) => {
-    if (scryOutcomeTimer) clearTimeout(scryOutcomeTimer);
-    set({ scryOutcome: payload });
-    scryOutcomeTimer = setTimeout(() => {
-      scryOutcomeTimer = null;
-      set({ scryOutcome: null });
-    }, 4_000);
+    if (get().scryOutcome === null) {
+      set({ scryOutcome: payload });
+      scheduleScryOutcomeAdvance();
+    } else {
+      set({ scryOutcomeQueue: [...get().scryOutcomeQueue, payload] });
+    }
   },
   resetScryOutcome: () => {
     if (scryOutcomeTimer) {
       clearTimeout(scryOutcomeTimer);
       scryOutcomeTimer = null;
     }
-    set({ scryOutcome: null });
+    set({ scryOutcome: null, scryOutcomeQueue: [] });
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
