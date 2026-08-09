@@ -6,13 +6,13 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DelayedTriggerCondition, Effect, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    TargetFilter, TriggerDefinition, TurnGate, WheneverEventExpiry,
+    DelayedTriggerCondition, Effect, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, TargetFilter, TriggerDefinition, TurnGate, WheneverEventExpiry,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ActivePlayerControl, DelayedTrigger, WaitingFor};
 use engine::types::identifiers::CardId;
-use engine::types::replacements::{ReplacementEvent, ReplacementMode};
+use engine::types::replacements::ReplacementEvent;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -52,7 +52,7 @@ fn setup_cleanup_discard(
     });
     let cards = (0..hand_size)
         .map(|index| scenario.add_card_to_hand(P0, &format!("Hand Card {index}")))
-        .collect();
+        .collect::<Vec<_>>();
     for index in 0..4 {
         scenario.add_card_to_library_top(P0, &format!("Library Card {index}"));
     }
