@@ -4239,7 +4239,7 @@ fn where_x_named_cards_in_all_graveyards_uses_named_graveyard_count() {
 
 #[test]
 fn where_x_times_kicked_uses_kicker_count() {
-    let expr = parse_where_x_quantity_expression("the number of times Zethi was kicked")
+    let expr = parse_where_x_quantity_expression("the number of times this spell was kicked")
         .expect("where-X quantity");
     assert_eq!(
         expr,

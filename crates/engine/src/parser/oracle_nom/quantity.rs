@@ -3738,10 +3738,14 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Only the spell itself can supply `QuantityRef::KickerCount`; accepting an
 /// arbitrary subject would silently read the source spell's kick count.
 pub fn parse_kicker_count_time_clause(input: &str) -> OracleResult<'_, QuantityRef> {
+    preceded(tag("time "), parse_kicker_count_subject_was_kicked).parse(input)
+}
+
+/// Parse a self-referential kicker subject and its past-tense verb.
+fn parse_kicker_count_subject_was_kicked(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::KickerCount,
         all_consuming((
-            tag("time "),
             alt((
                 tag("~"),
                 tag("this spell"),
@@ -3758,8 +3762,8 @@ pub fn parse_kicker_count_time_clause(input: &str) -> OracleResult<'_, QuantityR
 
 /// Parse a complete `where X is the number of times <self> was kicked` clause.
 pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the number of ").parse(input)?;
-    let (_, quantity) = parse_kicker_count_time_clause(rest)?;
+    let (rest, _) = tag("the number of times ").parse(input)?;
+    let (_, quantity) = parse_kicker_count_subject_was_kicked(rest)?;
     Ok(("", quantity))
 }
 
