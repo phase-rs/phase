@@ -391,6 +391,11 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
 }
 
 /// Extract the target filter from an effect, if present.
+///
+/// Inherently-mass effects whose `target` IS the population filter
+/// (`DestroyAll`) are surfaced, while scope-keyed mass arms (`SetTapState`
+/// All / `Suspect` All) stay hidden because a `Single` sibling exists and only
+/// that single scope exposes a selectable target.
 pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         // Beneficial effects
@@ -404,10 +409,16 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Regenerate { target, .. }
         | Effect::RemoveAllDamage { target, .. }
         | Effect::PreventDamage { target, .. }
-        // Harmful effects
+        // Harmful effects. `DestroyAll` is included deliberately — unlike the
+        // `SetTapState`/`Suspect` scope-keyed mass arms below there is NO
+        // `Single` sibling, so a wipe is inherently mass (CR 701.8) and its
+        // `target` IS the population filter it destroys. Surfacing it lets
+        // removal classification see the wipe line of a mixed spell instead of
+        // treating the whole spell as only its other halves.
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::RemoveCounter { target, .. }
+        | Effect::DestroyAll { target, .. }
         // Removal / disruption
         | Effect::Bounce { target, .. }
         | Effect::Counter { target, .. }
@@ -1089,6 +1100,7 @@ mod lethality_tests {
 #[cfg(test)]
 mod suspect_scope_tests {
     use super::*;
+    use engine::types::ability::TypedFilter;
 
     // CR 701.60a: mass un-designation ("all suspected creatures are no longer
     // suspected", Absolving Lammasu) is a non-targeting population effect. The
@@ -1134,6 +1146,21 @@ mod suspect_scope_tests {
             extract_target_filter(&all_unsuspect).is_none(),
             "mass Unsuspect{{All}} (Absolving Lammasu) is a population effect, not target-filtered"
         );
+    }
+
+    #[test]
+    fn extract_target_filter_handles_destroy_all() {
+        // `DestroyAll` is inherently mass — no `Single` sibling exists — so its
+        // `target` IS the population filter and must be surfaced. Contrast the
+        // `Suspect`/`SetTapState` All scopes above (CR 701.60a / CR 701.26a/b),
+        // which stay None because a `Single` sibling exists and only the
+        // single scope exposes a selectable target (CR 701.8).
+        let wipe_target = TargetFilter::Typed(TypedFilter::creature());
+        let wipe = Effect::DestroyAll {
+            target: wipe_target.clone(),
+            cant_regenerate: false,
+        };
+        assert_eq!(extract_target_filter(&wipe), Some(&wipe_target));
     }
 }
 

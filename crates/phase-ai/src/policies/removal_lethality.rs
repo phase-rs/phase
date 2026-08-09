@@ -48,7 +48,7 @@ use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
-use engine::types::ability::{DamageSource, Effect, TargetFilter, TargetRef, TypeFilter};
+use engine::types::ability::{DamageSource, Effect, TargetRef};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -56,8 +56,8 @@ use engine::types::keywords::{Keyword, KeywordKind};
 
 use super::context::PolicyContext;
 use super::effect_classify::{
-    effect_polarity, effect_targets_object, extract_target_filter, targets_creatures,
-    targets_creatures_only, EffectPolarity,
+    effect_polarity, effect_targets_object, extract_target_filter, targets_creatures_only,
+    EffectPolarity,
 };
 
 /// Reward for a target the removal spell actually kills — a clean kill is worth
@@ -387,12 +387,16 @@ pub(crate) fn lethality_bonus(
 /// **Conservative no-veto contract** — returns `true` (do not veto) whenever it
 /// cannot *prove* a total whiff:
 /// * no source object / no usable filter (cannot reason);
-/// * ANY `Harmful` or `Contextual` non-`DealDamage` effect whose target filter
-///   can hit an opponent's battlefield permanent (e.g. a mixed "deal damage +
-///   destroy" spell — the Destroy half is an independent, useful removal line,
-///   CR 701.8a; or "deal damage + gain control" — stealing a planeswalker or
-///   artifact is an independent control-changing line, CR 613.1b Layer 2), so
-///   the spell is never a total *damage* whiff);
+/// * ANY `Harmful` or `Contextual` non-`DealDamage` effect that has at least one
+///   legal target/population under an OPPONENT's control (e.g. a mixed "deal
+///   damage + destroy" spell — the Destroy half is an independent, useful
+///   removal line, CR 701.8a; "deal damage + gain control" — stealing a
+///   planeswalker or artifact is an independent control-changing line,
+///   CR 613.1b Layer 2; or a mass wipe, CR 701.8). The population is resolved
+///   with the COMPLETE typed filter — including `TypedFilter.controller`
+///   (CR 108.3 / CR 115.2b) — so an own-controller-constrained line ("gain
+///   control of target creature you control") credits nothing, so the spell is
+///   never a total *damage* whiff);
 /// * ANY `DealDamage` amount references `X` (CR 107.3a — the caster chooses the
 ///   value at announcement, so it is unknowable at cast-commit), including a
 ///   `DealDamage` whose target filter is not creature-only;
@@ -414,21 +418,22 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     };
     let effects = ctx.effects();
 
-    // FAIL OPEN on any `Harmful`/`Contextual` non-`DealDamage` effect whose
-    // target filter can hit an opponent's battlefield permanent — e.g. a mixed
-    // "deal 1 damage to target creature; destroy target creature" spell, or a
-    // control-changing line like "deal 1 damage; gain control of target
-    // permanent" (`GainControl`, CR 613.1b Layer 2 — creatures, planeswalkers,
-    // artifacts, etc.). `pending_damage_to_object` aggregates the spell's
-    // `DealDamage` halves only, but a non-damage removal/control effect is an
-    // independent, useful line. The spell must never read as a total *damage*
-    // whiff through its damage half alone.
+    // FAIL OPEN when a `Harmful`/`Contextual` non-`DealDamage` effect has at
+    // least one legal target/population under an OPPONENT's control — e.g. a
+    // mixed "deal 1 damage to target creature; destroy target creature" spell,
+    // a control-changing line like "deal 1 damage; gain control of target
+    // permanent" (`GainControl`, CR 613.1b Layer 2), or a mass wipe
+    // (`DestroyAll`, CR 701.8). The decision applies the COMPLETE typed filter
+    // — including `TypedFilter.controller` (CR 108.3 / CR 115.2b) — through
+    // the engine's `find_legal_targets`: an own-controller-constrained line
+    // ("gain control of target creature you control") credits nothing, and a
+    // wipe's real population is resolved, not guessed from filter shape.
     if effects.iter().any(|effect| {
         matches!(
             effect_polarity(effect),
             EffectPolarity::Harmful | EffectPolarity::Contextual
         ) && !matches!(effect, Effect::DealDamage { .. })
-            && targets_creature_or_permanent(effect)
+            && effect_has_legal_opposing_line(ctx, effect)
     }) {
         return true;
     }
@@ -491,78 +496,27 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     !modelled_any_target
 }
 
-/// Can `effect` target an opponent's battlefield permanent? True for
-/// creature-typed or any-target filters (`targets_creatures`, CR 205), and for
-/// any filter that can match a permanent — control-changing effects like
-/// `GainControl` (CR 613.1b, Layer 2) target creatures, planeswalkers,
-/// artifacts, etc. Conservative: `true` for every filter shape that is not
-/// provably limited to non-permanents, so negation and disjunction shapes
-/// (Non/AnyOf/Kindred, and `TargetFilter`-level Or/And/Not) fail open rather
-/// than veto a useful control line.
-fn targets_creature_or_permanent(effect: &Effect) -> bool {
-    if targets_creatures(effect) {
-        return true;
-    }
+/// Does this non-`DealDamage` effect currently have a legal target or
+/// population under an OPPONENT's control? Applies the full typed filter —
+/// including `TypedFilter.controller` (CR 108.3 / CR 115.2b) — via the
+/// engine's `find_legal_targets`; never a filter-shape proxy. Effects with no
+/// extractable filter (or no source object) resolve to false (no line).
+fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
     let Some(filter) = extract_target_filter(effect) else {
         return false;
     };
-    filter_can_match_permanent(filter)
-}
-
-/// Can this `TargetFilter` match an object on the battlefield? Conservative:
-/// returns `false` only when the filter provably cannot name a permanent.
-/// (`Player`/`Controller`/ability refs and `None` never match objects.)
-fn filter_can_match_permanent(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => typed
-            .type_filters
-            .iter()
-            .any(type_filter_can_match_permanent),
-        // Disjunction — any alternative able to match a permanent suffices
-        // (mirrors the engine's Or/AnyOf matching semantics).
-        TargetFilter::Or { filters } => filters.iter().any(filter_can_match_permanent),
-        // Conjunction — can match a permanent if any branch still can
-        // (conservative; the engine emits controller constraints via
-        // `TypedFilter.controller`, not `And` branches).
-        TargetFilter::And { filters } => filters.iter().any(filter_can_match_permanent),
-        // Negation — matches everything except the inner; still hits a
-        // permanent unless the negation excludes permanence itself.
-        TargetFilter::Not { filter: inner } => !matches!(**inner, TargetFilter::Any),
-        _ => false,
-    }
-}
-
-/// Can this single `TypeFilter` constraint match a permanent? Conservative:
-/// `false` only for constraints that provably exclude battlefield permanents.
-fn type_filter_can_match_permanent(t: &TypeFilter) -> bool {
-    match t {
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Permanent
-        | TypeFilter::Any => true,
-        // Disjunction — any inner filter able to match a permanent suffices
-        // (mirrors the engine's AnyOf matching for typed filters).
-        TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_can_match_permanent),
-        // Negation — matches everything except the inner; still hits a
-        // permanent unless the negation excludes permanence itself.
-        TypeFilter::Non(inner) => !matches!(
-            &**inner,
-            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
-        ),
-        // Kindred cards are permanents carrying another card type (CR 308.1) —
-        // the companion type arm catches the real filter; bare Kindred never
-        // occurs alone, so fail open rather than risk a false whiff veto.
-        TypeFilter::Kindred => true,
-        // Subtype(..) alone names a tribe, not a battlefield class — the parser
-        // always emits a base card type alongside (caught above). Instant and
-        // Sorcery are not permanents.
-        _ => false,
-    }
+    let Some(source) = ctx.source_object() else {
+        return false;
+    };
+    find_legal_targets(ctx.state, filter, ctx.ai_player, source.id)
+        .into_iter()
+        .any(|target| {
+            matches!(
+                target,
+                TargetRef::Object(id)
+                    if ctx.state.objects.get(&id).is_some_and(|o| o.controller != ctx.ai_player)
+            )
+        })
 }
 
 #[cfg(test)]
@@ -574,8 +528,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
@@ -892,6 +846,117 @@ mod tests {
             "mixed deal-1 + destroy must fail open: the Destroy half is a useful \
              removal line, so the spell is not a total damage whiff even though \
              1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Mixed removal spell with a wipe line: "deal 1 damage to target creature;
+    /// destroy all creatures". The 1-damage half is a whiff on the 3/3, but the
+    /// `DestroyAll` half (CR 701.8) is an independent, useful mass-removal
+    /// line. `extract_target_filter` surfaces `DestroyAll`'s population filter
+    /// and the cast-commit gate resolves it against the real opposing
+    /// population (the 3/3) via `find_legal_targets`. Guards feedback
+    /// finding (2): pre-fix, `DestroyAll` was not surfaced, so this spell read
+    /// as a pure 1-damage whiff and was wrongly vetoed.
+    #[test]
+    fn can_kill_fails_open_on_mixed_damage_and_destroy_all() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_006),
+            PlayerId(0),
+            "Charred Cataclysm".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_006),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + destroy-all must fail open: `DestroyAll` (CR 701.8) \
+             resolves a real opposing population (the 3/3) through \
+             `find_legal_targets`, so the spell is not a total whiff even though \
+             1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Own-controller-constrained control line: "deal 1 damage to target
+    /// creature; gain control of target creature YOU control". `GainControl` is
+    /// `Contextual`, but its `TypedFilter.controller` is `ControllerRef::You`
+    /// (CR 108.3 / CR 115.2b), so `find_legal_targets` names only the caster's
+    /// own creatures — there is no legal OPPOSING population for the control
+    /// line. The deleted filter-shape proxy credited this line anyway (its
+    /// `targets_creatures` early-out ignored `TypedFilter.controller`); the
+    /// population check must not. Only the whiff 1-damage half remains, so the
+    /// gate vetoes. Guards feedback finding (1).
+    #[test]
+    fn can_kill_vetoes_when_control_line_is_own_controller_constrained() {
+        let mut state = make_state();
+        // The AI's own bear keeps the You-constrained population NON-empty —
+        // the veto must come from the controller axis, not the empty set.
+        add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            }),
+            |ctx| {
+                assert!(
+                    !can_kill_any_legal_target(ctx),
+                    "an own-controller-constrained control line (CR 108.3/115.2b) must \
+                     NOT be credited as opposing removal: the You filter names only the \
+                     caster's own bear, so only the whiff 1-damage half remains and \
+                     the gate vetoes the total damage whiff"
+                );
+            },
         );
     }
 
