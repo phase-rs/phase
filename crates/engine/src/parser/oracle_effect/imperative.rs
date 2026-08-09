@@ -8976,6 +8976,16 @@ pub(super) fn parse_exile_ast(
 }
 
 pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+    // "Attack enchanted player" trigger scope resolves "that player's"/"their
+    // library" to the defender captured at attack declaration — the
+    // shared single-authority binding (`enchanted_player_anaphor_filter`) so this
+    // resolver stays complete for the whole curse class, not just the subject
+    // verb forms handled in subject.rs.
+    if let Some(filter) =
+        super::subject::enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
+    {
+        return filter;
+    }
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }
@@ -13241,6 +13251,25 @@ pub(super) fn parse_zone_counter_ast(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
+        // CR 122.1 + CR 603.2c: "put the same number and kind of counters" / "put
+        // one of each of those kinds of counters" — reproduce the triggering
+        // event's counters (Captain Marvel, Apex Avenger). Detected before the
+        // generic counter-type paths so the "same number and kind"/"those kinds"
+        // phrasing is never mis-read as a literal counter name.
+        if let Some((
+            Effect::ReproduceEventCounters {
+                target,
+                per_kind_count,
+            },
+            _rem,
+            _multi_target,
+        )) = super::counter::try_parse_reproduce_event_counters(lower, text, ctx)
+        {
+            return Some(ZoneCounterImperativeAst::ReproduceEventCounters {
+                target,
+                per_kind_count,
+            });
+        }
         // CR 122.1 + CR 122.6: "put [a[n]] [additional] counter of that kind on
         // <anaphor>" — add one counter of the kind chosen by a preceding
         // `ChooseCounterKind` (The Caves of Androzani). Detected before the
@@ -13596,6 +13625,13 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             mode,
             selection,
             target,
+        },
+        ZoneCounterImperativeAst::ReproduceEventCounters {
+            target,
+            per_kind_count,
+        } => Effect::ReproduceEventCounters {
+            target,
+            per_kind_count,
         },
     }
 }

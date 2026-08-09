@@ -1486,6 +1486,18 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 508.1d + CR 604.1: "<subject> attacks <player-class> each combat if able
+    // [unless ...]" — a static attack requirement whose required defender is a
+    // live-evaluated player class (Galactus: "an opponent with the most life among
+    // your opponents ... unless you control a creature named ..."). Richer than the
+    // bare scoped must-attack below: the selector form is disjoint (returns None
+    // without a defender phrase), and the wrapper's flavor-label strip is a
+    // retry-on-failure (never fires when the body already parses), so ordering
+    // before `try_parse_scoped_must_attack_block` is safe.
+    if let Some(def) = parse_forced_attack_defender_static(&text) {
+        return Some(def);
+    }
+
     // CR 508.1d / CR 509.1c: Subject-scoped "attack/block each combat if able" patterns.
     // These apply MustAttack/MustBlock to a class of creatures (not just self).
     // Compound forms ("attacks or blocks") produce multiple statics; return the first here.

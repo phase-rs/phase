@@ -2459,6 +2459,135 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     None
 }
 
+/// CR 102.2 / CR 102.3 + CR 508.1b / CR 508.1d: the required defending player
+/// class after "attacks ". Currently "a[n] opponent[ with the most life [among
+/// your opponents]]". CR 102.2 (two-player) / CR 102.3 (team multiplayer) scope
+/// the candidate set to opponents. This lowers to a static attack REQUIREMENT (CR
+/// 508.1d), re-evaluated each declare-attackers step; when the class holds more
+/// than one legal defender (e.g. a most-life tie) CR 508.1b — the active player
+/// announcing which player each attacker attacks — is where the player picks among
+/// the tied legal defenders. NOT CR 608.2d: that rule governs choices offered
+/// while resolving a spell or ability, not this continuous static requirement.
+/// Structured as sequential combinators so a future "a[n] player" (relation `All`)
+/// arm slots in without disturbing the opponent path. Reuses the shared
+/// `parse_opponent_most_life_restriction` selector rather than re-deriving the
+/// `PlayerAttribute` shape.
+fn parse_required_defender_selector(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(input)?;
+    let (input, _) = tag("opponent").parse(input)?;
+    // Optional "with the most life [among your opponents]" qualifier; fall back to
+    // the bare `Opponent` class when the qualifier is absent ("an opponent").
+    match super::oracle_effect::parse_opponent_most_life_restriction(input) {
+        Ok((rest, filter)) => Ok((rest, filter)),
+        Err(_) => Ok((input, PlayerFilter::Opponent)),
+    }
+}
+
+/// CR 508.1d: `attacks <player-class> each combat if able` — the required-attack
+/// predicate. Consumes the verb, the defender selector, and the recurring-combat
+/// suffix, returning the selected `PlayerFilter` for the required defender.
+fn parse_attacks_required_defender_nom(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("attacks ").parse(input)?;
+    let (input, filter) = parse_required_defender_selector(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" each combat if able"),
+        tag(" each turn if able"),
+    ))
+    .parse(input)?;
+    Ok((input, filter))
+}
+
+/// CR 508.1d + CR 508.1b + CR 604.1 / CR 604.2 + CR 102.2 / CR 102.3: "<subject>
+/// attacks <player-class> each combat if able [unless <condition>]" — a static
+/// attack requirement (CR 508.1d) whose defending player is a live-evaluated class
+/// (Galactus: "an opponent with the most life among your opponents"; CR 102.2 /
+/// CR 102.3 scope "opponent", CR 508.1b covers the active player's choice among
+/// tied legal defenders). Emits
+/// `MustAttackPlayer { RequiredDefender::Matching { filter } }`, re-evaluated each
+/// declare-attackers step by the combat resolver.
+///
+/// The dispatcher receives the self-ref-normalized line WITHOUT the CR 207.2c /
+/// CR 207.2d ability-/flavor-word label stripped (Galactus's line arrives as
+/// "Insatiable Hunger — ~ attacks …"), so this wrapper tries the line as-is, then
+/// strips a leading flavor label via `strip_flavor_word_with_name` and retries
+/// ONCE on the body — mirroring the single-hop retry in
+/// `parse_static_line_multi_inner`. The strip is class-general (any leading
+/// flavor label preceding this static form) and safe: a false-positive strip
+/// yields a body that fails the strict subject / "attacks … each combat if able"
+/// match and returns `None`. The full Oracle line (label included) is preserved
+/// as the definition's description for display / round-trip.
+pub(crate) fn parse_forced_attack_defender_static(text: &str) -> Option<StaticDefinition> {
+    parse_forced_attack_defender_static_body(text).or_else(|| {
+        let (_label, body) = super::oracle_modal::strip_flavor_word_with_name(text)?;
+        parse_forced_attack_defender_static_body(&body).map(|def| def.description(text.to_string()))
+    })
+}
+
+fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (subject_lower, filter, rest) =
+        nom_primitives::scan_preceded(&lower, parse_attacks_required_defender_nom)?;
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    let mut def = StaticDefinition::new(StaticMode::MustAttackPlayer {
+        player: RequiredDefender::Matching { filter },
+    })
+    .affected(affected)
+    .description(text.to_string());
+    // Consume an optional trailing period; any remaining tail MUST be a recognized
+    // `unless` gate (CR 604.1) — otherwise decline so an unrecognized rider cannot
+    // yield a half-parsed static (coverage stays honest / red).
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(def);
+    }
+    // The ONLY permitted tail is an `unless` clause, and it must begin RIGHT HERE.
+    // Requiring `rest` to start with `unless ` (rather than letting the whole-text
+    // `unless` scan below find it anywhere) is what stops an unmodelled rider
+    // between the recurring-combat suffix and `unless` from being silently
+    // swallowed — e.g. "... each combat if able <rider> unless <cond>" must decline,
+    // not parse as if the rider were absent.
+    tag::<_, _, OracleError<'_>>("unless ").parse(rest).ok()?;
+    let tp = TextPair::new(text, &lower);
+    let condition = super::shared::parse_unless_static_condition(&tp)?;
+    // Coverage-honesty gate (CR 604.1): only emit the forced-attack static when the
+    // `unless` gate is a FULLY-MODELED condition. `parse_unless_static_condition`
+    // wraps an unrecognized inner clause as `Not(Unrecognized)` — which (a) the
+    // coverage detector's TOP-LEVEL `Unrecognized` check misses, so the card is
+    // falsely reported supported, and (b) evaluates permanently false at runtime
+    // (`Unrecognized` is true; the wrapping `Not` negates it), silently disabling
+    // the whole requirement. Decline instead so the line stays honestly unsupported
+    // (coverage red) rather than shipping a broken static.
+    if static_condition_contains_unrecognized(&condition) {
+        return None;
+    }
+    def.condition = Some(condition);
+    Some(def)
+}
+
+/// True when `condition` contains an `Unrecognized` clause ANYWHERE in its tree
+/// (recursing through the `Not` / `And` / `Or` combinators). Used by the
+/// forced-attack parser to decline a not-fully-modeled `unless` gate: the
+/// coverage detector only flags a TOP-LEVEL `Unrecognized`, so a nested one
+/// (`Not(Unrecognized)`, the shape `parse_unless_static_condition` emits for an
+/// unknown clause) would otherwise mark the card supported while its requirement
+/// is permanently inert at runtime.
+fn static_condition_contains_unrecognized(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::Unrecognized { .. } => true,
+        // The only sub-condition-embedding variants — recurse through them. If a NEW
+        // combinator variant that nests `StaticCondition` is added, extend this match;
+        // the leaf wildcard below would otherwise hide an unrecognized clause inside
+        // it. Every remaining variant is a leaf that cannot contain a nested clause.
+        StaticCondition::Not { condition } => static_condition_contains_unrecognized(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(static_condition_contains_unrecognized),
+        _ => false,
+    }
+}
+
 /// CR 702.122a / 702.171a / 702.184c: nom parser for the crew/saddle/station
 /// power-contribution modifier predicate. Composes the named action-list prefix
 /// (which records the affected keyword actions) with the modifier tail.

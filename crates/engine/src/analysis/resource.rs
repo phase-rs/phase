@@ -10292,7 +10292,7 @@ mod tests {
                 true,
             ),
             (
-                "BattleProtectorChoice (CR 310.10 + CR 704.5w / CR 704.5x)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),

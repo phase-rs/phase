@@ -110,6 +110,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lands_played_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacking_creatures_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_defenders_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_defenders_last_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::creature_attacked_defenders_this_turn", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_discarded_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::mana_spent_on_spells_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -329,6 +330,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_MAP_OF_HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "attacked_defenders_last_turn",
+        "Box<HashMap<HashSet>>",
+        Classification::Canonical(HASH_MAP_OF_HASH_SET),
+    );
     for field in ["objects", "attribution", "lki_cache"] {
         add_spec(
             &mut specs,
@@ -1140,7 +1150,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        50,
+        51,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1229,6 +1239,12 @@ fn build_populated_state(reverse: bool) -> GameState {
         .into_iter()
         .map(|player| (player, inner_order.into_iter().collect()))
         .collect();
+    state.attacked_defenders_last_turn = Box::new(
+        outer_order
+            .into_iter()
+            .map(|player| (player, inner_order.into_iter().collect()))
+            .collect(),
+    );
     state.steps_to_skip = vec![
         [
             (engine::types::Phase::PostCombatMain, 2),
@@ -1568,6 +1584,16 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             [PlayerId(0), PlayerId(1)].into_iter().collect(),
         ),
     ]);
+    state.attacked_defenders_last_turn = Box::new(HashMap::from([
+        (
+            PlayerId(0),
+            [PlayerId(1), PlayerId(0)].into_iter().collect(),
+        ),
+        (
+            PlayerId(1),
+            [PlayerId(0), PlayerId(1)].into_iter().collect(),
+        ),
+    ]));
     state.creature_attacked_defenders_this_turn = HashMap::from([
         (
             ObjectId(1),
@@ -1701,6 +1727,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
         "attacked_defenders_this_turn",
+        "attacked_defenders_last_turn",
         "creature_attacked_defenders_this_turn",
         "cards_discarded_this_turn_by_player",
         "mana_spent_on_spells_this_turn",
@@ -1717,7 +1744,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        39,
+        40,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2067,6 +2094,7 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
     );
     assert!(forward_json.contains("\"ring_level\":{\"0\":1,\"1\":2}"));
     assert!(forward_json.contains("\"attacked_defenders_this_turn\":{\"0\":[0,1],\"1\":[0,1]}"));
+    assert!(forward_json.contains("\"attacked_defenders_last_turn\":{\"0\":[0,1],\"1\":[0,1]}"));
     assert!(forward_json
         .contains("\"steps_to_skip\":[{\"PreCombatMain\":1,\"PostCombatMain\":2},{\"End\":3}]"));
     assert!(forward_json.contains("\"objects\":{\"1\":"));

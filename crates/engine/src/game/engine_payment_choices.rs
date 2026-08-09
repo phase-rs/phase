@@ -61,6 +61,7 @@ pub(super) fn handle_optional_effect_choice(
             let OptionalEffectFrame {
                 ability,
                 trigger_event: pending_event,
+                trigger_events: pending_events,
                 trigger_match_count: pending_count,
             } = frame;
             let choice = if accept {
@@ -74,6 +75,12 @@ pub(super) fn handle_optional_effect_choice(
             // `TriggeringPlayer` and other event-context refs resolve correctly.
             let previous_trigger_event = state.current_trigger_event.clone();
             state.current_trigger_event = pending_event;
+            // CR 603.2c + CR 608.2: restore the PLURAL batched-trigger event list
+            // too — an effect that folds the whole event batch (e.g.
+            // `Effect::ReproduceEventCounters` reading every `CounterAdded`
+            // occurrence) must see all occurrences, not just the singular event.
+            let previous_trigger_events = std::mem::take(&mut state.current_trigger_events);
+            state.current_trigger_events = pending_events;
             // CR 603.2c + CR 608.2: mirror restoration of the batched-trigger
             // subject count so a `QuantityRef::EventContextAmount` resolved during
             // the resumed sub-ability reads the same "that many" the pre-pause
@@ -83,6 +90,7 @@ pub(super) fn handle_optional_effect_choice(
             let result =
                 effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
             state.current_trigger_event = previous_trigger_event;
+            state.current_trigger_events = previous_trigger_events;
             state.current_trigger_match_count = previous_trigger_match_count;
             result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         } else if state.pending_trigger.as_ref().is_some_and(|t| {
@@ -2157,6 +2165,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2187,6 +2196,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2223,6 +2233,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2256,6 +2267,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2287,6 +2299,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2317,6 +2330,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
@@ -2347,6 +2361,7 @@ mod tests {
         state.push_optional_effect_frame(OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {

@@ -7,7 +7,7 @@ use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, Comparator, CountScope,
     DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
@@ -1365,6 +1365,85 @@ fn cant_attack_or_block_gated_on_trailing_as_long_as() {
             parsed.parse_warnings
         );
     }
+}
+
+/// CR 508.6 + CR 109.5: Avenge — "This spell costs {2} less to cast if a player
+/// attacked you during their last turn." The cost-reduction condition must attach
+/// to the `ModifyCost` static (so the {2} reduction is GATED), not be dropped as a
+/// `SwallowedClause`/`Condition_If`. Regression for the misparse where
+/// `ModifyCost.condition` was `null` and the reduction applied unconditionally.
+#[test]
+fn modify_cost_gated_on_attacked_you_during_their_last_turn() {
+    let avenge = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {2} less to cast if a player attacked you during their last turn.\n\
+         Destroy all creatures. You gain 1 life for each creature destroyed this way.",
+        "Avenge",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let def = avenge
+        .statics
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ModifyCost { .. }))
+        .expect("expected a ModifyCost static");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::AnyPlayerAttackedYouLastTurn),
+        "the 'if a player attacked you during their last turn' gate must attach to \
+         ModifyCost so the reduction is conditional, got {:?}",
+        def.condition
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::SelfRef),
+        "the reduction applies to this spell (self-referential)"
+    );
+    assert!(
+        avenge.parse_warnings.is_empty(),
+        "the cost-reduction condition must not be swallowed; warnings = {:?}",
+        avenge.parse_warnings
+    );
+
+    // The "an opponent" surface reaches the same existential gate, and is likewise
+    // not swallowed.
+    let opp = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {2} less to cast if an opponent attacked you during their last turn.",
+        "OpponentRevenge",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        opp.statics
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::ModifyCost { .. })
+                && d.condition == Some(StaticCondition::AnyPlayerAttackedYouLastTurn)),
+        "the 'an opponent' phrasing must reach the same gate, got {:?}",
+        opp.statics
+    );
+    assert!(
+        opp.parse_warnings.is_empty(),
+        "warnings = {:?}",
+        opp.parse_warnings
+    );
+
+    // No false positive: an unconditional cost reducer carries no condition.
+    let plain = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {2} less to cast.",
+        "PlainReducer",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        plain
+            .statics
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::ModifyCost { .. }) && d.condition.is_none()),
+        "an unconditional reducer must not spuriously gain the revenge gate, got {:?}",
+        plain.statics
+    );
 }
 
 /// CR 611.3a vs duration seam: "for as long as" is effect-duration text
@@ -8870,6 +8949,164 @@ fn attacks_each_combat_if_able_unconditional_has_no_condition() {
     let def = parse_static_line("This creature attacks each combat if able.").unwrap();
     assert_eq!(def.mode, StaticMode::MustAttack);
     assert!(def.condition.is_none());
+}
+
+/// CR 508.1d + CR 604.1 / CR 604.2 + CR 102.3: the "opponent with the most life
+/// among your opponents" required-defender class — the live-evaluated filter
+/// emitted by [`parse_forced_attack_defender_static`]. Mirrors
+/// `parse_opponent_most_life_restriction`'s shape (the reused selector).
+fn expected_most_life_defender() -> PlayerFilter {
+    PlayerFilter::PlayerAttribute {
+        relation: PlayerRelation::Opponent,
+        attr: Box::new(QuantityRef::LifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        }),
+        comparator: Comparator::GE,
+        value: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+        }),
+    }
+}
+
+#[test]
+fn galactus_forced_attack_static_parses_with_flavor_label() {
+    // CR 508.1d + CR 604.1: Galactus, Devourer of Worlds — "Insatiable Hunger —
+    // Galactus attacks an opponent with the most life among your opponents each
+    // combat if able unless you control a creature named Silver Surfer, Galactus's
+    // Herald." The dispatcher sees the self-ref-normalized line WITH the CR 207.2d
+    // flavor label still attached, so the parser must strip it before resolving the
+    // subject.
+    let def = parse_static_line(
+        "Insatiable Hunger — ~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    )
+    .expect("Galactus forced-attack static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::MustAttackPlayer {
+            player: RequiredDefender::Matching {
+                filter: expected_most_life_defender(),
+            },
+        },
+        "must emit a live-evaluated Matching required defender, not a snapshot",
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    // The `unless you control a creature named …` gate must be a RECOGNIZED
+    // control-presence condition (CR 604.1), not swallowed as `Unrecognized`.
+    match &def.condition {
+        Some(StaticCondition::Not { condition }) => assert!(
+            matches!(**condition, StaticCondition::IsPresent { .. }),
+            "expected a recognized named-control gate, got {condition:?}",
+        ),
+        other => panic!("expected Not(IsPresent) gate, got {other:?}"),
+    }
+}
+
+#[test]
+fn forced_attack_defender_static_flavor_label_is_optional() {
+    // Reach-guard for the label strip: the identical line WITHOUT the flavor label
+    // parses to the same static, proving the strip is a fallback, not a requirement.
+    let def = parse_static_line(
+        "~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    )
+    .expect("unlabeled forced-attack static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::MustAttackPlayer {
+            player: RequiredDefender::Matching {
+                filter: expected_most_life_defender(),
+            },
+        },
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn forced_attack_defender_static_bare_opponent_selector() {
+    // Building-block coverage: the bare "an opponent" defender class (no most-life
+    // qualifier) lowers to `PlayerFilter::Opponent`, and the unconditional form has
+    // no gate.
+    let def = parse_static_line("~ attacks an opponent each combat if able.")
+        .expect("bare-opponent forced-attack static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::MustAttackPlayer {
+            player: RequiredDefender::Matching {
+                filter: PlayerFilter::Opponent,
+            },
+        },
+    );
+    assert!(def.condition.is_none());
+}
+
+#[test]
+fn forced_attack_defender_static_rejects_unmodelled_rider() {
+    // Honesty guard (CR 604.1): the ONLY permitted tail after "… each combat if
+    // able" is an `unless` clause that begins immediately. An unmodelled rider
+    // wedged between the recurring-combat suffix and `unless` must make the whole
+    // line decline — never parse as if the rider were absent (which would silently
+    // drop text and mark the card falsely supported).
+    //
+    // Reach-guard: the SAME line WITHOUT the rider parses (proving the rejection is
+    // the rider's doing, not an unrelated failure).
+    let ok = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        ok.is_some(),
+        "reach-guard: the rider-free line must still parse"
+    );
+    let with_rider = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able and gains flying unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        with_rider.is_none(),
+        "an unmodelled rider before `unless` must not be swallowed — the line declines",
+    );
+}
+
+#[test]
+fn forced_attack_defender_static_rejects_unmodelled_unless_condition() {
+    // Coverage-honesty guard: an `unless` gate whose INNER condition is not modeled
+    // must make the whole line decline. Otherwise it parses to `Not(Unrecognized)`,
+    // which the coverage detector's top-level `Unrecognized` check misses (falsely
+    // "supported") and which evaluates permanently false at runtime — silently
+    // disabling the forced-attack requirement. This is the grammar-class hole one
+    // level deeper than the rider test above: the rider sits BEFORE `unless`; here
+    // the unrecognized clause sits AFTER it.
+    //
+    // Reach-guard: the SAME shape with a MODELED `unless` condition still parses, so
+    // the rejection is the unrecognized condition's doing, not an unrelated failure.
+    let modeled = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent with the most life among your opponents each combat if able unless you control a creature named Silver Surfer, Galactus's Herald.",
+    );
+    assert!(
+        modeled.is_some(),
+        "reach-guard: a fully-modeled `unless` gate still parses",
+    );
+    let unmodeled = super::evasion::parse_forced_attack_defender_static(
+        "~ attacks an opponent each combat if able unless you satisfy an unmodelled condition.",
+    );
+    assert!(
+        unmodeled.is_none(),
+        "an unmodeled `unless` condition must decline — never a broken, falsely-supported static",
+    );
+}
+
+#[test]
+fn flavor_labeled_non_forced_attack_line_is_not_hijacked() {
+    // Anti-hijack: the flavor-label strip must not manufacture a forced-attack
+    // static from an unrelated labeled line. `parse_forced_attack_defender_static`
+    // declines (no "attacks … each combat if able" predicate), leaving the line to
+    // the ordinary anthem/PT dispatch.
+    assert!(
+        super::evasion::parse_forced_attack_defender_static("Insatiable Hunger — ~ gets +1/+1.")
+            .is_none(),
+        "a flavor-labeled non-forced-attack line must not become a MustAttackPlayer static",
+    );
 }
 
 #[test]

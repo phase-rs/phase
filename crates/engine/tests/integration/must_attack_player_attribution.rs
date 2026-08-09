@@ -47,7 +47,9 @@ fn graft_must_attack_player(
         Duration::UntilEndOfCombat,
         TargetFilter::SpecificObject { id: creature },
         vec![ContinuousModification::AddStaticMode {
-            mode: StaticMode::MustAttackPlayer { player },
+            mode: StaticMode::MustAttackPlayer {
+                player: player.into(),
+            },
         }],
         None,
     );
@@ -284,7 +286,7 @@ fn static_definition_source_object_serde_default() {
 
     // A stamped value round-trips.
     let stamped = StaticDefinition::new(StaticMode::MustAttackPlayer {
-        player: PlayerId(1),
+        player: PlayerId(1).into(),
     })
     .source_object(ObjectId(7));
     let round: StaticDefinition =

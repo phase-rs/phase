@@ -16,7 +16,7 @@ use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
-    parse_property_keyword, parse_superlative_adjective,
+    parse_object_recipient_pronoun, parse_property_keyword, parse_superlative_adjective,
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
@@ -2217,12 +2217,9 @@ fn parse_has_counters_axes(
     // CR 122.1: "on him/her/them" — animate/gendered possessive of the
     // counter-bearing source, identical semantics to "on it". Marvel cards use
     // gendered pronouns (Captain America "a shield counter on him"); the layer
-    // system never inspects the pronoun, only the counter-bearing object.
-    let (rest, _) = preceded(
-        tag(" on "),
-        alt((tag("it"), tag("him"), tag("her"), tag("them"))),
-    )
-    .parse(rest)?;
+    // system never inspects the pronoun, only the counter-bearing object. Routed
+    // through the shared recipient-pronoun combinator (single authority).
+    let (rest, _) = preceded(tag(" on "), parse_object_recipient_pronoun).parse(rest)?;
 
     Ok((rest, (subject, counters, minimum, maximum)))
 }
@@ -6046,6 +6043,19 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
             )),
         ),
         parse_you_attacked_with_quantity,
+        // CR 508.6 + CR 109.5: "a player attacked you during their last turn" —
+        // the existential revenge gate (Avenge's self-spell cost reduction). The
+        // defender is the controller ("you", CR 109.5); the attacker is
+        // existential ("a player" / "an opponent"). Distinct reference frame from
+        // the "you attacked this turn" arms above (attacker-timeline "last turn",
+        // not current-turn), so it is its own typed condition.
+        value(
+            StaticCondition::AnyPlayerAttackedYouLastTurn,
+            (
+                alt((tag("a player"), tag("an opponent"))),
+                tag(" attacked you during their last turn"),
+            ),
+        ),
     ))
     .parse(input)
 }
@@ -18637,6 +18647,39 @@ mod tests {
             StaticCondition::SpellCastWithVariantThisTurn {
                 variant: crate::types::game_state::CastingVariant::Warp,
             }
+        );
+    }
+
+    /// CR 508.6 + CR 109.5: "a player / an opponent attacked you during their
+    /// last turn" lowers to the existential revenge gate (Avenge's cost
+    /// reduction). Both surfaces reach the same nullary condition, the pre-existing
+    /// "you attacked this turn" arm in the same combinator is NOT shadowed, and a
+    /// similar-but-different phrase is not spuriously matched.
+    #[test]
+    fn parse_inner_condition_a_player_attacked_you_last_turn() {
+        for text in [
+            "a player attacked you during their last turn",
+            "an opponent attacked you during their last turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(c, StaticCondition::AnyPlayerAttackedYouLastTurn, "{text}");
+        }
+
+        // Sibling non-shadow: the pre-existing "you attacked this turn" arm in the
+        // same `parse_combat_history_condition` combinator still lowers to the
+        // AttackedThisTurn count gate, never the new revenge gate.
+        let (_, you) = parse_inner_condition("you attacked this turn").unwrap();
+        assert_ne!(you, StaticCondition::AnyPlayerAttackedYouLastTurn);
+
+        // Negative: the "this turn" (wrong window) sibling is not matched as the
+        // "last turn" gate — no false positive on a near-miss phrase.
+        assert!(
+            !matches!(
+                parse_inner_condition("a player attacked you this turn"),
+                Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn))
+            ),
+            "the this-turn near-miss must not lower to the last-turn revenge gate"
         );
     }
 

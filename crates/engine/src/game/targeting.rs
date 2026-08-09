@@ -623,12 +623,15 @@ pub fn resolve_event_context_target(
             .first()
             .copied()
             .map(TargetRef::Object),
-        TargetFilter::DefendingPlayer
-        | TargetFilter::AttachedTo
+        TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
+        }
+        TargetFilter::DefendingPlayer => {
+            let event = state.current_trigger_event.as_ref();
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, event)
         }
         // CR 108.3 + CR 608.2c: `ParentTargetOwner` may fall back to the source's
         // AttachedTo host (Enslave's "enchanted creature deals 1 damage to its
@@ -1246,10 +1249,17 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // tries the source as the attacker first (a creature's own attack trigger), then
         // falls back to the attacker carried by the current triggering event (a separate
         // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
-        // Equipment). Returns None when neither is in combat, degrading to the caller's
-        // controller fallback exactly as the prior source-only lookup did.
+        // Equipment). When combat state is no longer available, the triggering event's
+        // captured defender remains the resolution-time authority.
         TargetFilter::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id).map(TargetRef::Player)
+            crate::game::combat::resolve_defending_player(state, source_id)
+                .or_else(|| match event? {
+                    GameEvent::AttackersDeclared {
+                        defending_player, ..
+                    } => Some(*defending_player),
+                    _ => None,
+                })
+                .map(TargetRef::Player)
         }
         TargetFilter::AttachedTo => {
             let host = state.objects.get(&source_id)?.attached_to?;
@@ -1732,6 +1742,9 @@ pub(crate) fn extract_player_from_event(
         // TriggeringPlayer` fell back to the ability controller, hitting the
         // wrong player (Suture Priest #560, Bloodchief Ascension #546).
         GameEvent::ZoneChanged { record, .. } => Some(record.controller),
+        // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
+        // counter-placement trigger is the player who put the counters.
+        GameEvent::CounterAdded { actor, .. } => Some(*actor),
         _ => None,
     }
 }

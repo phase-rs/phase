@@ -1815,6 +1815,24 @@ pub enum CounterMoveSelection {
     ResolutionDistributionAnyNumber,
 }
 
+/// CR 122.1 + CR 603.2c: The per-kind magnitude axis for
+/// `Effect::ReproduceEventCounters`. Reproduces the counters a triggering
+/// counter-placement event just put onto a creature. A typed axis (never a bare
+/// `Option<u32>`) so the two class members are self-documenting and exhaustively
+/// matchable, mirroring `CounterTransferMode`/`CounterMoveSelection`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EventCounterReproductionCount {
+    /// "put the same number and kind of counters" — reproduce each kind with the
+    /// exact count the event placed (Captain Marvel, Apex Avenger; Bold
+    /// Plagiarist).
+    #[default]
+    SameNumber,
+    /// "put one of each of those kinds of counters" — reproduce each distinct
+    /// kind exactly `n` times regardless of the event's per-kind count (Aragorn,
+    /// Company Leader: `PerKind(1)`).
+    PerKind(u32),
+}
+
 /// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
 /// that acts on the *source permanent* of an ability countered by the effect.
 ///
@@ -7820,6 +7838,16 @@ pub enum StaticCondition {
     SpellCastWithVariantThisTurn {
         variant: crate::types::game_state::CastingVariant,
     },
+    /// CR 508.6 + CR 514.2 + CR 109.5: True when any (non-eliminated) player
+    /// declared a creature attacking the ability's controller ("you") during
+    /// that player's most recent COMPLETED turn. Existential over players; the
+    /// defender is the source controller (CR 109.5). Backed by the
+    /// `attacked_defenders_last_turn` snapshot taken at each turn's cleanup step
+    /// (CR 514.2). Shared "attacked you during their last turn" revenge
+    /// predicate: Avenge (this self-spell cost reduction), with O-Kagachi and
+    /// Weathered Sentinels as future adopters via
+    /// `GameState::player_attacked_player_last_turn`.
+    AnyPlayerAttackedYouLastTurn,
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -11982,6 +12010,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 122.1 + CR 603.2c + CR 608.2h: "put the same number and kind of
+    /// counters"/"put one of each of those kinds of counters" — reproduce onto
+    /// `target` the counters that the triggering counter-placement event just put
+    /// onto the recipient creature. Unlike `MoveCounters` (which reads an
+    /// object's TOTAL counter map), this reads the DELTA carried by the trigger's
+    /// `GameEvent::CounterAdded` occurrences in `state.current_trigger_events`,
+    /// so putting 1 more counter on a creature already holding 5 reproduces 1.
+    /// The multiset (kind → count) is snapshotted from the firing's events
+    /// (CR 608.2h). Covers the "reproduce the counters just placed" trigger class
+    /// (Captain Marvel, Apex Avenger; Bold Plagiarist; Aragorn, Company Leader).
+    ReproduceEventCounters {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default)]
+        per_kind_count: EventCounterReproductionCount,
+    },
     Animate {
         /// CR 613.4 / Layer 7b: fixed base power. Use `PtValue::Fixed(n)` for known
         /// values and `PtValue::Quantity(q)` for dynamic quantities (e.g. CostXPaid,
@@ -15235,6 +15279,11 @@ impl Effect {
             | Effect::MultiplyCounter { target, .. }
             | Effect::DoublePT { target, .. }
             | Effect::MoveCounters { target, .. }
+            // CR 122.1 + CR 603.2c: reproduce onto `target` (SelfRef for Captain
+            // Marvel; a real "up to one other target creature" for Aragorn).
+            // Surfaced so the SelfRef/stack target slot builds exactly like
+            // `PutCounter`.
+            | Effect::ReproduceEventCounters { target, .. }
             | Effect::Animate { target, .. }
             | Effect::Discard { target, .. }
             | Effect::Shuffle { target, .. }
@@ -16387,6 +16436,7 @@ impl Effect {
             | Effect::TurnFaceUp { .. }
             | Effect::UnattachAll { .. }
             | Effect::Unsuspect { .. }
+            | Effect::ReproduceEventCounters { .. }
             | Effect::WinTheGame { .. } => false,
         }
     }
@@ -17016,6 +17066,9 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
+            // not a `QuantityExpr`, so there is nothing to visit here.
+            | Effect::ReproduceEventCounters { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -17283,6 +17336,9 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::CombineHost { .. }
             | Effect::ChooseAugmentAndCombineWithHost { .. }
+            // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
+            // not a `QuantityExpr`.
+            | Effect::ReproduceEventCounters { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -17541,6 +17597,9 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::CombineHost { .. }
             | Effect::ChooseAugmentAndCombineWithHost { .. }
+            // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
+            // not a `QuantityExpr`.
+            | Effect::ReproduceEventCounters { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -17638,6 +17697,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::DoublePT { .. } => "DoublePT",
         Effect::DoublePTAll { .. } => "DoublePTAll",
         Effect::MoveCounters { .. } => "MoveCounters",
+        Effect::ReproduceEventCounters { .. } => "ReproduceEventCounters",
         Effect::Animate { .. } => "Animate",
         Effect::ReturnAsAura { .. } => "ReturnAsAura",
         Effect::RegisterBending { .. } => "RegisterBending",
@@ -17890,6 +17950,7 @@ pub enum EffectKind {
     DoublePT,
     DoublePTAll,
     MoveCounters,
+    ReproduceEventCounters,
     Animate,
     ReturnAsAura,
     RegisterBending,
@@ -18148,6 +18209,7 @@ impl From<&Effect> for EffectKind {
             Effect::DoublePT { .. } => EffectKind::DoublePT,
             Effect::DoublePTAll { .. } => EffectKind::DoublePTAll,
             Effect::MoveCounters { .. } => EffectKind::MoveCounters,
+            Effect::ReproduceEventCounters { .. } => EffectKind::ReproduceEventCounters,
             Effect::Animate { .. } => EffectKind::Animate,
             Effect::ReturnAsAura { .. } => EffectKind::ReturnAsAura,
             Effect::RegisterBending { .. } => EffectKind::RegisterBending,

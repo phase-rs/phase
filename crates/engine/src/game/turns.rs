@@ -907,6 +907,40 @@ pub(crate) fn select_next_turn_after_completion(
     }
 }
 
+/// CR 800.4i: Expires a departed player's last-turn attack record when the turn
+/// that player would have taken is skipped in seat order.
+fn expire_departed_last_turn_attack_records(
+    state: &mut GameState,
+    completed_player: PlayerId,
+    next_active: PlayerId,
+    is_extra_turn: bool,
+) {
+    if is_extra_turn || state.seat_order.is_empty() {
+        return;
+    }
+
+    let seat_order = &state.seat_order;
+    let current_idx = seat_order
+        .iter()
+        .position(|&player| player == completed_player)
+        .unwrap_or(0);
+    for offset in 1..=seat_order.len() {
+        let idx = super::players::turn_order_index(
+            current_idx,
+            offset,
+            seat_order.len(),
+            state.turn_direction,
+        );
+        let candidate = seat_order[idx];
+        if !super::players::is_alive(state, candidate) {
+            state.attacked_defenders_last_turn.remove(&candidate);
+        }
+        if candidate == next_active {
+            break;
+        }
+    }
+}
+
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
 /// projection. Slot 0 is the current live turn representative; later slots are
 /// the next turns that would actually begin after extra turns, skipped turns,
@@ -1067,6 +1101,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
     // can observe it.
     let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    expire_departed_last_turn_attack_records(state, completed_player, next_active, is_extra_turn);
     state.active_player = next_active;
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
@@ -2156,6 +2191,23 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
+    // CR 508.6 + CR 514.2: Snapshot this turn's attacks so "attacked you during
+    // their last turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each
+    // player's most recent completed turn. Overwrite the active (ending) player's
+    // entry — empty when they attacked no one, so a no-attack turn correctly
+    // clears their record; other players' entries are untouched (a skipped player
+    // never reaches cleanup, so it keeps its genuine last-turn record). Runs
+    // before `start_next_turn` clears `attacked_defenders_this_turn`, and is
+    // idempotent under a repeated cleanup step (CR 514.3): same ending player,
+    // same attacks.
+    let ending = state.active_player;
+    let this_turn = state
+        .attacked_defenders_this_turn
+        .get(&ending)
+        .cloned()
+        .unwrap_or_default();
+    state.attacked_defenders_last_turn.insert(ending, this_turn);
+
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
     // CR 514.2: Resolution-time replacements with `expiry: EndOfTurn` (e.g.,
@@ -6573,6 +6625,84 @@ mod tests {
         execute_cleanup(&mut state, &mut events);
 
         assert_eq!(state.objects[&id].damage_marked, 0);
+    }
+
+    /// CR 508.6 + CR 514.2: cleanup snapshots this turn's attacks into
+    /// `attacked_defenders_last_turn`, keyed by the ending (active) player and
+    /// directional, so "attacked you during their last turn" can query it. A
+    /// no-attack turn overwrites only that player's entry to empty; other players'
+    /// records persist (the skipped-player retention property).
+    #[test]
+    fn execute_cleanup_snapshots_attacked_defenders_last_turn() {
+        // P1's turn: P1 declared attackers against P0.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state
+            .attacked_defenders_this_turn
+            .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1 attacked P0 during P1's (now-completed) turn"
+        );
+        // The record is one-directional: P0 did not attack P1.
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(0), PlayerId(1)),
+            "helper is directional (attacker, defender) — the swap must be false"
+        );
+
+        // P0 then takes a real turn and attacks no one: P0's entry is overwritten
+        // to empty, while P1's genuine last-turn record is untouched.
+        state.active_player = PlayerId(0);
+        state.attacked_defenders_this_turn.clear();
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(0), PlayerId(1)),
+            "P0's no-attack turn leaves no last-turn record"
+        );
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1's last-turn record persists across another player's turn"
+        );
+
+        // A later real P1 turn with no attack overwrites P1's record to empty.
+        state.active_player = PlayerId(1);
+        state.attacked_defenders_this_turn.clear();
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1's subsequent no-attack turn clears its record to empty"
+        );
+    }
+
+    #[test]
+    fn start_next_turn_expires_departed_players_last_turn_attack_record() {
+        use crate::game::elimination::eliminate_player;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state
+            .attacked_defenders_last_turn
+            .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record persists before their skipped turn boundary"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(state.active_player, PlayerId(2));
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record expires when their skipped turn boundary is crossed"
+        );
     }
 
     #[test]
