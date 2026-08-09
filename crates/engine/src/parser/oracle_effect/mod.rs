@@ -5484,12 +5484,12 @@ enum ChoiceListShape {
 /// reaching the counter-choice branch builder.
 fn parse_full_counter_noun(input: &str) -> Option<(CounterType, QuantityExpr)> {
     let (count, rest) = parse_count_expr(input.trim())?;
-    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest.trim_start()).ok()?;
     all_consuming(alt((
-        tag::<_, _, OracleError<'_>>(" counters"),
-        tag(" counter"),
+        tag::<_, _, OracleError<'_>>("counters"),
+        tag("counter"),
     )))
-    .parse(rest)
+    .parse(rest.trim_start())
     .ok()?;
     Some((counter_type, count))
 }
@@ -5527,37 +5527,63 @@ fn recognize_shared_noun_counter_list(input: &str) -> Option<Vec<&str>> {
     Some(items)
 }
 
-/// Classify a counter-choice list and validate every member for the classified
-/// shape. This is the single authority for the priority order and guards shared
-/// by context-free callers and the branch-reparsing parser.
-fn classify_counter_choice_list(input: &str) -> Option<(ChoiceListShape, Vec<&str>)> {
-    let (shape, items) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a counter from among ").parse(input) {
-            (ChoiceListShape::FromAmong, split_choice_list_items(rest)?)
-        } else if let Some(items) = recognize_shared_noun_counter_list(input) {
-            (ChoiceListShape::SharedNoun, items)
-        } else {
-            (
-                ChoiceListShape::Distributed,
-                split_choice_list_items(input)?,
-            )
-        };
-
+/// Parse and validate every member of a classified counter-choice list.
+///
+/// This is deliberately the sole item-level parser: callers that need the
+/// typed entries receive the work performed during classification rather than
+/// reparsing the same text with subtly different validation.
+fn parse_counter_choice_list_entries(
+    shape: ChoiceListShape,
+    items: &[&str],
+) -> Option<Vec<(CounterType, QuantityExpr)>> {
     if items.len() < 2 || items.iter().any(|item| item.trim().is_empty()) {
         return None;
     }
 
-    let valid = match shape {
-        ChoiceListShape::Distributed => items
-            .iter()
-            .all(|item| parse_full_counter_noun(item).is_some()),
-        ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => items.iter().all(|item| {
-            all_consuming(nom_primitives::parse_strict_counter_type)
-                .parse(item.trim())
-                .is_ok()
-        }),
-    };
-    valid.then_some((shape, items))
+    items
+        .iter()
+        .map(|item| match shape {
+            // CR 122.1: full counter noun phrase ("a +1/+1 counter", "two
+            // charge counters"). Parse count then counter type from the remainder.
+            ChoiceListShape::Distributed => parse_full_counter_noun(item.trim()),
+            // CR 122.1b: bare keyword name ("first strike"); count is one.
+            ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
+                let (_rest, counter_type) =
+                    all_consuming(nom_primitives::parse_strict_counter_type)
+                        .parse(item.trim())
+                        .ok()?;
+                Some((counter_type, QuantityExpr::Fixed { value: 1 }))
+            }
+        })
+        .collect()
+}
+
+/// Classify a counter-choice list and parse every member for the classified
+/// shape. This is the single authority for the priority order and guards shared
+/// by context-free callers and the branch-reparsing parser.
+fn classify_counter_choice_list(
+    input: &str,
+) -> Option<(ChoiceListShape, Vec<&str>, Vec<(CounterType, QuantityExpr)>)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a counter from among ").parse(input) {
+        let items = split_choice_list_items(rest)?;
+        let entries = parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)?;
+        return Some((ChoiceListShape::FromAmong, items, entries));
+    }
+
+    // A distributed list also begins with "a" and ends with "counter". Only
+    // retain the shared-noun interpretation when every member is a bare,
+    // recognized counter type; otherwise try the full-noun distributed grammar.
+    if let Some(items) = recognize_shared_noun_counter_list(input) {
+        if let Some(entries) =
+            parse_counter_choice_list_entries(ChoiceListShape::SharedNoun, &items)
+        {
+            return Some((ChoiceListShape::SharedNoun, items, entries));
+        }
+    }
+
+    let items = split_choice_list_items(input)?;
+    let entries = parse_counter_choice_list_entries(ChoiceListShape::Distributed, &items)?;
+    Some((ChoiceListShape::Distributed, items, entries))
 }
 
 /// Recover the original-case list items after a lowercased list has already
@@ -5629,27 +5655,7 @@ pub(crate) fn classify_and_parse_counter_choice_list(
     choices_text: &str,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let lower = choices_text.to_lowercase();
-    let (shape, choice_items) = classify_counter_choice_list(&lower)?;
-
-    let mut entries: Vec<(CounterType, QuantityExpr)> = Vec::with_capacity(choice_items.len());
-    for item in &choice_items {
-        let item = item.trim();
-        let entry = match shape {
-            // CR 122.1: full counter noun phrase ("a +1/+1 counter", "two charge
-            // counters"). Parse count then counter type from the remainder.
-            ChoiceListShape::Distributed => parse_full_counter_noun(item)?,
-            // CR 122.1b: bare keyword name ("first strike"); count is one.
-            ChoiceListShape::FromAmong | ChoiceListShape::SharedNoun => {
-                let (_rest, counter_type) =
-                    all_consuming(nom_primitives::parse_strict_counter_type)
-                        .parse(item)
-                        .ok()?;
-                (counter_type, QuantityExpr::Fixed { value: 1 })
-            }
-        };
-        entries.push(entry);
-    }
-
+    let (_shape, _items, entries) = classify_counter_choice_list(&lower)?;
     Some(entries)
 }
 
@@ -5709,7 +5715,7 @@ fn try_parse_put_counter_choice(
     // established shared-noun admission and adds only a full counter-noun
     // Distributed list (Dwarven Armorer's form); `from among` remains reserved
     // for the explicit choice grammar.
-    let (shape, _) = classify_counter_choice_list(choices_tp.lower)?;
+    let (shape, _items, _entries) = classify_counter_choice_list(choices_tp.lower)?;
     if !explicit_choice && matches!(shape, ChoiceListShape::FromAmong) {
         return None;
     }
