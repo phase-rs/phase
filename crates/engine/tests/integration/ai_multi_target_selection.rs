@@ -16,7 +16,7 @@ const P0: PlayerId = PlayerId(0);
 
 fn exact_thirteen_targets_state() -> (GameState, Vec<ObjectId>) {
     let mut state = GameState::new_two_player(42);
-    let targets = (0..14)
+    let targets: Vec<ObjectId> = (0..14)
         .map(|index| {
             create_object(
                 &mut state,

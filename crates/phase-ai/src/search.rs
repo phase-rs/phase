@@ -1470,10 +1470,9 @@ pub fn fallback_action(
             })
         }
 
-        // Multi-target selection: zero targets is valid when min == 0.
-        WaitingFor::MultiTargetSelection { .. } => {
-            Some(GameAction::SelectCards { cards: Vec::new() })
-        }
+        // Choose an engine-issued target set. The legal cardinality is
+        // prompt-specific, so an empty selection is not always valid.
+        WaitingFor::MultiTargetSelection { .. } => issued_selection(contract),
 
         // Soulbond pair choice: choose the first legal partner; if none remain,
         // decline the pair.
@@ -12496,6 +12495,58 @@ mod tests {
             "an `up_to` prompt legally admits nothing, and the conservative pick \
              is still nothing"
         );
+    }
+
+    /// A multi-target prompt can require more targets than the ordinary
+    /// selection pool cap. The enumerator still issues one concrete exact-size
+    /// candidate, which the fallback must return unchanged rather than
+    /// synthesizing an illegal empty selection.
+    #[test]
+    fn fallback_multi_target_selection_uses_the_issued_exact_selection() {
+        let mut state = make_state();
+        let ai = P0;
+        let targets: Vec<ObjectId> = (0..14)
+            .map(|index| {
+                create_object(
+                    &mut state,
+                    CardId(80_000 + index),
+                    ai,
+                    format!("Fallback target {index}"),
+                    Zone::Battlefield,
+                )
+            })
+            .collect();
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            targets[0],
+            ai,
+        );
+        state.waiting_for = WaitingFor::MultiTargetSelection {
+            player: ai,
+            legal_targets: targets.clone(),
+            min_targets: 13,
+            max_targets: 13,
+            pending_ability: Box::new(ability),
+        };
+
+        let contract = AiDecisionContract::issue(&state, ai);
+        let action = fallback_action_default(&state)
+            .expect("the exact multi-target prompt must have an issued fallback");
+        let GameAction::SelectCards { cards } = &action else {
+            panic!("expected SelectCards, got {action:?}");
+        };
+        assert_eq!(cards.len(), 13, "the prompt requires exactly 13 targets");
+        assert!(cards.iter().all(|target| targets.contains(target)));
+        assert!(
+            contract.contains_action(&state, &action),
+            "the fallback must return the exact issued selection"
+        );
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the issued exact selection must apply");
     }
 
     /// T4. Hostile sibling for the "exactly one" sub-family. `WardDiscardChoice`
