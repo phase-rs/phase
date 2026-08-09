@@ -1368,10 +1368,10 @@ mod tests {
 
         assert_eq!(
             config.range_of_influence,
-            Some(RangeOfInfluenceConfig {
+            Some(Box::new(RangeOfInfluenceConfig {
                 default_range: 1,
                 player_overrides: BTreeMap::new(),
-            })
+            }))
         );
         assert!(config
             .reject_unimplemented_range_of_influence()
