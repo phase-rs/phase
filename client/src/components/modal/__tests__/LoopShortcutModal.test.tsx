@@ -81,6 +81,20 @@ describe("LoopShortcutModal", () => {
       type: "DeclareShortcut",
       data: { count: { Fixed: 1 }, template: null },
     });
+    // §1b (`fixedCount_one`): CR 732.2b makes a proposal an upper bound, so the modal says
+    // "at most" — the ruled wording. Fails against the pre-§1b catalog ("Repeat once.").
+    expect(screen.getByText("Repeat at most once.")).toBeInTheDocument();
+  });
+
+  // §1b (`fixedCount_other`, CR 732.2c): post-fix the object-growth offer seeds
+  // Fixed(MAX_SHORTCUT_CYCLES), and the modal echoes it verbatim — so the ceiling must render with
+  // the "at most" wording. Covers the other plural leaf and the {{count}} interpolation; the
+  // pre-§1b catalog renders "Repeat 1000 times." and fails.
+  it("renders the ceiling with the at-most wording (§1b)", () => {
+    seed(buildLoopShortcutWaitingFor({ schema: { iteration_count: { Fixed: 1000 } } }));
+    render(<DeclareShortcutModal />);
+
+    expect(screen.getByText("Repeat at most 1000 times.")).toBeInTheDocument();
   });
 
   // T3: display-only — a ConvokeTaps point renders a read-only info line and NO

@@ -59,6 +59,7 @@ export function DistributeAmongModal({ data }: { data: DistributeAmong["data"] }
     <ChoiceOverlay
       title={t("distributeAmong.title", { total: data.total, unit: label })}
       subtitle={t("distributeAmong.subtitle", { unit: label, remaining })}
+      maxWidthClassName="max-w-xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} />}
     >
       <div className="mb-4 space-y-3">

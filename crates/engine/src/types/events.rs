@@ -123,7 +123,7 @@ impl ManaTapState {
 }
 
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BendingType {
     Fire,
     Air,
@@ -131,7 +131,7 @@ pub enum BendingType {
     Water,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
     /// A player accepted a resolution-time optional effect.
     AcceptedOptionalEffect,
@@ -321,6 +321,7 @@ pub struct EventObjectSnapshot {
     /// CR 202.3: effective mana value as of capture.
     pub mana_value: u32,
     /// CR 122.1: counters on the subject as of capture.
+    #[serde(with = "crate::types::counter::counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 
     pub is_token: bool,
@@ -1341,6 +1342,10 @@ pub enum GameEvent {
     },
     /// CR 702.131b: A player gained the city's blessing (Ascend).
     CityBlessingGained {
+        player_id: PlayerId,
+    },
+    /// A player gained an enduring story.
+    EnduringStoryGained {
         player_id: PlayerId,
     },
     /// CR 706: A die was rolled. `result` is `None` when the roll has no numeric

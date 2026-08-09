@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, space0, space1};
@@ -700,6 +700,34 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
     Some(Keyword::Ward(cost))
 }
 
+/// CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" / "get a/an
+/// <kind> counter" — the single grammatical authority for this ward-cost
+/// family. Composes the count/article, kind, and singular/plural axes as
+/// independent nom combinators (this repo's mandated style) rather than
+/// enumerating their product as ad-hoc string dispatch.
+fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost> {
+    all_consuming(|i| {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("get ").parse(i)?;
+        let (rest, count) = alt((
+            nom_primitives::parse_number,
+            value(1u32, nom_primitives::parse_article),
+        ))
+        .parse(rest)?;
+        let (rest, _) = space0.parse(rest)?;
+        let (rest, counter_kind) = nom_primitives::parse_player_counter_kind.parse(rest)?;
+        let (rest, _) = tag(" counter").parse(rest)?;
+        let (rest, _) = opt(tag("s")).parse(rest)?;
+        Ok((
+            rest,
+            WardCost::GetPlayerCounters {
+                counter_kind,
+                count,
+            },
+        ))
+    })
+    .parse(input)
+}
+
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
@@ -748,6 +776,30 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
         let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
         return Some(WardCost::Waterbend(cost));
+    }
+
+    // CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" — a
+    // player-counter ward cost (The Serpent Society: "Ward—Get five poison
+    // counters."). MUST run before the mana-cost fallback below, which
+    // otherwise silently parses unrecognized cost text with no mana
+    // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
+    //
+    // One grammatical authority over the count/article, kind, and
+    // singular/plural axes — composed nom combinators, not string-suffix
+    // dispatch — so this parser family has a single production to extend
+    // rather than ad-hoc per-branch string handling.
+    if tag::<_, _, OracleError<'_>>("get ").parse(lower).is_ok() {
+        return match parse_get_player_counters_ward_cost(lower) {
+            Ok((_, cost)) => Some(cost),
+            // CR 702.21a: recognized as counter-shaped ("get ...") but the
+            // count, kind, or "counter(s)" tail didn't parse in full — fail
+            // closed rather than falling through to the mana-cost fallback
+            // below, which would otherwise silently produce a free,
+            // always-paid Ward for unsupported/malformed counter text
+            // (phase-rs/phase#6640's exact bug class, for different
+            // malformed input).
+            Err(_) => None,
+        };
     }
 
     // Fall back to mana cost parsing
@@ -2366,6 +2418,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Exploit => "exploit".to_string(),
         Keyword::Explore => "explore".to_string(),
         Keyword::Ascend => "ascend".to_string(),
+        Keyword::Storied => "storied".to_string(),
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
@@ -2709,7 +2762,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 96] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -2801,6 +2854,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
     "spree",
     "casualty",
     "bargain",
+    "storied",
     "demonstrate",
     "strive",
     "exploit",
@@ -2829,6 +2883,62 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn ward_get_poison_counters_parses_as_player_counter_cost() {
+        // Issue #6640 (The Serpent Society): "Ward—Get five poison counters."
+        // must not silently fall through to the mana-cost fallback.
+        let result = parse_ward_cost("Get five poison counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 5,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_player_counters_accepts_digit_count_and_other_kinds() {
+        // Class-level coverage: digit form, and a non-poison counter kind.
+        let result = parse_ward_cost("Get 3 experience counters.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Experience,
+                count: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn ward_get_a_poison_counter_singular_defaults_to_count_one() {
+        let result = parse_ward_cost("Get a poison counter.");
+        assert_eq!(
+            result,
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: PlayerCounterKind::Poison,
+                count: 1,
+            }))
+        );
+    }
+
+    // Issue #6640 follow-up: counter-shaped "get ... counter(s)" text that
+    // fails to parse (malformed count, unknown kind) must fail closed
+    // (`None`) rather than silently falling through to the mana-cost
+    // fallback and becoming a free, always-paid Ward.
+    #[test]
+    fn ward_get_counters_with_unparseable_count_fails_closed() {
+        let result = parse_ward_cost("Get many poison counters.");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn ward_get_counters_with_unknown_kind_fails_closed() {
+        let result = parse_ward_cost("Get five sprocket counters.");
+        assert_eq!(result, None);
+    }
 
     #[test]
     fn parse_granted_keyword_fragment_cascade() {
@@ -3183,6 +3293,45 @@ mod tests {
             "Shardless Agent must have Keyword::Cascade extracted, got {:?}",
             shardless.extracted_keywords
         );
+    }
+
+    #[test]
+    fn parse_oracle_text_extracts_storied_without_mtgjson_keyword_metadata() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        for (name, text, types, subtypes) in [
+            (
+                "Balin, Loremaster",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nWhenever Balin or another Dwarf you control enters, you may discard your hand. Draw X cards, where X is the number of cards discarded this way. If you have an enduring story, Balin deals X damage to each opponent.",
+                &["Creature"],
+                &["Dwarf", "Wizard"],
+            ),
+            (
+                "Ori, Keeper of Songs",
+                "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, Ori gets +1/+0 and has vigilance.",
+                &["Creature"],
+                &["Dwarf", "Bard"],
+            ),
+        ] {
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &[],
+                &types.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                &subtypes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            );
+
+            assert!(
+                parsed.extracted_keywords.contains(&Keyword::Storied),
+                "{name} must extract Storied when MTGJSON keyword metadata is absent: {:?}",
+                parsed.extracted_keywords
+            );
+            assert!(
+                parsed.abilities.is_empty(),
+                "{name} must not retain Storied as an unimplemented ability: {:?}",
+                parsed.abilities
+            );
+        }
     }
 
     #[test]
@@ -5570,6 +5719,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "bargain",
             valid_line: "Bargain",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "storied",
+            valid_line: "Storied",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

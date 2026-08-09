@@ -3,6 +3,7 @@ import type { DataConnection } from "peerjs";
 
 import type {
   AiActionProposal,
+  AiDecisionDiagnosticReceipt,
   AiProposalSubmission,
   EngineAdapter,
   EngineSnapshot,
@@ -768,7 +769,24 @@ export class P2PHostAdapter implements EngineAdapter {
         (revision, views) => this.handleNativeRevision(revision, views),
         nativeResume,
       );
+    } else {
+      this.attachBrowserAiDecisionDiagnostics();
     }
+  }
+
+  /**
+   * Installs the local-only diagnostics capability once this host is backed by
+   * browser WASM. It deliberately remains an instance property: native hosts
+   * and P2P guests must fail capability detection rather than receive a no-op.
+   */
+  private attachBrowserAiDecisionDiagnostics(): void {
+    if (this.nativeBridge) return;
+    Object.assign(this, {
+      setAiDecisionDiagnosticsEnabled: (enabled: boolean) =>
+        this.wasm.setAiDecisionDiagnosticsEnabled(enabled),
+      subscribeAiDecisionDiagnostics: (listener: (receipt: AiDecisionDiagnosticReceipt) => void) =>
+        this.wasm.subscribeAiDecisionDiagnostics(listener),
+    });
   }
 
   /**
@@ -1278,6 +1296,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
+          this.attachBrowserAiDecisionDiagnostics();
         }
       }
       // Resume path: load the persisted GameState with a fresh RNG seed
@@ -1428,6 +1447,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           this.nativeBridge.dispose();
           this.nativeBridge = null;
+          this.attachBrowserAiDecisionDiagnostics();
         }
       }
       if (!this.ownsAuthority()) {
@@ -1533,6 +1553,7 @@ export class P2PHostAdapter implements EngineAdapter {
       });
       this.nativeBridge.dispose();
       this.nativeBridge = null;
+      this.attachBrowserAiDecisionDiagnostics();
     }
   }
 
@@ -1907,6 +1928,7 @@ export class P2PHostAdapter implements EngineAdapter {
       ? null
       : this.wasm.getAiActionProposal(difficulty, playerId);
   }
+
 
   async submitAiActionProposal(
     proposal: AiActionProposal,

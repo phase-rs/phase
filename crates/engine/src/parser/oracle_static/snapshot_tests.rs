@@ -620,10 +620,14 @@ fn parses_wayta_damage_caused_doubler() {
             cause: TriggerCause::ControlledCreatureDealtDamage
         }
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'a permanent you control' must not add a redundant affected filter"
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "bare 'a permanent you control' must preserve its permanent source scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 /// CR 603.2d + CR 601.2 + CR 707.10: Cast-or-copy-caused trigger doubler
@@ -645,10 +649,14 @@ fn parses_veyran_cast_or_copy_caused_doubler() {
             }
         }
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'a permanent you control' must not add a redundant affected filter"
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "Veyran must preserve its permanent source scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 /// CR 603.2d: Source-restricted trigger doubler (Splinter, Radical Rat).
@@ -770,12 +778,11 @@ fn harmonic_prodigy_disjunctive_source_doubles_shaman_or_wizard() {
     );
 }
 
-/// CR 603.6a: Panharmonicon's source is the unrestricted "a permanent you
-/// control" — controller match alone suffices, so `affected` stays `None`.
-/// Regression guard: the source-filter extraction must NOT populate
-/// `affected` for a bare controlled-permanent source.
+/// CR 603.6a: Panharmonicon's source is "a permanent you control". Preserve
+/// that permanent-domain restriction so its controller check cannot admit a
+/// spell-source trigger.
 #[test]
-fn panharmonicon_doubler_has_no_source_filter() {
+fn panharmonicon_doubler_preserves_permanent_source_filter() {
     let def = parse_static_line(
             "If an artifact or creature entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
         )
@@ -790,11 +797,14 @@ fn panharmonicon_doubler_has_no_source_filter() {
         "expected EntersBattlefield cause, got {:?}",
         def.mode
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'permanent you control' source must leave affected None, got {:?}",
-        def.affected
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "bare 'permanent you control' source must preserve its scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 /// CR 603.2d + CR 603.6a + CR 603.6c: Gandalf the White — legendary OR
@@ -819,11 +829,14 @@ fn gandalf_the_white_doubler_static() {
         },
         "Gandalf must parse as legendary-or-artifact battlefield transition doubling"
     );
-    assert!(
-        def.affected.is_none(),
-        "bare 'permanent you control' source must leave affected None, got {:?}",
-        def.affected
-    );
+    let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
+        panic!(
+            "Gandalf's permanent source must preserve its scope, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filter.type_filters, [TypeFilter::Permanent]);
+    assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
 #[test]

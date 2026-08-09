@@ -24,6 +24,31 @@ pub fn resolve(
         }
     }
 
+    // CR 400.7 + CR 603.7c: a delayed flip whose pinned referent became a new
+    // object flips nothing. PLACEMENT IS LOAD-BEARING — this MUST sit ABOVE the
+    // `as_slice()` match below, and the match itself is deliberately left
+    // reading the RAW `ability.targets`.
+    //
+    // Substituting `live_object_targets` into that match would be actively
+    // WRONG rather than merely redundant: a filtered-to-empty list matches the
+    // `[]` arm, which binds `object_id` to `ability.source_id` — a SOURCE
+    // FALLBACK that flips the ability's own source instead of doing nothing.
+    // The two states must stay distinguishable: `[]` means "no target was ever
+    // declared" (the printed "flip this creature" shape), while an all-stale
+    // pin means "a referent was declared and it is gone".
+    //
+    // After this guard, any surviving single target is by definition live, so a
+    // substitution below would be a no-op. Early return alone is the complete
+    // shape here.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::FlipPermanent,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 710.1: if the named permanent isn't represented by a flip card, or
     // isn't on the battlefield, `flip_permanent` no-ops (CR 710.2).
     let object_id = match ability.targets.as_slice() {

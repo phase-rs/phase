@@ -836,12 +836,12 @@ fn run_game_observed(
 /// the historical `run_game` body, which capped at `MAX_TOTAL_ACTIONS`). The
 /// result `(winner, turn_number)` is a function of
 /// `(binary, payload, seed, difficulty, action_cap)` and nothing this function
-/// itself reads — but it is NOT wall-clock-free further down. `projection.rs`'s
-/// `TIME_CAP` (`projection.rs:110`, 15 ms) is not gated on measurement mode and is
-/// reached at `AiDifficulty::Medium` through `EvasionRemovalPriorityPolicy`'s
-/// `velocity_score`, so a faster or slower host can change which creature the AI
-/// targets. See the run-to-run caveats at the top of [`super::perf`]; this is a
-/// second source alongside #4878.
+/// itself reads. `projection.rs`'s wall-clock projection cap is now gated on
+/// measurement mode (`projection::projection_deadline` returns
+/// `Deadline::none()` under `ExecutionMode::Measurement`), so projections here
+/// are bounded by `STEP_CAP` and host speed cannot change which creature the AI
+/// targets. The remaining run-to-run caveat is `RandomState` iteration order
+/// (#4878) — see the notes at the top of [`super::perf`].
 pub(crate) fn drive_game(
     payload: &DeckPayload,
     seed: u64,

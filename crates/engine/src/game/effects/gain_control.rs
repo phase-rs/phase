@@ -205,7 +205,24 @@ fn gain_control_object_targets(
         }
     }
 
-    let chosen_objects = super::effect_object_targets(filter, &ability.targets);
+    // CR 400.7 + CR 603.7c: a delayed gain-control whose pinned referent became
+    // a new object controls nothing. This read is RAW and returns below before
+    // `resolved_targets` — the chokepoint the targeting guard covers — is ever
+    // reached, so the substitution MUST happen here or the pin is never checked
+    // at all. A delayed ParentTarget trigger's `targets` are non-empty by
+    // construction, so the early return below always fires for it.
+    //
+    // No early return is needed, and that is verified rather than assumed: if
+    // `chosen_objects` empties, control falls to `resolved_targets` (which also
+    // yields empty), `resolve` then iterates an empty list, skips the loop body,
+    // and falls to its UNCONDITIONAL `EffectResolved` push. An emptied list is
+    // already a clean no-op with the event.
+    //
+    // Slot carve-out does NOT apply here: `ParentTargetSlot` is handled above by
+    // `resolve_parent_slot_from_root` and never reaches this read. Adding a
+    // `matches!` guard would be dead code.
+    let live_targets = ability.live_object_targets(state);
+    let chosen_objects = super::effect_object_targets(filter, &live_targets);
 
     if !chosen_objects.is_empty() {
         return chosen_objects;
@@ -305,7 +322,27 @@ fn give_control_object_targets(
         return vec![ability.source_id];
     }
 
-    let chosen_objects = super::effect_object_targets(filter, &ability.targets);
+    // CR 400.7 + CR 603.7c: identical shape to `gain_control_object_targets`
+    // above — a RAW read that returns before the chokepoint. `GiveControl` is
+    // Tier C (1 pinned pair, `burning cinder fury of crimson chaos fire`, whose
+    // node carries BOTH an object `target` and a player `recipient`;
+    // `live_object_targets` passes `TargetRef::Player` through by construction,
+    // so the recipient is untouched).
+    //
+    // No early return needed, re-verified at `resolve_give` rather than copied:
+    // an emptied list skips the loop and reaches the unconditional
+    // `EffectResolved` push.
+    //
+    // Slot carve-out DOES apply here — unlike `gain_control_object_targets`,
+    // this function has no `ParentTargetSlot` pre-arm, so a slot filter can
+    // reach the positional indexer. Pass the raw list for that shape.
+    let live_targets = ability.live_object_targets(state);
+    let pool: &[TargetRef] = if matches!(filter, TargetFilter::ParentTargetSlot { .. }) {
+        &ability.targets
+    } else {
+        &live_targets
+    };
+    let chosen_objects = super::effect_object_targets(filter, pool);
 
     if !chosen_objects.is_empty() {
         return chosen_objects;

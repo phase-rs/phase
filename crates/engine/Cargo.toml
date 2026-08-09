@@ -115,3 +115,4 @@ tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"
 pretty_assertions = "1"
+syn = { version = "2", features = ["full"] }

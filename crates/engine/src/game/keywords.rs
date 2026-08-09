@@ -2694,6 +2694,57 @@ mod tests {
         );
     }
 
+    /// CR 702.174a + CR 702.174b: the promised [something] is the discriminant that
+    /// selects the gift effect ("The specific effect is defined by the [something]
+    /// listed"), so `effective_gift_kind` must report which kind was promised — not
+    /// merely that Gift is present. The value reaches the casting prompt as
+    /// `WaitingFor::OptionalCostChoice`'s `gift_kind`, which is what the client
+    /// renders; a blanket `None` would silently strip the promise from the prompt
+    /// with no other observable effect.
+    #[test]
+    fn effective_gift_kind_reports_each_promised_kind() {
+        for kind in [
+            GiftKind::Card,
+            GiftKind::Treasure,
+            GiftKind::Food,
+            GiftKind::TappedFish,
+        ] {
+            let mut state = GameState::new_two_player(1);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Gifted Spell".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.keywords.push(Keyword::Gift(kind.clone()));
+                obj.base_keywords = obj.keywords.clone();
+            }
+            assert_eq!(
+                effective_gift_kind(&state, id),
+                Some(kind.clone()),
+                "{kind:?} must survive to the casting prompt",
+            );
+        }
+
+        // No Gift keyword: the prompt must not claim a promise that wasn't made.
+        let mut state = GameState::new_two_player(1);
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Spell".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(
+            effective_gift_kind(&state, plain),
+            None,
+            "an object without Gift must report no promised kind",
+        );
+    }
+
     /// CR 702.49: synthesized marker must be classified so it cannot stack via
     /// `ActivateAbility` without paying mana (issue #5338).
     #[test]
