@@ -150,11 +150,37 @@ fn resolve_effect_recipients(
             .into_iter()
             .collect();
     }
+    // CR 400.7 + CR 603.7c: a delayed damage effect whose pinned referent became
+    // a new object deals it no damage. This is a RAW read that never reaches
+    // `resolved_targets`, so the targeting chokepoint cannot see this pin.
+    //
+    // THE `is_empty()` GATE STAYS RAW, AND THAT IS LOAD-BEARING — it is the
+    // reason no early return is needed here. "Targets were declared" and
+    // "declared targets are still live" are different questions. Gating on the
+    // raw list means an all-stale ability still ENTERS this branch and returns
+    // an empty recipient list, an inert no-op. Substituting the gate itself
+    // would make it fall through to the `Controller` fallback below and deal
+    // the damage to a PLAYER instead — precisely the `searing blood` shape the
+    // Tier C exclusion list warns about (its 14 Controller/Owner-only cards are
+    // additionally denied pins upstream, so this can only ever fail safe).
     if !ability.targets.is_empty() {
         if skip_first_target && ability.targets.len() > 1 {
-            return ability.targets[1..].to_vec();
+            // The positional split runs on the RAW list and the pin filter is
+            // applied AFTER it — never the other way round. `[1..]` encodes slot
+            // identity (`[source_0, …, recipient]`), so filtering first could
+            // renumber a live recipient into the source position. This is the
+            // same constraint as §5.4(b)'s `ParentTargetSlot` carve-out, applied
+            // to this file's own positional convention.
+            return ability.targets[1..]
+                .iter()
+                .filter(|target| match target {
+                    TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                    TargetRef::Player(_) => true,
+                })
+                .cloned()
+                .collect();
         }
-        return ability.targets.clone();
+        return ability.live_object_targets(state);
     }
     match target_filter {
         TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
@@ -568,14 +594,15 @@ pub(crate) fn apply_damage_after_replacement(
                 // counters. Route through the player-counter replacement pipeline
                 // so "players can't get poison counters" / poison-doublers apply;
                 // the actor is the source's controller.
-                if !player_counter::add_player_counter_with_replacement(
+                if player_counter::add_player_counter_with_replacement(
                     state,
                     ctx.controller,
                     *player_id,
                     PlayerCounterKind::Poison,
                     actual_amount,
                     events,
-                ) {
+                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+                {
                     return DamageResult::NeedsChoice;
                 }
             } else {
@@ -596,14 +623,15 @@ pub(crate) fn apply_damage_after_replacement(
                 // when a creature deals combat damage to a player. Route through
                 // the player-counter replacement pipeline (prevention/doublers);
                 // the actor is the source's controller.
-                if !player_counter::add_player_counter_with_replacement(
+                if player_counter::add_player_counter_with_replacement(
                     state,
                     ctx.controller,
                     *player_id,
                     PlayerCounterKind::Poison,
                     ctx.combat_damage_poison,
                     events,
-                ) {
+                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+                {
                     return DamageResult::NeedsChoice;
                 }
             }

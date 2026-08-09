@@ -4424,6 +4424,20 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(attr_scope), deconjugated);
     }
 
+    // CR 608.2c + CR 109.5: A "who [verb]ed … this way" relative clause after
+    // "each player" / "each opponent" restricts the affected set to the players
+    // who performed the tracked action during THIS resolution (Kwain, Itinerant
+    // Meddler: "each player who drew a card this way gains 1 life" — only players
+    // who actually drew gain the life, so an opponent who declined the optional
+    // draw or had an empty library is excluded). Like the "who controls" /
+    // attribute clauses above, the relative clause MUST be consumed and reflected
+    // in the scope; dropping it would over-apply the effect to every player.
+    if let Some((action_scope, after_clause)) = strip_performed_action_this_way_clause(&scope, rest)
+    {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(action_scope), deconjugated);
+    }
+
     // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
@@ -5064,6 +5078,67 @@ fn strip_player_attribute_clause(
             comparator: Comparator::GE,
             value: Box::new(QuantityExpr::Fixed { value: count }),
         },
+        verb_phrase.to_string(),
+    ))
+}
+
+/// CR 608.2c + CR 109.5: Strip a "who [verb]ed … this way" relative clause after
+/// an "each opponent"/"each player" subject. Returns
+/// `PlayerFilter::PerformedActionThisWay` (carrying the base subject's relation
+/// and the performed action, keyed at runtime on the `player_actions_this_way`
+/// ledger that each settled search/investigate/draw populates) and the
+/// verb-phrase remainder. Returns `None` when no such clause is present.
+///
+/// The this-way verb table is delegated whole to `parse_who_action_this_way`
+/// (oracle_quantity.rs) — the same authority the quantity path
+/// (`parse_action_this_way`) uses — so search, investigate, and draw stay one
+/// building block across both the quantity and subject scopes. This function
+/// adds only the subject-path concerns: deriving the relation from the base
+/// subject and enforcing a non-empty verb-phrase residual. Kwain, Itinerant
+/// Meddler ("each player who drew a card this way gains 1 life") is the
+/// subject-scope sibling of Cut a Deal's quantity-path "for each opponent who
+/// drew a card this way".
+fn strip_performed_action_this_way_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::PlayerRelation;
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        PlayerFilter::Controller
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::AllExcept { .. }
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TrackedSetPossessor { .. } => return None,
+    };
+    let (remainder, action) =
+        crate::parser::oracle_quantity::parse_who_action_this_way(rest).ok()?;
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        PlayerFilter::PerformedActionThisWay { relation, action },
         verb_phrase.to_string(),
     ))
 }
@@ -9998,6 +10073,9 @@ fn apply_where_x_to_ability_cost(
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        // CR 702.21a: `count` is a fixed `u32`, not a `QuantityExpr` — no
+        // where-X amount to bind.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }

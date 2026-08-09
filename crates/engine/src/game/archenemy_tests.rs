@@ -411,6 +411,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     let mut events = Vec::new();
@@ -491,6 +492,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     };
     state
         .deferred_triggers

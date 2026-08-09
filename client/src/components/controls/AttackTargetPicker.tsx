@@ -4,6 +4,7 @@ import { Trans, useTranslation } from "react-i18next";
 
 import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -673,14 +674,6 @@ function objectPtLabel(obj: GameObject | undefined): string | null {
   return `${obj.power}/${obj.toughness}`;
 }
 
-function objectCounterChips(obj: GameObject | undefined): Array<{ type: string; count: number }> {
-  if (!obj) return [];
-  return Object.entries(obj.counters)
-    .filter((entry): entry is [string, number] => entry[1] != null && entry[1] > 0 && entry[0] !== "loyalty")
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([type, count]) => ({ type, count }));
-}
-
 function RestoreTab({ onClick }: { onClick: () => void }) {
   const { t } = useTranslation("game");
   return (
@@ -831,7 +824,11 @@ interface StackLabelProps {
 /** Stack name + count badge + P/T + counter chips, with inspect-on-hover. */
 function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
   const ptLabel = objectPtLabel(stack.representative ?? undefined);
-  const counters = objectCounterChips(stack.representative ?? undefined);
+  // CR 122.1 + CR 306.5c: the engine's counter-display projection is the single authority —
+  // it already dropped zero FINITE rows, split the loyalty total out, and ordered the pills. Keyed on
+  // `ids[0]` because that is exactly the object `representative` is defined as (combat.ts), so
+  // the hook call is unconditional and the chips match the row set `groupKey` grouped on.
+  const counters = pillsOf(useCounterDisplay(stack.ids[0]));
   return (
     <div className="min-w-0" {...hoverProps(stack.ids[0])}>
       <div className="flex min-w-0 items-center gap-1.5">
@@ -853,13 +850,19 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
       </div>
       {counters.length > 0 && (
         <div className="mt-0.5 flex flex-wrap gap-1">
-          {counters.map(({ type, count }) => (
-            <CounterTooltip key={type} type={type} count={count}>
-              <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
-                {formatCounterType(type)} x{count}
-              </span>
-            </CounterTooltip>
-          ))}
+          {counters.map((row) => {
+            const type = row.counter;
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count.
+            const unbounded = isUnbounded(row);
+            return (
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+                <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
+                  {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
     </div>

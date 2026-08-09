@@ -539,6 +539,8 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::IsMonarch
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
         | AbilityCondition::IsRingBearer
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -1042,6 +1044,34 @@ fn condition_introduces_attacking_player(cond_lower: &str) -> bool {
     false
 }
 
+/// CR 603.2e + CR 115.1 + CR 608.2c: A "becomes the target of a spell or
+/// ability" trigger (Lethal Voice — Black Bolt, Inhuman King; Scalelord
+/// Reckoner) fires on the "becomes the target" event (CR 603.2e). The targeting
+/// source's target is fixed as it is put on the stack (CR 115.1), and CR 608.2c
+/// ("apply the rules of English to the text") reads a trailing "that player
+/// controls"/"that player's" anaphor in the effect body as referring back to the
+/// player named by the trigger condition — the controller of the targeting
+/// source.
+/// That player is delivered at runtime by `extract_player_from_event`'s
+/// `BecomesTarget` arm (game/targeting.rs), so the anaphor maps to
+/// `ControllerRef::TriggeringPlayer` rather than defaulting to `You`.
+fn condition_introduces_becomes_target_source_player(cond_lower: &str) -> bool {
+    // The detector IS the parser: scan word boundaries with a nom combinator
+    // (tolerating a leading "whenever"/"when" or ability-word prefix) rather
+    // than dispatching on `contains`. The shared `a` article prefix matches
+    // every source phrasing in the event grammar ("a spell or ability", "a
+    // spell", "an ability", "an aura spell", …); the singular/plural verb
+    // covers plural trigger subjects ("one or more … become the target").
+    nom_primitives::scan_at_word_boundaries(cond_lower, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("becomes the target of a"),
+            tag("become the target of a"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
     /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
     /// causes that player to lose life (CR 120.3a) and introduces the damaged
@@ -1187,6 +1217,15 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
         // CR 508.1 + CR 603.2c: the attacking player is the triggering-event
         // player for "that player" anaphors in the effect body (Total War:
         // "...destroy all untapped non-Wall creatures that player controls...").
+        Some(ControllerRef::TriggeringPlayer)
+    } else if condition_introduces_becomes_target_source_player(cond_lower) {
+        // CR 115.1 + CR 603.2e + CR 608.2c: "Whenever ~ becomes the target of a
+        // spell or ability an opponent controls, … that player controls" — reading
+        // the English text (CR 608.2c), "that player" is the controller of the
+        // targeting source, delivered by
+        // `extract_player_from_event`'s BecomesTarget arm (game/targeting.rs).
+        // (Black Bolt Lethal Voice, Scalelord Reckoner.) Unlike `TargetPlayer`,
+        // `TriggeringPlayer` surfaces no phantom companion Player target slot.
         Some(ControllerRef::TriggeringPlayer)
     } else if condition_introduces_target_player(cond_lower) {
         Some(ControllerRef::TargetPlayer)
@@ -1352,6 +1391,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         actor: ctx.actor.clone(),
         object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
             .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
+        plural_object_pronoun_ref: trigger_plural_object_pronoun_ref_for_intervening_if(
+            &if_condition,
+        ),
         in_trigger: true,
         ..Default::default()
     };
@@ -2325,6 +2367,7 @@ fn lift_mana_production_quantities_to_triggering_source(produced: &mut ManaProdu
         | ManaProduction::AnyOneColor { count, .. }
         | ManaProduction::AnyCombination { count, .. }
         | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
@@ -4520,6 +4563,8 @@ pub(crate) fn static_condition_to_trigger_condition(
         StaticCondition::NoMonarch => Some(TriggerCondition::NoMonarch),
         // CR 702.131a: City's Blessing bridges directly.
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
+        // CR 702.195b: Enduring story bridges as a player designation.
+        StaticCondition::HasEnduringStory => Some(TriggerCondition::HasEnduringStory),
         // CR 110.5b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
         StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),
@@ -9218,6 +9263,70 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     }
 
     None
+}
+
+/// CR 603.4 + CR 406.6 + CR 607.2a: an intervening-if introduces the
+/// source's linked-exile pool as the plural-anaphor antecedent ONLY when the
+/// condition semantically ENTAILS a nonempty pool — a gate that can hold with
+/// zero linked cards ("if there are no cards exiled with ~", EQ 0) must not hand
+/// a plural "them" a provably-empty referent set. Entailment (counts are
+/// cardinalities, >= 0), canonical orientation only (pool ref on lhs, Fixed rhs):
+///   GE n (n>=1) | GT n (n>=0) | EQ n (n>=1) | NE 0  -> entails
+///   LE / LT / EQ 0 / NE n>=1 / non-Fixed rhs        -> never entails
+/// The `Not(EQ 0)` form derives because its inverse excludes zero. `And` entails
+/// if ANY conjunct does; `Or` entails only if it is non-empty AND ALL branches
+/// do.
+fn trigger_plural_object_pronoun_ref_for_intervening_if(
+    if_condition: &Option<TriggerCondition>,
+) -> Option<TargetFilter> {
+    fn entails_nonempty_linked_exile_pool(condition: &TriggerCondition) -> bool {
+        match condition {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource
+                    }
+                ) && match (comparator, rhs) {
+                    (Comparator::GE, QuantityExpr::Fixed { value }) => *value >= 1,
+                    (Comparator::GT, QuantityExpr::Fixed { value }) => *value >= 0,
+                    (Comparator::EQ, QuantityExpr::Fixed { value }) => *value >= 1,
+                    (Comparator::NE, QuantityExpr::Fixed { value }) => *value == 0,
+                    _ => false,
+                }
+            }
+            TriggerCondition::And { conditions } => {
+                conditions.iter().any(entails_nonempty_linked_exile_pool)
+            }
+            TriggerCondition::Or { conditions } => {
+                !conditions.is_empty() && conditions.iter().all(entails_nonempty_linked_exile_pool)
+            }
+            TriggerCondition::Not { condition } => match condition.as_ref() {
+                TriggerCondition::QuantityComparison {
+                    lhs,
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                } => {
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource
+                        }
+                    ) && matches!((comparator, value), (Comparator::EQ, 0))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    if_condition
+        .as_ref()
+        .filter(|condition| entails_nonempty_linked_exile_pool(condition))
+        .map(|_| TargetFilter::ExiledBySource)
 }
 
 /// CR 608.2k: When an intervening-if pins the trigger source off the
@@ -17070,7 +17179,7 @@ fn try_parse_one_or_more_put_into_graveyard(
     None
 }
 
-/// Parse "whenever one or more cards are put into [a|your|an opponent's] library
+/// Parse "whenever one or more cards are put into [a|a player's|your|an opponent's] library
 /// [from <zone>]" — batched zone-change triggers with library destination.
 /// CR 603.2c + CR 603.10a: "One or more" triggers fire once per batch of
 /// simultaneous zone-change events. Example: Wan Shi Tong, All-Knowing —
@@ -17087,6 +17196,7 @@ fn try_parse_one_or_more_put_into_library(lower: &str) -> Option<(TriggerMode, T
         fn parse_library_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
             alt((
                 value(None, tag("a library")),
+                value(None, tag("a player's library")),
                 value(
                     Some(TargetFilter::Typed(
                         TypedFilter::default().controller(ControllerRef::You),

@@ -22,7 +22,7 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
     FilterProp, QuantityExpr, QuantityRef, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter,
+    TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -406,6 +406,13 @@ impl AbilityCost {
                 zone,
                 filter,
             } => {
+                // CR 107.3a + CR 601.2b: X in this cost is chosen during
+                // announcement. X=0 is legal, so the pre-announcement
+                // affordability gate must not treat its compact sentinel as a
+                // literal count that can never be met.
+                if *count == EXILE_COST_X {
+                    return true;
+                }
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
                     // CR 118.3 + CR 602.1a: "Exile this <self>" as an
                     // activation cost needs the source available to pay that
@@ -724,6 +731,10 @@ impl AbilityCost {
             // affordability is decided by the separate mana-payment step, not this
             // choice-of-object gate.
             AbilityCost::KeywordCostOfCastSpell { .. } => true,
+            // CR 702.21a + CR 122.1: Ward's player-counter cost is never paid
+            // as an activation cost (only at resolution, via the unless-pay
+            // round trip), and it has no affordability limit — always payable.
+            AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
 }
@@ -1239,6 +1250,28 @@ mod tests {
         assert!(
             cost.is_payable(&scenario.state, P0, src),
             "X sacrifice costs should stay payable once eligible permanents exist"
+        );
+    }
+
+    #[test]
+    fn variable_exile_cost_is_payable_at_x_zero() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Harvest Pyre", 0, 1).id();
+        let cost = AbilityCost::Exile {
+            count: EXILE_COST_X,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        };
+
+        assert!(
+            cost.is_payable(&scenario.state, P0, source),
+            "X exile costs are payable at X=0 before any eligible card is selected"
+        );
+
+        scenario.add_spell_to_graveyard(P0, "Lightning Bolt", true);
+        assert!(
+            cost.is_payable(&scenario.state, P0, source),
+            "X exile costs stay payable when eligible cards can set X above zero"
         );
     }
 

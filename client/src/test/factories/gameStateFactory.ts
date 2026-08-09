@@ -29,6 +29,7 @@ type TriggerTargetSelectionWaitingFor = Extract<
   { type: "TriggerTargetSelection" }
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
+type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
 type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
@@ -284,6 +285,26 @@ export const buildChooseXValueWaitingFor = (
   return chooseXValueWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class PayAmountChoiceWaitingForFactory extends PlayerWaitingForFactory<PayAmountChoiceWaitingFor> {}
+
+export const payAmountChoiceWaitingForFactory =
+  PayAmountChoiceWaitingForFactory.define((): PayAmountChoiceWaitingFor => ({
+    type: "PayAmountChoice",
+    data: {
+      player: 0,
+      resource: { type: "Energy" },
+      min: 0,
+      max: 0,
+      source_id: 0,
+    },
+  }));
+
+export const buildPayAmountChoiceWaitingFor = (
+  overrides: Partial<PayAmountChoiceWaitingFor> = {},
+): PayAmountChoiceWaitingFor => {
+  return payAmountChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
 export class AssistPaymentWaitingForFactory extends WaitingForFactory<AssistPaymentWaitingFor> {
   withCaster(caster: PlayerId) {
     return this.withData({ caster });
@@ -390,6 +411,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
     return this.variant(chooseXValueWaitingForFactory.withData(data).build());
+  }
+
+  payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
+    return this.variant(payAmountChoiceWaitingForFactory.withData(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
@@ -633,6 +658,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.chooseXValue(data).build());
+  }
+
+  payAmountChoice(data: Partial<PayAmountChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.payAmountChoice(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {

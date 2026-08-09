@@ -158,6 +158,23 @@ fn zone_change_rejects_occurrence_and_destination_position_mismatches() {
 }
 
 #[test]
+fn zone_change_replay_validates_the_nested_records_turn_number() {
+    let (pre_state, ordinary_state) = battlefield_reentry_states();
+    let command = recorded_zone_change(&ordinary_state, Zone::Graveyard, Zone::Battlefield);
+
+    let mut replay = pre_state.clone();
+    apply_resolved_zone_change(&mut replay, &command)
+        .expect("an exact nested record replays successfully");
+
+    let mut tampered = command;
+    tampered.zone_change_record.recorded_turn_number += 1;
+    assert!(matches!(
+        apply_resolved_zone_change(&mut pre_state.clone(), &tampered),
+        Err(ResolvedZoneChangeReplayInvariantError::RecordedTurnMismatch { .. })
+    ));
+}
+
+#[test]
 fn zone_change_journal_rejects_an_unrelated_cause() {
     let (_, ordinary_state) = battlefield_reentry_states();
     let mut wire = serde_json::to_value(&ordinary_state.resolved_rules_journal)

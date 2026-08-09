@@ -154,29 +154,25 @@ fn create_gift_token(
     }
 
     crate::game::layers::mark_layers_full(state);
-    crate::game::restrictions::record_battlefield_entry(state, obj_id);
     crate::game::restrictions::record_token_created(state, obj_id);
 
     // CR 111.1 + CR 603.6a: Token creation is a zone change from outside the
     // game — emit `ZoneChanged { from: None }` so ETB triggers (Soul Warden,
     // Panharmonicon, etc.) fire for gift tokens through the normal code path.
-    let zone_change_record = state
-        .objects
-        .get(&obj_id)
-        .expect("token just created")
-        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-    events.push(GameEvent::ZoneChanged {
-        object_id: obj_id,
-        from: None,
-        to: Zone::Battlefield,
-        record: Box::new(zone_change_record),
-    });
-
-    events.push(GameEvent::TokenCreated {
-        object_id: obj_id,
-        name: name.to_string(),
+    //
+    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
+    // `from: None → Battlefield` authority so the emitted `ZoneChanged` carries this turn's real
+    // zone-change index instead of the `0` placeholder. The authority performs the CR 608.2i
+    // battlefield-entry bookkeeping itself, so the co-located `record_battlefield_entry` call is
+    // deleted — keeping it would double-count `battlefield_entries_this_turn`.
+    super::token::push_committed_token_entry_events(
+        state,
+        obj_id,
+        name.to_string(),
         source_id,
-    });
+        events,
+    )
+    .expect("token just created");
 
     obj_id
 }
