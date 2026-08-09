@@ -3734,6 +3734,35 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref(rest)
 }
 
+/// Parse a complete self-referential kicker-count clause after `for each`.
+/// Only the spell itself can supply `QuantityRef::KickerCount`; accepting an
+/// arbitrary subject would silently read the source spell's kick count.
+pub fn parse_kicker_count_time_clause(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::KickerCount,
+        all_consuming((
+            tag("time "),
+            alt((
+                tag("~"),
+                tag("this spell"),
+                tag("it"),
+                tag("he"),
+                tag("she"),
+                tag("they"),
+            )),
+            alt((tag(" was kicked"), tag(" were kicked"))),
+        )),
+    )
+    .parse(input)
+}
+
+/// Parse a complete `where X is the number of times <self> was kicked` clause.
+pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the number of ").parse(input)?;
+    let (_, quantity) = parse_kicker_count_time_clause(rest)?;
+    Ok(("", quantity))
+}
+
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref_with_they_controller(input, ControllerRef::ScopedPlayer)

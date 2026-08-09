@@ -4,10 +4,10 @@ use std::borrow::Cow;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
-use nom::character::complete::{char, digit1, space0};
-use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
+use nom::character::complete::{char, digit1, satisfy, space0};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value};
 use nom::multi::{many0, many1};
-use nom::sequence::{delimited, preceded};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
@@ -186,13 +186,8 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
 /// Parse a bare anaphoric object pronoun that names a previously-referenced
 /// object: `it`, `them`, `him`, or `her`. Returns the matched pronoun slice.
 ///
-/// CR 608.2c + CR 608.2k: these pronouns are anaphors that bind to an object
-/// established earlier in the same ability (its trigger, cost, or an earlier
-/// clause) rather than a newly-parsed target. Gendered singulars (`him`/`her`)
-/// appear on named creatures that self-reference (e.g. Batroc the Leaper's
-/// "a +1/+1 counter on him"); `them` covers a distributive subject or a
-/// gender-neutral singular. The engine never inspects which pronoun was used —
-/// it only needs the anaphoric binding — so the whole set maps to one referent.
+/// The parser maps the supported grammatical forms to the caller's established
+/// object referent. The pronoun itself does not encode a separate runtime axis.
 ///
 /// This is the single authority for the object-recipient pronoun set. Every
 /// site that matches "… on it/them/him/her" (enters-with counter replacements,
@@ -201,7 +196,14 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
 /// cannot drift between modules. Callers that also accept the self-reference
 /// token `~` compose it as an outer `alt((tag("~"), parse_object_recipient_pronoun))`.
 pub fn parse_object_recipient_pronoun(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("it"), tag("them"), tag("him"), tag("her"))).parse(input)
+    recognize(terminated(
+        alt((tag("it"), tag("them"), tag("him"), tag("her"))),
+        peek(alt((
+            value((), eof),
+            value((), satisfy(|c| !c.is_alphanumeric() && c != '\'')),
+        ))),
+    ))
+    .parse(input)
 }
 
 /// Parse a number OR "x" (as 0). Use for costs, P/T, counter amounts where
@@ -1465,6 +1467,16 @@ mod tests {
         let out = strip_double_quoted_spans("");
         assert_eq!(out, "");
         assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn object_recipient_pronoun_requires_a_word_boundary() {
+        assert_eq!(
+            parse_object_recipient_pronoun("it, then").unwrap(),
+            (", then", "it")
+        );
+        assert!(parse_object_recipient_pronoun("item").is_err());
+        assert!(parse_object_recipient_pronoun("itself").is_err());
     }
 
     /// Extended number words (30, 40, ..., 100) for cards like Lux Artillery

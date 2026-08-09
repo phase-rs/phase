@@ -3506,32 +3506,9 @@ fn add_filter_property(filter: TargetFilter, property: FilterProp) -> TargetFilt
 }
 
 fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("time ").parse(clause).ok()?;
-    // CR 702.33c-d: Multikicker lets a spell be kicked any number of times, and
-    // a spell has been "kicked" once its controller pays a kicker cost; "for
-    // each time [subject] was kicked" therefore scales by that kick count
-    // (`QuantityRef::KickerCount`). The subject is parsed permissively so any
-    // self-reference is accepted — "it was kicked", "this spell was kicked", or
-    // a named creature's gendered/singular pronoun (Batroc the Leaper: "for each
-    // time he was kicked") — requiring only the "was"/"were kicked" verb anchor
-    // with full consumption so the match cannot over-reach a non-kicker clause.
-    // Mirrors the permissive subject match already used by
-    // `oracle_effect::lower::parse_where_x_kicker_count` for the "where X is the
-    // number of times … was kicked" trigger form, so the two kicker-count
-    // recognizers accept the same subject surface.
-    let (rest, _) = alt((
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" was kicked"),
-            tag(" was kicked"),
-        ),
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" were kicked"),
-            tag(" were kicked"),
-        ),
-    ))
-    .parse(rest)
-    .ok()?;
-    rest.is_empty().then_some(QuantityRef::KickerCount)
+    nom_quantity::parse_kicker_count_time_clause(clause)
+        .ok()
+        .map(|(_, quantity)| quantity)
 }
 
 fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
@@ -4149,7 +4126,7 @@ mod tests {
 
     #[test]
     fn for_each_time_gendered_pronoun_was_kicked_maps_to_kicker_count() {
-        // CR 702.33c-d + CR 201.5: named creatures that self-reference with a
+        // CR 702.33c-d: named creatures that self-reference with a
         // gendered/singular pronoun (Batroc the Leaper: "he was kicked") name
         // the same kicker count as the neuter "it was kicked" form.
         for subject in ["he", "she", "they"] {
@@ -4175,6 +4152,11 @@ mod tests {
         // coupling to unrelated for-each branches.
         assert_eq!(parse_for_each_kicker_count("time he was kissed"), None);
         assert_eq!(parse_for_each_kicker_count("time it dealt damage"), None);
+        assert_eq!(
+            parse_for_each_kicker_count("time a creature was kicked"),
+            None
+        );
+        assert_eq!(parse_for_each_kicker_count("time was kicked"), None);
         // A trailing tail after "was kicked" is not full consumption, so the
         // clause is not a bare kicker count either.
         assert_eq!(

@@ -8996,25 +8996,8 @@ fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Opti
 
 fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> {
     let lower = where_x_expression.to_ascii_lowercase();
-    let (rest, _) = tag::<_, _, OracleError<'_>>("the number of times ")
-        .parse(lower.as_str())
-        .ok()?;
-    let rest = alt((
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" was kicked"),
-            tag(" was kicked"),
-        ),
-        preceded(
-            take_until::<_, _, OracleError<'_>>(" kicked"),
-            tag(" kicked"),
-        ),
-    ))
-    .parse(rest)
-    .ok()?
-    .0;
-    rest.is_empty().then_some(QuantityExpr::Ref {
-        qty: QuantityRef::KickerCount,
-    })
+    let (_, qty) = nom_quantity::parse_kicker_count_where_x_expression(lower.as_str()).ok()?;
+    Some(QuantityExpr::Ref { qty })
 }
 
 /// CR 701.22a: "where X is the number of cards looked at while scrying this
