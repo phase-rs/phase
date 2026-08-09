@@ -1150,7 +1150,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        50,
+        51,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
