@@ -493,41 +493,76 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
 
 /// Can `effect` target an opponent's battlefield permanent? True for
 /// creature-typed or any-target filters (`targets_creatures`, CR 205), and for
-/// any permanent-type filter — control-changing effects like `GainControl`
-/// (CR 613.1b, Layer 2) target creatures, planeswalkers, artifacts, etc.
+/// any filter that can match a permanent — control-changing effects like
+/// `GainControl` (CR 613.1b, Layer 2) target creatures, planeswalkers,
+/// artifacts, etc. Conservative: `true` for every filter shape that is not
+/// provably limited to non-permanents, so negation and disjunction shapes
+/// (Non/AnyOf/Kindred, and `TargetFilter`-level Or/And/Not) fail open rather
+/// than veto a useful control line.
 fn targets_creature_or_permanent(effect: &Effect) -> bool {
     if targets_creatures(effect) {
         return true;
     }
-    let Some(TargetFilter::Typed(typed)) = extract_target_filter(effect) else {
+    let Some(filter) = extract_target_filter(effect) else {
         return false;
     };
-    typed.type_filters.iter().any(|t| match t {
-        TypeFilter::Land
+    filter_can_match_permanent(filter)
+}
+
+/// Can this `TargetFilter` match an object on the battlefield? Conservative:
+/// returns `false` only when the filter provably cannot name a permanent.
+/// (`Player`/`Controller`/ability refs and `None` never match objects.)
+fn filter_can_match_permanent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => typed
+            .type_filters
+            .iter()
+            .any(type_filter_can_match_permanent),
+        // Disjunction — any alternative able to match a permanent suffices
+        // (mirrors the engine's Or/AnyOf matching semantics).
+        TargetFilter::Or { filters } => filters.iter().any(filter_can_match_permanent),
+        // Conjunction — can match a permanent if any branch still can
+        // (conservative; the engine emits controller constraints via
+        // `TypedFilter.controller`, not `And` branches).
+        TargetFilter::And { filters } => filters.iter().any(filter_can_match_permanent),
+        // Negation — matches everything except the inner; still hits a
+        // permanent unless the negation excludes permanence itself.
+        TargetFilter::Not { filter: inner } => !matches!(**inner, TargetFilter::Any),
+        _ => false,
+    }
+}
+
+/// Can this single `TypeFilter` constraint match a permanent? Conservative:
+/// `false` only for constraints that provably exclude battlefield permanents.
+fn type_filter_can_match_permanent(t: &TypeFilter) -> bool {
+    match t {
+        TypeFilter::Creature
+        | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Permanent
         | TypeFilter::Any => true,
-        // CR 608.2b: disjunction — any inner filter matching a permanent type suffices.
-        TypeFilter::AnyOf(inners) => inners.iter().any(|inner| {
-            matches!(
-                inner,
-                TypeFilter::Creature
-                    | TypeFilter::Land
-                    | TypeFilter::Artifact
-                    | TypeFilter::Enchantment
-                    | TypeFilter::Planeswalker
-                    | TypeFilter::Battle
-                    | TypeFilter::Permanent
-                    | TypeFilter::Any
-            )
-        }),
-        // Non(..) / Subtype(..) / Instant / Sorcery / Card / Kindred alone never
-        // name a battlefield-permanent type — do not fail open on them.
+        // Disjunction — any inner filter able to match a permanent suffices
+        // (mirrors the engine's AnyOf matching for typed filters).
+        TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_can_match_permanent),
+        // Negation — matches everything except the inner; still hits a
+        // permanent unless the negation excludes permanence itself.
+        TypeFilter::Non(inner) => !matches!(
+            &**inner,
+            TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
+        ),
+        // Kindred cards are permanents carrying another card type (CR 308.1) —
+        // the companion type arm catches the real filter; bare Kindred never
+        // occurs alone, so fail open rather than risk a false whiff veto.
+        TypeFilter::Kindred => true,
+        // Subtype(..) alone names a tribe, not a battlefield class — the parser
+        // always emits a base card type alongside (caught above). Instant and
+        // Sorcery are not permanents.
         _ => false,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -539,7 +574,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
@@ -1000,6 +1036,165 @@ mod tests {
             "mixed deal-1 + gain control of a permanent must fail open: the \
              permanent-stealing half (CR 613.1b, Layer 2) is useful against the \
              opponent's artifact even though 1 damage alone cannot kill the 3/3"
+        );
+    }
+
+    /// Mixed spell with a parameterized `GainControl` filter: "deal 1 damage to
+    /// target creature" (a whiff on a 3/3) plus "gain control of [filter]".
+    /// The `GainControl` half is `EffectPolarity::Contextual`, so the fail-open
+    /// guard must recognize whichever target-filter shape `filter` names; a
+    /// filter the guard cannot analyse wrongly vetoes the control line
+    /// (CR 613.1b, Layer 2).
+    fn with_mixed_gain_control_spell<R>(
+        state: &mut GameState,
+        control_filter: TargetFilter,
+        f: impl FnOnce(&PolicyContext<'_>) -> R,
+    ) -> R {
+        let spell_id = create_object(
+            state,
+            CardId(90_005),
+            PlayerId(0),
+            "Charmed Heist Shapes".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainControl {
+                    target: control_filter,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_005),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        f(&ctx)
+    }
+
+    /// The control half targets "artifact or creature" via a TypeFilter-level
+    /// `AnyOf` disjunction — the opponent's artifact is a legal control target
+    /// (CR 613.1b, Layer 2). The fail-open guard must recurse into `AnyOf` and
+    /// treat an inner permanent type as sufficient; without the AnyOf arm the
+    /// old `_ => false` catch-all vetoes the mixed spell. Guards round-3 review
+    /// LOW #2 (filter-shape coverage).
+    #[test]
+    fn can_kill_fails_open_on_anyof_gain_control_target() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+        add_artifact(&mut state, PlayerId(1), "Opponent Rock");
+
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])],
+                ..Default::default()
+            }),
+            |ctx| {
+                assert!(
+                    can_kill_any_legal_target(ctx),
+                    "AnyOf(artifact, creature) control half must fail open: the \
+                     disjunction names the opponent's artifact (CR 613.1b, Layer 2), \
+                     a useful control line invisible to a flat permanent match"
+                );
+            },
+        );
+    }
+
+    /// The control half targets "nonland" via `TypeFilter::Non` — the opponent's
+    /// artifact matches ("nonland, noncreature permanent" filters are the
+    /// canonical Non shape), a legal control target (CR 613.1b, Layer 2). The
+    /// guard must treat `Non(Land)` as able to match a permanent; the old
+    /// catch-all vetoed every Non shape, including "noncreature permanent"
+    /// control lines. Guards round-3 review LOW #2 (filter-shape coverage).
+    #[test]
+    fn can_kill_fails_open_on_non_land_gain_control_target() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+        add_artifact(&mut state, PlayerId(1), "Opponent Rock");
+
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Land))],
+                ..Default::default()
+            }),
+            |ctx| {
+                assert!(
+                    can_kill_any_legal_target(ctx),
+                    "Non(Land) control half must fail open: the negation matches \
+                     the opponent's artifact (CR 613.1b, Layer 2), so the mixed \
+                     spell is not a total whiff"
+                );
+            },
+        );
+    }
+
+    /// The control half targets "a permanent, or a player" via a TargetFilter
+    /// level `Or` — the opponent's artifact satisfies the permanent alternative
+    /// (CR 613.1b, Layer 2). The guard must walk `TargetFilter::Or` branches;
+    /// the old `let Some(TargetFilter::Typed(..))` destructure returned `false`
+    /// for any non-Typed shape and vetoed the mixed spell. Guards round-3 review
+    /// LOW #2 (filter-shape coverage).
+    #[test]
+    fn can_kill_fails_open_on_or_filter_gain_control_target() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+        add_artifact(&mut state, PlayerId(1), "Opponent Rock");
+
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::permanent()),
+                    TargetFilter::Player,
+                ],
+            },
+            |ctx| {
+                assert!(
+                    can_kill_any_legal_target(ctx),
+                    "Or(permanent, player) control half must fail open: the \
+                     permanent branch is a useful control line against the \
+                     opponent's artifact (CR 613.1b, Layer 2)"
+                );
+            },
         );
     }
 
