@@ -145,7 +145,7 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
-    /// CR 121.1: A player completed a draw instruction that delivered at least
+    /// A player completed a draw instruction that delivered at least
     /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
     /// completion), not once per card — so a multi-card draw records a single
     /// event. Recorded so "for each opponent who drew a card this way" (Cut a
@@ -153,8 +153,7 @@ pub enum PlayerActionKind {
     /// players, not objects — and so `PlayerActionsThisTurn { Draw }` would count
     /// draw events rather than cards. `player_actions_this_way` (a set) counts the
     /// drawing player once; a draw that delivered no card (empty library, or every
-    /// unit replaced away) emits nothing (CR 608.2c ruling: a player who doesn't
-    /// draw isn't counted).
+    /// unit replaced away) emits nothing because that player did not draw.
     Draw,
 }
 

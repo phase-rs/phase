@@ -2708,7 +2708,7 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
     .parse(input)
 }
 
-/// CR 121.1: "draws/drew a card" → `Draw`. The tense axis is one `alt`; the
+/// "draws/drew/draw a card" → `Draw`. The tense axis is one `alt`; the
 /// object noun "a card" is fixed. The `" this way"` terminator is consumed by
 /// `parse_who_action_this_way`, so "drew a card this turn" cannot reach this arm.
 ///
@@ -2718,7 +2718,7 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
 /// Meddler: "each player who drew a card this way gains 1 life") through
 /// `strip_performed_action_this_way_clause` in oracle_effect/lower.rs.
 fn parse_drew_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
-    let (input, _) = alt((tag("draws"), tag("drew"))).parse(input)?;
+    let (input, _) = alt((tag("draws"), tag("drew"), tag("draw"))).parse(input)?;
     let (input, _) = tag(" a card").parse(input)?;
     Ok((input, PlayerActionKind::Draw))
 }
@@ -6709,6 +6709,14 @@ mod tests {
         assert_eq!(
             parse_action_this_way("opponent who drew a card this way"),
             Ok(("", (PlayerRelation::Opponent, PlayerActionKind::Draw)))
+        );
+    }
+
+    #[test]
+    fn parse_action_this_way_binds_plural_draw_arm() {
+        assert_eq!(
+            parse_action_this_way("players who draw a card this way"),
+            Ok(("", (PlayerRelation::All, PlayerActionKind::Draw)))
         );
     }
 

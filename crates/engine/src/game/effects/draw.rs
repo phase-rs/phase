@@ -446,15 +446,15 @@ fn resume_draw_sequence_outcome(
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
     state.last_effect_count = Some(frame.accumulated as i32);
-    // CR 121.1 + CR 608.2c + CR 109.5: Record the drawing player exactly once per
+    // Record the drawing player exactly once per
     // settled draw INSTRUCTION — the emission granularity is the whole draw, not
     // the per-card unit that `apply_draw_after_replacement` settles. `frame.player`
     // is the concrete drawer, so during a `player_scope: Opponent` fan-out (Cut a
     // Deal) each scoped opponent's own instruction records that opponent, without
     // relying on `ability.controller` rebinding. Gated on `frame.accumulated > 0`
     // so an instruction that delivered no card (empty library, or every unit
-    // replaced away) records nothing (CR 608.2c ruling: a player who doesn't draw
-    // isn't counted). The generic post-effect scan in `effects/mod.rs` folds this
+    // replaced away) records nothing because that player did not draw. The generic
+    // post-effect scan in `effects/mod.rs` folds this
     // event into `player_actions_this_way` (a set — dedups the drawer for a
     // multi-card draw) and `player_actions_this_turn` (a Vec — now one entry per
     // draw event, not per card).
