@@ -567,6 +567,18 @@ function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<strin
   console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
+function isZeroCountDebugCreate(action: GameAction): boolean {
+  if (action.type !== "Debug") return false;
+  switch (action.data.type) {
+    case "CreateCard":
+    case "CreateToken":
+    case "CreateTokenCopy":
+      return action.data.data.count === 0;
+    default:
+      return false;
+  }
+}
+
 /**
  * Host-side P2P adapter.
  *
@@ -1694,6 +1706,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const result = this.nativeBridge
       ? await this.nativeBridge.submitAction(action, actor)
       : await this.wasm.submitAction(action, actor);
+    if (isZeroCountDebugCreate(action)) return result;
     await this.broadcastStateUpdate(result.events, result.log_entries);
     await this.runAiLoop();
     this.persistAuthoritativeState();
@@ -2149,6 +2162,11 @@ export class P2PHostAdapter implements EngineAdapter {
           const result = this.nativeBridge
             ? await this.nativeBridge.submitAction(msg.action, pid)
             : await this.wasm.submitAction(msg.action, pid);
+          if (isZeroCountDebugCreate(msg.action)) {
+            const session = this.guestSessions.get(pid);
+            if (session) await this.send(session, { type: "action_noop" });
+            break;
+          }
           await this.broadcastStateUpdate(result.events, result.log_entries);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
@@ -3032,6 +3050,14 @@ export class P2PGuestAdapter implements EngineAdapter {
           this.pendingReject(
             actionRejectionError(msg.reason),
           );
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+      case "action_noop": {
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
           this.pendingResolve = null;
           this.pendingReject = null;
         }

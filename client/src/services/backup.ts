@@ -108,23 +108,48 @@ export function mergeDeckCollections(
   };
 }
 
-function parseRecord<T>(raw: string | null): Record<string, T> | null {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseRecord<T>(
+  raw: string | null,
+  isValue?: (value: unknown) => value is T,
+): Record<string, T> | null {
   if (raw == null) return {};
   try {
     const value: unknown = JSON.parse(raw);
-    return value !== null && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, T>)
-      : null;
+    if (!isRecord(value)) return null;
+    if (isValue && !Object.values(value).every(isValue)) return null;
+    return value as Record<string, T>;
   } catch {
     return null;
   }
+}
+
+function isDeckMeta(value: unknown): value is DeckMeta {
+  if (!isRecord(value) || typeof value.addedAt !== "number") return false;
+  return (
+    (value.lastPlayedAt === undefined || typeof value.lastPlayedAt === "number") &&
+    (value.folderId === undefined || typeof value.folderId === "string") &&
+    (value.starred === undefined || typeof value.starred === "boolean")
+  );
+}
+
+function isDeckFolder(value: unknown): value is DeckFolder {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.order === "number"
+  );
 }
 
 function parseFolders(raw: string | null | undefined): DeckFolder[] | null {
   if (raw == null) return [];
   try {
     const value: unknown = JSON.parse(raw);
-    return Array.isArray(value) ? (value as DeckFolder[]) : null;
+    return Array.isArray(value) && value.every(isDeckFolder) ? value : null;
   } catch {
     return null;
   }
@@ -168,8 +193,8 @@ function mergeDeckMetadata(
   cloudDeckNames: ReadonlyMap<string, string>,
   folderIds: ReadonlyMap<string, string>,
 ): string | null {
-  const local = parseRecord<DeckMeta>(localRaw);
-  const cloud = parseRecord<DeckMeta>(cloudRaw);
+  const local = parseRecord(localRaw, isDeckMeta);
+  const cloud = parseRecord(cloudRaw, isDeckMeta);
   if (local === null || cloud === null) return localRaw;
 
   for (const [name, meta] of Object.entries(cloud)) {

@@ -37,7 +37,7 @@ const viewerInteractionWithProducedMana = {
 
 describe("encodeWireMessage / decodeWireMessage", () => {
   it("pins the P2P wire protocol to v18", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(18);
+    expect(WIRE_PROTOCOL_VERSION).toBe(19);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -90,6 +90,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "reconnect", playerToken: "token-123" },
     { type: "reconnect_rejected", reason: "Unknown token" },
     { type: "action_rejected", reason: "Player kicked" },
+    { type: "action_noop" },
     { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
     { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
     {

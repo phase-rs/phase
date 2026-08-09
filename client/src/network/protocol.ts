@@ -80,6 +80,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
+ *  18 — DebugCardEntries added a serialized, private resolution frame for
+ *       multi-card sandbox battlefield entries that pause for replacement or
+ *       as-enters choices. Old peers cannot deserialize that GameState shape.
  *  16 — PayableResource::ManaGeneric changed from { per_x } to
  *       { base_cost: ManaCost } (#6410) — a GameState payload field type
  *       change, and base_cost intentionally carries no serde default (a
@@ -100,9 +104,6 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
  *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
- *  18 — DebugCardEntries added a serialized, private resolution frame for
- *       multi-card sandbox battlefield entries that pause for replacement or
- *       as-enters choices. Old peers cannot deserialize that GameState shape.
  *  17 — Bound draft-match concession request. A Traditional-draft guest
  *       asks its match authority to settle the match; it must not send a
  *       game-level concession through the ordinary P2P path.
@@ -110,7 +111,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 18 as const;
+export const WIRE_PROTOCOL_VERSION = 19 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -135,6 +136,7 @@ export type P2PMessage = P2PAuthorityWire & (
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
   | { type: "action_rejected"; reason: string }
+  | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
   | { type: "mana_payment_preview_rejected"; requestId: number; reason: string }
   | { type: "ping"; timestamp: number }
@@ -196,6 +198,7 @@ const VALID_TYPES = new Set([
   "preview_mana_payment",
   "state_update",
   "action_rejected",
+  "action_noop",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
   "ping",

@@ -13,6 +13,7 @@ describe("clearPromptOverlayState", () => {
       enchantmentsDialogPlayer: null,
       manualManaOverride: false,
       mobileHandGesture: null,
+      scryOutcome: null,
     });
   });
 
@@ -107,5 +108,15 @@ describe("clearPromptOverlayState", () => {
 
     expect(useUiStore.getState().diceRoll).toBeNull();
     expect(useUiStore.getState().diceRollQueue).toEqual([]);
+  });
+
+  it("clears a completed scry overlay at a game boundary", () => {
+    useUiStore.setState({
+      scryOutcome: { playerId: 1, topCount: 2, bottomCount: 1 },
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().scryOutcome).toBeNull();
   });
 });

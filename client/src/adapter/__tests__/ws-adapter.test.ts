@@ -928,6 +928,36 @@ describe("WebSocketAdapter", () => {
       });
     });
 
+    it("resolves an accepted no-op without publishing a state transition", async () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      const pending = adapter.submitAction(
+        {
+          type: "Debug",
+          data: {
+            type: "CreateCard",
+            data: {
+              card_name: "Lightning Bolt",
+              owner: 0,
+              zone: "Hand",
+              run_etb: false,
+              nonlegendary: false,
+              count: 0,
+            },
+          },
+        },
+        0,
+      );
+
+      ws.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp" }));
+
+      await expect(pending).resolves.toEqual({ events: [], log_entries: [] });
+      expect(listener).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "stateChanged" }),
+      );
+    });
+
     // A refused takeback answers a fire-and-forget request, so no promise owns
     // the rejection. Before this branch the whole `if (this.pendingReject)`
     // body was skipped and the refusal was dropped on the floor — which is why
