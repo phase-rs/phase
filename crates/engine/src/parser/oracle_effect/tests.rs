@@ -40983,7 +40983,7 @@ fn bare_shared_noun_counter_choice_keeps_final_comma_or_separator() {
     // being consumed as a generic comma list separator.
     let ability = parse_effect_chain(
         "Put a flying, lifelink, or +1/+1 counter on it.",
-        AbilityKind::Triggered,
+        AbilityKind::Spell,
     );
     let Effect::ChooseOneOf { branches, .. } = &*ability.effect else {
         panic!(
