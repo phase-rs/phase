@@ -5476,6 +5476,15 @@ enum ChoiceListShape {
     SharedNoun,
 }
 
+/// A counter-choice list after its surface grammar and every item have been
+/// validated. The original-text branch builder uses `shape` and `items`; the
+/// context-free replacement parser consumes `entries` without reparsing.
+struct ClassifiedCounterChoiceList<'a> {
+    shape: ChoiceListShape,
+    items: Vec<&'a str>,
+    entries: Vec<(CounterType, QuantityExpr)>,
+}
+
 /// Parse one complete counter noun phrase in a distributed choice list.
 ///
 /// The counter-type parser intentionally admits open-ended named counters, but
@@ -5561,13 +5570,15 @@ fn parse_counter_choice_list_entries(
 /// Classify a counter-choice list and parse every member for the classified
 /// shape. This is the single authority for the priority order and guards shared
 /// by context-free callers and the branch-reparsing parser.
-fn classify_counter_choice_list(
-    input: &str,
-) -> Option<(ChoiceListShape, Vec<&str>, Vec<(CounterType, QuantityExpr)>)> {
+fn classify_counter_choice_list(input: &str) -> Option<ClassifiedCounterChoiceList<'_>> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a counter from among ").parse(input) {
         let items = split_choice_list_items(rest)?;
         let entries = parse_counter_choice_list_entries(ChoiceListShape::FromAmong, &items)?;
-        return Some((ChoiceListShape::FromAmong, items, entries));
+        return Some(ClassifiedCounterChoiceList {
+            shape: ChoiceListShape::FromAmong,
+            items,
+            entries,
+        });
     }
 
     // A distributed list also begins with "a" and ends with "counter". Only
@@ -5577,13 +5588,21 @@ fn classify_counter_choice_list(
         if let Some(entries) =
             parse_counter_choice_list_entries(ChoiceListShape::SharedNoun, &items)
         {
-            return Some((ChoiceListShape::SharedNoun, items, entries));
+            return Some(ClassifiedCounterChoiceList {
+                shape: ChoiceListShape::SharedNoun,
+                items,
+                entries,
+            });
         }
     }
 
     let items = split_choice_list_items(input)?;
     let entries = parse_counter_choice_list_entries(ChoiceListShape::Distributed, &items)?;
-    Some((ChoiceListShape::Distributed, items, entries))
+    Some(ClassifiedCounterChoiceList {
+        shape: ChoiceListShape::Distributed,
+        items,
+        entries,
+    })
 }
 
 /// Recover the original-case list items after a lowercased list has already
@@ -5655,8 +5674,7 @@ pub(crate) fn classify_and_parse_counter_choice_list(
     choices_text: &str,
 ) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let lower = choices_text.to_lowercase();
-    let (_shape, _items, entries) = classify_counter_choice_list(&lower)?;
-    Some(entries)
+    Some(classify_counter_choice_list(&lower)?.entries)
 }
 
 /// CR 122.1 + CR 608.2d: Parse shared-target counter choices of the form
@@ -5715,11 +5733,15 @@ fn try_parse_put_counter_choice(
     // established shared-noun admission and adds only a full counter-noun
     // Distributed list (Dwarven Armorer's form); `from among` remains reserved
     // for the explicit choice grammar.
-    let (shape, _items, _entries) = classify_counter_choice_list(choices_tp.lower)?;
+    let classified = classify_counter_choice_list(choices_tp.lower)?;
+    let shape = classified.shape;
     if !explicit_choice && matches!(shape, ChoiceListShape::FromAmong) {
         return None;
     }
     let choice_items = original_counter_choice_list_items(shape, choices_tp)?;
+    if choice_items.len() != classified.items.len() {
+        return None;
+    }
 
     let target_text = target_tp.original.trim().trim_end_matches('.');
     if target_text.is_empty() {
