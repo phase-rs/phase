@@ -14971,6 +14971,7 @@ declare_game_state! {
     /// analog of `attacked_defenders_this_turn` powering "attacked you during their
     /// last turn" (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_last_turn: Box<HashMap<PlayerId, HashSet<PlayerId>>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
     /// turn, the defending players it attacked. This is the source-specific
