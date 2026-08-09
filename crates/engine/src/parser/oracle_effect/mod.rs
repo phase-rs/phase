@@ -4229,6 +4229,11 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 RestrictionPlayerScope::DefendingPlayer,
                 tag("defending player"),
             ),
+            // CR 101.2 + CR 109.5: bare "you" — the source's own controller
+            // (Conduit of Worlds' "you can't cast additional spells this turn").
+            // Ordered LAST so the longer "your opponents" possessive tag above
+            // cannot be shadowed by this "you" prefix.
+            value(RestrictionPlayerScope::SourceController, tag("you")),
         ))
         .parse(input)
     })?;
@@ -4238,6 +4243,23 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         alt((
             value(None, tag(" can't cast spells")),
             value(None, tag(" cannot cast spells")),
+            // CR 101.2: "additional/more/another spell(s)" is an incremental
+            // BLANKET ban (spell_filter None), not a spell-type filter — consume
+            // the qualifier wholesale before the generic filtered arm below can
+            // mis-read "additional" as a type phrase. Composed as two
+            // independent axes (can't/cannot × additional/more/another) rather
+            // than enumerating the permutations.
+            value(
+                None,
+                (
+                    alt((tag(" can't cast "), tag(" cannot cast "))),
+                    alt((
+                        tag("additional spells"),
+                        tag("more spells"),
+                        tag("another spell"),
+                    )),
+                ),
+            ),
             map(
                 preceded(
                     tag(" can't cast "),
@@ -12905,7 +12927,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // Bruntar), the anaphor is the tracked exile set — fall through to the
     // `PlayFromExile { TrackedSet }` grant below. `parent_target_is_chosen` is a
     // strict subset of `parent_target_available` set by the chain loop via
-    // `chain_prior_referent_is_chosen_target`, so the two classes split here
+    // `chain_prior_chosen_target`, so the two classes split here
     // without inspecting clause text (a lexical "that card this turn" guard would
     // misroute the entire impulse class and silently drop its `PlayFromExile`
     // shape).
@@ -15807,6 +15829,25 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     let pending_damage_multi_target = ctx.pending_damage_multi_target.take();
     if clause.duration.is_none() {
         clause.duration = duration;
+    }
+    // CR 611.2a: A during-resolution cast happens AS the ability resolves and
+    // cannot carry a lingering play-window duration. When the anaphor branch set
+    // the paid graveyard "cast that card" driver to `DuringResolution` from the
+    // chosen target's zone alone, but a trailing duration was stripped above
+    // ("cast that card THIS TURN" — Emry, Lurker in the Loch), this is really a
+    // standing `LingeringPermission` grant — restore it. The optionality
+    // reconciliation for the no-duration paid case (clearing the redundant
+    // `OptionalEffectChoice`) happens at the chunk-level `is_optional` derivation,
+    // where the offer's "may" is recognized (mirroring `FreeCastFromZones`).
+    if clause.duration.is_some() {
+        if let Effect::CastFromZone {
+            driver: driver @ crate::types::ability::CastFromZoneDriver::DuringResolution,
+            without_paying_mana_cost: false,
+            ..
+        } = &mut clause.effect
+        {
+            *driver = crate::types::ability::CastFromZoneDriver::LingeringPermission;
+        }
     }
     // CR 115.1d: Post-parse fixup for the "…counter(s) on up to N target …" shape.
     // The multi_target is lost in the AST→Effect lowering chain, so we re-extract
@@ -20357,32 +20398,38 @@ fn rebind_reanimate_animation_until_leaves(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 608.2c + CR 601.2a: Does the chain's prior referent come from an explicit
-/// target SELECTION (`Effect::TargetOnly`) rather than an exile/impulse publisher
-/// (`ExileTop`, `ExileFromTopUntil`, `ChangeZone`, token creation)? Emry, Lurker
-/// in the Loch — "Choose target artifact card in your graveyard. You may cast
-/// that card this turn." — selects its referent, so the anaphor binds to that
-/// chosen card (`CastFromZone { ParentTarget }`). An impulse publisher's anaphor
-/// is the tracked exile set and must stay a `PlayFromExile { TrackedSet }` grant
+/// CR 608.2c + CR 601.2a: Returns the chain's prior chosen-target FILTER when the
+/// prior referent comes from an explicit target SELECTION (`Effect::TargetOnly`)
+/// rather than an exile/impulse publisher (`ExileTop`, `ExileFromTopUntil`,
+/// `ChangeZone`, token creation). Emry, Lurker in the Loch — "Choose target
+/// artifact card in your graveyard. You may cast that card this turn." — selects
+/// its referent, so the anaphor binds to that chosen card
+/// (`CastFromZone { ParentTarget }`). An impulse publisher's anaphor is the
+/// tracked exile set and must stay a `PlayFromExile { TrackedSet }` grant
 /// (Territorial Bruntar's `ExileFromTopUntil` referent is whitelisted by
 /// `has_typed_target_widened`, so this stricter check is what excludes it). The
 /// walk mirrors `chain_has_prior_typed_referent`: it skips `ParentTarget`-carrier
 /// clauses (which continue the same chosen referent) and stops at the first
 /// conditional clause or non-carrier referent.
-fn chain_prior_referent_is_chosen_target(clauses: &[ClauseIr]) -> bool {
+///
+/// Returns the `TargetOnly` target filter (not just a bool) so callers can read
+/// its zone: a graveyard-scoped chosen target drives Conduit of Worlds' paid
+/// during-resolution cast (CR 608.2g). The `parent_target_is_chosen` bool is the
+/// `.is_some()` of this result.
+fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
-            return false;
+            return None;
         }
-        if matches!(prev.parsed.effect, Effect::TargetOnly { .. }) {
-            return true;
+        if let Effect::TargetOnly { target } = &prev.parsed.effect {
+            return Some(target);
         }
         if has_typed_target_widened(&prev.parsed.effect) {
             // A typed referent that is not a bare target selection (an exile/
             // zone publisher, or pump/destroy/etc. of a target) is not an
             // Emry-style chosen graveyard pick — its "that card" anaphor keeps
             // the impulse/tracked-set grant.
-            return false;
+            return None;
         }
         if matches!(
             prev.parsed.effect.target_filter(),
@@ -20390,9 +20437,9 @@ fn chain_prior_referent_is_chosen_target(clauses: &[ClauseIr]) -> bool {
         ) {
             continue;
         }
-        return false;
+        return None;
     }
-    false
+    None
 }
 
 /// CR 608.2c: Is the chain's MOST-RECENT object referent a just-created token
@@ -23529,11 +23576,30 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // when the permission is exercised, and the not-cast fallback relies on
         // the standing permission, neither of which the one-shot
         // during-resolution path models.
+        // CR 608.2g: a paid, single-target, no-duration "cast that card" bound
+        // to a CHOSEN target is also a during-resolution cast (Conduit of Worlds:
+        // "Choose target nonland permanent card in your graveyard. … you may cast
+        // that card."). The controller pays the real printed cost with normal
+        // mana (`mana_spend_permission: None`) as the ability resolves. This is
+        // the paid complement of the `without_paying` free case: the same
+        // structural gates (single target, no lingering duration, no alt-cost, no
+        // constraint) apply, plus the requirement that the anaphor's referent is
+        // a CHOSEN target (`Effect::TargetOnly`).
+        //
+        // CR 608.2g: the timing is a property of the resolving INSTRUCTION, not of
+        // the chosen card's zone. A no-duration "you may cast that card" is cast
+        // during resolution whether the chosen card is in a graveyard, hand,
+        // exile, or library; only an explicit standing duration (Emry's "you may
+        // cast that card THIS TURN" — `duration.is_some()`) keeps the lingering
+        // grant. The gate therefore reads `parent_target_is_chosen` (any zone),
+        // NOT the target's zone: an impulse/tracked-set anaphor
+        // (`ExiledBySource`/`TrackedSet`, `parent_target_is_chosen == false`)
+        // still keeps `LingeringPermission`.
         let driver = if mode == CardPlayMode::Cast
-            && without_paying
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
+            && (without_paying || ctx.parent_target_is_chosen)
         {
             crate::types::ability::CastFromZoneDriver::DuringResolution
         } else {
@@ -31881,8 +31947,11 @@ pub(crate) fn parse_effect_chain_ir(
         // restricted to chosen-target referents (Emry), excluding impulse
         // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you
         // do" object anchor is a created/tracked referent, not a target
-        // selection, so it does not count here.
-        let parent_target_is_chosen = chain_prior_referent_is_chosen_target(builder.clauses());
+        // selection, so it does not count here. The owned filter is carried
+        // forward solely to bind the anaphor; the bool is its `.is_some()`.
+        let chain_prior_chosen_target_filter =
+            chain_prior_chosen_target(builder.clauses()).cloned();
+        let parent_target_is_chosen = chain_prior_chosen_target_filter.is_some();
         // CR 608.2c (issue #1670): Consumption signal for the body "its
         // controller may" antecedent. True only when the rung ladder below
         // falls through to `chain_parent_target_controller_scope` for THIS
@@ -32008,6 +32077,10 @@ pub(crate) fn parse_effect_chain_ir(
             source_becomes_attachment_in_chain: chain_source_becomes_attachment(builder.clauses()),
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
+            // CR 608.2c + CR 601.2a: carry the chosen-target filter (with its
+            // zone) so `try_parse_cast_effect`'s anaphor branch can scope the
+            // "you may cast that card" driver to a graveyard-chosen target.
+            chain_prior_chosen_target: chain_prior_chosen_target_filter,
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
@@ -32877,7 +32950,24 @@ pub(crate) fn parse_effect_chain_ir(
         // play permission, not a choice to apply the continuous effect now. Keep
         // the actor context derived from the printed "you may", but lower both
         // permission grants as mandatory so resolution installs the permission.
+        // CR 608.2g + CR 608.2c: the "may" in a paid during-resolution graveyard
+        // "you may cast that card" (Conduit of Worlds) belongs to the interactive
+        // `GraveyardPaidCast` accept/decline offer, NOT to a generic
+        // `OptionalEffectChoice` wrapper. A redundant wrapper would additionally
+        // latch the "if you do" rider on acceptance — BEFORE the cast commits —
+        // so declining the offer (or failing payment) would wrongly install the
+        // rider. Lowering it mandatory makes the offer the sole "may" and leaves
+        // the commit-point latch (casting_costs.rs) as the sole authority for the
+        // rider gate. Mirrors the `FreeCastFromZones` arm above.
         let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
+            || matches!(
+                &clause.effect,
+                Effect::CastFromZone {
+                    driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                    without_paying_mana_cost: false,
+                    ..
+                }
+            )
             || clause_is_additional_land_permission(&clause)
             || clause_is_pay_to_end_effect_termination(normalized_text)
         {

@@ -3128,6 +3128,20 @@ pub enum RestrictionPlayerScope {
     /// as `TargetedPlayer`/`DefendingPlayer`. Mirrors the existing
     /// `ControllerRef::ScopedPlayer` / `TargetFilter::ScopedPlayer` siblings.
     ScopedPlayer,
+    /// CR 109.5 + CR 611.2a: The affected "you" — the "you" in "you can't cast
+    /// additional spells this turn" (Conduit of Worlds). Because that rider is
+    /// created by the resolution of an activated ability, "you" is the player who
+    /// activated it (CR 109.5), and the resulting rules-modifying continuous
+    /// effect lasts until end of turn (CR 611.2a) — a source-independent
+    /// turn-based duration, so it outlives the source.
+    /// `add_restriction::fill_runtime_fields`
+    /// therefore lowers this scope to `SpecificPlayer(original_controller)` at
+    /// creation — locking the activator so the ban survives the source changing
+    /// controller or leaving play — exactly like the other affected-player scopes
+    /// (`TargetedPlayer`, `DefendingPlayer`, `ScopedPlayer`,
+    /// `ParentObjectTargetController`). This parser-facing scope is never stored:
+    /// enforcement and display only ever see the lowered `SpecificPlayer`.
+    SourceController,
 }
 
 // ---------------------------------------------------------------------------
@@ -25231,6 +25245,54 @@ impl ResolvedAbility {
         }
     }
 
+    /// Marks only the first source-ordered `if you do` gate in a suspended
+    /// continuation. A paid resolution-time cast completes one
+    /// optional instruction; later, independent optional instructions must not
+    /// inherit that result.
+    pub fn set_first_optional_effect_performed_gate(&mut self, performed: bool) -> bool {
+        if self
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+        {
+            self.context.optional_effect_performed = performed;
+            return true;
+        }
+        if self
+            .sub_ability
+            .as_mut()
+            .is_some_and(|sub| sub.set_first_optional_effect_performed_gate(performed))
+        {
+            return true;
+        }
+        self.else_ability.as_mut().is_some_and(|else_branch| {
+            else_branch.set_first_optional_effect_performed_gate(performed)
+        })
+    }
+
+    /// CR 608.2c: Does any node in this local ability chain carry an
+    /// `EffectOutcome { OptionalEffectPerformed }` ("if you do") gate? Mirrors the
+    /// traversal of [`Self::set_optional_effect_performed_recursive`] (self →
+    /// sub-ability → else-branch). Used at the paid during-resolution cast-commit
+    /// point to gate the retroactive latch: only a stashed continuation carrying
+    /// such a rider (Conduit of Worlds' "If you do, you can't cast additional
+    /// spells this turn") is stamped, so the shared cast-finalize path does not
+    /// misfire on a during-resolution cast without an "if you do" rider (Cascade,
+    /// Discover) or on a normal hand cast.
+    pub fn has_optional_effect_performed_gate(&self) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+            || self
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.has_optional_effect_performed_gate())
+            || self
+                .else_ability
+                .as_ref()
+                .is_some_and(|else_branch| else_branch.has_optional_effect_performed_gate())
+    }
+
     /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.
     /// Used when the `Effect::OpponentGuess` answer arrives after the prompt
     /// suspended the parent chain — the stashed branch continuation was captured
@@ -25439,6 +25501,31 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn first_optional_effect_gate_does_not_latch_a_later_independent_gate() {
+        let mut first = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        first.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+
+        let mut second = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        second.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        first.sub_ability = Some(Box::new(second));
+
+        assert!(first.set_first_optional_effect_performed_gate(true));
+        assert!(first.context.optional_effect_performed);
+        assert!(
+            !first
+                .sub_ability
+                .as_ref()
+                .expect("second independent gate exists")
+                .context
+                .optional_effect_performed
+        );
+    }
 
     /// CR 601.3: `without_exile_anaphor` is the residual of a cast
     /// filter once the exile-set anaphor is discharged. The three shapes that

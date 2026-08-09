@@ -3019,6 +3019,19 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
             // (whiff → `cost_payment_failed_flag`; beheld → the rider fires), so
             // the mandatory-rider seed must not race it.
             | Effect::Behold { .. }
+            // CR 608.2g + CR 608.2c: a paid during-resolution graveyard cast
+            // (Conduit of Worlds) is lowered mandatory because the interactive
+            // `GraveyardPaidCast` offer IS its "you may". Its "if you do" outcome
+            // is decided by that offer — the commit-point latch
+            // (casting_costs.rs) sets the flag only when the cast actually
+            // commits, and a decline leaves it false. The mandatory-rider seed
+            // must not pre-set the flag, or a declined offer would wrongly fire
+            // the "you can't cast additional spells this turn" rider.
+            | Effect::CastFromZone {
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                without_paying_mana_cost: false,
+                ..
+            }
     )
 }
 

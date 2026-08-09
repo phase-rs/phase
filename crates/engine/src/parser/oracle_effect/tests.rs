@@ -31852,6 +31852,360 @@ fn render_silent_its_controller_cant_cast_spells() {
     assert_no_unimplemented(&def);
 }
 
+/// CR 101.2 + CR 109.5: "You can't cast additional spells this turn" (Conduit of
+/// Worlds' rider) — bare "you" scopes the ban to the source controller
+/// (`SourceController`), and "additional spells" is an incremental BLANKET ban
+/// (`spell_filter: None`), not a spell-type filter. Reverting the Step 4 parser
+/// arms leaves "additional" mis-parsed as a type phrase, so
+/// `try_parse_cant_cast_spells_effect` returns `None` and the clause is swallowed
+/// into an `Effect::Unimplemented` — this assertion then fails.
+#[test]
+fn cant_cast_additional_spells_you_source_controller() {
+    let def = parse_effect_chain(
+        "You can't cast additional spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // Reach guard: the "additional spells" qualifier was consumed as a blanket,
+    // not dropped into an unimplemented tail.
+    assert!(!matches!(&*def.effect, Effect::Unimplemented { .. }));
+}
+
+/// CR 101.2: the "more spells" / "another spell" incremental qualifiers are the
+/// same blanket ban (`spell_filter: None`) as "additional spells".
+#[test]
+fn cant_cast_more_and_another_spell_variants() {
+    for text in [
+        "You can't cast more spells this turn.",
+        "You can't cast another spell this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::SourceController,
+                        activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                        ..
+                    }
+                }
+            ),
+            "{text} got {:?}",
+            def.effect
+        );
+    }
+}
+
+/// CR 101.2: the new last-ordered "you" subject arm must NOT shadow the longer
+/// "your opponents" possessive tag (Silence), and the "additional/more/another"
+/// blanket arms must NOT over-consume a genuine typed spell filter ("creature
+/// spells"). Both negatives are paired with the positive above.
+#[test]
+fn cant_cast_you_arm_does_not_shadow_opponents_or_typed_filter() {
+    // "your opponents" still binds to OpponentsOfSourceController, not swallowed
+    // by a "you" prefix match.
+    let opponents = parse_effect_chain(
+        "Your opponents can't cast spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*opponents.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "opponents got {:?}",
+        opponents.effect
+    );
+
+    // A genuine typed filter ("creature spells") is still parsed as a filter, not
+    // consumed by the blanket qualifier arm.
+    let creatures = parse_effect_chain(
+        "You can't cast creature spells this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*creatures.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_),
+                    },
+                    ..
+                }
+            }
+        ),
+        "creature spells got {:?}",
+        creatures.effect
+    );
+}
+
+/// Conduit of Worlds' full line-2 effect chain (verbatim, minus the `{T}` cost
+/// and "Activate only as a sorcery" which are cost/timing metadata parsed
+/// elsewhere). Each clause and the CR rule that governs it:
+///   CR 601.2c: TargetOnly{nonland permanent card in graveyard} — choose target.
+///     → CR 608.2g (+ CR 601.2a–i): CastFromZone{ParentTarget, DuringResolution,
+///        paid, normal mana} — an effect that allows casting a spell during
+///        resolution — gated on "if you haven't cast a spell this turn".
+///        → CR 608.2c + CR 101.2: AddRestriction{CastSpells{None},
+///           SourceController, EndOfTurn} — a later "if you do" instruction whose
+///           meaning depends on the earlier optional cast (608.2c: apply the
+///           instructions in written order), imposing a "can't" that takes
+///           precedence (101.2).
+/// Reverting Step 5 leaves the cast at `LingeringPermission`; reverting Step 4
+/// leaves the rider unimplemented. Both surface here.
+#[test]
+fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
+    let def = parse_effect_chain(
+        "Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn.",
+        AbilityKind::Activated,
+    );
+
+    // Root: the chosen graveyard target.
+    assert!(
+        matches!(&*def.effect, Effect::TargetOnly { .. }),
+        "root got {:?}",
+        def.effect
+    );
+    let target_zone = def.effect.target_filter().and_then(|f| f.extract_in_zone());
+    assert_eq!(
+        target_zone,
+        Some(crate::types::zones::Zone::Graveyard),
+        "chosen target must be graveyard-scoped, got {:?}",
+        def.effect.target_filter()
+    );
+
+    // Clause 2: the paid, during-resolution graveyard cast of "that card".
+    let cast = def
+        .sub_ability
+        .as_deref()
+        .expect("TargetOnly must chain the cast clause");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: Cast,
+                driver: DuringResolution,
+                mana_spend_permission: None,
+                ..
+            }
+        ),
+        "cast clause got {:?}",
+        cast.effect
+    );
+    // The "if you haven't cast a spell this turn" resolution gate is present (not
+    // swallowed). Assert the concrete check — spells cast this turn by the
+    // controller (untyped) equal to zero — mirroring the rider-gate precision
+    // below, so a regression that flips the comparator or retargets the quantity
+    // is caught rather than passing on the variant alone.
+    assert!(
+        matches!(
+            cast.condition.as_ref(),
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Controller,
+                        filter: None,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ),
+        "cast condition got {:?}",
+        cast.condition
+    );
+
+    // Clause 3: the "if you do" self cast-ban rider.
+    let rider = cast
+        .sub_ability
+        .as_deref()
+        .expect("cast clause must chain the rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::SourceController,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                    ..
+                }
+            }
+        ),
+        "rider got {:?}",
+        rider.effect
+    );
+    assert!(
+        matches!(
+            rider.condition.as_ref(),
+            Some(crate::types::ability::AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        ),
+        "rider gate got {:?}",
+        rider.condition
+    );
+
+    // Reach guard: no Effect::Unimplemented anywhere in the chain.
+    let mut node = Some(&def);
+    while let Some(d) = node {
+        assert!(
+            !matches!(&*d.effect, Effect::Unimplemented { .. }),
+            "unexpected Unimplemented: {:?}",
+            d.effect
+        );
+        node = d.sub_ability.as_deref();
+    }
+}
+
+#[test]
+fn paid_chosen_target_cast_is_during_resolution_for_each_supported_zone() {
+    for zone in ["hand", "exile", "library"] {
+        let def = parse_effect_chain(
+            &format!(
+                "Choose target nonland permanent card in your {zone}. You may cast that card."
+            ),
+            AbilityKind::Activated,
+        );
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("chosen target must chain to its cast instruction");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    without_paying_mana_cost: false,
+                    mode: Cast,
+                    driver: DuringResolution,
+                    duration: None,
+                    ..
+                }
+            ),
+            "a no-duration chosen-target cast from {zone} must be during resolution; got {:?}",
+            cast.effect
+        );
+    }
+}
+
+/// CR 305.1 + CR 602.5d + CR 608.2g: the WHOLE Conduit of Worlds card (verbatim
+/// Oracle text) parses to an honest, fully-supported AST — line 1 to a
+/// `GraveyardCastPermission` (play lands), line 2 to a sorcery-speed activated
+/// ability whose chain has NO `Effect::Unimplemented` anywhere. This is the
+/// coverage-honesty gate: any swallowed clause (the paid cast, the condition, the
+/// "if you do" rider, or the sorcery-speed restriction) surfaces here.
+#[test]
+fn conduit_of_worlds_full_card_is_supported_no_unimplemented() {
+    let parsed = parse_oracle_text(
+        "You may play lands from your graveyard.\n{T}: Choose target nonland permanent card in your graveyard. If you haven't cast a spell this turn, you may cast that card. If you do, you can't cast additional spells this turn. Activate only as a sorcery.",
+        "Conduit of Worlds",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+
+    // Line 1: the graveyard land-play permission static.
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            s.mode,
+            crate::types::statics::StaticMode::GraveyardCastPermission {
+                play_mode: Play,
+                ..
+            }
+        )),
+        "line 1 must parse to a Play GraveyardCastPermission, got {:?}",
+        parsed.statics
+    );
+
+    // Line 2: the sorcery-speed activated ability.
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.kind == AbilityKind::Activated)
+        .expect("line 2 must parse to an activated ability");
+    assert!(
+        activated
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::AsSorcery),
+        "line 2 must carry the AsSorcery restriction (CR 602.5d)"
+    );
+
+    // No Effect::Unimplemented anywhere in any parsed ability chain.
+    fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Unimplemented { .. })
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(chain_has_unimplemented)
+    }
+    for a in &parsed.abilities {
+        assert!(
+            !chain_has_unimplemented(a),
+            "no ability chain may contain Effect::Unimplemented, got {:?}",
+            a.effect
+        );
+    }
+}
+
+/// CR 608.2c + CR 611.2a: Emry, Lurker in the Loch — "Choose target artifact card
+/// in your graveyard. You may cast that card this turn." — is a graveyard-scoped
+/// chosen target too, but its "this turn" duration keeps it a
+/// `LingeringPermission` grant (a standing until-end-of-turn permission), NOT a
+/// during-resolution cast. This is the negative that proves the Step 5 upgrade is
+/// gated on `duration.is_none()`, and that Emry is not regressed.
+#[test]
+fn emry_this_turn_grant_stays_lingering_not_during_resolution() {
+    let def = parse_effect_chain(
+        "Choose target artifact card in your graveyard. You may cast that card this turn.",
+        AbilityKind::Activated,
+    );
+    let cast = def
+        .sub_ability
+        .as_deref()
+        .expect("TargetOnly must chain the cast clause");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "Emry cast clause got {:?}",
+        cast.effect
+    );
+}
+
 /// CR 305.1 + CR 101.2 + CR 201.2: Conjurer's Ban's compound restriction —
 /// "Until your next turn, spells with the chosen name can't be cast and lands
 /// with the chosen name can't be played." The PASSIVE-voice, card-scoped
