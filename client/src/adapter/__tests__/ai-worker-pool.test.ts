@@ -57,4 +57,24 @@ describe("AiWorkerPool", () => {
     await expect(stale).resolves.toBeNull();
     await expect(current).resolves.toEqual([]);
   });
+
+  it("does not score after disposal while waiting for the pool lock", async () => {
+    let completeFirst!: () => void;
+    const first = new Promise<void>((resolve) => {
+      completeFirst = resolve;
+    });
+    workers[0].restoreState.mockReturnValueOnce(first);
+    const pool = new AiWorkerPool(2);
+
+    const scoring = pool.getAiScoredCandidates("{}", "VeryHard", 0);
+    await Promise.resolve();
+    const queued = pool.getAiScoredCandidates("{}", "VeryHard", 0);
+    pool.dispose();
+    completeFirst();
+
+    await expect(scoring).resolves.toBeNull();
+    await expect(queued).resolves.toBeNull();
+    expect(workers[0].dispose).toHaveBeenCalledOnce();
+    expect(workers[1].dispose).toHaveBeenCalledOnce();
+  });
 });

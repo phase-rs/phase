@@ -11,6 +11,7 @@ export class AiWorkerPool {
   private cardDbLoaded = false;
   private currentGeneration = 0;
   private scoringLock: Promise<void> = Promise.resolve();
+  private disposed = false;
 
   constructor(workerCount: number) {
     try {
@@ -55,9 +56,10 @@ export class AiWorkerPool {
     difficulty: string,
     playerId: number,
   ): Promise<[GameAction, number][] | null> {
+    if (this.disposed) return null;
     const generation = ++this.currentGeneration;
     await this.scoringLock;
-    if (this.currentGeneration !== generation) return null;
+    if (this.disposed || this.currentGeneration !== generation) return null;
 
     let releaseLock!: () => void;
     this.scoringLock = new Promise((resolve) => {
@@ -66,6 +68,7 @@ export class AiWorkerPool {
 
     try {
       await Promise.all(this.workers.map((worker) => worker.restoreState(stateJson)));
+      if (this.disposed || this.currentGeneration !== generation) return null;
       const baseSeed = Date.now();
       const scores = await Promise.all(
         this.workers.map((worker, index) =>
@@ -79,6 +82,10 @@ export class AiWorkerPool {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.currentGeneration += 1;
+    this.cardDbLoaded = false;
     this.workers.forEach((worker) => worker.dispose());
     this.workers = [];
   }

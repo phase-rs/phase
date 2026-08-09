@@ -425,6 +425,41 @@ fn ai_session_for(state: &GameState) -> Arc<AiSession> {
     })
 }
 
+/// Resolve the seat whose live prompt owns an AI decision. The requested seat
+/// is retained for simultaneous prompts where it is still entitled to act.
+fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> PlayerId {
+    if state.waiting_for.acting_players().contains(&requested_ai) {
+        requested_ai
+    } else {
+        state
+            .waiting_for
+            .acting_player()
+            .or_else(|| state.waiting_for.acting_players().first().copied())
+            .unwrap_or(requested_ai)
+    }
+}
+
+/// Mint an opaque proposal only after the engine's current decision contract
+/// accepts the selected action.
+fn mint_ai_action_proposal(
+    state: &GameState,
+    semantic_owner: PlayerId,
+    contract: AiDecisionContract,
+    action: GameAction,
+) -> JsValue {
+    if !contract.contains_action(state, &action) {
+        return JsValue::NULL;
+    }
+    let actor = contract.authorized_actor;
+    let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+    to_js(&serde_json::json!({
+        "token": token,
+        "semanticOwner": semantic_owner.0,
+        "actor": actor.0,
+        "action": action,
+    }))
+}
+
 /// Drop the cached session so the next `ai_session_for` rebuilds from scratch.
 /// Called whenever the game identity changes (init/clear/resume).
 fn clear_ai_session_cache() {
@@ -2226,19 +2261,7 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         // decision slot. The live prompt is the sole authority for semantic
         // ownership; this matters when control effects make its authorized
         // submitter a different player.
-        let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            // Simultaneous prompts (notably mulligans) are independently
-            // bounded per pending player rather than collapsing to the first
-            // entry in the prompt.
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
-        };
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -2250,20 +2273,46 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
             return Ok(JsValue::NULL);
         };
 
-        // This checks the engine-issued action bounds rather than reconstructing
-        // an action schema in WASM. Discrete candidates and combinatorial combat
-        // declarations both remain validated against the current WaitingFor state.
-        if !contract.contains_action(state, &action) {
+        Ok(mint_ai_action_proposal(
+            state,
+            semantic_owner,
+            contract,
+            action,
+        ))
+    })?
+}
+
+/// Mint a proposal using the existing tactical floor without entering
+/// rollout search. This is the engine-owned escape for a timed-out optional
+/// scorer; it still issues and validates the current decision contract.
+#[wasm_bindgen]
+pub fn get_ai_tactical_action_proposal(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let mut config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        // A pre-expired search deadline selects the established tactical floor
+        // while retaining the same engine-owned candidate and contract checks.
+        config.search.time_budget_ms = Some(0);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let Some(action) =
+            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+        else {
             return Ok(JsValue::NULL);
-        }
-        let actor = contract.authorized_actor;
-        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
-        Ok(to_js(&serde_json::json!({
-            "token": token,
-            "semanticOwner": semantic_owner.0,
-            "actor": actor.0,
-            "action": action,
-        })))
+        };
+        Ok(mint_ai_action_proposal(
+            state,
+            semantic_owner,
+            contract,
+            action,
+        ))
     })?
 }
 
@@ -2278,19 +2327,52 @@ pub fn get_ai_action_proposal_with_diagnostics(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
-        };
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let selection = choose_action_with_session_diagnostic(
+            state,
+            semantic_owner,
+            &config,
+            &mut rng,
+            &session,
+        );
+        let Some(action) = selection.action else {
+            return Ok(JsValue::NULL);
+        };
+        if !contract.contains_action(state, &action) {
+            return Ok(JsValue::NULL);
+        }
+        let actor = contract.authorized_actor;
+        let mut receipt = selection
+            .receipt
+            .expect("diagnostic chooser must observe its selected action");
+        attach_receipt_object_names(state, &mut receipt);
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
+        })))
+    })?
+}
+
+/// Diagnostic counterpart of [`get_ai_tactical_action_proposal`].
+#[wasm_bindgen]
+pub fn get_ai_tactical_action_proposal_with_diagnostics(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let mut config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        config.search.time_budget_ms = Some(0);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let selection = choose_action_with_session_diagnostic(
@@ -3563,6 +3645,31 @@ mod tests {
                 .expect("the production issuer must return a priority proposal"),
         )
         .expect("proposal must serialize");
+        assert_eq!(proposal["semanticOwner"], player.0);
+        assert_eq!(proposal["actor"], player.0);
+        assert_eq!(proposal["action"]["type"], "PassPriority");
+        let outcome =
+            serde_wasm_bindgen::from_value::<serde_json::Value>(submit_ai_action_proposal(
+                proposal["token"].as_str().expect("opaque token"),
+                player.0,
+                to_js(&proposal["action"]),
+            ))
+            .expect("submission outcome must serialize");
+        assert_eq!(outcome["status"], "applied");
+        clear_game_state();
+    }
+
+    #[test]
+    fn tactical_proposal_issuer_mints_a_submitable_priority_capability() {
+        let player = PlayerId(0);
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(priority_state(player))));
+
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_tactical_action_proposal("VeryHard", player.0)
+                .expect("the tactical issuer must return a priority proposal"),
+        )
+        .expect("tactical proposal must serialize");
         assert_eq!(proposal["semanticOwner"], player.0);
         assert_eq!(proposal["actor"], player.0);
         assert_eq!(proposal["action"]["type"], "PassPriority");

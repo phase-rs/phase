@@ -314,6 +314,27 @@ export class EngineWorkerClient {
     );
   }
 
+  /** Engine-owned tactical floor for a decision whose optional scorer timed out. */
+  async getAiTacticalActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiTacticalActionProposal", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async getAiTacticalActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiTacticalActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   /** This worker-side endpoint scores only; it cannot mint a proposal. */
   async getAiScoredCandidates(
     difficulty: string,
