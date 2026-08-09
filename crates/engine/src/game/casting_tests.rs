@@ -22628,6 +22628,7 @@ fn target_declaration_classifies_opponent_object_as_a_provisional_crime() {
         e,
         GameEvent::BecomesTarget {
             target: TargetRef::Object(object_id),
+            source_controller: PlayerId(0),
             ..
         } if *object_id == target
     )));

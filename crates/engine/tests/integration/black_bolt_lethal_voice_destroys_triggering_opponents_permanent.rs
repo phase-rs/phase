@@ -101,6 +101,15 @@ fn lethal_voice_destroys_a_permanent_the_targeting_opponent_controls() {
                         target: Some(TargetRef::Object(black_bolt)),
                     })
                     .expect("targeting Black Bolt with the opponent's spell must be legal");
+                // Hostile provenance fixture: control of the targeting source changes
+                // after its target is announced. Lethal Voice still refers to P1,
+                // the player who controlled the source at announcement.
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&bolt)
+                    .unwrap()
+                    .controller = P0;
                 chose_spell_target = true;
             }
             // CR 603.3d: Black Bolt's controller (P0) declares Lethal Voice's
