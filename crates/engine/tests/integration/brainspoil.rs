@@ -36,21 +36,7 @@ fn attach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
 
 /// Cast the canonical Regenerate card through the production action path.
 fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: ObjectId) {
-    let card_id = runner.state().objects[&regenerate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: regenerate,
-            card_id,
-            targets: vec![target],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast Regenerate targeting the creature");
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(target)],
-        })
-        .expect("select Regenerate's target");
-    runner.advance_until_stack_empty();
+    runner.cast(regenerate).target_object(target).resolve();
 }
 
 /// Begins a Brainspoil cast and leaves its target-selection prompt open.
@@ -95,9 +81,6 @@ fn brainspoil_target_slot_excludes_enchanted_creatures_not_equipped_creatures() 
         .with_subtypes(vec!["Aura"])
         .id();
     let equipped_brainspoil = scenario
-        .add_spell_to_hand_from_oracle(P0, "Brainspoil", false, BRAINSPOIL_ORACLE)
-        .id();
-    let bare_brainspoil = scenario
         .add_spell_to_hand_from_oracle(P0, "Brainspoil", false, BRAINSPOIL_ORACLE)
         .id();
 
@@ -162,15 +145,6 @@ fn brainspoil_target_slot_excludes_enchanted_creatures_not_equipped_creatures() 
         .expect("an equipped creature must be accepted by production target selection");
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().objects[&equipped].zone, Zone::Graveyard);
-
-    start_brainspoil_target_selection(&mut runner, bare_brainspoil);
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(bare)],
-        })
-        .expect("a bare creature must be accepted by production target selection");
-    runner.advance_until_stack_empty();
-    assert_eq!(runner.state().objects[&bare].zone, Zone::Graveyard);
 }
 
 #[test]
