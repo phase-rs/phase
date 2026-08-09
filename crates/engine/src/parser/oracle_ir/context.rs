@@ -269,12 +269,11 @@ pub(crate) struct ParseContext {
     /// CR 608.2c + CR 601.2a: the chain's prior chosen-target FILTER — the
     /// `Effect::TargetOnly { target }` filter that `parent_target_is_chosen`
     /// reports the presence of (Emry's / Conduit of Worlds' "Choose target …
-    /// card in your graveyard"). Carries the target's zone so a downstream "you
-    /// may cast that card" anaphor can scope its cast driver: a graveyard-scoped
-    /// chosen target with no lingering duration is a during-resolution paid cast
-    /// (CR 608.2g), whereas an exile/hand/library chosen target keeps the
-    /// lingering permission. Seeded alongside `parent_target_is_chosen` in the
-    /// chunk loop; `None` on every standalone and non-chosen parse.
+    /// card in your graveyard"). It binds a downstream "you may cast that card"
+    /// anaphor to the chosen object; timing comes independently from the
+    /// instruction plus its duration, never from this target's zone. Seeded
+    /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
+    /// standalone and non-chosen parse.
     pub chain_prior_chosen_target: Option<TargetFilter>,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a

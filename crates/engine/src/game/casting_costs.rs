@@ -9702,18 +9702,13 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // an "If you do, …" rider as a continuation (Conduit of Worlds: "you may cast
     // that card. If you do, you can't cast additional spells this turn."), that
     // rider's `EffectOutcome { OptionalEffectPerformed }` gate must now evaluate
-    // true, so propagate the signal into the stashed continuation. Gated on the
-    // gate's presence so the shared finalize path does not misfire: a normal hand
-    // cast is announced only at a priority window (no `AbilityContinuation` frame
-    // is stack-top there), and a during-resolution cast with no "if you do" rider
-    // (Cascade, Discover) carries no such gate, so neither is latched.
+    // true. Mark only the first causal gate in source order: a later independent
+    // optional cast must remain unperformed until its own cast commits.
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
-        if frame.pending.chain.has_optional_effect_performed_gate() {
-            frame
-                .pending
-                .chain
-                .set_optional_effect_performed_recursive(true);
-        }
+        frame
+            .pending
+            .chain
+            .set_first_optional_effect_performed_gate(true);
     }
 
     // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell

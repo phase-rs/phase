@@ -747,7 +747,7 @@ pub fn resolve(
     // INSTRUCTION (the `DuringResolution` driver, set by the parser from a paid
     // chosen-target "you may cast that card" with no lingering duration), NOT of
     // the chosen card's zone. This gate therefore accepts any castable
-    // non-battlefield origin — graveyard (Conduit), exile, or library — rather
+    // non-battlefield origin — graveyard (Conduit), hand, exile, or library — rather
     // than requiring `Zone::Graveyard`; `initiate_cast_during_resolution` casts
     // the card from whichever zone it currently occupies. Emry's "you may cast
     // that card THIS TURN" carries `duration: Some(_)` and is lowered to
@@ -757,10 +757,12 @@ pub fn resolve(
         && alt_ability_cost.is_none()
         && duration.is_none()
         && target_ids.len() == 1
-        && state
-            .objects
-            .get(&target_ids[0])
-            .is_some_and(|o| matches!(o.zone, Zone::Graveyard | Zone::Exile | Zone::Library));
+        && state.objects.get(&target_ids[0]).is_some_and(|o| {
+            matches!(
+                o.zone,
+                Zone::Graveyard | Zone::Hand | Zone::Exile | Zone::Library
+            )
+        });
     if paid_during_resolution_cast {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,

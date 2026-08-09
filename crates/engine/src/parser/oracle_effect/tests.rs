@@ -32083,6 +32083,37 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
     }
 }
 
+#[test]
+fn paid_chosen_target_cast_is_during_resolution_for_each_supported_zone() {
+    for zone in ["hand", "exile", "library"] {
+        let def = parse_effect_chain(
+            &format!(
+                "Choose target nonland permanent card in your {zone}. You may cast that card."
+            ),
+            AbilityKind::Activated,
+        );
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("chosen target must chain to its cast instruction");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    without_paying_mana_cost: false,
+                    mode: Cast,
+                    driver: DuringResolution,
+                    duration: None,
+                    ..
+                }
+            ),
+            "a no-duration chosen-target cast from {zone} must be during resolution; got {:?}",
+            cast.effect
+        );
+    }
+}
+
 /// CR 305.1 + CR 602.5d + CR 608.2g: the WHOLE Conduit of Worlds card (verbatim
 /// Oracle text) parses to an honest, fully-supported AST — line 1 to a
 /// `GraveyardCastPermission` (play lands), line 2 to a sorcery-speed activated

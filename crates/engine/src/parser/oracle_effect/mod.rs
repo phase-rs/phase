@@ -23181,15 +23181,15 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // when the permission is exercised, and the not-cast fallback relies on
         // the standing permission, neither of which the one-shot
         // during-resolution path models.
-        // CR 608.2g: a paid, single-target, no-duration graveyard "cast that
-        // card" bound to a CHOSEN target is also a during-resolution cast
-        // (Conduit of Worlds: "Choose target nonland permanent card in your
-        // graveyard. … you may cast that card."). The controller pays the real
-        // printed cost with normal mana (`mana_spend_permission: None`) as the
-        // ability resolves. This is the paid complement of the `without_paying`
-        // free case: the same structural gates (single target, no lingering
-        // duration, no alt-cost, no constraint) apply, plus the requirement that
-        // the anaphor's referent is a CHOSEN target (`Effect::TargetOnly`).
+        // CR 608.2g: a paid, single-target, no-duration "cast that card" bound
+        // to a CHOSEN target is also a during-resolution cast (Conduit of Worlds:
+        // "Choose target nonland permanent card in your graveyard. … you may cast
+        // that card."). The controller pays the real printed cost with normal
+        // mana (`mana_spend_permission: None`) as the ability resolves. This is
+        // the paid complement of the `without_paying` free case: the same
+        // structural gates (single target, no lingering duration, no alt-cost, no
+        // constraint) apply, plus the requirement that the anaphor's referent is
+        // a CHOSEN target (`Effect::TargetOnly`).
         //
         // CR 608.2g: the timing is a property of the resolving INSTRUCTION, not of
         // the chosen card's zone. A no-duration "you may cast that card" is cast
@@ -31554,8 +31554,7 @@ pub(crate) fn parse_effect_chain_ir(
         // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you
         // do" object anchor is a created/tracked referent, not a target
         // selection, so it does not count here. The owned filter is carried
-        // forward so the anaphor branch can read the chosen target's zone
-        // (Conduit of Worlds' paid graveyard cast); the bool is its `.is_some()`.
+        // forward solely to bind the anaphor; the bool is its `.is_some()`.
         let chain_prior_chosen_target_filter =
             chain_prior_chosen_target(builder.clauses()).cloned();
         let parent_target_is_chosen = chain_prior_chosen_target_filter.is_some();

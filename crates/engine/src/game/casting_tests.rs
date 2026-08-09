@@ -50198,6 +50198,69 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
 }
 
 #[test]
+fn paid_during_resolution_cast_router_is_independent_of_chosen_card_zone() {
+    for zone in [Zone::Hand, Zone::Exile, Zone::Library] {
+        let mut state = setup_game_at_main_phase();
+        let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+        state.objects.get_mut(&spell).expect("spell exists").zone = zone;
+
+        resolve_graveyard_paid_grant(&mut state, spell);
+
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::CastOffer {
+                    kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                        hit_card,
+                        ..
+                    },
+                    ..
+                } if *hit_card == spell
+            ),
+            "a paid during-resolution cast from {zone:?} must open the one-shot offer; got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.objects[&spell].casting_permissions.is_empty(),
+            "a no-duration cast from {zone:?} must not become a lingering permission"
+        );
+    }
+}
+
+#[test]
+fn paid_cast_with_explicit_duration_remains_a_lingering_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: None,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(9200),
+        PlayerId(0),
+    );
+
+    crate::game::effects::cast_from_zone::resolve(&mut state, &grant, &mut Vec::new()).unwrap();
+
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CastOffer { .. }),
+        "an explicit duration must prevent a one-shot resolution offer"
+    );
+    assert!(
+        !state.objects[&spell].casting_permissions.is_empty(),
+        "the duration-bearing permission must remain available after resolution"
+    );
+}
+
+#[test]
 fn graveyard_paid_manual_cast_remains_offered_and_reaches_mana_payment() {
     let mut state = setup_game_at_main_phase();
     let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));

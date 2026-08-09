@@ -25183,6 +25183,31 @@ impl ResolvedAbility {
         }
     }
 
+    /// Marks only the first source-ordered `if you do` gate in a suspended
+    /// continuation. A paid resolution-time cast completes one
+    /// optional instruction; later, independent optional instructions must not
+    /// inherit that result.
+    pub fn set_first_optional_effect_performed_gate(&mut self, performed: bool) -> bool {
+        if self
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+        {
+            self.context.optional_effect_performed = performed;
+            return true;
+        }
+        if self
+            .sub_ability
+            .as_mut()
+            .is_some_and(|sub| sub.set_first_optional_effect_performed_gate(performed))
+        {
+            return true;
+        }
+        self.else_ability.as_mut().is_some_and(|else_branch| {
+            else_branch.set_first_optional_effect_performed_gate(performed)
+        })
+    }
+
     /// CR 608.2c: Does any node in this local ability chain carry an
     /// `EffectOutcome { OptionalEffectPerformed }` ("if you do") gate? Mirrors the
     /// traversal of [`Self::set_optional_effect_performed_recursive`] (self →
@@ -25414,6 +25439,31 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn first_optional_effect_gate_does_not_latch_a_later_independent_gate() {
+        let mut first = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        first.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+
+        let mut second = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        second.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        first.sub_ability = Some(Box::new(second));
+
+        assert!(first.set_first_optional_effect_performed_gate(true));
+        assert!(first.context.optional_effect_performed);
+        assert!(
+            !first
+                .sub_ability
+                .as_ref()
+                .expect("second independent gate exists")
+                .context
+                .optional_effect_performed
+        );
+    }
 
     /// CR 601.3: `without_exile_anaphor` is the residual of a cast
     /// filter once the exile-set anaphor is discharged. The three shapes that
