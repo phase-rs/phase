@@ -35770,6 +35770,7 @@ fn exile_library_descriptive_target_with_counters_lifts_to_enter_with_counters()
     );
     let Effect::ChangeZone {
         destination: Zone::Exile,
+        origin: Some(Zone::Library),
         target: TargetFilter::Typed(typed),
         enter_with_counters,
         ..
@@ -35786,11 +35787,113 @@ fn exile_library_descriptive_target_with_counters_lifts_to_enter_with_counters()
         "expected (+1/+1, 1) enter_with_counters, got: {enter_with_counters:?}"
     );
     assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Library
+            }
+        )),
+        "target must retain its library origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
         !typed
             .properties
             .iter()
             .any(|p| matches!(p, FilterProp::Counters { .. })),
         "counter clause must not remain a target filter: {:?}",
+        typed.properties
+    );
+}
+
+/// The same trailing counter rider on a card selected from HAND belongs to the
+/// destination object. The target must nevertheless retain its hand constraint,
+/// so this covers the hand arm of the counterless-origin split independently of
+/// the graveyard and library cases.
+#[test]
+fn exile_hand_descriptive_target_with_counters_lifts_to_enter_with_counters() {
+    let def = parse_effect_chain(
+        "Exile target creature card from your hand with a time counter on it.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Hand),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from hand, got: {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(
+        enter_with_counters.as_slice(),
+        &[(CounterType::Time, QuantityExpr::Fixed { value: 1 })],
+        "expected (Time, 1) enter_with_counters, got: {enter_with_counters:?}"
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+        "target must retain its hand origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
+        !typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Counters { .. })),
+        "counter rider must not remain a target filter: {:?}",
+        typed.properties
+    );
+}
+
+/// A non-counter `with …` phrase on a hand target is not an enter-with-
+/// counters rider. This reach-guard ensures the counter parser's failure leaves
+/// the target text intact for ordinary target filtering.
+#[test]
+fn exile_hand_target_with_non_counter_clause_preserves_target_filter() {
+    let def = parse_effect_chain(
+        "Exile target creature card from your hand with flying.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        origin: Some(Zone::Hand),
+        target: TargetFilter::Typed(typed),
+        enter_with_counters,
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected ChangeZone->Exile(Typed) from hand, got: {:?}",
+            def.effect
+        );
+    };
+    assert!(
+        enter_with_counters.is_empty(),
+        "a non-counter clause must not create enter_with_counters: {enter_with_counters:?}"
+    );
+    assert!(
+        typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+        "target must retain its hand origin constraint: {:?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::WithKeyword {
+                value: Keyword::Flying
+            }
+        )),
+        "the non-counter clause must remain a target filter: {:?}",
         typed.properties
     );
 }
@@ -35809,6 +35912,7 @@ fn exile_battlefield_target_with_counters_stays_a_target_filter() {
     );
     let Effect::ChangeZone {
         destination: Zone::Exile,
+        origin: None,
         target: TargetFilter::Typed(typed),
         enter_with_counters,
         ..
