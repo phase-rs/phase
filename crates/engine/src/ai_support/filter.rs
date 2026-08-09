@@ -36,7 +36,7 @@ use std::sync::Arc;
 use crate::game::combat::AttackTarget;
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
-use crate::game::{casting, keywords, turn_control};
+use crate::game::{casting, casting_costs, keywords, turn_control};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, FilterProp,
     ParitySource, ParsedCondition, QuantityExpr, ReplacementDefinition, ResolvedAbility,
@@ -46,7 +46,9 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CardType;
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use crate::types::game_state::{
+    CastPaymentMode, CastingPermissionIndex, GameState, PendingCast, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -184,7 +186,12 @@ impl CandidateFilter for SimulationFilter {
 
 impl SimulationFilter {
     fn fallback_simulation(&self, state: &GameState, candidate: &CandidateAction) -> bool {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::RawValidation,
+        );
         crate::game::perf_counters::record_state_clone_for_legality();
+        crate::game::perf_counters::record_phase_owned_state_clone();
+        let before = pending_spell_root_provenance(state);
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
         // the top-level-only loop-shortcut detection (`reconcile_terminal_result` §3)
@@ -205,15 +212,88 @@ impl SimulationFilter {
             .or_else(|| turn_control::authorized_submitters(state).first().copied());
         actor.is_some_and(|actor| {
             let semantic_owner = candidate.metadata.semantic_owner.unwrap_or(actor);
-            crate::game::engine::apply_interaction_for_simulation(
+            if crate::game::engine::apply_interaction_for_simulation(
                 &mut sim,
                 actor,
                 semantic_owner,
                 candidate.action.clone(),
             )
-            .is_ok()
+            .is_err()
+            {
+                return false;
+            }
+
+            // CR 118.9a: This action entered through a named permission whose
+            // casting pipeline has already replaced the mana cost. Its successful
+            // simulation is the legality authority; the ordinary post-origin
+            // auto-payment probe below applies only to paid cast surfaces.
+            if matches!(candidate.action, GameAction::CastSpellForFree { .. }) {
+                return true;
+            }
+
+            // A payable alternative cost makes the ordinary CastSpell announcement
+            // legal even when target selection precedes the eventual OptionalCostChoice.
+            // The shared cost authority evaluates both the parsed condition and payment
+            // feasibility, so do not infer this from the action or pending cost.
+            if let GameAction::CastSpell { object_id, .. } = &candidate.action {
+                if casting_costs::payable_spell_alternative_cost(state, semantic_owner, *object_id)
+                    .is_some()
+                {
+                    return true;
+                }
+            }
+
+            let Some((after, pending)) = pending_spell_root(&sim) else {
+                return true;
+            };
+            // CR 601.2b: An optional alternative-cost choice is part of the
+            // casting process. The announced spell is legal when it reaches
+            // this decision, even when paying its printed cost would not be.
+            // The selected free branch will replace that cost before payment.
+            if matches!(sim.waiting_for, WaitingFor::OptionalCostChoice { .. }) {
+                return true;
+            }
+            // CR 118.6a: A selected free-cast permission is represented by the
+            // prepared spell's `NoCost`, including silent unlimited permissions
+            // that arrive through the ordinary `CastSpell` action. The prepared
+            // cost, rather than the action variant, is authoritative here.
+            if matches!(pending.cost, ManaCost::NoCost) {
+                return true;
+            }
+            if before == Some(after) {
+                return true;
+            }
+            !matches!(
+                crate::game::casting_costs::post_origin_auto_payment_verdict(&mut sim, &pending,),
+                Some(false)
+            )
         })
     }
+}
+
+type SpellRootProvenance = (ObjectId, Option<CastingPermissionIndex>);
+
+fn pending_spell_root_provenance(state: &GameState) -> Option<SpellRootProvenance> {
+    state
+        .waiting_for
+        .pending_cast_ref()
+        .or(state.pending_cast.as_deref())
+        .filter(|pending| pending.activation_ability_index.is_none())
+        .map(|pending| (pending.object_id, pending.casting_permission_index))
+}
+
+fn pending_spell_root(state: &GameState) -> Option<(SpellRootProvenance, PendingCast)> {
+    state
+        .waiting_for
+        .pending_cast_ref()
+        .or(state.pending_cast.as_deref())
+        .filter(|pending| pending.activation_ability_index.is_none())
+        .map(|pending| {
+            (
+                (pending.object_id, pending.casting_permission_index),
+                pending.clone(),
+            )
+        })
 }
 
 /// CR 117.3d: the holder of a live priority window may always decline to act.
@@ -295,6 +375,9 @@ fn structurally_valid_priority_cast_with_probe(
     action: &GameAction,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> bool {
+    let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+        crate::game::perf_counters::LegalityClonePhase::StrictFastPath,
+    );
     let (
         WaitingFor::Priority { player },
         GameAction::CastSpell {
@@ -996,6 +1079,11 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        | ParsedCondition::HasEnduringStory
+        // CR 903.3 / CR 903.3d: a controller-scoped battlefield scan for a commander
+        // (via `game::commander`), like the other `YouControl*` predicates — reads no
+        // combat/damage/pending-cast history, so it is memo-safe.
+        | ParsedCondition::ControlsCommander { .. }
         // CR 503.1: reads only `state.phase`, apply()-constant global state.
         | ParsedCondition::IsDuringUpkeep
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,

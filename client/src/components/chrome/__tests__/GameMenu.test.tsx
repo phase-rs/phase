@@ -143,4 +143,43 @@ describe("GameMenu", () => {
     expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
   });
 
+  // F4. "Request Takeback" is a proposal addressed to other humans. Solo vs.
+  // AI there is nobody to ask and the server auto-approves, so the same entry
+  // must read as a plain undo. Only the label changes — the handler and the
+  // wire frame are identical.
+  it("labels the rollback entry as an undo when the audience is solo", () => {
+    const onRequestTakeback = vi.fn();
+    renderGameMenu({ onRequestTakeback, takebackAudience: "solo" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Undo Last Action" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo Last Action" }));
+    expect(onRequestTakeback).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the table wording when other humans are present", () => {
+    // Paired positive. Also covers the default: `takebackAudience` is omitted
+    // here, and the default must be the pre-existing wording.
+    renderGameMenu({ onRequestTakeback: vi.fn() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Request Takeback" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo Last Action" })).toBeNull();
+  });
+
+  it("renders no rollback entry at all without a handler, whatever the audience", () => {
+    // Hostile: the audience must not become a second render gate.
+    renderGameMenu({ onRequestTakeback: undefined, takebackAudience: "solo" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+
+    expect(screen.getByRole("button", { name: "Concede" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo Last Action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request Takeback" })).toBeNull();
+  });
+
 });

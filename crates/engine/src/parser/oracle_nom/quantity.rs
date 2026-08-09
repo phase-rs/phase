@@ -6316,28 +6316,6 @@ mod tests {
         }
     }
 
-    /// CR 109.4: the bare "the number of <type> you control" count still parses
-    /// without a keyword predicate — the new keyword arm must not shadow it.
-    #[test]
-    fn parse_number_of_controlled_type_bare_no_keyword_still_parses() {
-        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
-        assert_eq!(rest, "");
-        match q {
-            QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(tf),
-            } => {
-                assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(
-                    !tf.properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::WithKeyword { .. })),
-                    "bare arm must not gate on a keyword"
-                );
-            }
-            other => panic!("expected ObjectCount, got {other:?}"),
-        }
-    }
-
     /// CR 121.1 + CR 604.3: cards drawn this turn as a CDA quantity (Duelist of the Mind).
     #[test]
     fn parse_number_of_cards_drawn_this_turn_cda() {
@@ -7063,16 +7041,7 @@ mod tests {
     fn parse_for_each_unspent_mana_rejects_invalid_color_and_spent_to_cast() {
         assert!(parse_for_each_clause_ref("unspent purple mana you have").is_err());
         assert!(parse_for_each_clause_ref("unspent green mana spent to cast it").is_err());
-
-        let (rest, q) = parse_for_each_clause_ref("mana spent to cast it").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            q,
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                metric: crate::types::ability::CastManaSpentMetric::Total
-            }
-        );
+        // The paired positive case lives in `parse_for_each_mana_spent_to_cast_it`.
     }
 
     #[test]
@@ -7153,6 +7122,9 @@ mod tests {
     /// only matched the `it` subject and fell back to an empty `ObjectCount`
     /// when the spell text used `this spell`, causing X to resolve to the
     /// battlefield permanent count (~30 in the late game).
+    ///
+    /// The `it` row also serves Wildgrowth Archaic and its cousin-card family, which
+    /// use this phrase for ETB-counter quantity expressions.
     #[test]
     fn parse_quantity_ref_the_number_of_colors_of_mana_spent_to_cast_this_spell() {
         for input in [
@@ -7696,6 +7668,10 @@ mod tests {
     /// CR 202.3 + CR 608.2k: prepositional cost-paid mana-value form
     /// (Morbid Curiosity) resolves the same `CostPaidObject` referent as the
     /// possessive "the sacrificed permanent's mana value".
+    ///
+    /// The "sacrificed permanent" row doubles as the negative control for
+    /// `tracked_set_anaphor_singular_property_of_binds`: the "this way" anaphor arm
+    /// must not steal this pre-nominal participle form.
     #[test]
     fn parse_quantity_ref_cost_paid_object_prepositional_mana_value() {
         for phrase in [
@@ -8614,39 +8590,6 @@ mod tests {
         assert!(parse_quantity("xyz").is_err());
     }
 
-    /// CR 202.2 + CR 601.2h: "the number of colors of mana spent to cast it"
-    /// resolves to `QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::DistinctColors }`. Used by Wildgrowth Archaic
-    /// and the cousin-card family for ETB-counter quantity expressions.
-    #[test]
-    fn parses_colors_spent_to_cast_it() {
-        let (rest, q) =
-            parse_quantity_ref("the number of colors of mana spent to cast it").unwrap();
-        assert_eq!(
-            q,
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                metric: crate::types::ability::CastManaSpentMetric::DistinctColors
-            }
-        );
-        assert_eq!(rest, "");
-    }
-
-    #[test]
-    fn test_parse_the_number_of_creatures() {
-        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
-        match q {
-            QuantityRef::ObjectCount { filter } => match filter {
-                TargetFilter::Typed(tf) => {
-                    assert!(matches!(tf.type_filters[0], TypeFilter::Creature));
-                    assert_eq!(tf.controller, Some(ControllerRef::You));
-                }
-                _ => panic!("expected Typed filter"),
-            },
-            _ => panic!("expected ObjectCount"),
-        }
-        assert_eq!(rest, "");
-    }
-
     #[test]
     fn test_parse_for_each_card_drawn_this_way() {
         let (rest, q) = parse_for_each_clause_ref("card drawn this way").unwrap();
@@ -8755,21 +8698,6 @@ mod tests {
             assert_eq!(qty, expected);
             assert_eq!(rest, "");
         }
-    }
-
-    /// CR 603.7c: Dusty Parlor — the SpellCast event's source object is the
-    /// spell, so "that spell's mana value" reads its CMC via the parameterized
-    /// `ObjectManaValue { scope: EventSource }` path.
-    #[test]
-    fn test_parse_that_spells_mana_value() {
-        let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
-        assert_eq!(
-            q,
-            QuantityRef::ObjectManaValue {
-                scope: crate::types::ability::ObjectScope::EventSource
-            }
-        );
-        assert_eq!(rest, "");
     }
 
     /// CR 117.1 + CR 202.3: Food Chain — "the exiled creature's mana value"
@@ -10496,6 +10424,10 @@ mod tests {
 
     /// Regression: a plain controlled-type count without a "that are" clause
     /// keeps the single head type.
+    ///
+    /// The exact `properties: Vec::new()` below is also what holds the line that the
+    /// keyword arm must not shadow the bare arm — a leaked `FilterProp::WithKeyword`
+    /// predicate fails this assertion.
     #[test]
     fn parse_quantity_ref_controlled_type_no_clause_keeps_head() {
         let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
@@ -10951,6 +10883,9 @@ mod tests {
     fn parse_that_spells_mana_value_stays_event_source() {
         // Regression guard: the new "that <type?> card's" arm is placed AFTER the
         // "that spell's" → EventSource arm and must not shadow it.
+        //
+        // Consumer: Dusty Parlor — the SpellCast event's source object is the spell,
+        // so "that spell's mana value" reads its CMC via the `EventSource` scope.
         let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
         assert_eq!(rest, "");
         assert_eq!(
@@ -11088,26 +11023,6 @@ mod tests {
                 other => panic!("{phrase:?} must be a ChainSet TrackedSetAggregate, got {other:?}"),
             }
         }
-    }
-
-    /// CR 608.2c: the "sacrificed permanent" COST referent must keep resolving
-    /// to `CostPaidObject` — the new "this way" anaphor arm must not steal the
-    /// pre-nominal participle form (Morbid Curiosity). Negative control for
-    /// `tracked_set_anaphor_singular_property_of_binds`.
-    #[test]
-    fn cost_paid_prepositional_referent_is_not_stolen_by_anaphor() {
-        let (rest, q) = parse_quantity_ref("the mana value of the sacrificed permanent")
-            .expect("cost-paid prepositional must still bind");
-        assert_eq!(rest, "");
-        assert!(
-            matches!(
-                q,
-                QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::CostPaidObject
-                }
-            ),
-            "the sacrificed-permanent COST referent must stay CostPaidObject, got {q:?}"
-        );
     }
 
     /// CR 202.3 + CR 608.2c (issue #1718 — Ovika, Enigma Goliath): the

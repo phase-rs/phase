@@ -14,6 +14,7 @@ import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
  * attacker, so the value is a set rather than a single attacker id.
  */
 export type BlockerAssignments = Map<ObjectId, Set<ObjectId>>;
+export type PreviewPlacement = "cursor" | "side";
 
 /** Flatten the UI's per-blocker representation at the engine action boundary. */
 export function blockerAssignmentPairs(
@@ -162,6 +163,8 @@ interface UiStoreState {
   hoveredObjectId: ObjectId | null;
   inspectedObjectId: ObjectId | null;
   inspectedFaceIndex: number;
+  /** Presentation requested by the element that opened the current preview. */
+  previewPlacement: PreviewPlacement;
   altHeld: boolean;
   /** Whether the Shift key is currently held. Drives the "shift" card-preview
    *  mode (preview shows only while Shift is down). Tracked as held-state via
@@ -219,6 +222,8 @@ interface UiStoreState {
    *  local state so entry points (Sandbox Tools nudge/button) can open the
    *  panel straight to "actions" instead of the default "console" log view. */
   debugPanelTab: "console" | "actions";
+  /** Local, non-persistent capture control for AI decision diagnostics. */
+  aiDecisionCaptureEnabled: boolean;
   debugInteractionMode: boolean;
   /** Whether the quick floating Click Mode control is pinned on-screen. The
    *  mode itself stays in `debugInteractionMode`; this only controls access to
@@ -260,7 +265,12 @@ interface UiStoreActions {
   hoverObject: (id: ObjectId | null) => void;
   /** `timing` defaults to "hover" (subject to the configurable preview latency);
    *  "immediate" bypasses the delay for explicit-intent triggers (long-press). */
-  inspectObject: (id: ObjectId | null, faceIndex?: number, timing?: "hover" | "immediate") => void;
+  inspectObject: (
+    id: ObjectId | null,
+    faceIndex?: number,
+    timing?: "hover" | "immediate",
+    placement?: PreviewPlacement,
+  ) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   setShiftHeld: (held: boolean) => void;
@@ -301,6 +311,7 @@ interface UiStoreActions {
   setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
+  setAiDecisionCaptureEnabled: (enabled: boolean) => void;
   /** Open the debug panel directly to the Actions ("Sandbox Tools") tab. */
   openSandboxTools: () => void;
   toggleDebugInteractionMode: () => void;
@@ -332,6 +343,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   hoveredObjectId: null,
   inspectedObjectId: null,
   inspectedFaceIndex: 0,
+  previewPlacement: "cursor",
   altHeld: false,
   shiftHeld: false,
   selectedCardIds: [],
@@ -358,6 +370,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
+  aiDecisionCaptureEnabled: false,
   debugInteractionMode: false,
   debugClickModeButtonVisible: false,
   debugContextMenu: null,
@@ -376,7 +389,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
   setShiftHeld: (held) => set({ shiftHeld: held }),
-  inspectObject: (id, faceIndex, timing = "hover") => {
+  inspectObject: (id, faceIndex, timing = "hover", placement = "cursor") => {
     if (id != null) {
       // Setting a new inspection target: cancel any pending clear, and drop a
       // pending delayed-show for a previous target before scheduling this one.
@@ -389,6 +402,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         set((s) => ({
           inspectedObjectId: id,
           inspectedFaceIndex: faceIndex ?? 0,
+          previewPlacement: placement,
           // Inspecting a DIFFERENT object replaces (dismisses) the previous
           // preview, so a pinned Alt state must not leak onto the new card —
           // Alt has to be pressed again to expand it. Re-inspecting the SAME
@@ -465,7 +479,13 @@ export const useUiStore = create<UiStore>()((set, get) => ({
           return;
         }
         cancelPendingShow();
-        set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
+        set({
+          inspectedObjectId: null,
+          inspectedFaceIndex: 0,
+          previewPlacement: "cursor",
+          previewSticky: false,
+          altHeld: false,
+        });
       }, 50);
     }
   },
@@ -479,6 +499,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     set({
       inspectedObjectId: null,
       inspectedFaceIndex: 0,
+      previewPlacement: "cursor",
       previewSticky: false,
       altHeld: false,
       mobileHandGesture: null,
@@ -658,6 +679,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),
+  setAiDecisionCaptureEnabled: (enabled) => set({ aiDecisionCaptureEnabled: enabled }),
   openSandboxTools: () => set({ debugPanelOpen: true, debugPanelTab: "actions" }),
   toggleDebugInteractionMode: () => set((state) => ({
     debugInteractionMode: !state.debugInteractionMode,

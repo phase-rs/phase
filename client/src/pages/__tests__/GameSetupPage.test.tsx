@@ -210,11 +210,8 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
 
     renderGameSetupPage();
 
-    // Allow any async effects to settle.
-    await waitFor(() => {
-      // The deck name should appear (deck is loaded).
-      expect(screen.getByText("cEDH Deck")).toBeInTheDocument();
-    });
+    // The deck name appearing is the signal that the deck finished loading.
+    expect(await screen.findByText("cEDH Deck")).toBeInTheDocument();
 
     // Warning must not be present.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -232,9 +229,7 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
 
     renderGameSetupPage();
 
-    await waitFor(() => {
-      expect(screen.getByText("Casual Deck")).toBeInTheDocument();
-    });
+    expect(await screen.findByText("Casual Deck")).toBeInTheDocument();
 
     // No warning chip.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();

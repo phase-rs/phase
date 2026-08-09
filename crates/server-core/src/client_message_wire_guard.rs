@@ -79,7 +79,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::Concede
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
-        | ClientMessage::RequestTakeback
+        | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
         ClientMessage::BootstrapTerminalDelivery { request } => {
@@ -251,7 +251,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
-        | ClientMessage::RequestTakeback
+        | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => ServerMessage::error(reason),
     }
@@ -350,7 +350,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::DraftAction { .. }
         | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
-        | ClientMessage::RequestTakeback
+        | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
     }

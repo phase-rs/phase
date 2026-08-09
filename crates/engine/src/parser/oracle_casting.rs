@@ -1143,32 +1143,24 @@ Trample";
         assert!(restrictions.contains(&CastingRestriction::AfterCombat));
     }
 
+    /// The blight count is parameterized, not enumerated — every count parses to the
+    /// same `Optional` shape with `AbilityCost::Blight { count }`.
     #[test]
-    fn parse_additional_cost_optional_blight() {
-        let lower = "as an additional cost to cast this spell, you may blight 1.";
-        let raw = "As an additional cost to cast this spell, you may blight 1.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 1 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_optional_blight_2() {
-        let lower = "as an additional cost to cast this spell, you may blight 2.";
-        let raw = "As an additional cost to cast this spell, you may blight 2.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 2 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
+    fn parse_additional_cost_optional_blight_counts() {
+        for count in [1, 2] {
+            let lower =
+                format!("as an additional cost to cast this spell, you may blight {count}.");
+            let raw = format!("As an additional cost to cast this spell, you may blight {count}.");
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Optional {
+                    cost: AbilityCost::Blight { count },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                }),
+                "blight {count}"
+            );
+        }
     }
 
     #[test]
@@ -1324,42 +1316,32 @@ Trample";
         }
     }
 
+    /// Both the blight count and the generic-mana alternative are parameterized —
+    /// the `(blight N, pay {M})` pair varies independently of the `Choice` shape.
     #[test]
-    fn parse_additional_cost_choice_blight_or_pay() {
-        let lower = "as an additional cost to cast this spell, blight 2 or pay {1}.";
-        let raw = "As an additional cost to cast this spell, blight 2 or pay {1}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 2 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 1,
-                        shards: vec![]
+    fn parse_additional_cost_choice_blight_or_pay_counts() {
+        for (blight, generic) in [(2, 1), (1, 3)] {
+            let lower = format!(
+                "as an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let raw = format!(
+                "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Choice(
+                    AbilityCost::Blight { count: blight },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic,
+                            shards: vec![]
+                        }
                     }
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_choice_blight_or_pay_3() {
-        let lower = "as an additional cost to cast this spell, blight 1 or pay {3}.";
-        let raw = "As an additional cost to cast this spell, blight 1 or pay {3}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 1 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 3,
-                        shards: vec![]
-                    }
-                }
-            ))
-        );
+                )),
+                "blight {blight} or pay {{{generic}}}"
+            );
+        }
     }
 
     #[test]
@@ -2266,73 +2248,42 @@ Trample";
     // because the global turn counter counts both players' turns (my turn 3 = global turn 5).
     #[test]
     fn spell_cast_restriction_parses_first_n_turns_of_game_per_player() {
-        // Spider-Man 2099 exact oracle text (with ability-word prefix and curly apostrophe,
-        // after card-name normalization to "~").
-        let restrictions = parse_casting_restriction_line(
-            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
-        )
-        .expect("Spider-Man 2099 restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 3 },
+        // Each row is a distinct English form, not just a different ordinal: the
+        // Spider-Man 2099 row carries an ability-word prefix, a curly apostrophe, and
+        // "~" after card-name normalization; the singular row uses "this spell".
+        for (max_ordinal, text) in [
+            (
+                3,
+                "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
+            ),
+            (
+                2,
+                "You can't cast ~ during your first or second turns of the game.",
+            ),
+            (
+                1,
+                "You can't cast this spell during your first turn of the game.",
+            ),
+        ] {
+            let restrictions = parse_casting_restriction_line(text)
+                .unwrap_or_else(|| panic!("{text:?} should parse"));
+            assert_eq!(
+                restrictions,
+                vec![CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::Not {
+                        condition: Box::new(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::TurnsTaken,
+                            },
+                            comparator: Comparator::LE,
+                            rhs: QuantityExpr::Fixed { value: max_ordinal },
+                        }),
                     }),
-                }),
-            }],
-            "must block casting on turns 1–3 using per-player TurnsTaken, not global turn_number"
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_two_turns_of_game() {
-        // "first or second" variant — max_ordinal = 2.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast ~ during your first or second turns of the game.",
-        )
-        .expect("two-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 2 },
-                    }),
-                }),
-            }]
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_turn_of_game() {
-        // Singular "turn" variant — max_ordinal = 1.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast this spell during your first turn of the game.",
-        )
-        .expect("single-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 1 },
-                    }),
-                }),
-            }]
-        );
+                }],
+                "must block casting on turns 1–{max_ordinal} using per-player TurnsTaken, \
+                 not global turn_number: {text:?}"
+            );
+        }
     }
 
     #[test]

@@ -131,6 +131,23 @@ Every round keeps the original `BASE_SHA` and frozen scope paths. Every checkpoi
 
 Accept only when the plan-review loop is clean, the reviewer emitted a matching external receipt SHA256, final acceptance independently revalidates the receipt and every recorded artifact, parser evidence and completion checks pass, and the fresh implementation review returns zero findings. The receipt validation/hash are acceptance evidence, never completion-check rows or receipt artifacts. Immediately run `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` and compare its output to `CANDIDATE_SHA`; if it differs, the review is stale and the current head must repeat the checkpoint-to-review sequence. Do not treat review of an ancestor as review of current work.
 
+### Post-acceptance PR handoff (non-gating)
+
+Final acceptance emits an immutable Final Report snapshot: `Pipeline-reviewed head == Current branch head == accepted CANDIDATE_SHA`, `Pipeline status: current`, and `Current-head review: none`. Do not alter or replace that snapshot, the accepted candidate SHA, or any canonical receipt evidence after acceptance.
+
+Copy the following mutable `PR handoff` block into the PR body beside the retained pipeline report:
+
+```text
+Pipeline-reviewed head: <accepted CANDIDATE_SHA>
+Current branch head: <current branch SHA>
+Pipeline status: current | historical — <reason>
+Current-head review: none | clean at <SHA> | findings at <SHA>
+```
+
+Whenever the branch head changes after acceptance, including through a rebase, update `Current branch head`, set `Pipeline status` to `historical — <reason>`, and reset `Current-head review` to `none`. When current-head evidence is desired, run ordinary `/review-impl` against the complete current PR/head — not checkpoint mode and not an incremental-only diff — then record `clean at <SHA>` or `findings at <SHA>` for that exact SHA. Each future head change repeats the reset. `Pipeline status` remains historical unless the current head again equals the original accepted `CANDIDATE_SHA`, in which case set it to `current`.
+
+If later work invalidates the approved plan or architecture, return to plan review. Otherwise, this is a concise reporting and navigation flow only: it is not a gate, a new receipt requirement, GitHub automation, an executor change, or a PR-handler change.
+
 ## Final Report
 
 Return after final acceptance:

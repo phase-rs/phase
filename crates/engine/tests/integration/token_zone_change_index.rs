@@ -10,27 +10,80 @@
 //! `(definition_ref, turn_zone_change_index)` — CR 603.2c, "an ability triggers only once each
 //! time its trigger event occurs" — so a SECOND same-turn token batch collided with the first on
 //! `(def, 0)` and its fire was silently swallowed.
+//!
+//! # REVERT-PROBE convention — read this before trusting an anchor
+//!
+//! Most assertions here carry an inline `REVERT-PROBE` anchor naming the mutation that should
+//! break that assertion. **`RUN` in an anchor tag is an INSTRUCTION to you, not a claim that
+//! anyone ran it.** Only anchors that also say `MEASURED` were executed, and those carry the
+//! verbatim failure point (file, line, `left`/`right`). Anything else is a PREDICTION.
+//!
+//! This distinction is load-bearing: two anchors in this file (`PROBE X` and `PROBE Y`, on the
+//! gift-token tests) named failure points their recipes never reached, and read as validated for
+//! multiple review rounds precisely because nothing separated "stated" from "executed".
+//!
+//! The failure mode to watch for is **RECIPE SCOPE**. An *authority-wide* revert (neutering
+//! `zones::record_and_emit_entry_from_no_zone` itself) also degrades the OTHER producer in the
+//! same fixture — usually a priming batch the test relies on — which can trip an upstream
+//! reach-guard and kill the test EARLIER than the anchor's named point. A *site-isolated* revert
+//! (one emit site, primer left on the real authority) does not. Prefer site-isolated recipes.
+//!
+//! A discrimination claim needs BOTH mutants, and each must fail THAT assertion, not merely the
+//! suite: **DROP** (delete the fix) and **TRIVIALIZE** (keep the shape, make the recorded index a
+//! meaningless constant). Scope a trivialize constant to the `from: None -> Battlefield` arm — a
+//! global one is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant in `zones.rs`
+//! and panics before any assertion here.
+//!
+//! **Filter trap:** `cargo test --test integration <bare_fn_name> -- --exact` runs ZERO tests and
+//! exits `0`. The module path is mandatory:
+//! `cargo test -p phase-engine --test integration token_zone_change_index::<fn> -- --exact`.
+//! Always check the `N passed` count — a vacuous filter reports `ok. 0 passed`.
+//!
+//! MEASURED at this tip: `second_same_turn_token_batch_still_triggers`,
+//! `mixed_group_sibling_then_token_each_fire_the_batched_trigger`,
+//! `a_realized_copy_token_entry_and_a_same_turn_token_batch_take_distinct_indices` (both arms plus
+//! a counter-control on its pre-fix form), the inline probe inside
+//! `suppressed_liminal_copy_token_entry_is_recorded_once`, and gift-token `PROBE X` / `PROBE Y`.
+//!
+//! STATED BUT NOT EXECUTED here — treat as predictions until run:
+//! `mixed_group_sibling_last_also_fires`,
+//! `battlefield_entries_this_turn_counts_each_token_exactly_once`,
+//! `conjured_battlefield_entry_after_a_token_batch_fires_the_batched_trigger`,
+//! `unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself`,
+//! the three `suppressed_liminal_copy_token_entry_*` realization-pause tests
+//! (`..._mandatory_as_enters_choice`, `..._as_enters_choice_with_a_second_pause`,
+//! `..._etb_counter_ordering_pause`), the remaining `suppressed_liminal_...` inline anchors, and
+//! the `*_after_a_token_batch_fires_the_batched_trigger` family for gift, copy-token tail,
+//! modification-paused copy, counter-paused token, counter-paused attached, counter-paused copy,
+//! and incubate-resume.
 
-use engine::game::effects::{incubate, token};
+use engine::game::effects::{conjure, gift_delivery, incubate, token, token_copy};
+use engine::game::filter::{matches_target_filter_on_zone_change_record, FilterContext};
+use engine::game::game_object::AttachTarget;
+use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::triggers::{drain_order_triggers_with_identity, process_triggers};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ChosenAttribute, ConjureCard, ConjureSource,
+    ContinuousModification, Effect, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::keywords::GiftKind;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 /// The batched enters-the-battlefield class (CR 603.6a + CR 603.2c): "Whenever one or more
 /// creatures you control enter, you gain 1 life." Built directly rather than loaded from a card
 /// because the behaviour under test is the ENGINE's batched-dedup KEY, which is card-agnostic —
-/// and no card in `integration_cards.json` carries a batched ETB trigger that admits tokens
+/// and no card in `integration_cards.json.gz` carries a batched ETB trigger that admits tokens
 /// without an additional "only once each turn" clause that would mask the second fire.
 fn batched_etb_life_trigger() -> TriggerDefinition {
     let mut def = TriggerDefinition::new(TriggerMode::ChangesZone);
@@ -86,10 +139,11 @@ fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<
 ///
 /// `incubate.rs` was one of SEVEN battlefield-entry emit sites that built a `ZoneChanged` record
 /// with `snapshot_for_zone_change` and emitted it without ever reaching the recorder, so it shipped
-/// the index-`0` placeholder. It is routed through `record_zone_change` by this change because
-/// these very tests drive it; the six that remain (`conjure.rs`, `counters.rs` ×2 — the `:526`
-/// inline emit and `push_token_entry_events` — `token_copy.rs` ×2, `gift_delivery.rs`) are the
-/// class-wide follow-up.
+/// the index-`0` placeholder. It was routed through `record_zone_change` first because these very
+/// tests drive it. The class is now CLOSED: all six are now routed through
+/// `zones::record_and_emit_entry_from_no_zone`, the single `from: None → Battlefield` record+emit
+/// authority, enforced structurally by `battlefield_entry_authority_census.rs`. Each has its own
+/// discriminator and empty-ledger control at the bottom of this file.
 fn incubate_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<GameEvent> {
     let ability = ResolvedAbility::new(
         Effect::Incubate {
@@ -138,10 +192,26 @@ fn token_ids(state: &GameState) -> Vec<ObjectId> {
 /// `ChangesZone` trigger, must fire the trigger TWICE — once per batch — because each batch is a
 /// distinct trigger event.
 ///
-/// REVERT-PROBE (discriminating, RUN): restore the direct
-/// `snapshot_for_zone_change` emit in `push_committed_token_entry_events` (index left at the `0`
+/// REVERT-PROBE (discriminating, RUN): replace the
+/// `zones::record_and_emit_entry_from_no_zone` call inside `push_committed_token_entry_events`
+/// with a bare `snapshot_for_zone_change` + `events.push(ZoneChanged)` (index left at the `0`
 /// placeholder) ⇒ both batches key on `(def, 0)`, the second is dropped by
 /// `batched_zone_change_already_collected`, and P0 gains 1 life instead of 2.
+///
+/// MEASURED (both arms, this tip). DROP, as written above: fails at the life assertion below —
+/// `left: 1 right: 2`, the first failure, no earlier guard trips. TRIVIALIZE, keeping
+/// `record_zone_change` wired so both per-turn ledgers hold the REAL index and forcing only the
+/// EMITTED record's index to `0`: same assertion, same `left: 1 right: 2`. The trivialize arm
+/// proves the stronger property neither prediction claimed — this test discriminates the
+/// **emitted** `turn_zone_change_index` specifically, not ledger presence.
+///
+/// RECIPE-SCOPE NOTE: this recipe is authority-wide, so it degrades the PRIMING batch too. The
+/// test survives that only by arithmetic coincidence — batch 1's reach-guard below expects delta
+/// `1`, and a degraded batch 1 still fires exactly once (both its tokens key on `(def, 0)`; one
+/// batch = one fire either way), so the guard is INSENSITIVE to the mutation and control reaches
+/// the named assertion. If that guard's expected value ever changes, re-measure this probe before
+/// trusting it: the same authority-wide shape made two sibling anchors in this file name failure
+/// points their recipes never reached.
 #[test]
 fn second_same_turn_token_batch_still_triggers() {
     let mut scenario = GameScenario::new();
@@ -224,9 +294,19 @@ fn second_same_turn_token_batch_still_triggers() {
 /// Both mechanisms are routed now (`token.rs` and `incubate.rs`), so this passes in either order;
 /// `mixed_group_sibling_last_also_fires` is the reversed-order twin.
 ///
-/// REVERT-PROBE (discriminating, RUN): restore the direct `snapshot_for_zone_change` emit in
-/// `push_committed_token_entry_events` ⇒ the token batch ships index `0`, collides with the
-/// Incubator's `0`, and P0 gains 1 life instead of 2.
+/// REVERT-PROBE (discriminating, RUN): replace the `zones::record_and_emit_entry_from_no_zone`
+/// call inside `push_committed_token_entry_events` with a bare `snapshot_for_zone_change` +
+/// `events.push(ZoneChanged)` ⇒ the token batch ships index `0`, collides with the Incubator's
+/// `0`, and P0 gains 1 life instead of 2.
+///
+/// MEASURED (both arms, this tip). DROP: fails at the life assertion below — `left: 1 right: 2`,
+/// first failure, no earlier guard trips. TRIVIALIZE (ledgers keep the real index, only the
+/// EMITTED index forced to `0`): same assertion, same values.
+///
+/// RECIPE-SCOPE NOTE: unlike its same-recipe sibling above, this test is STRUCTURALLY immune to
+/// the priming-producer hazard — its primer is Incubate, which reaches the authority through
+/// `incubate.rs`, NOT through `push_committed_token_entry_events`. The recipe degrades only the
+/// token producer, so the sibling's real index and its reach-guard below are untouched.
 #[test]
 fn mixed_group_sibling_then_token_each_fire_the_batched_trigger() {
     let mut scenario = GameScenario::new();
@@ -352,14 +432,25 @@ fn mixed_group_sibling_last_also_fires() {
     );
 }
 
-/// MUST-NOT-FLIP for the paired deletion: routing token entries through `record_zone_change`
-/// (which performs the CR 403.3 battlefield-entry bookkeeping itself) means the emit sites must
-/// NOT also call `record_battlefield_entry`.
+/// Routing token entries through `record_zone_change` (which performs the CR 608.2i
+/// battlefield-entry bookkeeping itself) means an emit site must NOT also call
+/// `record_battlefield_entry`.
 ///
-/// REVERT-PROBE (discriminating, RUN): re-add the deleted
+/// NOT the paired-deletion must-not-flip. This drive's route
+/// (`token::apply_create_token_after_replacement_with_created_ids`) never had such a call to
+/// delete: measured on `4b34e5465`, the seven pre-change `record_battlefield_entry` call sites in
+/// `engine/src` outside `restrictions.rs` are `conjure.rs:191`, `counters.rs:518/558/637`,
+/// `gift_delivery.rs:157` and `token_copy.rs:851/969` — none in `token.rs`, whose emitter already
+/// relied on `record_zone_change` doing the bookkeeping. The paired-deletion claim belongs to
+/// `assert_site_records`, which drives the sites the deletion actually touched, and is stated
+/// there.
+///
+/// REVERT-PROBE (discriminating, RUN): ADD a
 /// `crate::game::restrictions::record_battlefield_entry` call in
 /// `apply_create_token_after_replacement_with_created_ids` ⇒ every token appears TWICE in
-/// `battlefield_entries_this_turn` and the per-id count assertion fails with 2.
+/// `battlefield_entries_this_turn` and the per-id count assertion fails with 2. That is a
+/// forward-direction discriminator — it proves this assertion can fail — not evidence that the
+/// call was ever there.
 #[test]
 fn battlefield_entries_this_turn_counts_each_token_exactly_once() {
     let mut scenario = GameScenario::new();
@@ -387,7 +478,8 @@ fn battlefield_entries_this_turn_counts_each_token_exactly_once() {
         assert_eq!(
             entries, 1,
             "token {id:?} is recorded in battlefield_entries_this_turn exactly once \
-             (re-adding the deleted record_battlefield_entry ⇒ 2)"
+             (ADDING a record_battlefield_entry call at this route ⇒ 2; this route never had \
+             one to delete — see the doc comment)"
         );
     }
 
@@ -407,7 +499,7 @@ fn battlefield_entries_this_turn_counts_each_token_exactly_once() {
     }
 }
 
-// ───────── the SUPPRESS route (CR 403.3 + CR 603.6a) ─────────
+// ───────── the SUPPRESS route (CR 608.2i + CR 603.6a) ─────────
 //
 // `finalize_committed_liminal_token_entry_from_action` records AND emits inline only on the
 // `TokenEntryEventEmission::Emit` route. On `Suppress` — reached solely from the liminal branch of
@@ -453,7 +545,7 @@ fn battlefield_entries_this_turn_counts_each_token_exactly_once() {
 /// which is the only production route to `TokenEntryEventEmission::Suppress`.
 const VIZIER_ORACLE: &str = "You may have this creature enter as a copy of any creature on the battlefield, except if this creature was embalmed, the token has no mana cost, it's white, and it's a Zombie in addition to its other types.\nEmbalm {3}{U}{U}";
 
-/// CR 403.3 + CR 603.6a: a liminal copy-token entry committed on the `Suppress` route must land on
+/// CR 608.2i + CR 603.6a: a liminal copy-token entry committed on the `Suppress` route must land on
 /// both per-turn ledgers exactly once, describing the REALIZED copy, and must emit its entry pair
 /// exactly once — all of it from the single realization the flush performs, never half of it.
 ///
@@ -464,10 +556,14 @@ const VIZIER_ORACLE: &str = "You may have this creature enter as a copy of any c
 /// point (a), inside `engine_replacement::finish_copy_target_choice_entry`.
 ///
 /// REVERT-PROBE (discriminating, RUN): replace the `Suppress` park in
-/// `token::finalize_committed_liminal_token_entry_from_action` with the pre-lifecycle
-/// `record_committed_token_entry(state, object_id);` ⇒ the row is written from the pre-copy
+/// `token::finalize_committed_liminal_token_entry_from_action` with a pre-lifecycle RECORD-ONLY
+/// inline — take `state.objects.get(&object_id)`'s
+/// `snapshot_for_zone_change(object_id, None, Zone::Battlefield)` and pass it straight to
+/// `restrictions::record_zone_change`, emitting nothing — ⇒ the row is written from the pre-copy
 /// Shapeshifter (assertion (2b) reads `name: "Vizier of Many Faces"`, `power: Some(0)`) and nothing
-/// is ever parked for the flush to realize, so assertion (3)'s emit count is 0.
+/// is ever parked for the flush to realize, so assertion (3)'s emit count is 0. The substitution
+/// must be record-only (NOT `zones::record_and_emit_entry_from_no_zone`, which also emits), or
+/// assertion (3) would see the emit and the isolation claim would be lost.
 #[test]
 fn suppressed_liminal_copy_token_entry_is_recorded_once() {
     let mut scenario = GameScenario::new();
@@ -577,7 +673,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
     });
     runner.advance_until_stack_empty();
 
-    // (1) DISCRIMINATOR: the suppressed-emission entry is recorded exactly once (CR 403.3).
+    // (1) DISCRIMINATOR: the suppressed-emission entry is recorded exactly once (CR 608.2i).
     assert_eq!(
         runner
             .state()
@@ -642,10 +738,15 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
     //      cannot disagree by construction — that structural agreement is what this pins.
     //
     //      REVERT-PROBE (discriminating, RUN): delete the `record_zone_change` call inside
-    //      `token::record_committed_token_entry` and push the row onto `zone_changes_this_turn`
-    //      directly ⇒ `battlefield_entries_this_turn` never gets its row and the
-    //      `.expect("...has a battlefield-entry row")` below panics, while (2b) above stays
-    //      green — isolating the flip to the SECOND ledger.
+    //      `zones::record_and_emit_entry_from_no_zone` and push the row onto
+    //      `zone_changes_this_turn` directly, leaving the `0` placeholder ⇒
+    //      `battlefield_entries_this_turn` never gets its row. MEASURED failure point:
+    //      assertion (1) above, at this file's `battlefield_entries_this_turn` count
+    //      (`left: 0, right: 1`) — that earlier count assertion dominates, so the test dies
+    //      there. The `.expect("...has a battlefield-entry row")` below would panic for the
+    //      same missing row but is never reached, and (2b) is never evaluated. This probe
+    //      therefore pins the SECOND ledger losing its row; it does NOT isolate one assertion
+    //      against another.
     let battlefield_row = runner
         .state()
         .battlefield_entries_this_turn
@@ -655,7 +756,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
         .clone();
     assert_eq!(
         battlefield_row.name, entry_row.name,
-        "both CR 403.3 ledgers describe the same entry, so they must name the same creature"
+        "both CR 608.2i ledgers describe the same entry, so they must name the same creature"
     );
     // The measured subtypes here are ["Zombie"], and that is the FIXTURE, not a copy rule:
     // `GameScenario::add_creature` (game/scenario.rs:357) sets only `CoreType::Creature` and
@@ -670,11 +771,11 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
     // from `battlefield_entry_matches_filter` and a different one from a zone-change scan.
     assert_eq!(
         battlefield_row.subtypes, entry_row.subtypes,
-        "both CR 403.3 ledgers snapshot the same object, so their subtypes agree"
+        "both CR 608.2i ledgers snapshot the same object, so their subtypes agree"
     );
     assert_eq!(
         battlefield_row.core_types, entry_row.core_types,
-        "both CR 403.3 ledgers snapshot the same object, so their core types agree"
+        "both CR 608.2i ledgers snapshot the same object, so their core types agree"
     );
     // (3) The deferred emit really happened, carrying the recorder-assigned index (CR 603.6a +
     //     CR 400.7). Read off the `ActionResult` of the copy-target submission itself, which is
@@ -705,7 +806,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
     // as a follow-up with the symptom only, not fixed here.
 }
 
-// ───────── the POSTPONED entry lifecycle (CR 400.7 + CR 403.3 + CR 614.12a) ─────────
+// ───────── the POSTPONED entry lifecycle (CR 400.7 + CR 608.2i + CR 614.12a) ─────────
 //
 // A `Suppress`-route token is committed to the battlefield BEFORE it is the thing that entered:
 // `BecomeCopy` has not run, and the copied card's own mandatory as-enters choice (CR 614.12a) is
@@ -745,6 +846,17 @@ const FAITHFUL_WATCHDOG_ORACLE: &str =
 const HARDENED_SCALES_ORACLE: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
 const BRANCHING_EVOLUTION_ORACLE: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
 const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
+/// Scryfall-verbatim (`Vorinclex, Monstrous Raider`, KHM 199). Used as the ANY-PERMANENT half of
+/// the CR 616.1 counter-doubler pair: its doubling clause parses with `valid_card == None`, so it
+/// admits an ARTIFACT entrant (an Incubator, an Equipment token) that the creature-scoped Hardened
+/// Scales / Branching Evolution pair provably rejects. It carries no token-creation replacement, so
+/// the two-token reach batch stays exactly two entries.
+const VORINCLEX_ORACLE: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+/// Scryfall-verbatim (`Ozolith, the Shattered Spire`, SOC 281). The `Plus{1}` half of the
+/// ANY-PERMANENT pair — `DOUBLE` and `Plus{1}` do not commute, which is what makes the two
+/// simultaneously-applicable replacements raise the CR 616.1 ordering prompt the paused fixtures
+/// need. Also carries no token-creation replacement.
+const OZOLITH_SHATTERED_SPIRE_ORACLE: &str = "If one or more +1/+1 counters would be put on an artifact or creature you control, that many plus one +1/+1 counters are put on it instead.\n{1}{G}, {T}: Put a +1/+1 counter on target artifact or creature you control. Activate only as a sorcery.\nCycling {2} ({2}, Discard this card: Draw a card.)";
 
 /// What one answered prompt did to the token's entry: the events its `ActionResult` carried and
 /// both per-turn ledgers as of immediately after it returned.
@@ -759,7 +871,7 @@ struct CopyEntryStep {
     tokens_created: usize,
     /// CR 400.7 rows for the token on `zone_changes_this_turn` after this action.
     zone_rows: usize,
-    /// CR 403.3 rows for the token on `battlefield_entries_this_turn` after this action.
+    /// CR 608.2i rows for the token on `battlefield_entries_this_turn` after this action.
     entry_rows: usize,
     /// Whether an entry is still parked awaiting realization after this action.
     parked: bool,
@@ -853,7 +965,7 @@ fn token_entry_step(
 }
 
 /// Activate the graveyard Vizier's Embalm ability and answer every prompt the resulting token
-/// entry raises, recording each answer's effect on the two CR 400.7 / CR 403.3 ledgers.
+/// entry raises, recording each answer's effect on the two CR 400.7 / CR 608.2i ledgers.
 ///
 /// `copy_target` names the battlefield creature the copy-target prompt must pick; `None` DECLINES
 /// the "enter as a copy" replacement, which routes the entry through `TokenEntryEventEmission::Emit`
@@ -994,7 +1106,7 @@ fn entry_rows(
         .find(|record| record.object_id == token)
         .unwrap_or_else(|| {
             panic!(
-                "the realized copy token must have a CR 403.3 battlefield-entry row; prompts = {:?}",
+                "the realized copy token must have a CR 608.2i battlefield-entry row; prompts = {:?}",
                 drive.prompts
             )
         });
@@ -1014,7 +1126,7 @@ fn ledger_index(runner: &GameRunner, token: ObjectId) -> usize {
         .expect("the entry is on the CR 400.7 ledger")
 }
 
-/// CR 400.7 + CR 403.3 + CR 614.12a — the maintainer's named failure path. Embalm Vizier of Many
+/// CR 400.7 + CR 608.2i + CR 614.12a — the maintainer's named failure path. Embalm Vizier of Many
 /// Faces copying Painter's Servant: the copy carries Painter's MANDATORY "as this creature enters,
 /// choose a color" replacement, so the entry pauses on a `NamedChoice` that spans a client round
 /// trip. Both ledgers must describe the REALIZED copy exactly once, and the entry pair must be
@@ -1084,7 +1196,7 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
     assert_eq!(
         (settled.zone_rows, settled.entry_rows),
         (1, 1),
-        "the realized entry lands on both CR 400.7 / CR 403.3 ledgers exactly once"
+        "the realized entry lands on both CR 400.7 / CR 608.2i ledgers exactly once"
     );
     assert!(
         !settled.parked,
@@ -1102,7 +1214,7 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
     );
     assert_eq!(
         battlefield_name, zone_name,
-        "both CR 403.3 ledgers are written by the one record_zone_change call, so they agree"
+        "both CR 608.2i ledgers are written by the one record_zone_change call, so they agree"
     );
 
     // (3) The emit rides the SAME action that realized the entry, exactly once, carrying the
@@ -1388,7 +1500,7 @@ fn declined_copy_replacement_records_the_token_entry_without_parking_it() {
             .filter(|record| record.object_id == token)
             .count(),
         1,
-        "the Emit-route token is recorded on the CR 403.3 ledger exactly once"
+        "the Emit-route token is recorded on the CR 608.2i ledger exactly once"
     );
     assert_eq!(
         life_of_p0(runner.state()) - life_start,
@@ -1399,18 +1511,35 @@ fn declined_copy_replacement_records_the_token_entry_without_parking_it() {
 
 /// CR 603.2c — a postponed entry must not collide with a normally-recorded one. The realized copy
 /// token and a plain `Effect::Token` batch minted in the SAME turn (the `Emit` path, through
-/// `push_committed_token_entry_events` → `record_committed_token_entry` → `record_zone_change`)
-/// must occupy DISTINCT `turn_zone_change_index` values, because the batched zone-change replay
-/// guard dedups on that index.
+/// `push_committed_token_entry_events` → `zones::record_and_emit_entry_from_no_zone` →
+/// `record_zone_change`) must occupy DISTINCT `turn_zone_change_index` values, because the batched
+/// zone-change replay guard dedups on that index.
 ///
-/// The second producer is deliberately NOT `token_copy.rs`'s `record_battlefield_entry` sites:
-/// those never reach `record_zone_change`, so they have no `zone_changes_this_turn` row to compare
-/// against and the assertion would be vacuous.
+/// The second producer is the plain `Effect::Token` batch because it is the *pre-existing* routed
+/// producer; `token_copy.rs`'s sites are now routed too and get their own dedicated tests (the
+/// S4/S5 fixtures at the bottom of this file). This test's subject is the postponed-vs-normal
+/// collision, which `mint_token_batch` pins with the fewest moving parts.
 ///
-/// REVERT-PROBE (discriminating, RUN): delete the `record_zone_change` call inside
-/// `token::record_committed_token_entry` (push onto `zone_changes_this_turn` directly, leaving the
-/// snapshot's `0` placeholder) ⇒ the copy token and the minted tokens all report index `0` and the
-/// distinctness assertion fails.
+/// REVERT-PROBE, arm 1 — DROP (discriminating, RUN): delete the `record_zone_change` call inside
+/// `zones::record_and_emit_entry_from_no_zone` (push onto `zone_changes_this_turn` directly,
+/// leaving the snapshot's `0` placeholder) ⇒ every entry ships index `0`. MEASURED failure point:
+/// the distinctness assertion below —
+/// `the realized copy entry (0) must not share an index with the same-turn token batch ([0, 0])`.
+///
+/// REVERT-PROBE, arm 2 — TRIVIALIZE (discriminating, RUN): leave the recorder in place, writing
+/// BOTH ledgers' rows, but make `restrictions::record_zone_change` answer a CONSTANT index (`3`)
+/// for `from: None → Battlefield` records. Scoping the constant to that arm is required: a global
+/// constant is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant
+/// (`zones.rs`'s `expect("ordinary zone transition must install its resolved core")`), which
+/// panics before this test's own assertions. MEASURED failure point: the same assertion —
+/// `the realized copy entry (3) must not share an index with the same-turn token batch ([3, 3])`.
+/// A recorder that records but does not COUNT is what arm 1 alone cannot see.
+///
+/// MEASURED CONTROL for both arms: the pre-fix form of this test read the copy side through
+/// `ledger_index` — a ledger POSITION compared against event-borne STORED indices — and reported
+/// `ok` under arm 1 (position `1` vs `[0, 0]`) AND under arm 2 (position `1` vs `[3, 3]`). It
+/// could not fail for the index-`0` class it names. That is why the copy side is read off its own
+/// emitted event below.
 #[test]
 fn a_realized_copy_token_entry_and_a_same_turn_token_batch_take_distinct_indices() {
     let mut scenario = GameScenario::new();
@@ -1431,8 +1560,27 @@ fn a_realized_copy_token_entry_and_a_same_turn_token_batch_take_distinct_indices
             "NamedChoice(5)".to_string(),
         ],
     );
-    let token = drive.token();
-    let copy_index = ledger_index(&runner, token);
+    // STORED-vs-STORED, deliberately NOT `ledger_index`. The CR 603.2c dedup guard
+    // (`triggers.rs::batched_zone_change_already_collected`) keys on the
+    // `turn_zone_change_index` it reads off the EVENT, so both sides of the distinctness claim
+    // must be event-borne stored indices. `ledger_index` returns a ledger POSITION, which equals
+    // the stored index only when every row was recorded correctly — i.e. exactly when the defect
+    // is absent. MEASURED: with a position on the copy side this assertion survived its own
+    // revert probe (copy POSITION 1 vs minted STORED [0, 0] ⇒ `all(!= 1)` holds), so it could not
+    // fail for the index-`0` placeholder class it names.
+    //
+    // The `drive.token()` reach-guard this replaced is carried structurally: `token_entry_step`
+    // filters `zone_changed_indices` by the drive's own token id, so a drive that never reached
+    // the copy-target prompt yields an EMPTY vec and fails the length assertion below.
+    let copy_indices = &drive.steps[2].zone_changed_indices;
+    assert_eq!(
+        copy_indices.len(),
+        1,
+        "the realizing action emits exactly one battlefield ZoneChanged for the copy token; \
+         prompts = {:?}",
+        drive.prompts
+    );
+    let copy_index = copy_indices[0];
     let turn_start = runner.state().turn_number;
 
     let minted = mint_token_batch(runner.state_mut(), painter, 2);
@@ -1456,16 +1604,52 @@ fn a_realized_copy_token_entry_and_a_same_turn_token_batch_take_distinct_indices
 
 /// CR 400.7 + CR 603.6a — convergence point (a). On the UNPAUSED copy route the entry is realized
 /// inside `finish_copy_target_choice_entry`, i.e. during the action that answers the copy-target
-/// prompt. The settled-`Priority` backstop cannot substitute for it: this action does not settle
-/// (a stale second `CopyTargetChoice` is a known pre-existing defect on this route), so the
-/// backstop would slip the row and the emit into a LATER action — one client round trip late, with
-/// an empty CR 400.7 look-back in between.
+/// prompt.
 ///
-/// REVERT-PROBE (discriminating, RUN): delete the flush call in
-/// `engine_replacement::finish_copy_target_choice_entry` ⇒ the FIRST copy-target answer emits
-/// nothing and both ledgers are still empty after it, failing here, while
-/// `..._through_a_mandatory_as_enters_choice`, `..._with_a_second_pause` and
-/// `..._an_etb_counter_ordering_pause` stay green (they realize at (c) / (b)).
+/// STATUS UPDATED — this now carries the same status `counters.rs`'s `EmitCommittedCopyTokenEntry`
+/// site carries: EXERCISED, not isolated. The old text here said "this action does not settle (a
+/// stale second `CopyTargetChoice` is a known pre-existing defect on this route)". That defect is
+/// FIXED: `handle_copy_target_choice`'s liminal-resume branch now clears the answered prompt
+/// (CR 614.12a — the choice is made before the permanent enters, so the prompt is spent; CR 603.3 —
+/// the ETB abilities are owed the priority boundary the echo denied them). The route settles on the
+/// copy-target answer, so `engine::apply_action`'s settled-`Priority` backstop
+/// (`realize_settled_token_battlefield_entry`, called immediately before `run_post_action_pipeline`)
+/// now realizes the entry inside this same action and ahead of the same SBA pass. The old
+/// "one client round trip late" hazard cannot arise on this route any more.
+///
+/// REVERT-PROBE, RE-MEASURED (NO LONGER DISCRIMINATING): deleting the flush call in
+/// `engine_replacement::finish_copy_target_choice_entry` used to fail this test. Measured after the
+/// fix: this test and the whole `token_zone_change_index` / `spark_double_as_enters` /
+/// `vizier_of_many_faces_embalm_copy_panic_5278` / `metamorphic_alteration` /
+/// `constellation_enters_with_choice` / `issue_3260_phantasmal_image_persist` set stay GREEN with
+/// that call deleted, because the settled backstop covers it. Stronger than that: the call site is
+/// unpinned by the **whole** suite — `cargo test -p phase-engine` with it deleted returns the same
+/// 18514 + 12 + 9 + 4550 passing / 0 failed as baseline.
+///
+/// WHY IT IS STILL KEPT, measured rather than assumed. Probing the call site over the full suite
+/// gives 29 calls: 11 realize (`pushed=2`, Token-liminal settled route), 17 are inert, and 1 is the
+/// Meld caller — also inert (`pushed=0`; nothing is parked on a meld, because only the `Suppress`
+/// TOKEN commit parks `pending_token_battlefield_entry`). The CR 616.1 counter-pause reaches this
+/// call **0** times: it returns from `finish_copy_target_choice_entry` at the
+/// `apply_etb_counters == false` branch, well above the flush. So an earlier draft of this comment
+/// naming "the CR 616.1 counter-pause and Meld returns" as the callers this guards was wrong on
+/// both counts.
+///
+/// The call site's own comment says the flush precedes the replay / batch-drain / aura blocks so
+/// THEIR pause returns cannot strand a parked entry. **That guard function is stated, not
+/// established.** The intersection it describes — a Token-liminal entry that raises a pause AFTER
+/// the flush — IS reachable with the ordinary card pool: Embalm copying a creature whose ETB
+/// targets (e.g. Flametongue Kavu) drives
+/// `["ReplacementChoice(2)", "CopyTargetChoice", "TriggerTargetSelection"]`, returning the
+/// `replay_deferred_entry_events` pause after the flush. Measured at that pause with the flush call
+/// deleted vs intact: identical state in both arms (`parked=false`, the same single entry row).
+/// **Nothing is stranded**, so the only reachable instance does not demonstrate the guard.
+///
+/// Honest status, therefore: retained defensively. No shape reachable today has been measured to
+/// strand an entry when this call is removed, and no fixture pins it. Keep it for the CR 704.3
+/// ordering property it does provide on the 11 realizing calls (the CR 400.7 row is written before
+/// the settling action's SBA pass, so CR 704.5f cannot bury a 0-toughness copy first); do not cite
+/// a guard this file cannot demonstrate.
 #[test]
 fn unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself() {
     let mut scenario = GameScenario::new();
@@ -1477,13 +1661,19 @@ fn unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself() {
     let drive = drive_embalm_copy(&mut runner, vizier, Some("Grizzly Bears"));
     // POSITIVE reach-guard: the copy-target prompt is the only production entrance to the
     // postponed (`Suppress`) route, and this route raises no as-enters pause after it.
+    //
+    // WHOLE vector, not the `[..2]` slice this used to assert. The slice existed only because the
+    // unsettled action echoed a stale third `CopyTargetChoice`; with that fixed the full vector is
+    // assertable, and asserting it makes this test the cheapest stale-prompt regression detector on
+    // the route it names.
     assert_eq!(
-        drive.prompts[..2],
-        [
+        drive.prompts,
+        vec![
             "ReplacementChoice(2)".to_string(),
             "CopyTargetChoice".to_string()
         ],
-        "the unpaused route reaches the copy-target prompt with no intervening pause"
+        "the unpaused route reaches the copy-target prompt with no intervening pause, and that \
+         answer is the LAST prompt because it settles"
     );
     let token = drive.token();
 
@@ -1511,4 +1701,1202 @@ fn unpaused_copy_token_entry_is_realized_by_the_copy_target_action_itself() {
     assert_eq!(zone_name, "Grizzly Bears");
     assert_eq!(zone_power, Some(2));
     assert_eq!(battlefield_name, zone_name);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// CR 400.7 + CR 608.2i + CR 603.2c — the SIX remaining battlefield-entry emit sites.
+//
+// `snapshot_for_zone_change` leaves `turn_zone_change_index` at its `0` placeholder for
+// `restrictions::record_zone_change` to overwrite. Six production sites (seven fix points) built
+// the record and emitted it WITHOUT ever reaching the recorder, so each shipped index `0`:
+//   S1 `conjure.rs`                            — conjure onto the battlefield
+//   S2 `counters.rs` InjectPredefinedTokenAbilities — incubate resumed past a counter pause
+//   S3a `counters.rs` FinalizeTokenEntry        — spec token resumed past a counter pause
+//   S3b `counters.rs` FinalizeCopyTokenEntry    — copy token resumed past a counter pause
+//   S4  `token_copy.rs` copy-loop tail          — ordinary copy token
+//   S5  `token_copy.rs` modification-pause resume
+//   S6  `gift_delivery.rs` create_gift_token    — gift Treasure/Food/Fish/Card tokens
+//
+// THE DISCRIMINATING DIRECTION IS DICTATED BY THE GUARD.
+// `triggers.rs::batched_zone_change_already_collected` suppresses only when EVERY index in the
+// candidate batch is already in `batched_zone_change_trigger_fired`. So the site's entry must be
+// driven SECOND, after a routed two-token batch has already collected `(def, 0)` and `(def, 1)`:
+// the unrouted site then offers the single-element list `[0]`, `all()` is true, and its fire is
+// swallowed (life delta stays 1). Routed, it offers `[2]`, which is not in the set, and it fires
+// (life delta 2). Site FIRST would NOT discriminate — the batch's later entries carry uncollected
+// indices, so `all()` is false and both trees fire. Same idiom as
+// `mixed_group_sibling_last_also_fires` above.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Run the real trigger pipeline over the events a directly-driven resolver produced — the same
+/// two-line tail `mint_token_batch` and `incubate_batch` run inline.
+fn settle(state: &mut GameState, events: &[GameEvent]) {
+    process_triggers(state, events);
+    drain_order_triggers_with_identity(state);
+}
+
+/// What one site fixture measured.
+struct SiteRun {
+    /// The permanent the SITE's own drive put onto the battlefield.
+    site_obj: ObjectId,
+    /// `turn_zone_change_index` of every battlefield `ZoneChanged` the SITE's drive emitted.
+    site_indices: Vec<usize>,
+    /// P0's life change across the whole fixture (reach batch + site entry).
+    life_delta: i32,
+    /// The reach batch's indices — the negative sibling: the already-correct `token.rs` route
+    /// must be untouched by this change.
+    batch_indices: Vec<usize>,
+}
+
+/// The single battlefield `ZoneChanged` the SITE's drive emitted: which object entered, and the
+/// index the event actually shipped. Reads on BOTH trees — the unrouted sites still emit the
+/// event, just carrying the `0` placeholder — which is what makes the index a discriminator
+/// rather than a presence check.
+fn site_entry(events: &[GameEvent], what: &str) -> (ObjectId, Vec<usize>) {
+    let entries: Vec<(ObjectId, usize)> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } => Some((*object_id, record.turn_zone_change_index)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "{what} must emit exactly ONE battlefield ZoneChanged for its own entry \
+         (reach-guard: a fixture that never reached its site emits none); got {entries:?}"
+    );
+    (entries[0].0, vec![entries[0].1])
+}
+
+fn install_host_trigger(runner: &mut GameRunner, host: ObjectId) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&host)
+        .expect("host permanent")
+        .trigger_definitions
+        .push(batched_etb_life_trigger());
+}
+
+/// Open the turn under measurement and, when `mint_batch`, drive the routed two-token batch that
+/// collects `(def, 0)` and `(def, 1)` — the reach batch every discriminator needs so its own
+/// entry is the SECOND occurrence.
+fn open_turn(runner: &mut GameRunner, host: ObjectId, mint_batch: bool) -> (i32, u32, Vec<usize>) {
+    assert_eq!(
+        runner.state().zone_changes_this_turn.len(),
+        0,
+        "legibility: scenario staging must leave the per-turn zone-change ledger empty, so the \
+         indices below are the fixture's own"
+    );
+    let life_start = life_of_p0(runner.state());
+    let turn_start = runner.state().turn_number;
+    let batch_indices = if mint_batch {
+        let batch = mint_token_batch(runner.state_mut(), host, 2);
+        runner.advance_until_stack_empty();
+        // POSITIVE reach-guard: without this the site's "unchanged total" below would be a
+        // fixture that never triggered rather than a genuine suppression.
+        assert_eq!(
+            life_of_p0(runner.state()) - life_start,
+            1,
+            "the two-token reach batch fires the batched trigger exactly ONCE (CR 603.2c)"
+        );
+        zone_change_indices(&batch)
+    } else {
+        Vec::new()
+    };
+    (life_start, turn_start, batch_indices)
+}
+
+/// Answer the CR 616.1 counter-ordering pause a directly-driven resolver parked, through the REAL
+/// engine dispatch: `runner.act` routes into `engine_replacement::handle_replacement_choice` plus
+/// the post-action pipeline, which runs the trigger scan itself — hence no `settle` here. Shipped
+/// idiom for "direct resolver parks `waiting_for`, then `runner.act(ChooseReplacement)`":
+/// `counter_double_redirect_choice.rs`.
+fn answer_counter_order(runner: &mut GameRunner, what: &str) -> Vec<GameEvent> {
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "{what} must park the CR 616.1 counter-ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "{what}: a 1-candidate prompt is an optional replacement, not the CR 616.1 ordering pause"
+    );
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answer the CR 616.1 ordering prompt");
+    let events = result.events;
+    runner.advance_until_stack_empty();
+    events
+}
+
+/// M1–M4 plus the paired-deletion must-not-flip and the T9 negative sibling — the mechanism half
+/// of every discriminator. NOT called by the T8 controls (their whole job is to read identically
+/// on both trees).
+fn assert_site_records(runner: &GameRunner, run: &SiteRun, expected_index: usize) {
+    // M1 — ledger self-consistency. Every production push now routes through `record_zone_change`,
+    // which sets index = position by construction. Unfixed at S1/S2 the direct `push_back` lands a
+    // row at position 2 still carrying the placeholder `0`.
+    assert!(
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .enumerate()
+            .all(|(position, record)| record.turn_zone_change_index == position),
+        "every zone-change row's index must equal its position — a direct `push_back` that skips \
+         `record_zone_change` lands a row carrying the `0` placeholder; ledger = {:?}",
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .map(|record| (record.object_id, record.turn_zone_change_index))
+            .collect::<Vec<_>>()
+    );
+
+    // M2 — row presence. The five sites that never reached the recorder pushed NO row at all.
+    assert_eq!(
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| record.object_id == run.site_obj
+                && record.to_zone == Zone::Battlefield)
+            .count(),
+        1,
+        "the site's entry is on the CR 400.7 ledger exactly once (unrouted ⇒ 0; a kept direct \
+         push alongside the recorder ⇒ 2)"
+    );
+
+    // M3 — the EMITTED index, the dedup key `triggers.rs` reads off the event.
+    assert_eq!(
+        run.site_indices,
+        vec![expected_index],
+        "the emitted ZoneChanged carries the index the recorder assigned (placeholder ⇒ [0])"
+    );
+
+    // M4 — subscript contract. `ability.rs::self_ref_own_departure_successor` uses this index as a
+    // ROW SUBSCRIPT into `zone_changes_this_turn`; unfixed it subscripts row 0, which is the reach
+    // batch's first Saproling, not the emitting object.
+    assert_eq!(
+        runner.state().zone_changes_this_turn[run.site_indices[0]].object_id,
+        run.site_obj,
+        "the emitted index must subscript the EMITTING object's own ledger row"
+    );
+
+    // MUST-NOT-FLIP FOR THE PAIRED DELETION — this is the assertion that carries that claim, and
+    // it carries it because these sites are the ones the deletion actually touched. Measured on
+    // `4b34e5465`, the pre-change `record_battlefield_entry` call sites outside `restrictions.rs`
+    // are `conjure.rs:191`, `counters.rs:518/558/637`, `gift_delivery.rs:157` and
+    // `token_copy.rs:851/969` — the routes `SiteRun` drives. `record_zone_change` performs the
+    // CR 608.2i bookkeeping itself, so re-adding any one of those deleted calls makes this 2.
+    // MEASURED: re-adding `gift_delivery.rs:157` fails this assertion, `left: 2 right: 1`.
+    assert_eq!(
+        runner
+            .state()
+            .battlefield_entries_this_turn
+            .iter()
+            .filter(|record| record.object_id == run.site_obj)
+            .count(),
+        1,
+        "the site's entry is on the CR 608.2i ledger exactly once (re-adding the deleted \
+         `record_battlefield_entry` ⇒ 2)"
+    );
+
+    // T9 NEGATIVE SIBLING: the already-correct `token.rs` route is untouched. Neither counter
+    // doubler replaces token creation, so the reach batch is exactly two entries on both trees.
+    assert_eq!(
+        run.batch_indices,
+        vec![0, 1],
+        "the reach batch keeps its own two legitimate indices"
+    );
+}
+
+/// Both doublers of the CREATURE pair. Their `valid_card` is `Typed{[Creature], You}`, so they
+/// admit a creature entrant only.
+fn stage_creature_counter_pair(scenario: &mut GameScenario) {
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION_ORACLE);
+}
+
+/// Both doublers of the ANY-PERMANENT pair — required whenever the entrant is an ARTIFACT (the
+/// Incubator, the Equipment token), which the creature pair provably rejects. Vorinclex's
+/// doubling clause parses with `valid_card == None`; Ozolith's admits `artifact or creature you
+/// control`. `add_enchantment_from_oracle` stands in for the missing artifact builder: replacement
+/// candidacy gates the SOURCE only on its zone, and `valid_card` filters the AFFECTED object.
+fn stage_any_permanent_counter_pair(scenario: &mut GameScenario) {
+    scenario.add_creature_from_oracle(P0, "Vorinclex, Monstrous Raider", 6, 6, VORINCLEX_ORACLE);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Ozolith, the Shattered Spire",
+        OZOLITH_SHATTERED_SPIRE_ORACLE,
+    );
+}
+
+fn copy_token_effect(additional_modifications: Vec<ContinuousModification>) -> Effect {
+    Effect::CopyTokenOf {
+        target: TargetFilter::Any,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        extra_keywords: Vec::new(),
+        additional_modifications,
+    }
+}
+
+// ── S1 · conjure.rs ──────────────────────────────────────────────────────────────────────────
+
+fn drive_s1(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    // A missing card-registry entry is harmless here: `ConjuredIdentity::Named { face: None }`
+    // still creates the object and still takes the `destination == Battlefield` arm.
+    let ability = ResolvedAbility::new(
+        Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: "Verdant Dread".to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination: Zone::Battlefield,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        },
+        Vec::new(),
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    conjure::resolve(runner.state_mut(), &ability, &mut events).expect("the conjure resolves");
+    let (site_obj, site_indices) = site_entry(&events, "the battlefield conjure");
+    settle(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().turn_number,
+        turn_start,
+        "the whole fixture is ONE turn (both ledgers are per-turn)"
+    );
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S1 (CR 603.6a + CR 603.2c): a conjured battlefield entry driven AFTER a routed token batch is a
+/// distinct occurrence and must fire the batched ETB trigger again.
+///
+/// REVERT-PROBE (discriminating, RUN): replace the
+/// `zones::record_and_emit_entry_from_no_zone` call at `conjure.rs` with the hand-rolled
+/// `snapshot_for_zone_change` + `state.zone_changes_this_turn.push_back(…)` +
+/// `events.push(ZoneChanged)` ⇒ the conjured entry ships the `0` placeholder, collides
+/// with the batch's already-collected `(def, 0)`, its fire is swallowed, and the life delta reads
+/// 1 instead of 2 (M1, M3 and M4 fail with it).
+#[test]
+fn conjured_battlefield_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s1(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the conjured entry after a token batch fires the batched trigger AGAIN \
+         (index-0 placeholder ⇒ collides with the batch's legitimate 0 ⇒ 1)"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S6 · gift_delivery.rs ────────────────────────────────────────────────────────────────────
+
+/// Consumer 1's PRODUCTION seam: `quantity.rs`'s `ZoneChangeCountThisTurn` population scan, driven
+/// through the real resolver `game::quantity::resolve_quantity`. `TargetFilter::Any` reaches
+/// `zone_change_filter_inner`'s `Any => true` arm, so no filter conjunct can dominate the answer,
+/// and `source` is only the filter-context source id — which `Any` ignores. That is what makes the
+/// same query legible at a point where the site object does not exist yet.
+fn zone_change_count_this_turn(runner: &GameRunner, source: ObjectId) -> i32 {
+    resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: Some(Zone::Battlefield),
+                filter: TargetFilter::Any,
+            },
+        },
+        P0,
+        source,
+    )
+}
+
+/// The battlefield `ZoneChanged` record the SITE's own drive emitted for `site_obj`.
+fn site_entry_record(
+    events: &[GameEvent],
+    site_obj: ObjectId,
+) -> engine::types::game_state::ZoneChangeRecord {
+    events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *object_id == site_obj => Some((**record).clone()),
+            _ => None,
+        })
+        .expect("the site's own battlefield ZoneChanged")
+}
+
+/// `drive_s6` with its two observation points exposed, so tests **H** and **L** can read the state
+/// a monolithic drive hides: the trigger host, consumer 1's answer BEFORE the site enters, and the
+/// site's own emitted events (which carry the `ZoneChangeRecord` that went on the wire). One body,
+/// so the S6 discriminator, its T8 control, H and L all run the identical fixture.
+fn drive_s6_observed(mint_batch: bool) -> (GameRunner, SiteRun, Vec<GameEvent>, ObjectId, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    // OBSERVATION POINT (1) — consumer 1's seam AFTER the priming batch, BEFORE the site's entry.
+    // The site object does not exist yet, so the host is the filter-context source at both points
+    // and the two calls are literally the same query.
+    let before = zone_change_count_this_turn(&runner, host);
+
+    // Both context fields are load-bearing: `resolve` no-ops without `additional_cost_paid`, and
+    // returns early without a latched recipient (CR 702.174a). Same shape as the in-repo
+    // `make_gift_ability`.
+    let mut ability = ResolvedAbility::new(
+        Effect::GiftDelivery {
+            kind: GiftKind::Treasure,
+        },
+        Vec::new(),
+        host,
+        P0,
+    );
+    ability.context.additional_cost_paid = true;
+    ability.context.gift_recipient = Some(PlayerId(1));
+
+    let mut events = Vec::new();
+    gift_delivery::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the gift delivery resolves");
+    // Reach-guard: the Treasure was actually created. The batched trigger has no `valid_card`, so
+    // P1's token still fires it and its `GainLife { player: Controller }` still pays P0.
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        "the promised gift must create the Treasure token"
+    );
+    let (site_obj, site_indices) = site_entry(&events, "the gift token");
+    settle(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+        events,
+        host,
+        before,
+    )
+}
+
+fn drive_s6(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let (runner, run, _events, _host, _before) = drive_s6_observed(mint_batch);
+    (runner, run)
+}
+
+/// **H** — CR 400.7 + CR 603.6a, the event↔ledger IDENTITY agreement (requirement R3).
+///
+/// `Ability::self_ref_own_departure_successor` (`types/ability.rs`) uses the index the EVENT
+/// carries as a SUBSCRIPT into `state.zone_changes_this_turn` and then requires the row it lands on
+/// to carry the SAME `trigger_source_context().identity.reference` as the event's own record. An
+/// entry that emits without recording ships the `0` placeholder, so that subscript lands on a row
+/// belonging to a DIFFERENT object and the `SelfRef` binding silently fails.
+///
+/// This asserts R3, not `Some`-ness: `trigger_source_context` is `Some` on BOTH trees by
+/// construction (`game_object.rs`'s snapshot builds it unconditionally), so an
+/// `assert!(…is_some())` here would be a snapshot of the constructor and could never fail. The
+/// payload is assertion (2).
+///
+/// VACUITY: the priming batch is MANDATORY. With an empty ledger the site's index would legally be
+/// `0` and row `0` would be the site's own row, so (2) would pass pre-fix for the wrong reason.
+/// The batch-first ordering is what makes H discriminating, exactly as for T1–T7; the
+/// `batch_indices == [0, 1]` guard below pins it.
+///
+/// REVERT-PROBE (discriminating, RUN — this is PROBE X): revert the SITE, not the shared
+/// authority. In `gift_delivery.rs::create_gift_token`, replace the
+/// `token::push_committed_token_entry_events` call with the hand-rolled pair —
+/// `record_battlefield_entry`,
+/// `zone_changes_this_turn.push_back(snapshot_for_zone_change(obj, None, Battlefield))`, then
+/// `events.push(ZoneChanged { .. })` + `events.push(TokenCreated { .. })` — so the site's row
+/// EXISTS but keeps the `0` placeholder index.
+///
+/// Site-isolated, not authority-wide, and that is load-bearing: reverting the shared authority
+/// also strips the PRIMING batch's rows, so this test dies at the vacuity guard above
+/// (MEASURED: `left: [0, 0] right: [0, 1]` at the `batch_indices` assertion) and assertion (2) is
+/// never evaluated. The site-isolated form leaves the priming batch on the real authority, so the
+/// guard passes and the payload is what flips.
+///
+/// MEASURED, site-isolated: `idx == 0`, the ledger row at `0` is the priming batch's first
+/// Saproling, and assertion (2) fails —
+/// `left: ObjectIncarnationRef { object_id: ObjectId(2), incarnation: 1 }`,
+/// `right: ObjectIncarnationRef { object_id: ObjectId(5), incarnation: 1 }`,
+/// ledger `[(ObjectId(2), 0), (ObjectId(3), 1), (ObjectId(5), 0)]`.
+/// MEASURED on the same probe build: **L** and its folded L-b assertions stay GREEN — that
+/// contrast is what proves H's payload is the index/identity while L's is row presence.
+#[test]
+fn the_site_row_the_event_subscripts_carries_the_entering_objects_identity() {
+    let (runner, run, events, _host, _before) = drive_s6_observed(true);
+
+    // Vacuity guard, before touching the site row: the priming batch really did take 0 and 1.
+    assert_eq!(
+        run.batch_indices,
+        vec![0, 1],
+        "H is only discriminating when the site's entry is the SECOND occurrence — the priming \
+         batch must own indices 0 and 1"
+    );
+
+    let record = site_entry_record(&events, run.site_obj);
+    let idx = record.turn_zone_change_index;
+
+    // (1) PRECONDITION R1 — an `.expect`, deliberately not an `assert!(…is_some())`: this is a
+    // precondition of the payload, and it holds on both trees.
+    let ev_ctx = record
+        .trigger_source_context()
+        .expect("a real zone-change event carries its source context");
+
+    // (2) PAYLOAD — R3. The ledger row the EVENT subscripts is the row that event wrote.
+    assert_eq!(
+        runner.state().zone_changes_this_turn[idx]
+            .trigger_source_context()
+            .expect("the recorded row carries its source context")
+            .identity
+            .reference,
+        ev_ctx.identity.reference,
+        "CR 400.7: the ledger row at the event's own `turn_zone_change_index` must be the record \
+         that event wrote — an unrecorded entry ships the `0` placeholder and subscripts a row \
+         belonging to a different object (ledger = {:?})",
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .map(|row| (row.object_id, row.turn_zone_change_index))
+            .collect::<Vec<_>>()
+    );
+
+    // (3) R2 — the identity is the entering object's live incarnation.
+    assert_eq!(ev_ctx.identity.reference.object_id, run.site_obj);
+    assert_eq!(
+        ev_ctx.identity.reference.incarnation,
+        runner
+            .state()
+            .objects
+            .get(&run.site_obj)
+            .expect("the gift token is on the battlefield")
+            .incarnation
+    );
+
+    // (4) R4 — free and NON-DISCRIMINATING, labelled as such: `ObjectIdentityBinding::new(…,
+    // from.unwrap_or(self.zone))` falls back to the live zone when `from` is `None`, and that
+    // fallback is independently guaranteed by `record_battlefield_entry`'s
+    // `obj.zone != Battlefield → return` guard, which `assert_site_records`'s must-not-flip clause
+    // already exercises. It passes on both trees.
+    assert_eq!(ev_ctx.identity.expected_zone, Zone::Battlefield);
+}
+
+/// **L** (with **L-b** folded in) — CR 400.7: the new ledger row is visible at the two production
+/// seams that read `zone_changes_this_turn` by content rather than by subscript.
+///
+/// **L** drives consumer 1, `quantity.rs`'s `ZoneChangeCountThisTurn` population scan, through the
+/// real resolver at TWO points of ONE run: after the priming batch (`before`) and after the site's
+/// drive (`after`). The assertion is a DELTA (`after == before + 1`), never an absolute — the
+/// primed fixture is what gives L-b its cross-producer property, and a delta cannot be invalidated
+/// by a change in how many rows the priming batch mints.
+///
+/// **L-b** then runs consumer 4's own seam on the same post-drive state:
+/// `filter::matches_target_filter_on_zone_change_record` with `TargetFilter::SelfRef` and a
+/// `FilterContext::from_trigger_source` built from the site event's context. Three
+/// `(None, Battlefield)` rows from TWO producers are on the ledger; the seam must select exactly
+/// the site's.
+///
+/// ZERO-CENSUS POSITIVE CONTROL (mandatory): `before > 0` is asserted in the same run. An
+/// instrument that can only ever answer `0` proves nothing about an absence.
+///
+/// DOMINATING-CONJUNCT CHECK: `TargetFilter::Any` reaches `zone_change_filter_inner`'s
+/// `Any => true`, and the `from`/`to` conjuncts are `is_none_or`, so nothing upstream of the row
+/// can dominate L's answer. `matches_target_filter_on_zone_change_record` is a pure pass-through to
+/// `zone_change_filter_inner`, so nothing sits between the row and the `SelfRef` arm for L-b.
+///
+/// DISCLOSED NON-DISCRIMINATION (do not upgrade this claim): `FilterContext::from_trigger_source`
+/// sets `source_id` from the same identity, so the `SelfRef` arm's `map_or` fallback would select
+/// the same row. L-b measures ADMISSION at consumer 4's seam, not identity-vs-ObjectId inside the
+/// arm. The identity payload is H's job.
+///
+/// REVERT-PROBE (discriminating, RUN — this is PROBE Y): revert the SITE, not the shared
+/// authority. In `gift_delivery.rs::create_gift_token`, replace the
+/// `token::push_committed_token_entry_events` call with `events.push(ZoneChanged { .. })` +
+/// `events.push(TokenCreated { .. })` over a bare `snapshot_for_zone_change` and NO recording at
+/// all — no `push_back`, no `record_battlefield_entry`, index left at its `0` placeholder.
+///
+/// Site-isolated, not authority-wide, and that is load-bearing: reverting the shared authority
+/// also strips the PRIMING batch's rows, so the zero-census positive control above fails first
+/// (`before` collapses to `0`) and the fixture does NOT stay intact. The site-isolated form leaves
+/// the priming batch on the real authority, so `before` stays non-zero and the delta is what flips.
+///
+/// MEASURED, site-isolated: the DELTA assertion fails — `left: 2 right: 3`, `before = 2,
+/// after = 2` — with the `before > 0` control green. The L-b `selected` assertion is NOT reached
+/// (the delta assertion dominates), so this probe pins row PRESENCE at consumer 1's seam only;
+/// no claim is made here about L-b flipping. PROBE X — the site's row still pushed, index left at
+/// `0` — leaves this test GREEN (measured); that is H's probe, not L's.
+#[test]
+fn zone_change_count_this_turn_sees_the_gift_token_entry() {
+    let (runner, run, events, host, before) = drive_s6_observed(true);
+
+    // Zero-census positive control: the instrument answers non-zero before the site ever runs.
+    assert!(
+        before > 0,
+        "the priming batch must already be visible at consumer 1's seam — an instrument stuck at \
+         0 could not distinguish 'the site added nothing' from 'the query sees nothing'"
+    );
+
+    let after = zone_change_count_this_turn(&runner, host);
+    assert_eq!(
+        after,
+        before + 1,
+        "CR 400.7: the gift token's battlefield entry must add exactly one row that consumer 1's \
+         production scan can see (before = {before}, after = {after})"
+    );
+
+    // L-b — consumer 4 (`filter.rs`'s `TargetFilter::SelfRef` arm) at its own production seam.
+    let record = site_entry_record(&events, run.site_obj);
+    let ev_ctx = record
+        .trigger_source_context()
+        .expect("a real zone-change event carries its source context");
+    let ctx = FilterContext::from_trigger_source(ev_ctx);
+    let select_with = |filter: &TargetFilter| -> Vec<ObjectId> {
+        runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .filter(|row| {
+                matches_target_filter_on_zone_change_record(runner.state(), row, filter, &ctx)
+            })
+            .map(|row| row.object_id)
+            .collect()
+    };
+
+    // REACHABILITY EXHIBIT for the exclusion below. `selected == vec![site_obj]` is an asserted
+    // NEGATIVE about the two priming rows, and a negative is vacuous if the excluded rows could
+    // never have been selected in the first place. Run the SAME loop over the SAME ledger with an
+    // admitting filter first: all three rows ARE reachable at this seam, so the exclusion is the
+    // `SelfRef` arm's doing and not an artefact of the population.
+    let reachable = select_with(&TargetFilter::Any);
+    assert_eq!(
+        reachable.len(),
+        3,
+        "reachability exhibit: with an admitting filter this seam selects all three \
+         `(None, Battlefield)` rows this turn — two priming Saprolings and the site's own. \
+         Without that, the SelfRef exclusion below would be a negative about rows that were never \
+         selectable; got {reachable:?}"
+    );
+    assert!(
+        reachable.contains(&run.site_obj),
+        "reachability exhibit: the site's own row must be among them; got {reachable:?}"
+    );
+
+    let selected = select_with(&TargetFilter::SelfRef);
+    assert_eq!(
+        selected,
+        vec![run.site_obj],
+        "CR 400.7: consumer 4's SelfRef seam must select exactly the site's own row out of the \
+         three `(None, Battlefield)` rows two different producers wrote this turn (all three are \
+         reachable here — see the exhibit above)"
+    );
+}
+
+/// S6 (CR 111.1 + CR 603.6a): a gift token entering after a routed token batch fires the batched
+/// ETB trigger again.
+///
+/// REVERT-PROBE (discriminating, RUN): restore `record_battlefield_entry` plus the
+/// snapshot/`ZoneChanged`/`TokenCreated` block in `gift_delivery.rs::create_gift_token` in place
+/// of `push_committed_token_entry_events` ⇒ life delta 2→1, M2 1→0, M3 [2]→[0], M4 fails.
+#[test]
+fn gift_token_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s6(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the gift token entry after a token batch fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S4 · token_copy.rs copy-loop tail ────────────────────────────────────────────────────────
+
+fn drive_s4(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    // The Watchdog's "enters with three +1/+1 counters" seeds `etb_counters`, which forces the
+    // NON-liminal copy branch. With NO doubler on board the counter addition executes without
+    // pausing, so the loop falls through to the S4 tail.
+    let watchdog = scenario
+        .add_creature(P0, "Faithful Watchdog", 0, 0)
+        .with_plus_counters(3)
+        .from_oracle_text_with_keywords(&["Vigilance"], FAITHFUL_WATCHDOG_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    let ability = ResolvedAbility::new(
+        copy_token_effect(Vec::new()),
+        vec![TargetRef::Object(watchdog)],
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    token_copy::resolve(runner.state_mut(), &ability, &mut events).expect("the copy resolves");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        "the copy token must be created"
+    );
+    let (site_obj, site_indices) = site_entry(&events, "the copy-loop tail");
+
+    // POSITIVE CONTROL for the `etb_counters` seed that routes this fixture (and T6's) into the
+    // non-liminal branch: if this reads 0 the seed never materialized and the S3b fixture's
+    // premise is dead too. Declared escalation, not a degradable assertion.
+    assert_eq!(
+        runner.state().objects[&site_obj]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        3,
+        "the copy carries the Watchdog's three +1/+1 counters — this is what seeds `etb_counters` \
+         and forces the non-liminal branch"
+    );
+
+    settle(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S4 (CR 707.2 + CR 603.6a): an ordinary copy token's entry after a routed token batch fires the
+/// batched ETB trigger again.
+///
+/// REVERT-PROBE (discriminating, RUN): restore `record_battlefield_entry` plus the
+/// snapshot/`ZoneChanged`/`TokenCreated` block at the `token_copy.rs` copy-loop tail ⇒ life delta
+/// 2→1, M2 1→0, M3 [2]→[0], M4 fails.
+#[test]
+fn copy_token_tail_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s4(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the copy token's entry after a token batch fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S5 · token_copy.rs modification-pause resume ─────────────────────────────────────────────
+
+fn drive_s5(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    // Vanilla source: it seeds NO `etb_counters`, so the only pausable stage is
+    // `apply_token_modifications` — which is the S5 resume, not S3b's.
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    // The copy is a CREATURE, so the creature-scoped doubler pair admits it.
+    stage_creature_counter_pair(&mut scenario);
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    // `AddCounterOnEnter` is NOT liminal-immediate, so the non-liminal branch runs regardless of
+    // `etb_counters`; its counter addition meets two competing replacements and parks CR 616.1.
+    let ability = ResolvedAbility::new(
+        copy_token_effect(vec![ContinuousModification::AddCounterOnEnter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            if_type: None,
+        }]),
+        vec![TargetRef::Object(bears)],
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    token_copy::resolve(runner.state_mut(), &ability, &mut events).expect("the copy resolves");
+    let resume_events = answer_counter_order(&mut runner, "the copy's AddCounterOnEnter");
+    let (site_obj, site_indices) = site_entry(&resume_events, "the modification-pause resume");
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S5 (CR 616.1 + CR 603.6a): a copy token whose entry was postponed across a counter-ordering
+/// pause fires the batched ETB trigger when it finally enters after a routed token batch.
+///
+/// REVERT-PROBE (discriminating, RUN): restore `record_battlefield_entry` plus the
+/// snapshot/`ZoneChanged`/`TokenCreated` block in
+/// `token_copy.rs::apply_remaining_token_modifications_after_counter_pause` ⇒ life delta 2→1,
+/// M2 1→0, M3 [2]→[0], M4 fails.
+#[test]
+fn modification_paused_copy_token_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s5(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the modification-paused copy's entry fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S3a · counters.rs FinalizeTokenEntry (unattached) ────────────────────────────────────────
+
+fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: &str) -> Effect {
+    Effect::Token {
+        name: name.to_string(),
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types,
+        colors: Vec::new(),
+        keywords: Vec::new(),
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to,
+        enters_attacking: false,
+        supertypes: Vec::new(),
+        static_abilities: Vec::new(),
+        enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+    }
+}
+
+fn drive_s3a_unattached(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    stage_creature_counter_pair(&mut scenario);
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    // A CREATURE token with `enter_with_counters`: the two competing +1/+1 replacements park
+    // CR 616.1 mid-entry, and the answer drains through `FinalizeTokenEntry`.
+    let ability = ResolvedAbility::new(
+        spec_token_effect(vec!["Creature".to_string()], None, "Counter Saproling"),
+        Vec::new(),
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    token::resolve(runner.state_mut(), &ability, &mut events).expect("the token resolves");
+    let resume_events = answer_counter_order(&mut runner, "the token's enter_with_counters");
+    let (site_obj, site_indices) = site_entry(&resume_events, "the FinalizeTokenEntry resume");
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S3a (CR 616.1 + CR 603.6a), unattached arm: a spec token whose entry was postponed across a
+/// counter-ordering pause fires the batched ETB trigger when it enters after a routed batch.
+///
+/// REVERT-PROBE (discriminating, RUN): restore the private `counters.rs::push_token_entry_events`
+/// clone, repoint the `FinalizeTokenEntry` arm back at it, and restore its
+/// `record_battlefield_entry` ⇒ life delta 2→1, M2 1→0, M3 [2]→[0], M4 fails.
+#[test]
+fn counter_paused_token_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s3a_unattached(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the counter-paused token's entry fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S3a · counters.rs FinalizeTokenEntry (attach arm) ────────────────────────────────────────
+
+fn drive_s3a_attached(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    let attach_host = scenario.add_creature(P0, "Equipped Host", 2, 2).id();
+    let painter = scenario
+        .add_creature_from_oracle(P0, "Painter's Servant", 1, 3, PAINTERS_SERVANT_ORACLE)
+        .id();
+    // The entrant is an ARTIFACT Equipment, which the creature-scoped pair would reject.
+    stage_any_permanent_counter_pair(&mut scenario);
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+    // `add_creature_from_oracle` places the object directly on the battlefield without running the
+    // entry pipeline, so Painter's "As this creature enters, choose a color" never raised its
+    // `NamedChoice` and `chosen_color()` would answer `None` — leaving the colour instrument below
+    // inert. Stage the choice the pipeline would have recorded.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&painter)
+        .expect("Painter's Servant is on the battlefield")
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Blue));
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    let ability = ResolvedAbility::new(
+        spec_token_effect(
+            vec!["Artifact".to_string(), "Equipment".to_string()],
+            Some(TargetFilter::ParentTarget),
+            "Bladed Rig",
+        ),
+        vec![TargetRef::Object(attach_host)],
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    token::resolve(runner.state_mut(), &ability, &mut events).expect("the token resolves");
+    let resume_events = answer_counter_order(&mut runner, "the Equipment token's counters");
+    let (site_obj, site_indices) = site_entry(&resume_events, "the attached FinalizeTokenEntry");
+
+    // Reach-guard for the ATTACH arm specifically: without this the fixture would be a second copy
+    // of the unattached test.
+    assert_eq!(
+        runner.state().objects[&site_obj].attached_to,
+        Some(AttachTarget::Object(attach_host)),
+        "the Equipment token must enter attached (CR 301.5) — this is what makes the entry record \
+         post-`flush_layers`"
+    );
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S3a (CR 616.1 + CR 301.5 + CR 603.6a), ATTACH arm. Two claims:
+///
+/// (A) FIX — unconditional discriminator, identical to the unattached arm's.
+/// REVERT-PROBE (discriminating, RUN): restore `counters.rs::push_token_entry_events`, repoint
+/// `FinalizeTokenEntry` back at it, restore its `record_battlefield_entry` ⇒ life delta 2→1,
+/// M2 1→0, M3 [2]→[0], M4 fails.
+///
+/// (B) ORDERING — the record point moves from before `attach::attach_to` to after it, and
+/// `attach_to` ends in a SYNCHRONOUS `flush_layers`, so every layer-derived field of the entry
+/// record (`colors`, `keywords`, types, controller) is now snapshotted post-flush. That is the
+/// CR-correct point (it is what the unpaused twin in `token.rs` already does: attach, then call
+/// the same helper). REVERT-PROBE (conditional, RUN and journal either way): move the S3a record
+/// point back to before the attach block. If the `colors` equality below flips, this test covers
+/// the ordering change too; if it does not, the ordering change ships untested and that is
+/// disclosed rather than papered over.
+#[test]
+fn counter_paused_attached_token_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s3a_attached(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the counter-paused ATTACHED token's entry fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+
+    // FIXTURE-VALIDITY GUARD (fail-loud, deliberately identical on both trees): Painter's Servant
+    // must actually colour the Equipment token. An uncoloured token makes the ordering assertion
+    // below vacuous.
+    let live_color = runner.state().objects[&run.site_obj].color.clone();
+    assert!(
+        !live_color.is_empty(),
+        "Painter's Servant must colour the Equipment token — an inert fixture makes the ordering \
+         assertion vacuous"
+    );
+
+    // (B) ORDERING: the entry record is taken after `attach_to`'s synchronous `flush_layers`, so
+    // its layer-derived colours agree with the live object.
+    let entry_row = runner
+        .state()
+        .battlefield_entries_this_turn
+        .iter()
+        .find(|record| record.object_id == run.site_obj)
+        .expect("the attached token has a CR 608.2i battlefield-entry row");
+    assert_eq!(
+        entry_row.colors, live_color,
+        "the entry record snapshots the token's post-attach, post-flush colours (CR 608.2i)"
+    );
+}
+
+// ── S3b · counters.rs FinalizeCopyTokenEntry ─────────────────────────────────────────────────
+
+fn drive_s3b(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    let watchdog = scenario
+        .add_creature(P0, "Faithful Watchdog", 0, 0)
+        .with_plus_counters(3)
+        .from_oracle_text_with_keywords(&["Vigilance"], FAITHFUL_WATCHDOG_ORACLE)
+        .id();
+    // The copy is a CREATURE, so the creature pair admits it — and unlike S5 there are NO
+    // modifications, so stage 1 cannot pause and the `etb_counters` loop is what parks CR 616.1.
+    stage_creature_counter_pair(&mut scenario);
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    let ability = ResolvedAbility::new(
+        copy_token_effect(Vec::new()),
+        vec![TargetRef::Object(watchdog)],
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    token_copy::resolve(runner.state_mut(), &ability, &mut events).expect("the copy resolves");
+    let resume_events = answer_counter_order(&mut runner, "the copy's seeded etb_counters");
+    let (site_obj, site_indices) = site_entry(&resume_events, "the FinalizeCopyTokenEntry resume");
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S3b (CR 616.1 + CR 707.2 + CR 603.6a): a copy token whose SEEDED etb-counter placement parked
+/// the ordering choice fires the batched ETB trigger when it enters after a routed batch.
+///
+/// REVERT-PROBE (discriminating, RUN): restore `counters.rs::push_token_entry_events`, repoint the
+/// `FinalizeCopyTokenEntry` arm back at it, restore its `record_battlefield_entry` ⇒ life delta
+/// 2→1, M2 1→0, M3 [2]→[0], M4 fails.
+#[test]
+fn counter_paused_copy_token_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s3b(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the counter-paused copy token's entry fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── S2 · counters.rs InjectPredefinedTokenAbilities (incubate resume) ────────────────────────
+
+fn drive_s2(mint_batch: bool) -> (GameRunner, SiteRun) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Batched Watcher", 1, 1).id();
+    // The Incubator is a colorless ARTIFACT: the creature-scoped pair provably does NOT admit it,
+    // so this fixture must use the any-permanent pair or it would never pause.
+    stage_any_permanent_counter_pair(&mut scenario);
+    let mut runner = scenario.build();
+    install_host_trigger(&mut runner, host);
+
+    let (life_start, turn_start, batch_indices) = open_turn(&mut runner, host, mint_batch);
+
+    let ability = ResolvedAbility::new(
+        Effect::Incubate {
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+        Vec::new(),
+        host,
+        P0,
+    );
+    let mut events = Vec::new();
+    incubate::resolve(runner.state_mut(), &ability, &mut events).expect("the incubate resolves");
+    // The entry is DEFERRED behind the counter pause: nothing has entered yet.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+        "the Incubator's entry is deferred until its counters settle — a ZoneChanged here means \
+         the fixture never paused and is measuring the unpaused incubate route instead"
+    );
+    let resume_events = answer_counter_order(&mut runner, "the Incubator's counter");
+    let (site_obj, site_indices) = site_entry(&resume_events, "the incubate resume");
+
+    // POSITIVE CONTROL: both doublers really applied. Base is 1; either alone reaches 2; the pair
+    // reaches 3 (`(1*2)+1`) or 4 (`(1+1)*2`) depending on the chosen order. A reading of 2 means
+    // Ozolith's parsed `quantity_modification` is not `Plus{1}` — escalate, do not weaken to `>=2`
+    // (that would be satisfied by either doubler alone and so is vacuous).
+    assert!(
+        runner.state().objects[&site_obj]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+            >= 3,
+        "both counter doublers must have applied to the Incubator; got {:?}",
+        runner.state().objects[&site_obj].counters
+    );
+
+    assert_eq!(runner.state().turn_number, turn_start, "one turn");
+    let life_delta = life_of_p0(runner.state()) - life_start;
+    (
+        runner,
+        SiteRun {
+            site_obj,
+            site_indices,
+            life_delta,
+            batch_indices,
+        },
+    )
+}
+
+/// S2 (CR 616.1 + CR 603.6a): an Incubator whose entry was deferred behind a counter-ordering
+/// pause fires the batched ETB trigger when it enters after a routed token batch.
+///
+/// REVERT-PROBE (discriminating, RUN): replace the `zones::record_and_emit_entry_from_no_zone`
+/// call in the `InjectPredefinedTokenAbilities` arm with the hand-rolled
+/// `snapshot_for_zone_change` + `state.zone_changes_this_turn.push_back(…)` +
+/// `events.push(ZoneChanged)`, and restore its `record_battlefield_entry` ⇒ life delta 2→1,
+/// M1 fails (a row at position 2 carrying index 0), M3 [2]→[0], M4 fails.
+#[test]
+fn incubate_resume_entry_after_a_token_batch_fires_the_batched_trigger() {
+    let (runner, run) = drive_s2(true);
+    assert_eq!(
+        run.life_delta, 2,
+        "the resumed Incubator's entry fires the batched trigger AGAIN"
+    );
+    assert_site_records(&runner, &run, 2);
+}
+
+// ── T8 · single-entry controls, one per site class ───────────────────────────────────────────
+//
+// Each drives the SAME `drive_<site>` body with no reach batch, into an EMPTY ledger. The
+// instrument is the EMITTED index, which reads `[0]` on BOTH trees (unfixed: the placeholder;
+// fixed: `len() == 0`) — a deliberate no-flip. These are NOT discriminators and carry no
+// revert-probe: their job is to prove each fixture reaches its site and fires at all, so that the
+// `== 2` failure of the tests above on an unfixed tree reads as SUPPRESSION rather than fixture
+// breakage. They deliberately do not call `assert_site_records` or `ledger_index` — `ledger_index`
+// panics on the unfixed tree at the five sites that record no row, which would destroy the
+// control property.
+
+fn assert_single_entry_control(run: &SiteRun) {
+    assert_eq!(
+        run.life_delta, 1,
+        "the site's entry alone fires the batched trigger exactly once"
+    );
+    assert_eq!(
+        run.site_indices,
+        vec![0],
+        "the first entry of an empty-ledger turn legitimately takes index 0"
+    );
+    assert!(
+        run.batch_indices.is_empty(),
+        "the control drives no reach batch"
+    );
+}
+
+#[test]
+fn t8_conjure_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s1(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_gift_token_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s6(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_copy_token_tail_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s4(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_modification_paused_copy_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s5(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_counter_paused_token_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s3a_unattached(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_counter_paused_copy_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s3b(false);
+    assert_single_entry_control(&run);
+}
+
+#[test]
+fn t8_incubate_resume_alone_into_an_empty_ledger_fires_once() {
+    let (_runner, run) = drive_s2(false);
+    assert_single_entry_control(&run);
 }

@@ -217,6 +217,13 @@ pub(crate) fn handle_select_modes(
             )?;
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            super::casting::emit_targeting_events(
+                state,
+                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                pending.object_id,
+                controller,
+                events,
+            );
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -230,6 +237,13 @@ pub(crate) fn handle_select_modes(
         )? {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            super::casting::emit_targeting_events(
+                state,
+                &super::ability_utils::flatten_targets_in_chain(&resolved),
+                pending.object_id,
+                controller,
+                events,
+            );
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -371,18 +385,20 @@ pub(crate) fn handle_select_targets(
 
     let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
+    let mut pending = pending;
+    let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+    pending.crime_candidate =
+        super::casting::targets_commit_crime(state, &announced_targets, pending.ability.controller);
 
-    if pending.activation_ability_index.is_some() {
-        // CR 602.2b + CR 601.2c: the target event occurs when targets are
-        // declared, before a distribution choice or any activation cost.
-        super::casting::emit_targeting_events(
-            state,
-            &super::ability_utils::flatten_targets_in_chain(&ability),
-            pending.object_id,
-            pending.ability.controller,
-            events,
-        );
-    }
+    // CR 601.2c / CR 602.2b: targets become targets at declaration, before
+    // any later distribution or cost-payment continuation.
+    super::casting::emit_targeting_events(
+        state,
+        &announced_targets,
+        pending.object_id,
+        pending.ability.controller,
+        events,
+    );
 
     if let Some(waiting_for) =
         maybe_pause_for_cast_distribution(state, player, &pending, &ability, events)?
@@ -391,7 +407,6 @@ pub(crate) fn handle_select_targets(
     }
 
     if pending.activation_ability_index.is_some() {
-        let mut pending = pending;
         pending.ability = ability;
         pending.activation_target_selection = ActivationTargetSelection::Settled;
         if !target_first_activation_defers_interactive_costs_to_payment_boundary(
@@ -486,18 +501,20 @@ pub(crate) fn handle_choose_target(
             // Offering's final slot is opponent-chosen; without re-anchoring here the
             // inbound per-slot `player` (the opponent) would pay and stack the spell.
             let controller = pending.ability.controller;
+            let mut pending = pending;
+            let announced_targets = super::ability_utils::flatten_targets_in_chain(&ability);
+            pending.crime_candidate =
+                super::casting::targets_commit_crime(state, &announced_targets, controller);
 
-            if pending.activation_ability_index.is_some() {
-                // CR 602.2b + CR 601.2c: complete the target-declaration event
-                // before any distribution choice or activation cost.
-                super::casting::emit_targeting_events(
-                    state,
-                    &super::ability_utils::flatten_targets_in_chain(&ability),
-                    pending.object_id,
-                    controller,
-                    events,
-                );
-            }
+            // CR 601.2c / CR 602.2b: complete target declaration before later
+            // distribution or cost-payment continuations.
+            super::casting::emit_targeting_events(
+                state,
+                &announced_targets,
+                pending.object_id,
+                controller,
+                events,
+            );
 
             if let Some(waiting_for) =
                 maybe_pause_for_cast_distribution(state, controller, &pending, &ability, events)?
@@ -506,7 +523,6 @@ pub(crate) fn handle_choose_target(
             }
 
             if pending.activation_ability_index.is_some() {
-                let mut pending = pending;
                 pending.ability = ability;
                 pending.activation_target_selection = ActivationTargetSelection::Settled;
                 if !target_first_activation_defers_interactive_costs_to_payment_boundary(

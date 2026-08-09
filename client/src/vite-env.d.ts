@@ -8,6 +8,7 @@ declare const __ENGINE_WASM_URL__: string | undefined;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 declare const __CARD_DATA_URL__: string;
 declare const __CARD_DATA_LOCALE_URL_TEMPLATE__: string;
+declare const __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: string;
 declare const __CARD_NAMES_URL__: string;
 declare const __CHANGELOG_URL__: string;
 declare const __CHANGELOG_META_URL__: string;

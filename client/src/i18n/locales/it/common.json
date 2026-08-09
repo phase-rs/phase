@@ -78,6 +78,7 @@
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",
     "requestTakeback": "Richiedi ripristino",
+    "undoLastAction": "Annulla ultima azione",
     "concede": "Concedi",
     "backToDraft": "Torna al Draft",
     "mainMenu": "Menu principale",

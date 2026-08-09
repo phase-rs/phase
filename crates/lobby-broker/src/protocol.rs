@@ -31,13 +31,24 @@ pub enum ServerErrorCode {
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
-/// field with `#[serde(default)]` does not require a bump.
+/// field with `#[serde(default)]` does not require a bump — **unless the client
+/// stops deriving a fallback for it.** That clause is about wire
+/// *parseability*, not capability: once the client renders a feature only from
+/// the new field, an old server that omits it produces a silent feature loss
+/// rather than a parse error, and the handshake is the only place that pairing
+/// can be refused. See 24.
 ///
 /// Note: renaming or removing a variant silently fails at JSON parse time
 /// (clients see "Invalid message: unknown variant") rather than at the
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 24 — `DerivedViews::unbounded_families` carries the engine-owned per-seat
+///      family collapse state behind each `∞` badge. The field is
+///      `#[serde(default)]`, so this is a capability bump rather than a parse
+///      bump: the client deleted its row-flag OR-fold derivation, so a v23
+///      server that omits the field would leave a new client rendering NO
+///      infinity badges at all, silently and with no parse error to catch it.
 /// 23 — `PayableResource::ManaGeneric` changed from `{ per_x }` to
 ///      `{ base_cost: ManaCost }` (#6410) — a `GameState` payload field type
 ///      change, and `base_cost` intentionally carries no `#[serde(default)]`
@@ -58,7 +69,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -395,8 +406,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_priority_passing_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 23);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 22);
+        assert_eq!(PROTOCOL_VERSION, 24);
+        // Lobby keeps its one-version rollout window; full-game servers stay
+        // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
+        // which is what refuses the v23-server/v24-client pairing that would
+        // silently drop every ∞ badge.
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 23);
     }
 
     #[test]

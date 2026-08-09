@@ -13957,24 +13957,6 @@ mod tests {
     }
 
     #[test]
-    fn replacement_prevent_all_combat_damage_to_you() {
-        let def = parse_replacement_line(
-            "Prevent all combat damage that would be dealt to you.",
-            "Some Card",
-        )
-        .unwrap();
-        assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert!(matches!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        ));
-        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
-    }
-
-    #[test]
     fn replacement_prevent_all_combat_damage_fog() {
         // Fog: "Prevent all combat damage that would be dealt this turn."
         let def = parse_replacement_line(
@@ -14437,47 +14419,6 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// Board-wide graveyard replacements keep their external typed filter.
-    #[test]
-    fn graveyard_exile_card_subject_stays_external_nontoken() {
-        use crate::types::ability::{FilterProp, TypedFilter};
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Leyline of the Void",
-        )
-        .expect("Leyline-style exile must parse");
-        assert_eq!(
-            def.valid_card,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NonToken])
-            ))
-        );
-    }
-
-    /// Regression: exile-branch must remain fully backward-compatible after the
-    /// dispatcher refactor. Rest in Peace / Leyline-style wording.
-    #[test]
-    fn replacement_graveyard_exile_branch_still_parses() {
-        let def = parse_replacement_line(
-            "If a card would be put into a graveyard from anywhere, exile it instead.",
-            "Rest in Peace",
-        )
-        .expect("exile branch must parse");
-        let execute = def.execute.as_ref().unwrap();
-        assert!(matches!(
-            *execute.effect,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ));
-        assert!(
-            execute.sub_ability.is_none(),
-            "exile branch has no post-redirect sub_ability"
-        );
-    }
-
     #[test]
     fn shock_land_watery_grave() {
         let def = parse_replacement_line(
@@ -14601,6 +14542,13 @@ mod tests {
                 state: TapStateChange::Tap,
             }
         ));
+        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
+        // Regression guard retained after the Tarkir reveal-land extension.
+        assert!(
+            decline.condition.is_none(),
+            "Port Town on_decline must remain unconditional, got {:?}",
+            decline.condition
+        );
     }
 
     #[test]
@@ -14727,30 +14675,6 @@ mod tests {
             }
             other => panic!("expected Not(ControllerControlsMatching), got {other:?}"),
         }
-    }
-
-    /// Regression: Port Town (and the rest of the if-you-don't reveal-land
-    /// cycle) must continue to emit an unconditional Tap on_decline. The
-    /// Tarkir-variant tail recognizer must not fire on the older grammar.
-    #[test]
-    fn reveal_land_port_town_unchanged_after_tarkir_extension() {
-        let def = parse_replacement_line(
-            "As Port Town enters, you may reveal a Plains or Island card from your hand. If you don't, Port Town enters tapped.",
-            "Port Town",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        let on_decline = match &*execute.effect {
-            Effect::RevealFromHand { on_decline, .. } => on_decline,
-            other => panic!("expected RevealFromHand, got {other:?}"),
-        };
-        let decline = on_decline.as_ref().unwrap();
-        // No condition gates the Tap — Port Town's on_decline runs unconditionally.
-        assert!(
-            decline.condition.is_none(),
-            "Port Town on_decline must remain unconditional, got {:?}",
-            decline.condition
-        );
     }
 
     /// Negative: a mismatched filter pair ("reveal a Soldier ... or you control
@@ -15131,19 +15055,6 @@ mod tests {
             .is_none(),
             "bare object as-enters choose must not claim Moved without CopyChosen"
         );
-    }
-
-    #[test]
-    fn as_enters_choose_does_not_match_shock_land() {
-        // Shock lands with "choose a basic land type" should be handled by parse_shock_land,
-        // not parse_as_enters_choose
-        let def = parse_replacement_line(
-            "As this land enters, choose a basic land type. Then you may pay 2 life. If you don't, it enters tapped.",
-            "Multiversal Passage",
-        )
-        .unwrap();
-        // Should be Optional (shock land), not Mandatory (simple choose)
-        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
     }
 
     #[test]
@@ -16520,21 +16431,31 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        match &def.valid_card {
-            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
-                assert!(
-                    properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 730.3e)"
-                );
-                assert!(
-                    !properties.contains(&FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    }),
-                    "any-graveyard scope must not add an owner constraint"
-                );
+        // Exact equality: the "a card" subject must exclude tokens (CR 730.3e) and the
+        // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
+        // no `Owned { Opponent }` and no other property.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::NonToken])
+            ))
+        );
+        // Regression: the exile branch stays backward-compatible after the dispatcher
+        // refactor — Rest in Peace / Leyline-style wording redirects to exile with no
+        // post-redirect sub-ability.
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
             }
-            other => panic!("Expected Typed filter with NonToken, got {other:?}"),
-        }
+        ));
+        assert!(
+            execute.sub_ability.is_none(),
+            "exile branch has no post-redirect sub_ability"
+        );
     }
 
     #[test]
@@ -17226,20 +17147,6 @@ mod tests {
     }
 
     #[test]
-    fn fast_land_does_not_capture_check_land() {
-        // Check lands must still parse as UnlessControlsSubtype, not UnlessControlsOtherLeq
-        let def = parse_replacement_line(
-            "This land enters tapped unless you control a Mountain or a Plains.",
-            "Clifftop Retreat",
-        )
-        .unwrap();
-        assert!(matches!(
-            def.condition,
-            Some(ReplacementCondition::UnlessControlsSubtype { .. })
-        ));
-    }
-
-    #[test]
     fn unconditional_enters_tapped_unaffected_by_fast_land() {
         // Plain "enters tapped" must still work (no condition)
         let def = parse_replacement_line("This land enters tapped.", "Some Tapland").unwrap();
@@ -17345,20 +17252,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unless_controls_does_not_steal_check_land() {
-        // Check lands must still produce UnlessControlsSubtype, not UnlessControlsMatching
-        let def = parse_replacement_line(
-            "This land enters tapped unless you control a Mountain or a Plains.",
-            "Clifftop Retreat",
-        )
-        .unwrap();
-        assert!(matches!(
-            def.condition,
-            Some(ReplacementCondition::UnlessControlsSubtype { .. })
-        ));
-    }
-
     /// CR 614.1d: "unless your opponents control N or more [type]" — Turbulent land cycle (SOC).
     /// One parser test covers the class; all five Turbulent lands share this clause verbatim.
     #[test]
@@ -17427,22 +17320,6 @@ mod tests {
             }
             other => panic!("Expected IfControlsMatching, got {other:?}"),
         }
-    }
-
-    /// CR 614.1d: The "if you control" pattern must NOT fall through to the
-    /// unconditional enters-tapped handler. Regression guard.
-    #[test]
-    fn if_controls_pattern_does_not_match_unconditional() {
-        let def = parse_replacement_line(
-            "If you control two or more other lands, this land enters tapped.",
-            "Test Land",
-        )
-        .unwrap();
-        // Must have a non-None condition — the unconditional handler would produce None.
-        assert!(
-            def.condition.is_some(),
-            "conditional ETB must not produce unconditional replacement"
-        );
     }
 
     /// CR 614.1d: Generality — three or more threshold.
@@ -18026,10 +17903,22 @@ mod tests {
                 match target {
                     TargetFilter::Typed(tf) => {
                         assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                        // Clone's filter must not gain a spurious InZone { Battlefield } —
+                        // the engine-side `find_copy_targets` defaults to the battlefield
+                        // when the filter has no InZone property. Preserving the empty
+                        // properties list keeps the filter shape identical to pre-change
+                        // Clone behaviour.
+                        assert!(
+                            tf.properties.is_empty(),
+                            "Clone's filter must not carry InZone; got {:?}",
+                            tf.properties
+                        );
                     }
                     other => panic!("Expected Typed creature filter, got {other:?}"),
                 }
             }
+            // A non-tapped clone (Phantasmal Image class) must keep `BecomeCopy` as the
+            // top-level effect — it must NOT compose through Tap.
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
     }
@@ -18367,22 +18256,6 @@ mod tests {
     }
 
     #[test]
-    fn clone_without_tapped_still_direct_become_copy() {
-        // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        assert!(
-            matches!(&*execute.effect, Effect::BecomeCopy { .. }),
-            "non-tapped clone must have BecomeCopy as top-level, got {:?}",
-            execute.effect
-        );
-    }
-
-    #[test]
     fn clone_uses_self_ref_normalization() {
         // "this creature" should be normalized to "~" by replace_self_refs
         let def = parse_replacement_line(
@@ -18499,10 +18372,15 @@ mod tests {
             Effect::BecomeCopy {
                 mana_value_limit,
                 additional_modifications,
+                duration,
                 ..
             } => {
                 assert_eq!(*mana_value_limit, None);
                 assert!(additional_modifications.is_empty());
+                // Regression: the Phantasmal Image class uses "enter as a copy of" and
+                // must continue producing a permanent copy after the verb split was
+                // generalised to also accept "become a copy of".
+                assert_eq!(*duration, None, "Clone must produce a permanent copy");
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
@@ -18614,25 +18492,6 @@ mod tests {
     }
 
     #[test]
-    fn phantasmal_image_clone_has_no_duration() {
-        // Regression: the Phantasmal Image class uses "enter as a copy of" and
-        // must continue producing a permanent copy (duration: None) after the
-        // verb split was generalised to also accept "become a copy of".
-        let def = parse_replacement_line(
-            "You may have this creature enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        match &*execute.effect {
-            Effect::BecomeCopy { duration, .. } => {
-                assert_eq!(*duration, None, "Clone must produce a permanent copy");
-            }
-            other => panic!("Expected BecomeCopy, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn clone_suffix_multiple_keywords_produce_multiple_add_keyword() {
         // Hypothetical clone: "except it's a Spirit in addition to its other
         // types and it has flying, trample, and lifelink." Each keyword must
@@ -18682,7 +18541,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::CreateToken);
-        assert!(def.quantity_modification.is_some());
+        // Regression: "twice that many" still parameterizes to factor 2 after
+        // the Double → Times { factor } migration.
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Times { factor: 2 })
+        );
         assert!(def.token_owner_scope.is_some());
     }
 
@@ -18816,21 +18680,6 @@ mod tests {
     }
 
     #[test]
-    fn token_doubling_via_twice_is_factor_two() {
-        // Regression: "twice that many" still parameterizes to factor 2 after
-        // the Double → Times { factor } migration.
-        let def = parse_replacement_line(
-            "If one or more tokens would be created under your control, twice that many tokens are created instead.",
-            "Parallel Lives",
-        )
-        .unwrap();
-        assert_eq!(
-            def.quantity_modification,
-            Some(QuantityModification::Times { factor: 2 })
-        );
-    }
-
-    #[test]
     fn counter_doubling_replacement() {
         let def = parse_replacement_line(
             "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on it instead.",
@@ -18893,21 +18742,6 @@ mod tests {
                 zone: Zone::Battlefield
             }]
         ));
-    }
-
-    #[test]
-    fn counter_agnostic_one_or_more_does_not_set_counter_match() {
-        // CR 614.1a + CR 122.1: Sanity check — "if an effect would put one
-        // or more counters on a permanent you control" (Doubling Season's
-        // modern wording) must NOT be treated as type-specific. The
-        // counter-agnostic wording leaves counter_match = None so the
-        // replacement matches every counter type.
-        let def = parse_replacement_line(
-            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
-            "Doubling Season",
-        )
-        .unwrap();
-        assert_eq!(def.counter_match, None);
     }
 
     #[test]
@@ -19739,33 +19573,6 @@ mod tests {
                 assert_eq!(*target, TargetFilter::ParentTarget);
             }
             other => panic!("expected ChangeZone(Exile), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn zone_qualifier_defaults_to_battlefield_for_classic_clones() {
-        // Clone's filter must not gain a spurious InZone { Battlefield } — the
-        // engine-side `find_copy_targets` defaults to the battlefield when the
-        // filter has no InZone property. Preserving the empty properties list
-        // keeps the filter shape identical to pre-change Clone behaviour.
-        let def = parse_replacement_line(
-            "You may have Clone enter as a copy of any creature on the battlefield.",
-            "Clone",
-        )
-        .unwrap();
-        let execute = def.execute.as_ref().unwrap();
-        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
-            panic!("expected BecomeCopy");
-        };
-        match target {
-            TargetFilter::Typed(tf) => {
-                assert!(
-                    tf.properties.is_empty(),
-                    "Clone's filter must not carry InZone; got {:?}",
-                    tf.properties
-                );
-            }
-            other => panic!("expected Typed filter, got {other:?}"),
         }
     }
 

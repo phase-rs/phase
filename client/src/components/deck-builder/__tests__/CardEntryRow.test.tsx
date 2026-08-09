@@ -25,6 +25,28 @@ describe("CardEntryRow", () => {
     expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "main");
   });
 
+  it("forwards a row's selected printing to the hover preview", () => {
+    const onCardHover = vi.fn();
+    render(
+      <CardEntryRow
+        entry={{
+          ...entry,
+          sourcePrinting: { setCode: "lea", collectorNumber: "161" },
+        }}
+        section="main"
+        onMove={vi.fn()}
+        onCardHover={onCardHover}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Lightning Bolt"));
+
+    expect(onCardHover).toHaveBeenCalledWith({
+      name: "Lightning Bolt",
+      sourcePrinting: { setCode: "lea", collectorNumber: "161" },
+    });
+  });
+
   it("shows an arrow pointing the opposite direction for sideboard rows", () => {
     const onMove = vi.fn();
     render(

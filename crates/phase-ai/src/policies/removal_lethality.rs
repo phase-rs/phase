@@ -46,9 +46,10 @@
 
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
-use engine::game::quantity::resolve_quantity;
-use engine::types::ability::{DamageSource, Effect};
+use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
+use engine::types::ability::{DamageSource, Effect, TargetRef};
 use engine::types::card_type::CoreType;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 
@@ -102,9 +103,60 @@ fn effect_damage_source(
             .map_or(EffectDamageSource::Unresolved, |object| {
                 EffectDamageSource::Object(object.id)
             }),
-        Some(DamageSource::Target | DamageSource::EachTarget | DamageSource::TriggeringSource) => {
+        // CR 120.3: for `DamageSource::Target` the first object target IS the
+        // source. During interactive target selection the engine binds already-
+        // declared targets in `TargetSelectionProgress.selected_slots` (NOT
+        // `ability.targets`, which stays empty until
+        // `assign_selected_slots_in_chain` welds the final selection after the
+        // last slot commits — CR 601.2c / CR 608.2c). Once a later slot's
+        // selection is being made the source is already bound there and is
+        // knowable, so lethality against it can be modelled.
+        Some(DamageSource::Target) => match bound_target_source_id(ctx) {
+            Some(source_id) => EffectDamageSource::Object(source_id),
+            // Before the source's own slot is declared (`selected_slots` empty)
+            // there is no bound source to model — stay neutral rather than
+            // guessing (first-slot / empty-selection case).
+            None => EffectDamageSource::Unresolved,
+        },
+        // CR 120.1 (EachTarget) / triggering-event source: the source is not
+        // resolvable from interactive target selection — see the enum doc.
+        Some(DamageSource::EachTarget | DamageSource::TriggeringSource) => {
             EffectDamageSource::Unresolved
         }
+    }
+}
+
+/// CR 120.3: the first already-declared OBJECT target of a `DamageSource::Target`
+/// effect, as bound in `TargetSelectionProgress.selected_slots` while targets
+/// are still being chosen (CR 601.2c). Before that slot is declared the source
+/// is not yet bound, so the caller stays `Unresolved` (neutral), not a guess.
+fn bound_target_source_id(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
+    match &ctx.decision.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+            selection.selected_slots.iter().find_map(|slot| match slot {
+                Some(TargetRef::Object(id)) => Some(*id),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// CR 601.2c: the declared-object target slice for the current interactive
+/// selection — the engine buffers already-chosen targets in
+/// `TargetSelectionProgress.selected_slots`. Used to resolve a
+/// `DamageSource::Target` amount that references the first object target
+/// (`QuantityRef::Power { scope: Target }`), so "X, where X is its power"
+/// reads the already-bound source's power. A `Some(TargetRef::Object(id))`
+/// slot is unwrapped into the slice; `None`/`Player` slots are skipped.
+fn bound_target_slice(ctx: &PolicyContext<'_>) -> Vec<TargetRef> {
+    match &ctx.decision.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+            selection.selected_slots.iter().flatten().cloned().collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -166,16 +218,40 @@ pub(crate) fn pending_damage_to_object(
                 if !effect_targets_object(ctx, effect, target_id) {
                     continue;
                 }
+                // CR 120.3: resolve the damage source.
                 let EffectDamageSource::Object(source_id) =
                     effect_damage_source(ctx, damage_source.as_ref())
                 else {
                     return PendingDamage::Unresolved;
                 };
                 found = true;
-                let dealt = u32::try_from(
-                    resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0),
-                )
-                .unwrap_or(u32::MAX);
+                // CR 120.3 + CR 208.1 + CR 601.2c: for a `DamageSource::Target`
+                // effect whose amount is "X, where X is its power", the amount is
+                // the FIRST object target's power — the same bound source object
+                // resolved above. `resolve_quantity_with_targets_slice` resolves
+                // `QuantityRef::Power { scope: Target }` against the first entry
+                // of the passed slice, which is the declared source already bound
+                // in `selection.selected_slots[0]`. All other sources resolve the
+                // amount against the source object (CR 120.3 default) or a fixed
+                // value, unchanged.
+                let dealt = if matches!(damage_source, Some(DamageSource::Target)) {
+                    u32::try_from(
+                        resolve_quantity_with_targets_slice(
+                            ctx.state,
+                            amount,
+                            ctx.ai_player,
+                            source_id,
+                            &bound_target_slice(ctx),
+                        )
+                        .max(0),
+                    )
+                    .unwrap_or(u32::MAX)
+                } else {
+                    u32::try_from(
+                        resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0),
+                    )
+                    .unwrap_or(u32::MAX)
+                };
                 // CR 120.3d + CR 702.80a + CR 702.90c: wither/infect damage to a
                 // creature is dealt as -1/-1 counters and is never marked.
                 if is_creature

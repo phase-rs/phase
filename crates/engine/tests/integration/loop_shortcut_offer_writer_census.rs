@@ -70,7 +70,7 @@ struct Hit {
 ///
 /// The naive "nearest preceding attribute" rule is measured wrong and yields
 /// false TEST verdicts, so it is deliberately not used.
-fn cfg_test_scoped_lines(src: &str) -> Vec<bool> {
+pub(super) fn cfg_test_scoped_lines(src: &str) -> Vec<bool> {
     let lines: Vec<&str> = src.lines().collect();
     let mut scoped = vec![false; lines.len()];
     let mut i = 0usize;
@@ -137,7 +137,7 @@ fn classify(src: &str, needle: &str, file: &str) -> Vec<Hit> {
         .collect()
 }
 
-fn rs_files(root: &Path) -> Vec<PathBuf> {
+pub(super) fn rs_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

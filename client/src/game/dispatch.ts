@@ -1,4 +1,4 @@
-import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, WaitingFor } from "../adapter/types";
+import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
 import type { InteractionSubmission } from "../adapter/generated/interaction";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
@@ -73,6 +73,8 @@ interface PendingRemoteUpdate {
   snapshot: EngineSnapshot;
   events: GameEvent[];
   logEntries?: GameLogEntry[];
+  /** See `processRemoteUpdateInner`: `undefined` and `[]` mean different things. */
+  rewindTargets?: RewindOption[];
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -601,7 +603,13 @@ async function processQueue(generation: number): Promise<void> {
           if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
         }
       } else {
-        await processRemoteUpdateInner(next.snapshot, next.events, next.logEntries, generation);
+        await processRemoteUpdateInner(
+          next.snapshot,
+          next.events,
+          next.logEntries,
+          generation,
+          next.rewindTargets,
+        );
       }
       next.resolve();
     } catch (err) {
@@ -803,6 +811,7 @@ async function processRemoteUpdateInner(
   events: GameEvent[],
   logEntries: GameLogEntry[] = [],
   generation: number,
+  rewindTargets?: RewindOption[],
 ): Promise<void> {
   if (!isCurrentDispatchGeneration(generation)) return;
   const state = snapshot.state;
@@ -855,6 +864,14 @@ async function processRemoteUpdateInner(
   //    than clobbering the newer state.
   if (!isCurrentDispatchGeneration(generation)) return;
   useGameStore.getState().commitEngineSnapshot(snapshot, { events, logEntries });
+  // Written INSIDE the generation gate, alongside the snapshot it describes:
+  // outside it, a superseded update would clobber the list with a stale one.
+  // `undefined` means "this transport does not publish rollback targets" (p2p,
+  // draft) and leaves the store alone; `[]` means "the server published none"
+  // and clears it. The two are deliberately not collapsed.
+  if (rewindTargets) {
+    useGameStore.getState().setRewindTargets(rewindTargets);
+  }
 
   // 6. Play victory/defeat stinger on GameOver
   const gameOverEvent = events.find((e) => e.type === "GameOver");
@@ -878,17 +895,18 @@ export async function processRemoteUpdate(
   snapshot: EngineSnapshot,
   events: GameEvent[],
   logEntries?: GameLogEntry[],
+  rewindTargets?: RewindOption[],
 ): Promise<void> {
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", snapshot, events, logEntries, resolve, reject });
+      pendingQueue.push({ kind: "remote", snapshot, events, logEntries, rewindTargets, resolve, reject });
     });
   }
 
   const generation = dispatchGeneration;
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(snapshot, events, logEntries, generation);
+    await processRemoteUpdateInner(snapshot, events, logEntries, generation, rewindTargets);
   } finally {
     releaseDispatchMutex(generation);
   }

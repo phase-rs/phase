@@ -1,0 +1,165 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ExileTop",
+          "player": {
+            "type": "Controller"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "position": {
+            "type": "Top"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "CastFromZone",
+            "target": {
+              "type": "TrackedSetFiltered",
+              "id": 0,
+              "filter": {
+                "type": "Any"
+              },
+              "caused_by": "Exiled"
+            },
+            "without_paying_mana_cost": false,
+            "mode": "Play"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": {
+            "ForAsLongAs": {
+              "condition": {
+                "type": "Unrecognized",
+                "text": "it remains exiled"
+              }
+            }
+          },
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": true,
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          "Land"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever a land you control enters, exile the top card of your library. You may play that card for as long as it remains exiled.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    },
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZoneAll",
+          "origin": "Exile",
+          "destination": "Graveyard",
+          "target": {
+            "type": "ExiledBySource"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "mass_move_total_damage",
+            "description": "~ deals that much damage to each opponent"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "End",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of your end step, if there are cards exiled with ~, put them into their owner's graveyard, then ~ deals that much damage to each opponent.",
+      "constraint": {
+        "type": "OnlyDuringYourTurn"
+      },
+      "condition": {
+        "type": "QuantityComparison",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "CardsExiledBySource"
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 1
+        }
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

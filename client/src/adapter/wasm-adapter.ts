@@ -1,5 +1,7 @@
 import type {
   AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  AiDecisionDiagnosticsCapability,
   AiProposalSubmission,
   BatchResolveResult,
   EngineAdapter,
@@ -33,6 +35,17 @@ function isMemoryConstrainedDevice(): boolean {
   const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent)
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
+}
+
+// Parallel scoring is optional. Bound its queued restore-and-score work so a
+// stalled score worker cannot make a healthy local game appear hung.
+const AI_POOL_SCORE_TIMEOUT_MS = 5_000;
+
+class AiPoolScoreTimeoutError extends Error {
+  constructor() {
+    super(`AI worker pool timed out after ${AI_POOL_SCORE_TIMEOUT_MS}ms`);
+    this.name = "AiPoolScoreTimeoutError";
+  }
 }
 
 /**
@@ -122,7 +135,7 @@ export function getSharedAdapter(): WasmAdapter {
  * Falls back to direct main-thread WASM calls if Worker creation fails
  * (e.g., restrictive CSP, very old browser).
  */
-export class WasmAdapter implements EngineAdapter {
+export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   cardDbLoaded = false;
 
@@ -148,6 +161,51 @@ export class WasmAdapter implements EngineAdapter {
   // worker's ~90 MB instance. Concurrent callers share one promise.
   private initPromise: Promise<void> | null = null;
   private lifecycleGeneration = 0;
+  private aiDecisionDiagnosticsEnabled = false;
+  private aiDecisionDiagnosticsEpoch = 0;
+  private readonly receiptByToken = new Map<string, AiDecisionDiagnosticReceipt>();
+  private readonly tokenBySemanticOwner = new Map<PlayerId, string>();
+  private readonly aiDecisionDiagnosticListeners = new Set<(receipt: AiDecisionDiagnosticReceipt) => void>();
+
+  /** Invalidate local observations whenever the WASM authority invalidates proposals. */
+  private invalidateAiDecisionDiagnostics(): void {
+    this.aiDecisionDiagnosticsEpoch += 1;
+    this.receiptByToken.clear();
+    this.tokenBySemanticOwner.clear();
+  }
+
+  setAiDecisionDiagnosticsEnabled(enabled: boolean): void {
+    if (this.aiDecisionDiagnosticsEnabled === enabled) return;
+    this.aiDecisionDiagnosticsEnabled = enabled;
+    this.invalidateAiDecisionDiagnostics();
+  }
+
+  subscribeAiDecisionDiagnostics(listener: (receipt: AiDecisionDiagnosticReceipt) => void): () => void {
+    this.aiDecisionDiagnosticListeners.add(listener);
+    return () => this.aiDecisionDiagnosticListeners.delete(listener);
+  }
+
+  private retainAiDecisionDiagnostic(
+    startEpoch: number,
+    proposal: AiActionProposal,
+    receipt: AiDecisionDiagnosticReceipt,
+  ): void {
+    if (!this.aiDecisionDiagnosticsEnabled || startEpoch !== this.aiDecisionDiagnosticsEpoch) return;
+    const previous = this.tokenBySemanticOwner.get(proposal.semanticOwner);
+    if (previous) this.receiptByToken.delete(previous);
+    this.tokenBySemanticOwner.set(proposal.semanticOwner, proposal.token);
+    this.receiptByToken.set(proposal.token, receipt);
+  }
+
+  private takeAiDecisionDiagnostic(token: string): AiDecisionDiagnosticReceipt | undefined {
+    const receipt = this.receiptByToken.get(token);
+    if (!receipt) return undefined;
+    this.receiptByToken.delete(token);
+    if (this.tokenBySemanticOwner.get(receipt.semanticOwner) === token) {
+      this.tokenBySemanticOwner.delete(receipt.semanticOwner);
+    }
+    return receipt;
+  }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -250,8 +308,9 @@ export class WasmAdapter implements EngineAdapter {
       await this.ensureCardDb();
     }
     try {
-      if (this.engine) return await this.engine.submitAction(actor, action);
-      return await this.fallback!.submitAction(action, actor);
+      const result = this.engine ? await this.engine.submitAction(actor, action) : await this.fallback!.submitAction(action, actor);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -263,8 +322,9 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<SubmitResult> {
     this.assertInitialized();
     try {
-      if (this.engine) return await this.engine.submitInteraction(actor, submission);
-      return await this.fallback!.submitInteraction(submission, actor);
+      const result = this.engine ? await this.engine.submitInteraction(actor, submission) : await this.fallback!.submitInteraction(submission, actor);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -374,32 +434,73 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<AiActionProposal | null> {
     this.assertInitialized();
     try {
+      const captureEpoch = this.aiDecisionDiagnosticsEpoch;
+      const capture = this.aiDecisionDiagnosticsEnabled;
+      if (capture) {
+        // Preserve the existing VeryHard score-worker route. Capturing may
+        // observe its rebinding receipt, but never chooses a different path.
+        if (difficulty === "VeryHard" && this.engine) {
+          try {
+            const state = await this.engine!.getState();
+            if (state.waiting_for.type === "Priority") {
+              const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+              if (scores?.length) {
+                const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
+                  JSON.stringify(scores),
+                  difficulty,
+                  playerId,
+                  Date.now(),
+                );
+                if (captured) {
+                  this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                  return captured.proposal;
+                }
+              }
+            }
+          } catch (error) {
+            if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+            if (error instanceof AiPoolScoreTimeoutError) {
+              const captured = await this.engine!.getAiTacticalActionProposalWithDiagnostics(
+                difficulty,
+                playerId,
+              );
+              if (captured) {
+                this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                return captured.proposal;
+              }
+            }
+            console.warn("AI worker pool failed; using authoritative single worker", error);
+          }
+        }
+        const captured = this.engine
+          ? await this.engine.getAiActionProposalWithDiagnostics(difficulty, playerId)
+          : await this.fallback!.getAiActionProposalWithDiagnostics(difficulty, playerId);
+        if (captured) this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+        return captured?.proposal ?? null;
+      }
       if (difficulty === "VeryHard" && this.engine) {
         try {
           // A snapshot can become stale while scoring. That is safe: the main
           // worker rebinds every score against a newly-issued contract below.
           const state = await this.engine.getState();
           if (state.waiting_for.type === "Priority") {
-            const pool = await this.ensureAiPool();
-            if (pool) {
-              const scores = await pool.getAiScoredCandidates(
-                await this.engine.exportState(),
+            const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+            if (scores?.length) {
+              const proposal = await this.engine.getAiActionProposalFromScores(
+                JSON.stringify(scores),
                 difficulty,
                 playerId,
+                Date.now(),
               );
-              if (scores?.length) {
-                const proposal = await this.engine.getAiActionProposalFromScores(
-                  JSON.stringify(scores),
-                  difficulty,
-                  playerId,
-                  Date.now(),
-                );
-                if (proposal) return proposal;
-              }
+              if (proposal) return proposal;
             }
           }
         } catch (error) {
           if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+          if (error instanceof AiPoolScoreTimeoutError) {
+            const proposal = await this.engine.getAiTacticalActionProposal(difficulty, playerId);
+            if (proposal) return proposal;
+          }
           console.warn("AI worker pool failed; using authoritative single worker", error);
         }
       }
@@ -415,8 +516,19 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<AiProposalSubmission> {
     this.assertInitialized();
     try {
-      if (this.engine) return await this.engine.submitAiActionProposal(proposal);
-      return await this.fallback!.submitAiActionProposal(proposal);
+      const outcome = this.engine
+        ? await this.engine.submitAiActionProposal(proposal)
+        : await this.fallback!.submitAiActionProposal(proposal);
+      if (outcome.status === "applied") {
+        const receipt = this.takeAiDecisionDiagnostic(proposal.token);
+        if (receipt && this.aiDecisionDiagnosticsEnabled) {
+          for (const listener of this.aiDecisionDiagnosticListeners) listener(receipt);
+        }
+        this.invalidateAiDecisionDiagnostics();
+      } else if (outcome.status === "stale") {
+        this.takeAiDecisionDiagnostic(proposal.token);
+      }
+      return outcome;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -429,6 +541,45 @@ export class WasmAdapter implements EngineAdapter {
     };
     void pending.then(clear, clear);
     return pending;
+  }
+
+  /** Discard an optional scorer without affecting the authoritative worker. */
+  private disableAiPool(generation: number): void {
+    if (generation !== this.aiPoolGeneration) return;
+    this.aiPoolGeneration += 1;
+    this.aiPoolPromise = null;
+    this.aiPool?.dispose();
+    this.aiPool = null;
+    this.aiPoolFailed = true;
+  }
+
+  private async getAiPoolScores(
+    engine: EngineWorkerClient,
+    difficulty: string,
+    playerId: number,
+  ): Promise<[GameAction, number][] | null> {
+    const pool = await this.ensureAiPool();
+    if (!pool) return null;
+    const generation = this.aiPoolGeneration;
+    const stateJson = await engine.exportState();
+    if (generation !== this.aiPoolGeneration) return null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      return await Promise.race([
+        pool.getAiScoredCandidates(stateJson, difficulty, playerId),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new AiPoolScoreTimeoutError());
+          }, AI_POOL_SCORE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      this.disableAiPool(generation);
+      throw error;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
   }
 
   private async reloadAiPoolGameDb(
@@ -512,7 +663,9 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<BatchResolveResult> {
     this.assertInitialized();
     if (this.engine) {
-      return this.engine.resolveAll(requester, aiSeats, maxResolutions);
+      const result = await this.engine.resolveAll(requester, aiSeats, maxResolutions);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
     throw new Error("resolveAll requires worker-based engine");
   }
@@ -534,6 +687,7 @@ export class WasmAdapter implements EngineAdapter {
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+    this.invalidateAiDecisionDiagnostics();
   }
 
   /**
@@ -560,15 +714,20 @@ export class WasmAdapter implements EngineAdapter {
     } else {
       this.fallback!.setMultiplayerMode(enabled);
     }
+    this.invalidateAiDecisionDiagnostics();
   }
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
     this.assertInitialized();
     await this.ensureCardDb();
     if (this.engine) {
-      return this.engine.applySeatMutation(stateJson, mutationJson);
+      const result = await this.engine.applySeatMutation(stateJson, mutationJson);
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
-    return this.fallback!.applySeatMutation(stateJson, mutationJson);
+    const result = await this.fallback!.applySeatMutation(stateJson, mutationJson);
+    this.invalidateAiDecisionDiagnostics();
+    return result;
   }
 
   async projectSeatView(stateJson: string): Promise<unknown> {
@@ -597,6 +756,7 @@ export class WasmAdapter implements EngineAdapter {
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.resumeMultiplayerHostState(json);
     else await this.fallback!.resumeMultiplayerHostState(json);
+    this.invalidateAiDecisionDiagnostics();
   }
 
   /** Clear the WASM game state without terminating the worker. */
@@ -609,6 +769,7 @@ export class WasmAdapter implements EngineAdapter {
     if (this.engine) {
       await this.engine.resetGame();
     }
+    this.invalidateAiDecisionDiagnostics();
   }
 
   async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
@@ -673,6 +834,8 @@ export class WasmAdapter implements EngineAdapter {
   }
 
   dispose(): void {
+    this.setAiDecisionDiagnosticsEnabled(false);
+    this.aiDecisionDiagnosticListeners.clear();
     this.lifecycleGeneration += 1;
     this.aiPoolGeneration += 1;
     // Clear the singleton reference so getSharedAdapter() creates a fresh
@@ -713,7 +876,7 @@ export class WasmAdapter implements EngineAdapter {
     }
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {
-      return this.engine.initializeGame(
+      const result = await this.engine.initializeGame(
         deckData ?? null,
         seed,
         formatConfig ?? null,
@@ -721,8 +884,10 @@ export class WasmAdapter implements EngineAdapter {
         playerCount,
         firstPlayer,
       );
+      this.invalidateAiDecisionDiagnostics();
+      return result;
     }
-    return this.fallback!.initializeGame(
+    const result = await this.fallback!.initializeGame(
       deckData ?? null,
       seed,
       formatConfig ?? null,
@@ -730,6 +895,8 @@ export class WasmAdapter implements EngineAdapter {
       playerCount,
       firstPlayer,
     );
+    this.invalidateAiDecisionDiagnostics();
+    return result;
   }
 
   /** Expose the worker client for AI pool state export (Phase 4). */
@@ -763,6 +930,10 @@ interface MainThreadFallback {
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
   getAiActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
+  getAiActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null>;
   submitAiActionProposal(proposal: AiActionProposal): Promise<AiProposalSubmission>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
@@ -882,6 +1053,12 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     getAiActionProposal: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
+
+    getAiActionProposalWithDiagnostics: (difficulty: string, playerId: number) =>
+      enqueue(() => (wasm.get_ai_action_proposal_with_diagnostics(difficulty, playerId) ?? null) as {
+        proposal: AiActionProposal;
+        receipt: AiDecisionDiagnosticReceipt;
+      } | null),
 
     submitAiActionProposal: (proposal: AiActionProposal) =>
       enqueue(() => wasm.submit_ai_action_proposal(

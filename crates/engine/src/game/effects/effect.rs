@@ -523,6 +523,7 @@ fn register_transient_effect(
             .is_some_and(crate::game::ability_utils::filter_references_target_player)
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
+            state,
             ability,
             application_filter,
             skip_companion_player_target,
@@ -728,24 +729,55 @@ fn register_transient_effect(
     }
 }
 
+// CR 400.7 + CR 603.7c: a delayed `GenericEffect` whose pinned referent became a
+// new object must not bind a transient continuous effect to that new object.
+// This is the `okoye, mighty and adored` / `garruk, curse breaker` /
+// `rediscover the way` shape — an untyped `StaticDefinition` carrying
+// `affected: ParentTarget` under a `GenericEffect` root.
+//
+// The substitution lives HERE rather than at the caller's
+// `!ability.targets.is_empty()` gate, and that split is deliberate. The gate
+// asks "were targets declared?"; substituting it would make an all-stale
+// ability fall through to the BROADCAST filter path, which installs the
+// continuous effect against a battlefield-wide population — a fallback binding
+// different objects. Keeping the gate raw and filtering here instead means an
+// all-stale ability still enters the targeted branch and produces ZERO bound
+// filters, so `install_transient` is never called. That is already a clean,
+// event-preserving no-op, so no early return is required.
 fn transient_bound_filters(
+    state: &GameState,
     ability: &ResolvedAbility,
     resolved_filter: Option<&TargetFilter>,
     skip_companion_player_target: bool,
     inherited_object_target: bool,
 ) -> Vec<TargetFilter> {
+    let live_targets = ability.live_object_targets(state);
+
     if inherited_object_target {
         let Some(filter) = resolved_filter else {
             return Vec::new();
         };
-        return crate::game::effects::effect_object_targets(filter, &ability.targets)
+        // Slot carve-out (§5.4b): this hands its list straight to
+        // `effect_object_targets`, which indexes `ParentTargetSlot`
+        // POSITIONALLY. A pin-filtered list would renumber the slots, so the
+        // raw list is passed for that shape only.
+        let pool: &[TargetRef] = if matches!(filter, TargetFilter::ParentTargetSlot { .. }) {
+            &ability.targets
+        } else {
+            &live_targets
+        };
+        return crate::game::effects::effect_object_targets(filter, pool)
             .into_iter()
             .map(|id| TargetFilter::SpecificObject { id })
             .collect();
     }
 
-    ability
-        .targets
+    // The `skip` is positional (it drops a companion player slot), but it skips
+    // from the FRONT of a list whose leading element is a player ref, and
+    // `live_object_targets` passes every `TargetRef::Player` through unfiltered.
+    // The skipped position therefore cannot be removed by the filter, so
+    // filtering before skipping is safe here.
+    live_targets
         .iter()
         .skip(usize::from(skip_companion_player_target))
         .map(|target| match target {
