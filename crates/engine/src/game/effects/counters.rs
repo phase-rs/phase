@@ -415,6 +415,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                         action: action.action,
                         look_count: None,
                         scry_bottom_count: None,
+                        scry_top_count: None,
                     });
                 }
             }
@@ -478,6 +479,7 @@ fn apply_pending_counter_post_action(
                 action,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             });
             true
         }

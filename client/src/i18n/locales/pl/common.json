@@ -5,6 +5,11 @@
     "close": "Zamknij",
     "closeNamed": "Zamknij {{name}}"
   },
+  "scryOutcome": {
+    "title": "Wróżenie zakończone",
+    "you": "Ty",
+    "result": "{{player}} — {{top}} na górze · {{bottom}} na dole"
+  },
   "modal": {
     "defaultEyebrow": "Narzędzie warsztatu"
   },

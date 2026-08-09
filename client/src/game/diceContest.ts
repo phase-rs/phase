@@ -4,6 +4,14 @@ import { useUiStore } from "../stores/uiStore";
 type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
 type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerContest" }>;
+type ScryEvent = Extract<GameEvent, { type: "PlayerPerformedAction" }>;
+type CompletedScryEvent = ScryEvent & {
+  data: ScryEvent["data"] & {
+    action: "Scry";
+    scry_top_count: number;
+    scry_bottom_count: number;
+  };
+};
 
 /**
  * Fire the starting-player contest overlay from a game-start event batch.
@@ -74,4 +82,25 @@ export function flashInGameRolls(events: GameEvent[]): void {
   for (const coin of coins) {
     flash({ kind: "coin", playerId: coin.data.player_id, won: coin.data.won, context: "ability" });
   }
+}
+
+/**
+ * Surface a completed scry using the engine's public top/bottom counts. A
+ * partially-resolved scry has no event yet, and non-scry player actions have
+ * no display effect.
+ */
+export function flashCompletedScry(events: GameEvent[]): void {
+  const scry = events.find(
+    (event): event is CompletedScryEvent =>
+      event.type === "PlayerPerformedAction" &&
+      event.data.action === "Scry" &&
+      event.data.scry_top_count !== undefined &&
+      event.data.scry_bottom_count !== undefined,
+  );
+  if (!scry) return;
+  useUiStore.getState().flashScryOutcome({
+    playerId: scry.data.player_id,
+    topCount: scry.data.scry_top_count,
+    bottomCount: scry.data.scry_bottom_count,
+  });
 }

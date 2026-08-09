@@ -8,7 +8,7 @@ use engine::analysis::decision_template::{
 use engine::types::ability::{
     Comparator, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
 };
-use engine::types::actions::{DebugAction, DebugTokenRequest};
+use engine::types::actions::{DebugAction, DebugTokenRequest, MAX_DEBUG_CREATE_COUNT};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, YieldTarget};
 use engine::types::identifiers::{CardId, ObjectIncarnationRef};
@@ -271,6 +271,7 @@ fn rejects_oversized_debug_token_counter_name() {
             toughness_override: None,
             enter_with_counters: vec![(CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)), 1)],
         },
+        count: 1,
         run_etb: true,
     });
 
@@ -288,10 +289,24 @@ fn accepts_debug_token_preset_pt_override_fields() {
             toughness_override: Some(5),
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 
     guard_game_action_payload(&action).expect("numeric P/T overrides are semantic engine input");
+}
+
+#[test]
+fn rejects_debug_create_count_above_engine_ceiling() {
+    let action = GameAction::Debug(DebugAction::CreateTokenCopy {
+        source_id: ObjectId(1),
+        owner: PlayerId(0),
+        count: MAX_DEBUG_CREATE_COUNT + 1,
+        nonlegendary: false,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.CreateTokenCopy.count"));
 }
 
 #[test]
@@ -311,6 +326,7 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
             },
             enter_with_counters: Vec::new(),
         },
+        count: 1,
         run_etb: true,
     });
 

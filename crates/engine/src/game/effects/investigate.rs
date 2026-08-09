@@ -49,6 +49,7 @@ pub fn resolve(
         action: PlayerActionKind::Investigate,
         look_count: None,
         scry_bottom_count: None,
+        scry_top_count: None,
     });
 
     Ok(())

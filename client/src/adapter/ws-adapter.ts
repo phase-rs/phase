@@ -202,6 +202,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 25 — DebugCardEntries added a serialized, private resolution frame for
+ *      multi-card sandbox battlefield entries that pause for replacement or
+ *      as-enters choices. Old peers cannot deserialize that GameState shape.
  * 24 — DerivedViews.unbounded_families carries the engine-owned per-seat family
  *      collapse state behind each ∞ badge. A CAPABILITY bump, not a parse bump:
  *      the field is serde-optional, but this client deleted its row-flag
@@ -228,7 +231,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 24;
+export const PROTOCOL_VERSION = 25;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

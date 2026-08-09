@@ -2257,15 +2257,15 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_24() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+    fn protocol_version_is_25() {
+        assert_eq!(PROTOCOL_VERSION, 25);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
     /// pairing. This is the assertion with teeth: full-game servers accept ONLY
-    /// the current protocol, so a v24 client can never complete a handshake
-    /// with a v23 server and silently render zero ∞ badges (the family channel
-    /// is `#[serde(default)]`, so that loss would raise no parse error).
+    /// the current protocol, so an older peer cannot complete a handshake with
+    /// a server that may persist a paused DebugCardEntries frame it cannot
+    /// deserialize.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while `protocol_version_is_24` stays

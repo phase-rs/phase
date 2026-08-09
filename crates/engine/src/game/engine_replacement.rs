@@ -1405,9 +1405,11 @@ pub(super) fn handle_replacement_choice(
                     }
                 }
             }
-            Ok(WaitingFor::Priority {
+            state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
-            })
+            };
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
+            Ok(state.waiting_for.clone())
         }
     }
 }

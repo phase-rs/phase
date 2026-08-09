@@ -464,6 +464,7 @@ fn resume_draw_sequence_outcome(
             action: PlayerActionKind::Draw,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         });
     }
     match frame.origin {

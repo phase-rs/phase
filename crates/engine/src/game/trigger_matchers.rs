@@ -7808,6 +7808,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7836,6 +7837,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7864,6 +7866,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7892,6 +7895,7 @@ mod tests {
             action: PlayerActionKind::Surveil,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7920,6 +7924,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7948,6 +7953,7 @@ mod tests {
             action: PlayerActionKind::Proliferate,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -11032,6 +11038,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -11064,6 +11071,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -11078,6 +11086,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_shuffled(
             &self_event,
