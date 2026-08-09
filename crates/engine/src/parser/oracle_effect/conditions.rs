@@ -4922,7 +4922,8 @@ pub(crate) fn ability_condition_to_static_condition(
         // outcomes, reveals, resolved targets, zone-change events, player-scope
         // iteration); only meaningful inside `resolve_ability_chain`, never as
         // a continuous-effect gate.
-        AbilityCondition::EffectOutcome { .. }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo
