@@ -636,6 +636,7 @@ fn triggering_source_damage_stays_neutral() {
 fn vanilla_damage_snapshot() -> DamageContextSnapshot {
     DamageContextSnapshot {
         source_id: ObjectId(1),
+        source_incarnation: None,
         controller: AI,
         source_is_creature: false,
         has_deathtouch: false,
