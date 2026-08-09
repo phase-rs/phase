@@ -4649,12 +4649,13 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, DamageModification, Effect, OutsideGameSourcePool,
-        QuantityExpr, TargetFilter,
+        QuantityExpr, TargetFilter, TriggerCondition,
     };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
@@ -4930,6 +4931,91 @@ mod tests {
             !has_swallowed_detector(&parsed, "Condition_If"),
             "Lilah's folded plotted rider must not surface as a swallowed Condition_If: {:?}",
             parsed.parse_warnings
+        );
+    }
+
+    /// CR 603.4 + CR 700.4 + CR 120.1: Hawkeye, Avenging Archer's death-trigger
+    /// intervening-if "if Hawkeye dealt damage to it this turn" is now hoisted to
+    /// a `TriggerCondition::DealtDamageBySourceThisTurn`. Detector G (Condition_If)
+    /// clears because the trigger's `condition` slot is populated
+    /// (`has_slot("condition")`), and Detector J (Duration_ThisTurn) clears via
+    /// the damage-history whitelist. Both fired before the parser arm existed —
+    /// the audit-flagged DroppedCondition — so reverting the arm re-surfaces both.
+    #[test]
+    fn hawkeye_dealt_damage_intervening_if_not_swallowed() {
+        let parsed = parse_named(
+            "Reach\nWhenever a creature an opponent controls dies, if Hawkeye dealt \
+             damage to it this turn, draw a card.\n{T}: Hawkeye deals 1 damage to any \
+             target.",
+            "Hawkeye, Avenging Archer",
+            &["Legendary", "Creature"],
+        );
+        // Positive reach-guard: the negative diagnostic assertions below are only
+        // meaningful if the typed carrier is actually present. Assert the dies
+        // trigger carries `DealtDamageBySourceThisTurn` AND a `Draw` effect FIRST,
+        // so a broad suppression or an unrelated carrier that merely silences the
+        // detectors cannot make this test pass while the Hawkeye condition is
+        // absent or misclassified.
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("Hawkeye's dies trigger must parse");
+        assert_eq!(
+            dies_trigger.condition,
+            Some(TriggerCondition::DealtDamageBySourceThisTurn),
+            "the dies trigger must carry the hoisted intervening-if condition: {:?}",
+            dies_trigger.condition
+        );
+        assert!(
+            matches!(
+                dies_trigger.execute.as_deref().map(|a| a.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "the dies trigger must retain its `draw a card` effect after the clause is stripped: {:?}",
+            dies_trigger.execute
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Hawkeye's hoisted intervening-if must not surface as a swallowed \
+             Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Duration_ThisTurn"),
+            "Hawkeye's hoisted 'this turn' clause must not surface as a swallowed \
+             Duration_ThisTurn: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 603.4: the paired trailing-resolution-time case. When the same
+    /// "if ~ dealt damage to it this turn" clause appears in TRAILING position
+    /// ("draw a card if …") it is a resolution-time conditional, not an
+    /// intervening-if, so it must NOT be hoisted to the trigger `condition`
+    /// (leading-position guard in `extract_if_condition_with_card_name`). This
+    /// pairs with `hawkeye_dealt_damage_intervening_if_not_swallowed` above —
+    /// same clause, LEADING position -> condition Some — so the `None` assertion
+    /// here is non-vacuous: it proves the position guard, not that the phrase is
+    /// unparseable.
+    #[test]
+    fn hawkeye_trailing_dealt_damage_if_not_hoisted() {
+        let parsed = parse_named(
+            "Reach\nWhenever a creature an opponent controls dies, draw a card if \
+             Hawkeye dealt damage to it this turn.\n{T}: Hawkeye deals 1 damage to \
+             any target.",
+            "Hawkeye, Avenging Archer",
+            &["Legendary", "Creature"],
+        );
+        let dies_trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| t.mode == TriggerMode::ChangesZone)
+            .expect("the dies trigger must parse");
+        assert_eq!(
+            dies_trigger.condition, None,
+            "a trailing resolution-time `if` must not be hoisted to an intervening-if (CR 603.4): {:?}",
+            dies_trigger.condition
         );
     }
 

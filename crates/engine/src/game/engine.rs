@@ -16031,12 +16031,12 @@ mod stage2_injector_tests {
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
                 // #7018 adds the 16-line distinct-player-scope continuation gate above all
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
-                // Main's debug-entry (+3) and counter-reproduction (+5/+10)
-                // shifts combine with #6958's paid-cast outcome exclusion (+13).
-                // None creates an `OptionalEffect` prompt.
-                "game/effects/mod.rs:6249".to_string(),
-                "game/effects/mod.rs:6326".to_string(),
-                "game/effects/mod.rs:9519".to_string(),
+                // shifts combine with #6958's paid-cast outcome exclusion and
+                // #6976's conditional-branch exclusions. None creates an
+                // `OptionalEffect` prompt. Re-pinned against the merged source.
+                "game/effects/mod.rs:6252".to_string(),
+                "game/effects/mod.rs:6329".to_string(),
+                "game/effects/mod.rs:9522".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

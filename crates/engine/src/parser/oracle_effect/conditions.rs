@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
@@ -3168,6 +3168,25 @@ fn parse_colored_mana_symbol_count_target_condition(text: &str) -> Option<Abilit
     })
 }
 
+/// Parses the source-damage predicate of a trailing trigger-effect rider.
+///
+/// The source grammar is shared with replacement effects; this layer owns the
+/// event-target anaphor and resolution-time turn qualifier.
+fn parse_trigger_event_target_damaged_by_source_this_turn(input: &str) -> OracleResult<'_, ()> {
+    let (rest, source) = crate::parser::oracle_replacement::parse_damage_history_source(input)
+        .ok_or_else(|| oracle_err(input))?;
+    let (rest, _) = tag(" dealt damage").parse(rest)?;
+    let (rest, _) = tag(" to it").parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    match source {
+        TargetFilter::SelfRef => Ok((rest, ())),
+        _ => Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        ))),
+    }
+}
+
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
@@ -3178,6 +3197,19 @@ pub(super) fn strip_suffix_conditional(
     };
 
     let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+    // CR 608.2c + CR 603.4: trailing "if ~ dealt damage to it this turn" is
+    // a resolution-time rider, not an intervening-if. The event target is
+    // carried by the resolving trigger entry.
+    if ctx.in_trigger
+        && all_consuming(parse_trigger_event_target_damaged_by_source_this_turn)
+            .parse(condition_text)
+            .is_ok()
+    {
+        return (
+            Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+            text[..if_pos].trim().to_string(),
+        );
+    }
     // CR 608.2d: "it has " is in NON_REHOMEABLE_CONDITION_PREFIXES, so this
     // source-referential mana-symbol eligibility check must be recognized BEFORE
     // the rehomeable bail or it would never run. effect_prefix/effect_text are
@@ -4912,7 +4944,8 @@ pub(crate) fn ability_condition_to_static_condition(
         // outcomes, reveals, resolved targets, zone-change events, player-scope
         // iteration); only meaningful inside `resolve_ability_chain`, never as
         // a continuous-effect gate.
-        AbilityCondition::EffectOutcome { .. }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo

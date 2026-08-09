@@ -2577,6 +2577,11 @@ fn scan_quantity_expr(x: &QuantityExpr, mode: ScanMode) -> Axes {
 
 fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
     match x {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         AbilityCondition::AdditionalCostPaid { subject, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_object_scope(subject));

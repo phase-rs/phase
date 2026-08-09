@@ -1905,6 +1905,15 @@ pub struct DamageRecord {
     /// `None` preserves compatibility with legacy records and player targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_incarnation: Option<u64>,
+    /// CR 400.7: Incarnation of the source object when it dealt this damage. A
+    /// permanent that leaves and re-enters keeps its `ObjectId` but bumps its
+    /// incarnation, becoming a NEW object that did not deal earlier damage.
+    /// Exact-source look-backs (`DealtDamageBySourceThisTurn`) must therefore
+    /// compare the source's incarnation, not just its `ObjectId`. `None`
+    /// preserves compatibility with legacy records and with the CR 113.7a
+    /// source-already-gone case (no live incarnation to snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
@@ -1966,6 +1975,7 @@ impl Default for DamageRecord {
             target: TargetRef::Player(PlayerId(0)),
             target_controller: PlayerId(0),
             target_incarnation: None,
+            source_incarnation: None,
             amount: 0,
             is_combat: false,
             source_name: String::new(),

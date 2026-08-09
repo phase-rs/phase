@@ -10264,6 +10264,10 @@ pub enum ExcessRecipient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageContextSnapshot {
     pub source_id: ObjectId,
+    /// CR 400.7: Exact source identity captured when the damage context was
+    /// created. A replacement pause must not rebind a later incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     pub controller: PlayerId,
     pub source_is_creature: bool,
     pub has_deathtouch: bool,
@@ -19739,6 +19743,11 @@ pub enum EffectOutcomeSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
+    /// CR 608.2c + CR 400.7: Resolution-time rider on a dies trigger: the
+    /// triggering creature was dealt damage this turn by this exact source
+    /// incarnation. Unlike an intervening-if, this is checked only while the
+    /// effect resolves.
+    TriggerEventTargetDamagedBySourceThisTurn,
     /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
     /// during casting. Parameterized for kicker variant gating:
     ///
@@ -20258,7 +20267,8 @@ impl AbilityCondition {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded | EffectOutcomeSignal::Guessed { .. },
             } => false,
-            AbilityCondition::AdditionalCostPaidInstead
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::AdditionalCostPaidInstead
             | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EventOutcomeWon
             | AbilityCondition::SourceEnteredThisTurn

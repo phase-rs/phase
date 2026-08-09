@@ -18685,6 +18685,131 @@ fn trigger_another_creature_damaged_by_spider_you_controlled_dies() {
 }
 
 #[test]
+fn trigger_dies_if_source_dealt_damage_intervening_if() {
+    // CR 603.4 + CR 700.4 + CR 120.1: Hawkeye, Avenging Archer — the dies-trigger
+    // intervening-if "if ~ dealt damage to it this turn" must hoist to the
+    // trigger-level `DealtDamageBySourceThisTurn` condition. Dropping the arm
+    // leaves `condition == None` (the audit-flagged DroppedCondition) and the
+    // clause is silently swallowed. The `Draw` execute assertion is the
+    // reach-guard: it proves the clause was STRIPPED (leaving "draw a card"),
+    // not that the whole line simply failed to parse.
+    let def = parse_trigger_line(
+        "Whenever a creature an opponent controls dies, if Hawkeye dealt damage to it this turn, draw a card.",
+        "Hawkeye, Avenging Archer",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert!(
+        matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ),
+        "trigger head must remain 'a creature an opponent controls dies': {:?}",
+        def.valid_card
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::DealtDamageBySourceThisTurn)
+    );
+    assert!(matches!(
+        def.execute.as_deref().map(|a| a.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn trigger_dies_if_filter_source_dealt_damage_intervening_if() {
+    // CR 603.4 + CR 700.4 + CR 120.1 + CR 608.2i: the filter-source sibling of the
+    // Hawkeye self-source intervening-if. "if a [filter] dealt damage to it this
+    // turn" lowers to `DealtDamageThisTurnBySource { source }`, reusing the shared
+    // `parse_damage_history_source` helper (the same one the event-embedded Shelob
+    // form uses). The `Draw` execute assertion is the reach-guard.
+    let def = parse_trigger_line(
+        "Whenever a creature an opponent controls dies, if a Warrior you controlled dealt damage to it this turn, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Warrior".to_string())
+                    .controller(ControllerRef::You)
+            )
+        })
+    );
+    assert!(matches!(
+        def.execute.as_deref().map(|a| a.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn trigger_non_dies_head_does_not_capture_dealt_damage_if() {
+    // CR 603.4 + CR 700.4: the dies-shape gate. The resolver reads the dying
+    // creature from the death event, so the "if ... dealt damage to it this turn"
+    // arm must fire ONLY on a proven battlefield->graveyard head. On a non-dies
+    // (enters) head the clause must stay honestly unrepresented (condition None,
+    // left to swallow as a Condition_If diagnostic) rather than mis-parse. Paired
+    // with `trigger_dies_if_source_dealt_damage_intervening_if` above — same
+    // clause, dies head -> condition Some — so this negative is non-vacuous: it
+    // proves the GATE blocks the hoist, not that the phrase is unparseable. The
+    // `Draw` execute assertion is the reach-guard proving the clause reached the
+    // extract path (draw still parsed from the residual, as it did pre-fix).
+    let def = parse_trigger_line(
+        "When Test Card enters the battlefield, if Test Card dealt damage to it this turn, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(
+        def.condition, None,
+        "the dies-shape gate must not hoist the clause on a non-dies (enters) head"
+    );
+    assert!(matches!(
+        def.execute.as_deref().map(|a| a.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn trigger_dies_trailing_if_dealt_damage_stays_resolution_time() {
+    // CR 603.4: an intervening-if IMMEDIATELY follows the trigger condition. The
+    // TRAILING form "draw a card if ~ dealt damage to it this turn" is a
+    // resolution-time conditional, NOT an intervening-if, so it must stay in the
+    // effect chain (condition None) rather than be hoisted to the trigger-level
+    // `condition`. Paired with `trigger_dies_if_source_dealt_damage_intervening_if`
+    // (same clause + same dies head in LEADING position -> condition Some), so
+    // this negative is non-vacuous: it proves the leading-position guard blocks
+    // the hoist for the trailing form, on the very head where the leading form
+    // DOES hoist. The `Draw` execute assertion is the reach-guard proving the
+    // clause reached the extract path with the draw preserved.
+    let def = parse_trigger_line(
+        "Whenever a creature an opponent controls dies, draw a card if Hawkeye dealt damage to it this turn.",
+        "Hawkeye, Avenging Archer",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.condition, None,
+        "a trailing resolution-time `if` must NOT be hoisted to an intervening-if (CR 603.4)"
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("trailing rider must parse an execute");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+    assert_eq!(
+        execute.condition,
+        Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+        "the trailing condition must stay on the resolving effect"
+    );
+}
+
+#[test]
 fn trigger_you_dealt_damage() {
     // CR 120.1: "whenever you're dealt damage" — player damage received.
     let def = parse_trigger_line(
