@@ -82,6 +82,7 @@ fn emit_empty_proliferate_action(actor: PlayerId, events: &mut Vec<GameEvent>) {
         action: PlayerActionKind::Proliferate,
         look_count: None,
         scry_bottom_count: None,
+        scry_top_count: None,
     });
 }
 

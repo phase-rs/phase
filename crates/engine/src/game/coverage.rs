@@ -9407,10 +9407,25 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("prevent") && effective_lower.contains("damage")
                 }
                 Effect::CopySpell { .. } => {
-                    // "You may have this creature enter as a copy of ..." lines
-                    // (including "enter tapped as a copy of")
-                    // Parsed as CopySpell without a description string.
+                    // CR 707.5: clone-permanent copies enter "as a copy of ..."
+                    // (including "enter tapped as a copy of").
+                    // CR 707.10: to copy a spell is to put a copy of it onto the
+                    // stack. A CopySpell is parsed without a description string, so
+                    // it is matched here by effect type. Spell copies — "copy that
+                    // spell", "copy it", "copy target instant or sorcery spell" —
+                    // frequently nest
+                    //       inside a CreateDelayedTrigger ("When you next cast ...
+                    //       this turn, copy that spell", CR 603.7b), reached via
+                    //       ability_tree_any's CreateDelayedTrigger recursion. The
+                    //       retarget rider ("you may choose new targets for the
+                    //       copy") is CR 707.10c. Covers Galvanic Iteration /
+                    //       Doublecast / Dual Strike / Twincast / Fork.
                     effective_lower.contains("as a copy of")
+                        || (effective_lower.contains("copy")
+                            && (effective_lower.contains("that spell")
+                                || effective_lower.contains("copy it")
+                                || (effective_lower.contains("copy target")
+                                    && effective_lower.contains("spell"))))
                 }
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
@@ -9435,6 +9450,32 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     (effective_lower.contains("get ") || effective_lower.contains("gets "))
                         && (effective_lower.contains('+') || effective_lower.contains('-'))
                         && effective_lower.contains('/')
+                }
+                // CR 113.6m: "The same is true if the effect of that ability
+                // creates a delayed triggered ability whose effect moves the
+                // object out of a particular zone." Instants/sorceries in the
+                // graveyard-recursion class ("Whenever <event>, [you may pay
+                // <cost>. If you do,] return this card from your graveyard to
+                // your hand." — Spit Flame, Reach of Branches, Asgardian
+                // Inspiration, Endless Ranks of HYDRA) lower to a
+                // descriptionless CreateDelayedTrigger whose nested effect chain
+                // returns SelfRef from the graveyard to hand. `ability_tree_any`
+                // already recurses into the delayed trigger's `effect` and its
+                // `sub_ability`, so crediting this ChangeZone leaf covers the
+                // whole class and clears the false SilentDrop — the AST fully
+                // represents the line; only the per-line description-association
+                // heuristic failed (the delayed trigger carries no description).
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => {
+                    effective_lower.contains("return")
+                        && effective_lower.contains("graveyard")
+                        && effective_lower.contains("hand")
+                        && (effective_lower.contains("return ~")
+                            || effective_lower.contains("return this card"))
                 }
                 _ => false,
             };
@@ -12782,6 +12823,241 @@ mod tests {
         );
     }
 
+    /// Build a graveyard-recursion `ChangeZone` leaf ability with no description
+    /// string, mirroring the class shape (Spit Flame / Reach of Branches /
+    /// Endless Ranks of HYDRA): return an object from one zone to another.
+    fn recursion_change_zone(
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+    ) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
+    /// Wrap an inner ability in a descriptionless "Whenever your commander
+    /// enters or attacks" delayed trigger — the exact lowering the parser emits
+    /// for the non-permanent graveyard-recursion class (CR 113.6m).
+    fn recursion_delayed_trigger(inner: AbilityDefinition) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::EntersOrAttacks)),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    /// Endless Ranks of HYDRA line 2 and the whole "[you may pay <cost>. If you
+    /// do,] return this card from your graveyard to your hand" class. The
+    /// delayed trigger carries no description, so the per-line audit can only
+    /// credit the line through the nested `ChangeZone(Graveyard -> Hand,
+    /// SelfRef)` leaf. Reverting the new CR 113.6m arm makes this fail (the
+    /// recursion line is reported as SilentDrop). The control line proves the
+    /// audit machinery is live, so the recursion line's clean result is not
+    /// vacuous.
+    #[test]
+    fn test_audit_credits_descriptionless_delayed_trigger_graveyard_recursion_to_hand() {
+        let mut face = make_face();
+        let recursion_line = "Whenever your commander enters or attacks, you may pay {1}{B}. If you do, return this card from your graveyard to your hand.";
+        let control_line = "Draw seven cards and then discard three cards at random.";
+        let oracle = format!("{recursion_line}\n{control_line}");
+        face.oracle_text = Some(oracle.clone());
+
+        let pay = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(
+            recursion_change_zone(Some(Zone::Graveyard), Zone::Hand, TargetFilter::SelfRef)
+                .condition(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+        );
+        face.abilities.push(recursion_delayed_trigger(pay));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("return this card from your graveyard")
+            )),
+            "graveyard-recursion delayed trigger must not be flagged as SilentDrop: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("Draw seven cards")
+            )),
+            "control line with no parsed element must still surface as SilentDrop (reach guard): {findings:?}"
+        );
+    }
+
+    /// Reach of Branches sub-shape: the delayed trigger's effect IS the
+    /// `ChangeZone` directly (no `PayCost` wrapper). Exercises `ability_tree_any`
+    /// recursion into `effect` (vs. the `sub_ability` path of the with-cost
+    /// class), proving both sub-shapes of the class are covered.
+    #[test]
+    fn test_audit_credits_delayed_trigger_direct_graveyard_return_without_cost() {
+        let mut face = make_face();
+        let oracle = "Whenever a Forest enters the battlefield, you may return this card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "direct (no-cost) graveyard-recursion delayed trigger must be credited: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (destination axis): a reanimation delayed trigger
+    /// that returns the card to the BATTLEFIELD is a larger, different effect.
+    /// The oracle line here contains all three text-guard words (return /
+    /// graveyard / hand), so only the structural `destination: Hand` pattern
+    /// keeps it from being credited — dropping that pattern would regress this.
+    #[test]
+    fn test_audit_still_flags_delayed_trigger_return_to_battlefield() {
+        let mut face = make_face();
+        let oracle = "Whenever this dies, you may return this card from your graveyard to the battlefield rather than to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Battlefield,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "return-to-battlefield delayed trigger must NOT be credited by the graveyard-to-hand arm: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (target axis): targeted graveyard recovery ("return
+    /// target creature card from your graveyard to your hand") does not return
+    /// the object the ability is on, so CR 113.6m does not apply. The text guard
+    /// passes here; only the `target: SelfRef` pattern keeps it uncredited.
+    #[test]
+    fn test_audit_still_flags_targeted_graveyard_to_hand_return() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, return target creature card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::Typed(TypedFilter::creature()),
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "targeted (non-SelfRef) graveyard-to-hand return must NOT be credited by the SelfRef arm: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_graveyard_recursion_does_not_cross_credit_targeted_return_line() {
+        let mut face = make_face();
+        let recursion =
+            "Whenever a Dragon enters, return this card from your graveyard to your hand.";
+        let targeted = "Return target creature card from your graveyard to your hand.";
+        let oracle = format!("{recursion}\n{targeted}");
+        face.oracle_text = Some(oracle.clone());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == recursion)),
+            "the self-reference line must be credited: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == targeted)),
+            "the SelfRef leaf must not credit a different targeted-return line: {findings:?}"
+        );
+    }
+
+    /// Conjunctivity guard (text axis): the structural match alone must not
+    /// credit a line — the return/graveyard/hand text guard is required. An
+    /// unrelated oracle line paired with the recursion effect shape is still
+    /// reported, proving the heuristic is a conservative confirmation.
+    #[test]
+    fn test_audit_graveyard_recursion_text_guard_is_conjunctive() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, exile the top three cards of your library.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "structural match without the text-guard words must remain a SilentDrop: {findings:?}"
+        );
+    }
+
     #[test]
     fn test_audit_split_line_accepts_move_counters() {
         let mut face = make_face();
@@ -13688,6 +13964,141 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
             "unsupported non-Defiler cost reduction should remain visible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn delayed_spell_copy_line_is_not_a_silent_drop() {
+        // CR 707.10 / CR 603.7b: "When you next cast an instant or sorcery spell
+        // this turn, copy that spell. You may choose new targets for the copy."
+        // parses to a description-less CopySpell nested inside a
+        // CreateDelayedTrigger. The description matcher misses (no description
+        // string at any level), so coverage must come from the effect-type
+        // fallback reaching the nested CopySpell via ability_tree_any's
+        // CreateDelayedTrigger recursion. Covers the whole delayed spell-copy
+        // class (Galvanic Iteration / Doublecast / Dual Strike), not one card.
+        // The delayed-trigger condition variant is immaterial to the seam under
+        // test (the audit inspects only the effect subtree for coverage), so a
+        // minimal AtNextPhase stands in for the real WhenNextEvent.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let delayed_copy = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::CopySpell {
+                            target: TargetFilter::TriggeringSource,
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
+                            additional_modifications: vec![],
+                            starting_loyalty_from_casualty_sacrifice: false,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            )
+        };
+
+        for oracle in [
+            // Galvanic Iteration / Doublecast
+            "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+            // Dual Strike — mana-value-restricted variant of the same class
+            "When you next cast an instant or sorcery spell with mana value 4 or less this turn, copy that spell. You may choose new targets for the copy.",
+        ] {
+            let mut face = make_face();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities.push(delayed_copy());
+            let findings = audit_card_lines(oracle, &face);
+            assert!(
+                findings.is_empty(),
+                "delayed spell-copy line falsely flagged: {oracle} -> {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_spell_copy_line_without_description_is_not_a_silent_drop() {
+        // CR 707.10: "Copy target instant or sorcery spell. You may choose new
+        // targets for the copy." (Twincast / Fork). The real printings carry an
+        // ability description that the description matcher catches, but a
+        // description-less CopySpell of the same direct-copy class must still be
+        // covered by the effect-type fallback rather than flagged as a SilentDrop.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle =
+            "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings.is_empty(),
+            "direct spell-copy line falsely flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_effect_does_not_cover_unparsed_ability_copy_line() {
+        // CR 707.10 distinguishes copying a spell from copying an activated
+        // ability. The face-wide CopySpell fallback must not hide a separate,
+        // unparsed ability-copy line.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle = "Copy target instant or sorcery spell.\nCopy target activated ability.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "unparsed ability-copy line must remain visible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_line_without_copyspell_effect_is_still_a_silent_drop() {
+        // Reach-guard (non-vacuous): proves the negatives above are caused by the
+        // CopySpell arm actually reaching the effect — not by the line being
+        // skipped for an unrelated reason. The same "... copy that spell ..." line
+        // on a face whose only effect is an unimplemented stub (no CopySpell) MUST
+        // still surface as a SilentDrop.
+        let oracle = "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("copy that spell", oracle),
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "spell-copy line without a CopySpell effect must remain a SilentDrop: {findings:?}"
         );
     }
 

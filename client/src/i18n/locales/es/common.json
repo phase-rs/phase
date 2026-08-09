@@ -5,6 +5,11 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "scryOutcome": {
+    "title": "Adivinación completada",
+    "you": "Tú",
+    "result": "{{player}} — {{top}} arriba · {{bottom}} abajo"
+  },
   "modal": {
     "defaultEyebrow": "Herramienta del espacio de trabajo"
   },

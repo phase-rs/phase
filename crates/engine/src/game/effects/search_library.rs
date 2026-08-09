@@ -542,6 +542,7 @@ pub fn resolve(
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         });
         state
             .players_who_searched_library_this_turn

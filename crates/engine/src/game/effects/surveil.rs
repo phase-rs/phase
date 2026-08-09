@@ -50,6 +50,7 @@ pub fn resolve(
         action: PlayerActionKind::Surveil,
         look_count: None,
         scry_bottom_count: None,
+        scry_top_count: None,
     });
 
     let cards: Vec<_> = player
