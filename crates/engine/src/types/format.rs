@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::LegalityFormat;
@@ -126,6 +128,21 @@ pub enum FormatTopology {
     },
 }
 
+/// Configuration for the limited range of influence option.
+///
+/// The engine does not implement limited-range rules yet. This type preserves
+/// the full per-seat configuration shape so external boundaries can reject it
+/// explicitly until the corresponding game-rule support exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeOfInfluenceConfig {
+    /// The number of seats away that each player can influence by default.
+    /// Zero is valid and means a player can influence only themself.
+    pub default_range: u8,
+    /// Per-seat exceptions to [`Self::default_range`].
+    #[serde(default)]
+    pub player_overrides: BTreeMap<PlayerId, u8>,
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -144,7 +161,7 @@ pub struct FormatConfig {
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
-    pub range_of_influence: Option<u8>,
+    pub range_of_influence: Option<RangeOfInfluenceConfig>,
     pub team_based: bool,
     /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
     /// designated as the archenemy and takes the first turn.
@@ -626,6 +643,39 @@ impl FormatConfig {
                     "archenemy_player must be less than player_count ({player_count})"
                 ));
             }
+        }
+        if let Some(range) = &self.range_of_influence {
+            let max_radius = player_count / 2;
+            if range.default_range > max_radius {
+                return Err(format!(
+                    "range_of_influence.default_range must be at most {max_radius} for {player_count} players"
+                ));
+            }
+            for (&player, &radius) in &range.player_overrides {
+                if player.0 >= player_count {
+                    return Err(format!(
+                        "range_of_influence.player_overrides contains seat {} outside player_count ({player_count})",
+                        player.0
+                    ));
+                }
+                if radius > max_radius {
+                    return Err(format!(
+                        "range_of_influence.player_overrides[{}] must be at most {max_radius} for {player_count} players",
+                        player.0
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects limited-range configuration until the engine implements its rules.
+    pub fn reject_unimplemented_range_of_influence(&self) -> Result<(), String> {
+        if self.range_of_influence.is_some() {
+            return Err(
+                "range_of_influence is not supported until limited-range rules are implemented"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -1251,6 +1301,64 @@ mod tests {
             let deserialized: FormatConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(config, deserialized);
         }
+    }
+
+    #[test]
+    fn range_of_influence_config_round_trips_with_player_overrides() {
+        let config = RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        };
+
+        let json = serde_json::to_value(&config).expect("range config serializes");
+        assert_eq!(json["default_range"], 0);
+        assert_eq!(json["player_overrides"]["1"], 1);
+        assert_eq!(json["player_overrides"]["3"], 2);
+        assert_eq!(
+            serde_json::from_value::<RangeOfInfluenceConfig>(json)
+                .expect("range config deserializes"),
+            config
+        );
+    }
+
+    #[test]
+    fn range_of_influence_config_defaults_missing_overrides_to_empty() {
+        let config: RangeOfInfluenceConfig =
+            serde_json::from_str(r#"{"default_range":0}"#).expect("range config deserializes");
+
+        assert_eq!(config.default_range, 0);
+        assert!(config.player_overrides.is_empty());
+    }
+
+    #[test]
+    fn range_of_influence_validation_uses_actual_seating() {
+        let mut config = FormatConfig::commander();
+        config.range_of_influence = Some(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
+        });
+        assert!(config.validate_for_player_count(4).is_ok());
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(4), 0)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override must name an occupied seat")
+            .contains("outside player_count"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides =
+            BTreeMap::from([(PlayerId(1), 3)]);
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("an override cannot exceed the table radius")
+            .contains("player_overrides[1]"));
+
+        config.range_of_influence.as_mut().unwrap().player_overrides = BTreeMap::new();
+        config.range_of_influence.as_mut().unwrap().default_range = 3;
+        assert!(config
+            .validate_for_player_count(4)
+            .expect_err("a range cannot exceed the table radius")
+            .contains("at most 2"));
     }
 
     #[test]

@@ -563,7 +563,7 @@ impl DraftSessionManager {
                 2,
                 match_config,
                 Some(format_config.clone()),
-            );
+            )?;
             let (token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;
 
             game_mgr

@@ -143,10 +143,54 @@ fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState
     let state = serde_json::from_value::<PersistedGameState>(serialized)
         .map(PersistedGameState::into_game_state)
         .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
+    state
+        .format_config
+        .reject_unimplemented_range_of_influence()
+        .map_err(|error| format!("Failed to restore GameState: {error}"))?;
     Ok(DecodedRestoredGameState {
         state,
         debug_permitted_was_serialized,
     })
+}
+
+fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> Result<(), String> {
+    config.validate_for_player_count(player_count)?;
+    config.reject_unimplemented_range_of_influence()
+}
+
+#[cfg(test)]
+mod external_format_config_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn external_initialization_rejects_limited_range_configuration() {
+        let mut config = FormatConfig::standard();
+        config.range_of_influence = Some(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        });
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("limited range must remain disabled at the WASM boundary")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn restored_state_with_limited_range_is_rejected_before_rehydration() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config.range_of_influence = Some(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        });
+        let json = serde_json::to_string(&state).expect("state serializes");
+
+        assert!(decode_restored_game_state(&json)
+            .expect_err("limited range must remain disabled at the restore boundary")
+            .contains("not supported"));
+    }
 }
 
 /// Bind the engine's interaction authority for the one game this module hosts.
@@ -952,14 +996,21 @@ pub fn initialize_game(
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
     let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-            .unwrap_or_else(|_| FormatConfig::standard())
+        match serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js) {
+            Ok(config) => config,
+            Err(error) => {
+                return to_js(&serde_json::json!({
+                    "error": true,
+                    "reasons": [format!("Format config deserialization failed: {error}")],
+                }));
+            }
+        }
     } else {
         FormatConfig::standard()
     };
     let count = player_count.unwrap_or(2);
     let game_format = format_config.format;
-    if let Err(reason) = format_config.validate_for_player_count(count) {
+    if let Err(reason) = validate_external_format_config(&format_config, count) {
         return to_js(&serde_json::json!({
             "error": true,
             "reasons": [reason],
