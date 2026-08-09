@@ -2072,6 +2072,7 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
+            biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     if socket.send(Message::text(json)).await.is_err() {

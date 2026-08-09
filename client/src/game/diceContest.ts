@@ -4,14 +4,6 @@ import { useUiStore } from "../stores/uiStore";
 type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
 type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerContest" }>;
-type ScryEvent = Extract<GameEvent, { type: "PlayerPerformedAction" }>;
-type CompletedScryEvent = ScryEvent & {
-  data: ScryEvent["data"] & {
-    action: "Scry";
-    scry_top_count: number;
-    scry_bottom_count: number;
-  };
-};
 
 /**
  * Fire the starting-player contest overlay from a game-start event batch.
@@ -90,17 +82,19 @@ export function flashInGameRolls(events: GameEvent[]): void {
  * no display effect.
  */
 export function flashCompletedScry(events: GameEvent[]): void {
-  const scry = events.find(
-    (event): event is CompletedScryEvent =>
-      event.type === "PlayerPerformedAction" &&
-      event.data.action === "Scry" &&
-      event.data.scry_top_count !== undefined &&
-      event.data.scry_bottom_count !== undefined,
-  );
-  if (!scry) return;
-  useUiStore.getState().flashScryOutcome({
-    playerId: scry.data.player_id,
-    topCount: scry.data.scry_top_count,
-    bottomCount: scry.data.scry_bottom_count,
-  });
+  for (const scry of events) {
+    if (
+      scry.type !== "PlayerPerformedAction" ||
+      scry.data.action !== "Scry" ||
+      scry.data.scry_top_count === undefined ||
+      scry.data.scry_bottom_count === undefined
+    ) {
+      continue;
+    }
+    useUiStore.getState().flashScryOutcome({
+      playerId: scry.data.player_id,
+      topCount: scry.data.scry_top_count,
+      bottomCount: scry.data.scry_bottom_count,
+    });
+  }
 }
