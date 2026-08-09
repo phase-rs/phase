@@ -20,10 +20,11 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::SpellCastRecord;
+use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
-    ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSpellGrant, ManaType, ManaUnit,
+    ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
+    ManaType, ManaUnit,
 };
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
@@ -208,6 +209,366 @@ fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProdu
         .cost(AbilityCost::Tap),
     );
     source
+}
+
+fn create_black_red_filter_land(state: &mut GameState, card_id: u64) -> ObjectId {
+    let filter_land = create_object(
+        state,
+        CardId(card_id),
+        PlayerId(0),
+        "Black-Red Filter Land".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&filter_land).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    Arc::make_mut(&mut obj.abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::ChoiceAmongCombinations {
+                    options: vec![
+                        vec![ManaColor::Black, ManaColor::Black],
+                        vec![ManaColor::Black, ManaColor::Red],
+                        vec![ManaColor::Red, ManaColor::Red],
+                    ],
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 0,
+                    },
+                },
+                AbilityCost::Tap,
+            ],
+        }),
+    );
+    filter_land
+}
+
+fn mana_selection_for_source(state: &GameState, source_id: ObjectId) -> ManaSourceSelection {
+    crate::game::mana_sources::activatable_mana_source_selections(state, PlayerId(0))
+        .into_iter()
+        .find(|selection| selection.source.object_id == source_id)
+        .expect("source must have one live mana selection")
+}
+
+fn mana_selection_for_source_ability(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> ManaSourceSelection {
+    crate::game::mana_sources::activatable_mana_source_selections(state, PlayerId(0))
+        .into_iter()
+        .find(|selection| {
+            selection.source.object_id == source_id
+                && selection.ability_index == Some(ability_index)
+        })
+        .expect("source must expose the requested live mana ability")
+}
+
+fn choose_black_red_filter_output(state: &mut GameState) -> WaitingFor {
+    if let WaitingFor::PayManaAbilityMana { options, .. } = &state.waiting_for {
+        let payment = options
+            .iter()
+            .find(|payment| payment.as_slice() == [ManaType::Black])
+            .cloned()
+            .expect("the filter-land mana-cost prompt must offer {B}");
+        apply_as_current(state, GameAction::PayManaAbilityMana { payment })
+            .expect("the offered filter-land mana payment must be accepted");
+    }
+
+    let WaitingFor::ChooseManaColor {
+        choice: ManaChoicePrompt::Combination { options },
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "filter-land activation must offer a combination choice, got {:?}",
+            state.waiting_for
+        );
+    };
+    let colors = options
+        .iter()
+        .find(|colors| colors.as_slice() == [ManaType::Black, ManaType::Red])
+        .cloned()
+        .expect("the filter-land combination prompt must offer {B}{R}");
+    apply_as_current(
+        state,
+        GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(colors),
+            count: 1,
+        },
+    )
+    .expect("the offered filter-land {B}{R} choice must resolve")
+    .waiting_for
+}
+
+fn advertised_cast_for(state: &GameState, spell: ObjectId) -> GameAction {
+    crate::ai_support::legal_actions(state)
+        .into_iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == spell
+            )
+        })
+        .expect("the exact castability witness must advertise the spell")
+}
+
+#[test]
+fn castability_does_not_double_count_mana_used_to_activate_a_filter_land() {
+    let mut state = setup_game_at_main_phase();
+    let spell =
+        create_generic_creature_in_hand(&mut state, 9_013, PlayerId(0), "Three-Colored Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+        ],
+        generic: 0,
+    };
+
+    create_tap_mana_source(
+        &mut state,
+        "Swamp",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        },
+    );
+
+    create_black_red_filter_land(&mut state, 9_014);
+
+    let cost = state.objects[&spell].mana_cost.clone();
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+        "the filter land must spend the Swamp's mana before producing its pair"
+    );
+    assert!(
+        !has_manual_mana_ability_for_spell_payment(&state, PlayerId(0), spell),
+        "the filter land's tap-cost activation belongs to exact auto-payment, not the manual fallback"
+    );
+    assert!(
+        !can_feasibly_pay_mana_cost(&state, PlayerId(0), Some(spell), &cost),
+        "castability must use the exact tap-source payment authority rather than double-counting the Swamp"
+    );
+    assert!(
+        !crate::ai_support::legal_actions(&state)
+            .iter()
+            .any(|action| matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == spell
+            )),
+        "an unpayable spell must not be offered as a cast action"
+    );
+}
+
+#[test]
+fn castability_follows_two_swamps_through_a_filter_land_payment() {
+    let mut state = setup_game_at_main_phase();
+    let spell =
+        create_generic_creature_in_hand(&mut state, 9_017, PlayerId(0), "Bedevil Cost Stand-In", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+        ],
+        generic: 0,
+    };
+    let first_swamp = create_tap_mana_source(
+        &mut state,
+        "First Swamp",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        },
+    );
+    let second_swamp = create_tap_mana_source(
+        &mut state,
+        "Second Swamp",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        },
+    );
+    let filter_land = create_black_red_filter_land(&mut state, 9_018);
+    let cost = state.objects[&spell].mana_cost.clone();
+
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+        "the ordinary auto-tap probe does not sequence the filter-land payment"
+    );
+    assert!(
+        can_feasibly_pay_mana_cost(&state, PlayerId(0), Some(spell), &cost),
+        "the exact two-step reducer witness must offer the legally payable spell"
+    );
+
+    let cast_action = advertised_cast_for(&state, spell);
+    let cast_result = apply_as_current(&mut state, cast_action)
+        .expect("the advertised cast must enter manual mana payment");
+    assert!(matches!(
+        cast_result.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+
+    let first_swamp_selection = mana_selection_for_source(&state, first_swamp);
+    let first_result = apply_as_current(
+        &mut state,
+        GameAction::TapLandForMana {
+            selection: first_swamp_selection,
+        },
+    )
+    .expect("the first Swamp activation must resolve");
+    assert!(matches!(
+        first_result.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+
+    let filter_selection = mana_selection_for_source_ability(&state, filter_land, 0);
+    let filter_result = apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: filter_selection.source.object_id,
+            ability_index: filter_selection
+                .ability_index
+                .expect("the filter land selection names its printed ability"),
+        },
+    )
+    .expect("the filter land must accept the black mana payment");
+    assert!(matches!(
+        filter_result.waiting_for,
+        WaitingFor::PayManaAbilityMana { .. } | WaitingFor::ChooseManaColor { .. }
+    ));
+
+    let choice_result = choose_black_red_filter_output(&mut state);
+    assert!(matches!(choice_result, WaitingFor::ManaPayment { .. }));
+    let second_swamp_selection = mana_selection_for_source(&state, second_swamp);
+    let second_result = apply_as_current(
+        &mut state,
+        GameAction::TapLandForMana {
+            selection: second_swamp_selection,
+        },
+    )
+    .expect("the untouched second Swamp must be usable during payment");
+    assert!(matches!(
+        second_result.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("the completed manual route must finalize the advertised cast");
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert!(state.pending_cast.is_none());
+}
+
+#[test]
+fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment() {
+    let mut state = setup_game_at_main_phase();
+    let spell =
+        create_generic_creature_in_hand(&mut state, 9_019, PlayerId(0), "Bedevil Cost Stand-In", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+        ],
+        generic: 0,
+    };
+    let producer = create_object(
+        &mut state,
+        CardId(9_020),
+        PlayerId(0),
+        "Life-Powered Mana Battery".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&producer).unwrap();
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Black, ManaColor::Black],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            }),
+        );
+    }
+    let filter_land = create_black_red_filter_land(&mut state, 9_021);
+    let cost = state.objects[&spell].mana_cost.clone();
+
+    assert!(!can_pay_cost_after_auto_tap(
+        &state,
+        PlayerId(0),
+        spell,
+        &cost
+    ));
+    assert!(has_manual_mana_ability_for_spell_payment(
+        &state,
+        PlayerId(0),
+        spell
+    ));
+    assert!(
+        can_feasibly_pay_mana_cost(&state, PlayerId(0), Some(spell), &cost),
+        "the exact witness must retain one black mana after funding the filter land"
+    );
+
+    let cast_action = advertised_cast_for(&state, spell);
+    let cast_result = apply_as_current(&mut state, cast_action)
+        .expect("the advertised cast must enter manual mana payment");
+    assert!(matches!(
+        cast_result.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+
+    let producer_result = apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: producer,
+            ability_index: 0,
+        },
+    )
+    .expect("the deterministic nonland producer must resolve through the live reducer");
+    assert!(matches!(
+        producer_result.waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+
+    let filter_selection = mana_selection_for_source_ability(&state, filter_land, 0);
+    apply_as_current(
+        &mut state,
+        GameAction::ActivateAbility {
+            source_id: filter_selection.source.object_id,
+            ability_index: filter_selection
+                .ability_index
+                .expect("the filter land selection names its printed ability"),
+        },
+    )
+    .expect("the filter land must spend one of the battery's black mana");
+    let choice_result = choose_black_red_filter_output(&mut state);
+    assert!(matches!(choice_result, WaitingFor::ManaPayment { .. }));
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("the completed manual route must finalize the advertised cast");
+    assert_eq!(state.objects[&spell].zone, Zone::Stack);
+    assert!(state.pending_cast.is_none());
 }
 
 #[test]
@@ -16927,6 +17288,249 @@ fn assist_offers_player_choice_with_generic_cost() {
 }
 
 #[test]
+fn assist_only_affordability_remains_offered_through_choose_player_and_payment() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = make_assist_spell(&mut state);
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+    add_mana(&mut state, PlayerId(1), ManaType::Colorless, 3);
+    let action = GameAction::CastSpell {
+        object_id: obj_id,
+        card_id: state.objects[&obj_id].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("assist-only cast must start");
+    let WaitingFor::AssistChoosePlayer { .. } = &state.waiting_for else {
+        panic!("assist-only affordability must reach helper choice")
+    };
+    assert_eq!(
+        state
+            .pending_cast
+            .as_ref()
+            .expect("Assist prompt must retain its external pending cast")
+            .object_id,
+        obj_id
+    );
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseAssistPlayer {
+            player: Some(PlayerId(1)),
+        },
+    )
+    .expect("the helper must be selectable");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AssistPayment {
+            chosen: PlayerId(1),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let spell = create_object(
+        &mut state,
+        CardId(77_100),
+        PlayerId(0),
+        "Gift Offer Regression".to_string(),
+        Zone::Hand,
+    );
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::zero();
+        let keyword = Keyword::Gift(crate::types::keywords::GiftKind::Card);
+        object.keywords.push(keyword.clone());
+        object.base_keywords.push(keyword);
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        Arc::make_mut(&mut object.abilities).push(definition.clone());
+        Arc::make_mut(&mut object.base_abilities).push(definition);
+    }
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("gift cast must start");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalCostChoice { .. }
+    ));
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+        .expect("promising the gift must be legal");
+    let WaitingFor::ChooseGiftRecipient {
+        pending_cast,
+        candidates,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("a three-player promised gift must reach recipient choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+    assert_eq!(candidates, &vec![PlayerId(1), PlayerId(2)]);
+}
+
+#[test]
+fn defiler_auto_cast_remains_offered_and_reaches_defiler_payment() {
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(77_110),
+        PlayerId(0),
+        "Green Defiler Offer Spell".to_string(),
+        Zone::Hand,
+    );
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.color = vec![ManaColor::Green];
+        object.base_color = vec![ManaColor::Green];
+        object.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        };
+    }
+    let defiler = create_object(
+        &mut state,
+        CardId(77_111),
+        PlayerId(0),
+        "Defiler Offer Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&defiler)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::DefilerCostReduction {
+            color: ManaColor::Green,
+            life_cost: 2,
+            mana_reduction: ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            },
+        }));
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("Defiler-reducible cast must start");
+    let WaitingFor::DefilerPayment { pending_cast, .. } = &state.waiting_for else {
+        panic!("Defiler-reducible cast must reach life-payment choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+}
+
+#[test]
+fn announcing_opponent_auto_cast_remains_offered_and_reaches_announcer_choice() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    for player in [PlayerId(1), PlayerId(2)] {
+        let creature = create_object(
+            &mut state,
+            CardId(77_120 + u64::from(player.0)),
+            player,
+            format!("Announcer Target {}", player.0),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&creature).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+    }
+    let spell = create_object(
+        &mut state,
+        CardId(77_125),
+        PlayerId(0),
+        "Opponent Announces Target Spell".to_string(),
+        Zone::Hand,
+    );
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::zero();
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        );
+        definition.target_chooser = Some(TargetFilter::Opponent);
+        Arc::make_mut(&mut object.abilities).push(definition.clone());
+        Arc::make_mut(&mut object.base_abilities).push(definition);
+    }
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("opponent-announced cast must start");
+    let WaitingFor::ChooseAnnouncingOpponent {
+        pending_cast,
+        candidates,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("opponent-announced cast must reach announcer choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+    assert_eq!(candidates, &vec![PlayerId(1), PlayerId(2)]);
+}
+
+#[test]
 fn assist_no_offer_without_generic_component() {
     let mut state = setup_game_at_main_phase();
     let obj_id = make_assist_spell(&mut state);
@@ -16966,6 +17570,79 @@ fn assist_no_offer_without_other_players() {
         !matches!(result, WaitingFor::AssistChoosePlayer { .. }),
         "with no eligible helper, assist must not be offered, got {result:?}"
     );
+}
+
+/// R4f — CR 702.132a: assist is *"you may **choose** another player"*, a CHOICE and not a
+/// target (CR 115.10a), so the helper list is the seats that still exist to be chosen.
+/// A phased-out seat is treated as though it does not exist (the CR 702.26b MIRROR) and
+/// must drop out of the offer; the eliminated exclusion this seam already had (CR 800.4 +
+/// CR 102.1) must be PRESERVED, not traded for it.
+///
+/// FOUR SEATS, NOT TWO, and that is load-bearing twice over: `setup_game_at_main_phase` is
+/// two-player, so it cannot carry both an excluded and a surviving helper, and
+/// `assist_offer_params` returns `None` when the candidate list is empty — so on a narrower
+/// board the offer would never fire and a "P1 is not a candidate" assertion would pass
+/// vacuously. THE OFFER MUST STILL FIRE, which is why the assertion is on the published
+/// `AssistChoosePlayer` variant and is a TOTAL EQUALITY rather than a `!contains`.
+///
+/// Contrast `assist_no_offer_without_other_players` directly above: that row asserts an
+/// ABSENCE, which is exactly the shape this one must not copy.
+///
+/// REVERT-PROBE: restore HEAD's `.filter(|p| p.id != player && !p.is_eliminated)` at the
+/// `assist_offer_params` site ⇒ candidates become `[P1, P3]` ⇒ the equality FAILS.
+#[test]
+fn assist_offer_excludes_a_phased_out_helper_and_still_offers_the_rest() {
+    use crate::types::format::FormatConfig;
+
+    let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+
+    // Setup anti-vacuity, asserted before anything is measured.
+    let mut setup_events = Vec::new();
+    let transitioned =
+        crate::game::phasing::phase_out_player(&mut state, PlayerId(1), &mut setup_events);
+    assert_eq!(
+        transitioned,
+        vec![PlayerId(1)],
+        "phase_out_player must actually transition P1"
+    );
+    assert!(
+        state.players[1].is_phased_out(),
+        "P1 must read as phased out"
+    );
+    crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+    assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
+
+    let obj_id = make_assist_spell(&mut state);
+    // CR 601.2h: "The player pays the total cost" — unpayable costs can't be paid, so the
+    // caster is staged with enough mana for {3}{R} or the cast never reaches the offer.
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    // The PRODUCTION entry point, exactly as every other assist row drives it — never
+    // `assist_offer_params`, which is private.
+    let result = handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(22), &mut Vec::new())
+        .expect("assist spell should begin casting");
+
+    match result {
+        WaitingFor::AssistChoosePlayer {
+            player, candidates, ..
+        } => {
+            assert_eq!(player, PlayerId(0));
+            assert_eq!(
+                candidates,
+                vec![PlayerId(3)],
+                "phased-out P1 and eliminated P2 are out; the one valid helper is in"
+            );
+        }
+        other => panic!("expected AssistChoosePlayer, got {other:?}"),
+    }
 }
 
 #[test]
@@ -21930,7 +22607,7 @@ fn non_aura_enchantment_does_not_trigger_aura_targeting() {
 }
 
 #[test]
-fn emit_targeting_events_opponent_object_is_crime() {
+fn target_declaration_classifies_opponent_object_as_a_provisional_crime() {
     let mut state = setup_game_at_main_phase();
     let target = create_object(
         &mut state,
@@ -21951,12 +22628,21 @@ fn emit_targeting_events_opponent_object_is_crime() {
         e,
         GameEvent::BecomesTarget {
             target: TargetRef::Object(object_id),
+            source_controller: PlayerId(0),
             ..
         } if *object_id == target
     )));
-    assert!(events.iter().any(
-        |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+    assert!(targets_commit_crime(
+        &state,
+        &[TargetRef::Object(target)],
+        PlayerId(0)
     ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CrimeCommitted { .. })),
+        "declaration is not a durable crime commitment"
+    );
 }
 
 #[test]
@@ -21986,7 +22672,7 @@ fn emit_targeting_events_own_object_no_crime() {
 }
 
 #[test]
-fn emit_targeting_events_opponent_player_is_crime() {
+fn target_declaration_classifies_opponent_player_as_a_provisional_crime() {
     let state = setup_game_at_main_phase();
     let mut events = Vec::new();
     emit_targeting_events(
@@ -22003,9 +22689,17 @@ fn emit_targeting_events_opponent_player_is_crime() {
             ..
         }
     )));
-    assert!(events.iter().any(
-        |e| matches!(e, GameEvent::CrimeCommitted { player_id } if *player_id == PlayerId(0))
+    assert!(targets_commit_crime(
+        &state,
+        &[TargetRef::Player(PlayerId(1))],
+        PlayerId(0)
     ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CrimeCommitted { .. })),
+        "declaration is not a durable crime commitment"
+    );
 }
 
 #[test]
@@ -22075,6 +22769,16 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
                 actual_mana_spent: 0,
             },
         },
+        &mut events,
+    );
+
+    // CR 601.2c: This direct payment-boundary test bypasses the normal target
+    // declaration continuation, so reproduce its event before paying costs.
+    emit_targeting_events(
+        &state,
+        &flatten_targets_in_chain(&ability),
+        object_id,
+        PlayerId(0),
         &mut events,
     );
 
@@ -22272,6 +22976,31 @@ fn modal_spell_enters_mode_choice() {
         matches!(result, WaitingFor::ModeChoice { .. }),
         "expected ModeChoice, got {result:?}"
     );
+}
+
+#[test]
+fn mode_choice_auto_cast_remains_offered_and_reaches_mode_choice() {
+    let mut state = setup_game_at_main_phase();
+    let obj_id = create_modal_charm(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+    let action = GameAction::CastSpell {
+        object_id: obj_id,
+        card_id: state.objects[&obj_id].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("modal cast must start");
+    let WaitingFor::ModeChoice { pending_cast, .. } = &state.waiting_for else {
+        panic!("modal cast must reach ModeChoice")
+    };
+    assert_eq!(pending_cast.object_id, obj_id);
 }
 
 /// CR 700.2 / CR 601.2b: A "Choose two —" modal spell whose chosen modes
@@ -24489,6 +25218,155 @@ fn voltage_surge_deals_four_when_its_artifact_cost_is_paid() {
     outcome.assert_zone(&[artifact], Zone::Graveyard);
 }
 
+#[test]
+fn pay_cost_spell_resume_auto_cast_remains_offered() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fodder = scenario.add_card_to_hand(P0, "Required Discard Fodder");
+    let spell = scenario
+        .add_spell_to_hand(P0, "Required Discard Offer Spell", false)
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text("Draw a card.")
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        }))
+        .id();
+    let mut runner = scenario.build();
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(runner.state())
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(runner.state())
+        .0
+        .contains(&action));
+    runner
+        .act(action)
+        .expect("required-discard cast must start");
+    let WaitingFor::PayCost {
+        choices, resume, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("required-discard cast must reach PayCost")
+    };
+    assert!(choices.contains(&fodder));
+    let crate::types::game_state::CostResume::Spell { spell: pending } = resume else {
+        panic!("required additional cost must carry Spell resume")
+    };
+    assert_eq!(pending.object_id, spell);
+}
+
+#[test]
+fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let discard = scenario.add_card_to_hand(P0, "One-Of Discard Fodder");
+    let spell = scenario
+        .add_spell_to_hand(P0, "One-Of Cost Offer Spell", false)
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text("Draw a card.")
+        .with_additional_cost(AdditionalCost::Choice(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            },
+        ))
+        .id();
+    let mut runner = scenario.build();
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(runner.state())
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(runner.state())
+        .0
+        .contains(&action));
+    runner.act(action).expect("one-of-cost cast must start");
+    let WaitingFor::OptionalCostChoice {
+        pending_cast,
+        cost: AdditionalCost::Choice(_, _),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("one-of casting cost must reach its branch choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+    assert_eq!(runner.state().objects[&discard].zone, Zone::Hand);
+}
+
+#[test]
+fn cost_type_auto_cast_remains_offered_and_reaches_cost_type_choice() {
+    use crate::game::scenario::{GameScenario, P0};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.state.all_creature_types.push("Elf".to_string());
+    scenario
+        .add_creature(P0, "Behold Elf", 1, 1)
+        .with_subtypes(vec!["Elf"]);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Behold Type Offer Spell", false)
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text("Draw a card.")
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Behold {
+            count: 1,
+            filter: TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsChosenCreatureType]),
+            ),
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: Some(crate::types::ability::ChoiceType::CreatureType {
+                options: Vec::new(),
+            }),
+        }))
+        .id();
+    let mut runner = scenario.build();
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(runner.state())
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(runner.state())
+        .0
+        .contains(&action));
+    runner.act(action).expect("behold-type cast must start");
+    let WaitingFor::CostTypeChoice {
+        pending_cast,
+        options,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("behold-type cast must reach its creature-type choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+    assert!(options.iter().any(|option| option == "Elf"));
+}
+
 fn resolve_torch_the_tower(
     bargain: bool,
 ) -> (crate::game::scenario::CastOutcome, ObjectId, ObjectId) {
@@ -24706,6 +25584,62 @@ fn drive_deadly(
             other => panic!("unexpected Deadly prompt: {other:?}"),
         }
     }
+}
+
+#[test]
+fn collect_evidence_auto_cast_remains_offered_and_reaches_evidence_choice() {
+    let (mut runner, _, _, _, _, _, deadly, _) = deadly_fixture();
+    let action = GameAction::CastSpell {
+        object_id: deadly,
+        card_id: runner.state().objects[&deadly].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(crate::ai_support::candidate_actions(runner.state())
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(runner.state())
+        .0
+        .contains(&action));
+    runner
+        .act(action)
+        .expect("collect-evidence cast must start");
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { pending_cast, .. } => {
+                assert_eq!(pending_cast.object_id, deadly);
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("collect evidence must be accepted");
+            }
+            WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                selection,
+                ..
+            } => {
+                assert_eq!(pending_cast.object_id, deadly);
+                let target = target_slots[selection.current_slot]
+                    .legal_targets
+                    .first()
+                    .cloned();
+                runner
+                    .act(GameAction::ChooseTarget { target })
+                    .expect("seed target must be selectable");
+            }
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                crate::types::game_state::CollectEvidenceResume::Casting {
+                    pending_cast, ..
+                } => {
+                    assert_eq!(pending_cast.object_id, deadly);
+                    return;
+                }
+                other => panic!("expected casting evidence resume, got {other:?}"),
+            },
+            other => panic!("expected collect-evidence casting prompt, got {other:?}"),
+        }
+    }
+    panic!("collect-evidence cast did not reach its evidence choice");
 }
 
 fn p1_library_len(runner: &crate::game::scenario::GameRunner) -> usize {
@@ -29163,6 +30097,56 @@ fn harmonize_card_castable_when_creature_tap_covers_generic() {
         can_cast_object_now(&state, PlayerId(0), spell),
         "Harmonize {{4}}{{U}} must be castable with 4 mana + a 4-power creature to tap"
     );
+}
+
+#[test]
+fn harmonize_only_affordability_remains_offered_and_reaches_harmonize_tap_choice() {
+    let mut state = setup_game_at_main_phase();
+    let spell = add_harmonize_draw_spell_to_graveyard(
+        &mut state,
+        PlayerId(0),
+        CardId(77_040),
+        "Harmonize Offer Regression",
+    );
+    let creature = create_object(
+        &mut state,
+        CardId(77_041),
+        PlayerId(0),
+        "Power Four Offer Reducer".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&creature).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+        object.power = Some(4);
+        object.toughness = Some(4);
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    let action = GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    };
+
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+    apply_as_current(&mut state, action).expect("Harmonize-only cast must start");
+    let WaitingFor::HarmonizeTapChoice {
+        pending_cast,
+        eligible_creatures,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("Harmonize-only affordability must defer to its tap choice")
+    };
+    assert_eq!(pending_cast.object_id, spell);
+    assert_eq!(eligible_creatures, &vec![creature]);
 }
 
 #[test]
@@ -40086,7 +41070,7 @@ fn animate_dead_aura_spell_resolves_and_attaches_to_graveyard_creature() {
 }
 
 /// Verbatim Animate Dead Oracle text (matches `crates/engine/tests/fixtures/
-/// integration_cards.json` — the repo's canonical corpus form, which uses the
+/// integration_cards.json.gz` — the repo's canonical corpus form, which uses the
 /// self-reference "this Aura"). Reused across the end-to-end reanimation tests.
 const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
 
@@ -49144,6 +50128,35 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
         state.objects[&spell].casting_permissions.is_empty(),
         "the paid gate must NOT stamp a lingering permission — the grant is stamped only on accept"
     );
+}
+
+#[test]
+fn graveyard_paid_manual_cast_remains_offered_and_reaches_mana_payment() {
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant(&mut state, spell);
+    let action = GameAction::GraveyardPaidCastChoice {
+        choice: crate::types::actions::CastChoice::Cast,
+    };
+    assert!(crate::ai_support::candidate_actions(&state)
+        .iter()
+        .any(|candidate| candidate.action == action));
+    assert!(crate::ai_support::legal_actions_full(&state)
+        .0
+        .contains(&action));
+
+    apply_as_current(&mut state, action)
+        .expect("the paid during-resolution cast offer must be accepted");
+    // CR 608.2g: A spell cast during resolution still follows the casting and payment steps.
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .expect("manual payment must retain the exact spell root");
+    assert_eq!(pending.object_id, spell);
+    assert_eq!(pending.payment_mode, CastPaymentMode::Manual);
+    assert!(pending.casting_permission_index.is_some());
 }
 
 /// TEST 1 (paid accept, on-color): accepting opens a MANUAL mana payment (not an

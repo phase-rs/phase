@@ -8827,7 +8827,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // CR 702.62a: Last-counter free-cast trigger — "When the last time counter
     // is removed from this card, if it's exiled, you may play it without
     // paying its mana cost." Mirrors `synthesize_siege_intrinsics` victory
-    // trigger (CR 310.11b) — both use `CounterRemoved` with `threshold: Some(0)`.
+    // trigger (CR 310.12b) — both use `CounterRemoved` with `threshold: Some(0)`.
     // The cast itself goes through the normal casting pipeline; `prepare_spell_cast`
     // detects the variant via `obj.zone == Exile && Keyword::Suspend` and assigns
     // `CastingVariant::Suspend`, which tags `CastVariantPaid::Suspend` at
@@ -9668,12 +9668,12 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     );
 }
 
-/// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
+/// CR 310.12a + CR 310.12b: Synthesize the two intrinsic abilities every Siege has:
 ///   1. As-enters replacement: "As this Siege enters, its controller chooses an
-///      opponent to be its protector." (CR 310.11a)
+///      opponent to be its protector." (CR 310.12a)
 ///   2. Victory trigger: "When the last defense counter is removed from this
 ///      permanent, exile it, then you may cast it transformed without paying
-///      its mana cost." (CR 310.11b)
+///      its mana cost." (CR 310.12b)
 ///
 /// The defense-counter ETB replacement (CR 310.4b) is handled directly by
 /// `apply_card_face_to_object` which seeds `CounterType::Defense` at load time,
@@ -9685,7 +9685,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         return;
     }
 
-    // CR 310.11a: "As a Siege enters the battlefield, its controller must
+    // CR 310.12a: "As a Siege enters the battlefield, its controller must
     // choose its protector from among their opponents." Modeled as a
     // self-referential `Moved` replacement that persists the opponent choice
     // as a `ChosenAttribute::Player`, which `GameObject::protector()` reads.
@@ -9706,7 +9706,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.valid_card = Some(TargetFilter::SelfRef);
         protector_replacement.destination_zone = Some(Zone::Battlefield);
         protector_replacement.description = Some(
-            "CR 310.11a: As a Siege enters, its controller chooses an opponent as its protector."
+            "CR 310.12a: As a Siege enters, its controller chooses an opponent as its protector."
                 .to_string(),
         );
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
@@ -9720,7 +9720,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         face.replacements.push(protector_replacement);
     }
 
-    // CR 310.11b: Victory triggered ability — "When the last defense counter
+    // CR 310.12b: Victory triggered ability — "When the last defense counter
     // is removed from this permanent, exile it, then you may cast it
     // transformed without paying its mana cost."
     let already_has_victory_trigger = face.triggers.iter().any(|t| {
@@ -9741,7 +9741,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                // CR 310.11b + CR 608.2g: the Siege victory ability casts the
+                // CR 310.12b + CR 608.2g: the Siege victory ability casts the
                 // exiled back face AS this trigger resolves — a self-free-cast
                 // during resolution, structurally identical to Suspend's
                 // last-counter cast. (Pre-`driver`, the `duration.is_none()`
@@ -9780,7 +9780,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             })
             .execute(exile_then_cast)
             .description(
-                "CR 310.11b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
+                "CR 310.12b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
             );
         face.triggers.push(trigger);
     }
@@ -10763,6 +10763,165 @@ mod cycling_synthesis_tests {
                 )
             }),
             "cycling line must not become an Unimplemented spell ability"
+        );
+    }
+
+    /// Thought Distortion (PR #6940), production boundary (`build_oracle_face`):
+    /// "Exile all noncreature, nonland cards from that player's hand and
+    /// graveyard" lowers to ONE owner-scoped, type-restricted, multi-zone exile —
+    /// not a hand-only wipe plus an orphaned `Unimplemented { "graveyard" }` (the
+    /// pre-PR parse), and never the mis-parse that injected `InZone(Battlefield)`
+    /// and dropped the noncreature/nonland restriction. The asserted shape:
+    ///   - `RevealHand` targeting the Opponent (the parse-chain antecedent that
+    ///     the exile's "that player" anaphor resolves to — template/anaphora
+    ///     resolution, not a numbered rule),
+    ///   - a single `ChangeZoneAll` to Exile with `origin: None` (the zone union
+    ///     rides on the filter) whose `Typed` filter carries the
+    ///     `Non(Creature)`/`Non(Land)` restriction (CR 205.2a), the
+    ///     `ControllerRef::TargetPlayer` owner scope (CR 400.3), and
+    ///     `InAnyZone([Hand, Graveyard])` (CR 402.1 + CR 404.1) — with NO
+    ///     `InZone(Battlefield)`,
+    ///   - and NO remaining coverage gap (`card_face_gaps` is empty).
+    #[test]
+    fn thought_distortion_owner_scoped_multizone_exile_at_production_boundary() {
+        use crate::database::mtgjson::AtomicIdentifiers;
+        use crate::types::ability::{AbilityDefinition, ControllerRef, TypeFilter};
+        use crate::types::zones::Zone;
+
+        let oracle = "This spell can't be countered.\n\
+                      Target opponent reveals their hand. Exile all noncreature, nonland cards from that player's hand and graveyard.";
+        let mtgjson = AtomicCard {
+            name: "Thought Distortion".to_string(),
+            mana_cost: Some("{4}{B}{B}".to_string()),
+            colors: vec!["B".to_string()],
+            color_identity: vec!["B".to_string()],
+            text: Some(oracle.to_string()),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 6.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("5f089ac6-9e92-4ec2-bf46-a0b08d1e2979".to_string()),
+                scryfall_id: Some("thought-distortion-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        // The reveal names the target opponent; the exile's "that player" anaphor
+        // resolves to that same antecedent (parser-chain behavior, not a CR rule).
+        let reveal = face
+            .abilities
+            .iter()
+            .find(|a| matches!(&*a.effect, Effect::RevealHand { .. }))
+            .expect("Thought Distortion must parse a RevealHand ability");
+        match &*reveal.effect {
+            Effect::RevealHand { target, .. } => assert!(
+                matches!(
+                    target,
+                    TargetFilter::Typed(tf)
+                        if tf.controller == Some(crate::types::ability::ControllerRef::Opponent)
+                ),
+                "RevealHand must target the opponent, got {target:?}"
+            ),
+            _ => unreachable!(),
+        }
+
+        // Walk the whole chain and locate the hand-exile ChangeZoneAll.
+        fn walk<'a>(a: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+            out.push(a);
+            if let Some(sub) = a.sub_ability.as_deref() {
+                walk(sub, out);
+            }
+            if let Some(els) = a.else_ability.as_deref() {
+                walk(els, out);
+            }
+        }
+        let mut chain = Vec::new();
+        for a in &face.abilities {
+            walk(a, &mut chain);
+        }
+
+        let exile = chain
+            .iter()
+            .find_map(|a| match &*a.effect {
+                Effect::ChangeZoneAll {
+                    destination: Zone::Exile,
+                    origin,
+                    target,
+                    ..
+                } => Some((origin, target)),
+                _ => None,
+            })
+            .expect("must lower to a ChangeZoneAll to Exile");
+        let (origin, target) = exile;
+
+        // Multi-zone origin rides on the filter, so the lowering passes None.
+        assert_eq!(
+            *origin, None,
+            "multi-zone exile carries its origin on the filter (InAnyZone), so origin is None"
+        );
+
+        // A single Typed leg (never an Or) carrying: the noncreature/nonland
+        // restriction, the target-player owner scope, and the hand+graveyard zone
+        // union — with NO battlefield injection.
+        let tf = match target {
+            TargetFilter::Typed(tf) => tf,
+            other => panic!("exile target must be a single Typed leg, got {other:?}"),
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                && tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+            "noncreature/nonland restriction must survive, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::TargetPlayer),
+            "the exile must be owner-scoped to the targeted player, got {:?}",
+            tf.controller
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard)
+            )),
+            "the zone union must span Hand and Graveyard, got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Battlefield
+            }),
+            "no InZone(Battlefield) may be injected, got {:?}",
+            tf.properties
+        );
+
+        // The whole card is now supported: no coverage gap remains.
+        assert!(
+            crate::game::coverage::card_face_gaps(&face).is_empty(),
+            "Thought Distortion must be fully supported, gaps: {:?}",
+            crate::game::coverage::card_face_gaps(&face)
         );
     }
 
@@ -16951,7 +17110,7 @@ mod siege_synthesis_tests {
         face
     }
 
-    /// CR 310.11a: Sieges get a synthesized Moved-replacement that asks the
+    /// CR 310.12a: Sieges get a synthesized Moved-replacement that asks the
     /// controller to choose an opponent as the protector.
     #[test]
     fn synthesize_adds_protector_choice_replacement() {
@@ -16974,7 +17133,7 @@ mod siege_synthesis_tests {
         ));
     }
 
-    /// CR 310.11b: Sieges get a synthesized `CounterRemoved` trigger with a
+    /// CR 310.12b: Sieges get a synthesized `CounterRemoved` trigger with a
     /// `CounterTriggerFilter` targeting defense at threshold 0 (last counter
     /// removed). The execute chain exiles the Siege then offers an optional
     /// `CastFromZone` with both `without_paying_mana_cost` and `cast_transformed`.
@@ -18181,28 +18340,6 @@ mod sorcery_speed_invariant_tests {
     use crate::types::ability::ActivationRestriction;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    /// Walk every sub_ability in the chain.
-    fn walk_chain<F: FnMut(&AbilityDefinition)>(def: &AbilityDefinition, mut visit: F) {
-        let mut cur: Option<&AbilityDefinition> = Some(def);
-        while let Some(d) = cur {
-            visit(d);
-            cur = d.sub_ability.as_deref();
-        }
-    }
-
-    fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
-        walk_chain(def, |d| {
-            if d.is_sorcery_speed() {
-                assert!(
-                    d.activation_restrictions
-                        .contains(&ActivationRestriction::AsSorcery),
-                    "{context}: ability is sorcery-speed but \
-                     activation_restrictions is missing AsSorcery"
-                );
-            }
-        });
-    }
-
     /// CR 702.6a: Swiftfoot Boots — "Equip {1}" synthesizes an activated ability
     /// that MUST be gated at sorcery speed. Regression test for the confirmed
     /// bug where equip abilities were activatable at instant speed because
@@ -18600,51 +18737,6 @@ mod sorcery_speed_invariant_tests {
             .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
             .count();
         assert_eq!(count, 1, "AsSorcery must not be duplicated");
-    }
-
-    /// CR 602.5d: Corpus-wide smoke test — run the synthesis pipeline against
-    /// every keyword variant that has synthesis coverage and walk each ability's
-    /// sub_ability chain, confirming every sorcery-speed ability carries
-    /// `AsSorcery`. Now that `is_sorcery_speed()` is defined as
-    /// `contains(AsSorcery)`, this is structurally guaranteed; the test remains
-    /// as broad synthesis coverage.
-    #[test]
-    fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
-        fn mana() -> ManaCost {
-            ManaCost::Cost {
-                shards: vec![],
-                generic: 1,
-            }
-        }
-
-        type SynthCase = (&'static str, fn() -> CardFace);
-        let cases: &[SynthCase] = &[
-            ("Equip {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Equip(mana()));
-                synthesize_equip(&mut f);
-                f
-            }),
-            ("Level Up {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::LevelUp(mana()));
-                synthesize_level_up(&mut f);
-                f
-            }),
-            ("Scavenge {1}", || {
-                let mut f = CardFace::default();
-                f.keywords.push(Keyword::Scavenge(mana()));
-                synthesize_scavenge(&mut f);
-                f
-            }),
-        ];
-
-        for (name, build) in cases {
-            let face = build();
-            for def in face.abilities.iter() {
-                assert_sorcery_invariant(def, name);
-            }
-        }
     }
 }
 

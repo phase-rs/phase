@@ -71,7 +71,12 @@ pub use swarm::{
 };
 #[cfg(feature = "test-support")]
 pub use swarm::{adversarial_swarm_witness_with_counters, SwarmWitnessCounters};
-pub use targeted_exchange::{targeted_exchange_verdict, TargetedExchangeVerdict};
+pub use targeted_exchange::{
+    is_targeted_exchange_root, root_may_yield_adverse_exchange, targeted_exchange_verdict,
+    TargetedExchangeVerdict,
+};
+#[cfg(feature = "test-support")]
+pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///
@@ -105,13 +110,83 @@ pub fn validated_candidate_actions_with_probe(
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    let mut actions =
-        pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe);
+    let candidates = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::Generation,
+        );
+        candidate_actions_with_probe(state, probe)
+    };
+    let mut actions = pipeline.apply_with_probe(state, candidates, probe);
     // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
     // iteration order leaking into AI tie-breaking downstream. Ordered via the
     // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
     actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
     actions
+}
+
+/// CR 701.23a + CR 608.2c: A `SelectCards` answering a library search is legal
+/// exactly when it meets the three conditions the submission guard checks —
+/// cardinality, membership in the searched pool, and the printed-text selection
+/// constraint (`engine_resolution_choices.rs`, the `SearchChoice` arm). All
+/// three are decidable from the prompt without mutating the game, so
+/// `SimulationFilter` can skip its clone-and-apply probe. Mirrors
+/// [`structurally_valid_tap_for_convoke_payment`].
+///
+/// This is load-bearing for a single-card search, where the enumerator issues
+/// one candidate per card: against an 88-card library the simulated probe
+/// measured ~2.5 ms per candidate — ~217 ms to validate a list whose every
+/// entry is legal by construction.
+///
+/// Conservative by design: `false` only costs a simulation, so any shape this
+/// does not fully model must return `false` rather than guess.
+pub(crate) fn structurally_valid_search_selection(state: &GameState, action: &GameAction) -> bool {
+    let (
+        WaitingFor::SearchChoice {
+            cards,
+            count,
+            up_to,
+            allows_partial_find,
+            constraint,
+            ..
+        },
+        GameAction::SelectCards { cards: chosen },
+    ) = (&state.waiting_for, action)
+    else {
+        return false;
+    };
+
+    // A scoped search (Wheel-of-Fate-class "each player searches") routes through
+    // `scoped_library_search::submit_selection`, which additionally requires the
+    // pick to be in that player's prepared exact-candidate set AND still live.
+    // Neither is modeled here, so defer to the simulation.
+    if state.pending_scoped_library_search.is_some() {
+        return false;
+    }
+
+    // CR 701.23b/d: "up to N", hidden-zone stated-quality searches, and explicit
+    // stated-quality constraints accept a short or empty pick; a pure quantity
+    // search needs exactly `count`.
+    let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
+    let cardinality_ok = if lower_bounded {
+        chosen.len() <= *count
+    } else {
+        chosen.len() == *count
+    };
+    if !cardinality_ok {
+        return false;
+    }
+
+    // Membership plus distinctness: a repeated id would select one card twice,
+    // which pool membership alone would not catch.
+    let mut seen = std::collections::HashSet::with_capacity(chosen.len());
+    if !chosen
+        .iter()
+        .all(|id| cards.contains(id) && seen.insert(*id))
+    {
+        return false;
+    }
+
+    crate::game::effects::search_library::selection_satisfies_constraint(state, chosen, constraint)
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -1916,6 +1991,7 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     let (state, priority_probe) = match &state.waiting_for {
         WaitingFor::Priority { player } => {
             priority_probe_storage = if state.layers_dirty.is_dirty() {
+                crate::game::perf_counters::record_priority_cast_probe_state_clone();
                 let mut flushed = state.clone();
                 layers::flush_layers(&mut flushed);
                 crate::game::casting::PriorityCastProbe::from_flushed_state(flushed, *player)
@@ -1938,8 +2014,16 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let mut actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
-        .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+    let mut actions: Vec<GameAction> =
+        if context::target_selection_requires_reducer_validation(state) {
+            validated_candidate_actions(state)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        } else {
+            target_selection_actions_without_simulation(state)
+                .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe))
+        };
 
     // This preference-setting action is intentionally excluded from AI candidate
     // generation: it changes future prompt behavior rather than making a tactical
@@ -2001,7 +2085,13 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 
     // Group by source object using the engine-authoritative classifier.
     let mut grouped_actions = actions.clone();
-    grouped_actions.extend(activatable_object_mana_actions(state));
+    let object_mana_actions = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::GroupedManaReadiness,
+        );
+        activatable_object_mana_actions(state)
+    };
+    grouped_actions.extend(object_mana_actions);
     let mut grouped: HashMap<ObjectId, Vec<GameAction>> = HashMap::new();
     for action in &grouped_actions {
         if let Some(id) = action.source_object() {
@@ -4090,6 +4180,20 @@ mod tests {
     /// satisfiable, so a lone source classifies as `ManaSourcePenalty::Sacrifices`
     /// and is activatable. Colorless mana models the Eldrazi-Spawn/altar class.
     fn add_sac_for_mana_source(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        add_sac_for_mana_source_producing(
+            state,
+            controller,
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+    }
+
+    fn add_sac_for_mana_source_producing(
+        state: &mut GameState,
+        controller: PlayerId,
+        produced: ManaProduction,
+    ) -> ObjectId {
         use crate::types::ability::{TypeFilter, TypedFilter};
         let id = create_object(
             state,
@@ -4100,25 +4204,340 @@ mod tests {
         );
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
-        Arc::make_mut(&mut obj.abilities).push(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            )
-            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                1,
-            ))),
-        );
+        obj.base_card_types = obj.card_types.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            1,
+        )));
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
         id
+    }
+
+    #[test]
+    fn sacrificial_mana_selection_auto_cast_remains_offered_and_reaches_source_selection() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let spell = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Sacrificial Mana Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(1);
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut object.abilities).push(definition.clone());
+            Arc::make_mut(&mut object.base_abilities).push(definition);
+        }
+        let raw = candidate_actions(&state);
+        let action = raw
+            .iter()
+            .find_map(|candidate| match &candidate.action {
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if *object_id == spell => Some(candidate.action.clone()),
+                _ => None,
+            })
+            .expect("the production candidate must select AutoExceptSacrificialMana");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("sacrificial-mana cast must start");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("AutoExceptSacrificialMana must reach source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+        assert_eq!(
+            state
+                .pending_cast
+                .as_ref()
+                .expect("external prompt must preserve the pending cast")
+                .object_id,
+            spell
+        );
+    }
+
+    #[test]
+    fn sacrificial_colored_requirement_preserves_source_choice_despite_generic_mana() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source_producing(
+            &mut state,
+            PlayerId(0),
+            ManaProduction::Fixed {
+                colors: vec![ManaColor::Red],
+                contribution: ManaContribution::Base,
+            },
+        );
+        let forest = create_land(&mut state, "Forest", &[]);
+        add_fixed_mana_ability(&mut state, forest, ManaColor::Green);
+        let spell = create_object(
+            &mut state,
+            CardId(7_011),
+            PlayerId(0),
+            "Sacrificial Red Requirement".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            };
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut object.abilities).push(definition.clone());
+            Arc::make_mut(&mut object.base_abilities).push(definition);
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpell {
+                    object_id,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if object_id == spell => Some(action),
+                _ => None,
+            })
+            .expect("a mandatory sacrificial color source must preserve source choice");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("the generic-only Forest must not make the sacrificial red source automatic")
+        };
+        assert!(state.objects[&forest].tapped);
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+    }
+
+    #[test]
+    fn pool_payable_and_no_cost_spells_keep_auto_mode_with_sacrificial_source_available() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(702),
+            false,
+            Vec::new(),
+        ));
+        let spell = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(0),
+            "Pool-Payable Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(1);
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let action = GameAction::CastSpell {
+            object_id: spell,
+            card_id: state.objects[&spell].card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        };
+        let no_cost_spell = create_object(
+            &mut state,
+            CardId(708),
+            PlayerId(0),
+            "No-Cost Offer Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&no_cost_spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::zero();
+            object.base_mana_cost = object.mana_cost.clone();
+        }
+        let no_cost_action = GameAction::CastSpell {
+            object_id: no_cost_spell,
+            card_id: state.objects[&no_cost_spell].card_id,
+            targets: Vec::new(),
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        };
+
+        let candidates = candidate_actions(&state);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.action == action));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.action == no_cost_action));
+        let legal = legal_actions_full(&state).0;
+        assert!(legal.contains(&action));
+        assert!(legal.contains(&no_cost_action));
+        apply_as_current(&mut state, action).expect("pool-payable cast must complete payment");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    #[test]
+    fn sneak_with_only_sacrificial_mana_preserves_source_choice() {
+        let mut state = setup_priority();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareBlockers;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let attacker = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(0),
+            "Sneak Return Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&attacker).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.tapped = true;
+            object.entered_battlefield_turn = Some(1);
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        let spell = create_object(
+            &mut state,
+            CardId(705),
+            PlayerId(0),
+            "Sacrificial-Mana Sneak Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(7);
+            object.base_mana_cost = object.mana_cost.clone();
+            object.keywords.push(Keyword::Sneak(ManaCost::generic(1)));
+            object.base_keywords = object.keywords.clone();
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpellAsSneak {
+                    hand_object,
+                    creature_to_return,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if hand_object == spell && creature_to_return == attacker => Some(action),
+                _ => None,
+            })
+            .expect("Sneak must retain a manual sacrificial-mana cast candidate");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action).expect("Sneak cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("Sneak with only sacrificial mana must stop at source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
+    }
+
+    #[test]
+    fn web_slinging_with_only_sacrificial_mana_preserves_source_choice() {
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+        let source = add_sac_for_mana_source(&mut state, PlayerId(0));
+        let returned = create_object(
+            &mut state,
+            CardId(706),
+            PlayerId(0),
+            "Web-Slinging Return Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&returned).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.tapped = true;
+        }
+        let spell = create_object(
+            &mut state,
+            CardId(707),
+            PlayerId(0),
+            "Sacrificial-Mana Web-Slinging Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(7);
+            object.base_mana_cost = object.mana_cost.clone();
+            object
+                .keywords
+                .push(Keyword::WebSlinging(ManaCost::generic(1)));
+            object.base_keywords = object.keywords.clone();
+        }
+
+        let action = candidate_actions(&state)
+            .into_iter()
+            .find_map(|candidate| match candidate.action {
+                action @ GameAction::CastSpellAsWebSlinging {
+                    hand_object,
+                    creature_to_return,
+                    payment_mode:
+                        crate::types::game_state::CastPaymentMode::AutoExceptSacrificialMana,
+                    ..
+                } if hand_object == spell && creature_to_return == returned => Some(action),
+                _ => None,
+            })
+            .expect("Web-slinging must retain a manual sacrificial-mana cast candidate");
+        assert!(legal_actions_full(&state).0.contains(&action));
+        apply_as_current(&mut state, action)
+            .expect("Web-slinging cast must reach mana-source choice");
+        let WaitingFor::ManaSourceSelection { options, .. } = &state.waiting_for else {
+            panic!("Web-slinging with only sacrificial mana must stop at source selection")
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.source.object_id == source));
     }
 
     /// V1 (repro fix): on an OPPONENT's turn, a lone sacrifice-for-mana source
@@ -5574,7 +5993,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_do_not_simulate_each_target() {
+    fn target_selection_legal_actions_use_current_targets_without_simulation() {
         let mut state = setup_priority();
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
@@ -5622,6 +6041,14 @@ mod tests {
 
         assert_eq!(counters.state_clone_for_legality, 0);
         assert_eq!(counters.priority_cast_probe_builds, 0);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) }))
+                .count(),
+            25
+        );
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
         assert_eq!(actions.len(), 26);
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
@@ -5691,6 +6118,296 @@ mod tests {
     }
 
     #[test]
+    fn offer_side_auto_payment_phase_accounting_has_exact_clone_ownership() {
+        use crate::types::game_state::CastPaymentMode;
+        use crate::types::mana::ManaCostShard;
+
+        const N: u64 = 6;
+        let mut state = setup_priority();
+        state.phase = Phase::PreCombatMain;
+
+        let victim = create_object(
+            &mut state,
+            CardId(80_000),
+            PlayerId(1),
+            "Offer Probe Victim".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&victim).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(80_001),
+            PlayerId(0),
+            "Choice-Bearing Offer Probe Source".to_string(),
+            Zone::Battlefield,
+        );
+        let interactive_mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Black],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            )),
+        });
+        {
+            let object = state.objects.get_mut(&source).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+            Arc::make_mut(&mut object.abilities).push(interactive_mana.clone());
+            Arc::make_mut(&mut object.base_abilities).push(interactive_mana);
+            object.summoning_sick = false;
+        }
+        create_object(
+            &mut state,
+            CardId(80_002),
+            PlayerId(0),
+            "Offer Probe Fodder".to_string(),
+            Zone::Graveyard,
+        );
+
+        let mut spell_ids = Vec::new();
+        for index in 0..N {
+            let spell = create_object(
+                &mut state,
+                CardId(80_100 + index),
+                PlayerId(0),
+                format!("Offer Probe Spell {index}"),
+                Zone::Hand,
+            );
+            let definition = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            );
+            {
+                let object = state.objects.get_mut(&spell).unwrap();
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+                object.mana_cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 0,
+                };
+                Arc::make_mut(&mut object.abilities).push(definition.clone());
+                Arc::make_mut(&mut object.base_abilities).push(definition);
+            }
+            spell_ids.push(spell);
+        }
+
+        let probe = crate::game::casting::PriorityCastProbe::new(&state, PlayerId(0));
+        crate::game::perf_counters::reset();
+        let generated = {
+            let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+                crate::game::perf_counters::LegalityClonePhase::Generation,
+            );
+            super::candidate_actions_with_probe(&state, Some(&probe))
+        };
+        let generation = crate::game::perf_counters::snapshot();
+        let g = generation.generation_state_clones;
+        let g_w = generation.generation_auto_payment_wrapper_calls;
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|candidate| matches!(candidate.action, GameAction::CastSpell { .. }))
+                .count(),
+            N as usize
+        );
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|candidate| candidate.action == GameAction::PassPriority)
+                .count(),
+            1
+        );
+        assert!(!generated
+            .iter()
+            .any(|candidate| candidate.action.is_mana_ability()));
+
+        let strict_candidate = generated
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::CastSpell { object_id, .. } if object_id == spell_ids[0]
+                )
+            })
+            .expect("generation baseline must contain the first cast")
+            .clone();
+        crate::game::perf_counters::reset();
+        assert!(
+            !super::FilterPipeline::default_pipeline().accepts_with_probe(
+                &state,
+                &strict_candidate,
+                Some(&probe),
+            ),
+            "the isolated strict candidate must still fail at the post-origin Auto payer"
+        );
+        let strict_baseline = crate::game::perf_counters::snapshot();
+        assert_eq!(
+            strict_baseline.strict_fast_path_auto_payment_wrapper_calls,
+            2
+        );
+        let strict_mana_readiness_clones =
+            strict_baseline.strict_fast_path_mana_readiness_state_clones;
+        assert_eq!(strict_mana_readiness_clones, 5);
+        assert_eq!(strict_baseline.strict_fast_path_state_clones, 7);
+        assert_eq!(
+            strict_baseline.strict_fast_path_state_clones,
+            strict_baseline.strict_fast_path_auto_payment_wrapper_calls
+                + strict_baseline.strict_fast_path_mana_readiness_state_clones,
+            "strict clones must have exactly one of the two named owners"
+        );
+        let strict_clones_per_cast = strict_baseline.strict_fast_path_state_clones;
+
+        crate::game::perf_counters::reset();
+        let grouped_baseline = {
+            let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+                crate::game::perf_counters::LegalityClonePhase::GroupedManaReadiness,
+            );
+            super::activatable_object_mana_actions(&state)
+        };
+        let grouped = crate::game::perf_counters::snapshot();
+        let r = grouped.grouped_mana_readiness_state_clones;
+        assert_eq!(r, 1);
+        assert!(grouped_baseline.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility { source_id, .. } if *source_id == source
+        )));
+
+        let first_action = GameAction::CastSpell {
+            object_id: spell_ids[0],
+            card_id: state.objects[&spell_ids[0]].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        let mut scratch = state.clone();
+        apply_as_current(&mut scratch, first_action)
+            .expect("the broad cast must reach target selection in scratch");
+        let pending = scratch
+            .waiting_for
+            .pending_cast_ref()
+            .expect("target selection carries the pending cast")
+            .clone();
+        crate::game::perf_counters::reset();
+        assert!(
+            !crate::game::casting::can_pay_pending_cast_after_auto_tap_in_scratch(
+                &mut scratch,
+                &pending
+            )
+        );
+        let core = crate::game::perf_counters::snapshot();
+        assert_eq!(core.post_apply_auto_payment_core_calls, 1);
+        assert_eq!(core.post_apply_uncached_source_collections, 1);
+        assert_eq!(core.post_apply_auto_payment_core_state_clones, 0);
+
+        let mut zero_residual_scratch = state.clone();
+        let mut zero_residual_pending = pending.clone();
+        zero_residual_pending.cost = ManaCost::zero();
+        crate::game::perf_counters::reset();
+        assert!(
+            crate::game::casting::can_pay_pending_cast_after_auto_tap_in_scratch(
+                &mut zero_residual_scratch,
+                &zero_residual_pending,
+            )
+        );
+        let zero_residual = crate::game::perf_counters::snapshot();
+        assert_eq!(zero_residual.post_apply_auto_payment_core_calls, 1);
+        assert_eq!(zero_residual.post_apply_uncached_source_collections, 0);
+        assert_eq!(zero_residual.post_apply_auto_payment_core_state_clones, 0);
+
+        let before = serde_json::to_value(&state).expect("fixture must serialize");
+        crate::game::perf_counters::reset();
+        let (actions, _, grouped_actions) = legal_actions_full(&state);
+        let counters = crate::game::perf_counters::snapshot();
+        let s_w = counters.strict_fast_path_auto_payment_wrapper_calls;
+        let s = N * strict_clones_per_cast;
+
+        assert_eq!(counters.generation_state_clones, g);
+        assert_eq!(counters.generation_auto_payment_wrapper_calls, g_w);
+        assert_eq!(counters.strict_fast_path_state_clones, s);
+        assert_eq!(s_w, 2 * N);
+        assert_eq!(
+            counters.strict_fast_path_mana_readiness_state_clones,
+            N * strict_mana_readiness_clones
+        );
+        assert_eq!(
+            counters.strict_fast_path_state_clones,
+            counters.strict_fast_path_auto_payment_wrapper_calls
+                + counters.strict_fast_path_mana_readiness_state_clones,
+            "the full strict path must preserve the fixed owner composition"
+        );
+        assert_eq!(
+            counters.raw_validation_state_clones, N,
+            "each cast reaches the fallback simulation; the mana activation uses its \
+             structural fast path"
+        );
+        assert_eq!(counters.grouped_mana_readiness_state_clones, r);
+        assert!(grouped_actions.get(&source).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, .. } if *source_id == source
+                )
+            })
+        }));
+        assert_eq!(counters.priority_cast_probe_state_clones, 1);
+        assert_eq!(counters.priority_cast_probe_builds, 1);
+        assert_eq!(counters.auto_tap_source_cache_builds, 1);
+        assert_eq!(
+            counters.auto_payment_borrowed_wrapper_calls,
+            counters.auto_payment_owned_state_clones
+        );
+        assert_eq!(counters.auto_payment_borrowed_wrapper_calls, g_w + s_w);
+        assert_eq!(counters.post_apply_auto_payment_core_calls, N);
+        assert_eq!(counters.post_apply_auto_payment_core_state_clones, 0);
+        assert_eq!(counters.post_apply_uncached_source_collections, N);
+        // The mana activation is accepted by its structural fast path, so only
+        // the N spell candidates reach fallback simulation.
+        let expected_raw_validation_clones = N;
+        let expected_priority_probe_state_clones = 1;
+        let total = counters.generation_state_clones
+            + counters.strict_fast_path_state_clones
+            + counters.raw_validation_state_clones
+            + counters.grouped_mana_readiness_state_clones
+            + counters.priority_cast_probe_state_clones
+            + counters.post_apply_auto_payment_core_state_clones;
+        assert_eq!(
+            total,
+            g + s + expected_raw_validation_clones + r + expected_priority_probe_state_clones
+        );
+        assert!(spell_ids.iter().all(|spell| !actions.iter().any(|action| {
+            matches!(action, GameAction::CastSpell { object_id, .. } if object_id == spell)
+        })));
+        assert!(actions.contains(&GameAction::PassPriority));
+        assert_eq!(
+            serde_json::to_value(&state).expect("live fixture must serialize"),
+            before
+        );
+    }
+
+    #[test]
     fn target_selection_legal_actions_do_not_fall_back_to_stale_slot_targets() {
         let mut state = setup_priority();
         let target = TargetRef::Object(create_object(
@@ -5707,7 +6424,7 @@ mod tests {
             player: PlayerId(0),
             pending_cast,
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: vec![target],
+                legal_targets: vec![target.clone()],
                 optional: true,
                 chooser: None,
                 effect_kind: EffectKind::NoOp,
@@ -5915,6 +6632,7 @@ mod tests {
                 source_name: "Token".to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         // A meaningful action keeps auto-pass OFF absent a yield (reach-guard:

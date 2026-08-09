@@ -14,7 +14,7 @@ import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, familyOf, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
@@ -106,6 +106,7 @@ export function PlayerHud() {
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+            {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
             {designations.activeDungeon ? (
               <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
             ) : null}
@@ -134,9 +135,9 @@ export function PlayerHud() {
                 condition={condition}
               />
             ))}
-            {[...new Set(designations.unboundedResources.map((u) => familyOf(u.axis)))].map(
-              (family) => (
-                <UnboundedBadge key={family} family={family} />
+            {designations.unboundedFamilies.map(
+              (u) => (
+                <UnboundedBadge key={u.family} family={u.family} state={u.state} />
               ),
             )}
           </>

@@ -133,25 +133,23 @@ describe("ZoneViewer", () => {
   });
 
   it("shows only the engine-revealed library cards, omitting unrevealed ones", () => {
-    // CR 701.20b: a RevealTop / "play with top revealed" surfaces specific top
-    // cards via `revealed_cards`. Visibility is gated on that engine set, NOT on
-    // the card name — single-player renders the raw, unredacted state, so the
-    // unrevealed cards below carry real names yet must NOT appear in the viewer.
+    // Rust projects identity visibility per object. Real names alone never make
+    // a library card render in the viewer.
     const revealed = makeObject({
       id: 20,
       zone: "Library",
       name: "Llanowar Elves",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
-    // Real names, but absent from revealed_cards → must be filtered out.
+    // Real names, but no engine display projection → must be filtered out.
     const unrevealedA = makeObject({ id: 21, zone: "Library", name: "Black Lotus" });
     const unrevealedB = makeObject({ id: 22, zone: "Library", name: "Mox Sapphire" });
     const base = makeState(revealed);
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealedA, unrevealedB),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealedA.id, unrevealedB.id] },
         base.players[1],
@@ -187,6 +185,7 @@ describe("ZoneViewer", () => {
       id: 30,
       zone: "Library",
       name: "Mystic Sanctuary",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -196,7 +195,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealed),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [], library: [revealed.id, unrevealed.id] },
         base.players[1],
@@ -231,6 +229,7 @@ describe("ZoneViewer", () => {
       id: 50,
       zone: "Library",
       name: "Future Sight Top",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -240,7 +239,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(top, buried),
-      revealed_cards: [],
       players: [
         {
           ...base.players[0],
@@ -290,6 +288,7 @@ describe("ZoneViewer", () => {
       controller: 1,
       zone: "Library",
       name: "Courser of Kruphix",
+      display_visible_to_viewer: true,
       keywords: [],
       base_keywords: [],
     });
@@ -304,7 +303,6 @@ describe("ZoneViewer", () => {
     const gameState = {
       ...base,
       objects: buildObjectMap(revealed, unrevealed),
-      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [] },
         { ...base.players[1], graveyard: [], library: [revealed.id, unrevealed.id] },

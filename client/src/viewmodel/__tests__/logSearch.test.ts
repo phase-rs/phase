@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameLogEntry } from "../../adapter/types";
-import { filterLogEntries, segmentsToPlainText } from "../logSearch";
+import { filterLogEntries, segmentsToPlainText, uniqueTurns } from "../logSearch";
 
 function entry(
   category: GameLogEntry["category"],
@@ -30,5 +30,10 @@ describe("logSearch", () => {
     });
     expect(result).toHaveLength(1);
     expect(segmentsToPlainText(result[0].segments)).toContain("damage");
+  });
+
+  it("does not expose pregame turn zero as a turn filter", () => {
+    const turns = uniqueTurns([entry("Game", "setup", 0), entry("Stack", "cast", 1)]);
+    expect(turns).toEqual([1]);
   });
 });

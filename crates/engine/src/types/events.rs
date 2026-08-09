@@ -123,7 +123,7 @@ impl ManaTapState {
 }
 
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BendingType {
     Fire,
     Air,
@@ -131,7 +131,7 @@ pub enum BendingType {
     Water,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
     /// A player accepted a resolution-time optional effect.
     AcceptedOptionalEffect,
@@ -145,6 +145,16 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
+    /// A player completed a draw instruction that delivered at least
+    /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
+    /// completion), not once per card — so a multi-card draw records a single
+    /// event. Recorded so "for each opponent who drew a card this way" (Cut a
+    /// Deal) resolves via `PlayerFilter::PerformedActionThisWay` — a count over
+    /// players, not objects — and so `PlayerActionsThisTurn { Draw }` would count
+    /// draw events rather than cards. `player_actions_this_way` (a set) counts the
+    /// drawing player once; a draw that delivered no card (empty library, or every
+    /// unit replaced away) emits nothing because that player did not draw.
+    Draw,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -321,6 +331,7 @@ pub struct EventObjectSnapshot {
     /// CR 202.3: effective mana value as of capture.
     pub mana_value: u32,
     /// CR 122.1: counters on the subject as of capture.
+    #[serde(with = "crate::types::counter::counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 
     pub is_token: bool,
@@ -1159,6 +1170,7 @@ pub enum GameEvent {
     BecomesTarget {
         target: TargetRef,
         source_id: ObjectId,
+        source_controller: PlayerId,
     },
     /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
@@ -1341,6 +1353,10 @@ pub enum GameEvent {
     },
     /// CR 702.131b: A player gained the city's blessing (Ascend).
     CityBlessingGained {
+        player_id: PlayerId,
+    },
+    /// A player gained an enduring story.
+    EnduringStoryGained {
         player_id: PlayerId,
     },
     /// CR 706: A die was rolled. `result` is `None` when the roll has no numeric

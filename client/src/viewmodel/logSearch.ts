@@ -46,7 +46,7 @@ export function filterLogEntries(
 export function uniqueTurns(entries: GameLogEntry[]): number[] {
   const turns = new Set<number>();
   for (const entry of entries) {
-    turns.add(entry.turn);
+    if (entry.turn > 0) turns.add(entry.turn);
   }
   return [...turns].sort((a, b) => a - b);
 }

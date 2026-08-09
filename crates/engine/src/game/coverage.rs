@@ -1819,7 +1819,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{DamageKindFilter, PlayerRelation};
+    use crate::types::ability::{DamageKindFilter, PlayerRelation, PossessionAxis};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1896,6 +1896,25 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             };
             return format!("{who} whose {attr:?} {comparator:?} {value:?}");
         }
+        // CR 608.2c + CR 109.4: "each [player class] who controlled/owned a
+        // [filter] this way"
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            ..
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let verb = match possession {
+                PossessionAxis::Controller => "controlled",
+                PossessionAxis::Owner => "owned",
+            };
+            return format!("{who} who {verb} a {filter:?} this way");
+        }
     }
     .into()
 }
@@ -1956,6 +1975,9 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         }
         ManaProduction::ChosenColor { count, .. } => {
             format!("{} of chosen color", fmt_quantity(count))
+        }
+        ManaProduction::NotedType { count } => {
+            format!("{} of noted type", fmt_quantity(count))
         }
         ManaProduction::OpponentLandColors { count } => {
             format!("{} of opponent land colors", fmt_quantity(count))
@@ -3673,6 +3695,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Forage
         | Effect::Harness
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore
@@ -3905,6 +3928,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
+        AbilityCondition::HasEnduringStory => "has an enduring story".into(),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => {
+            format!("discarded card matches {}", fmt_target(filter))
+        }
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
@@ -4051,6 +4078,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             "a spell was cast with this variant this turn".into()
         }
         TC::HasCityBlessing => "has the city's blessing".into(),
+        TC::HasEnduringStory => "has an enduring story".into(),
         TC::CompletedDungeon { .. } => "completed a dungeon".into(),
         TC::SourceIsTapped => "source is tapped".into(),
         TC::SourceIsTransformed => "source is transformed".into(),
@@ -4207,6 +4235,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
+        SC::HasEnduringStory => "has an enduring story".into(),
         SC::CompletedADungeon => "completed a dungeon".into(),
         SC::WasStartingPlayer { .. } => "was the starting player".into(),
         SC::SpellCastWithVariantThisTurn { .. } => {
@@ -7406,6 +7435,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        AbilityCondition::HasEnduringStory => ("HasEnduringStory", Handled),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => {
+            ("DiscardedCardMatchesFilter", Handled)
+        }
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
@@ -7745,6 +7778,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
+        // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
+        // via both `resolve_player_count` and `matches_player_scope`.
+        PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
     }
 }
 
@@ -7806,6 +7842,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        StaticCondition::HasEnduringStory => ("HasEnduringStory", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),

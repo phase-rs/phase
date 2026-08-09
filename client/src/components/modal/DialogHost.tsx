@@ -176,9 +176,13 @@ export function DialogHost({ children }: { children: ReactNode }) {
   const isNarrow = useIsNarrowViewport();
   // Only apply the peek slide transform while peeked. Framer-motion keeps a
   // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
-  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
-  // such as ChooseXValueUI — the slider looks fine but ignores drags until
-  // something else reflows the tree (issue #2427).
+  // which breaks pointer hit-testing in bottom-anchored panels — the control
+  // looks fine but ignores input until something else reflows the tree
+  // (issue #2427). Originally hit `<input type="range">` in ChooseXValueUI;
+  // that slider no longer exists, and the live subjects are now the amount box
+  // and its ± steppers (AmountInput), which ChooseXValueUI's mount-integration
+  // test drives for exactly this reason. The guard is NOT obsolete just because
+  // the control it was written for is gone.
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }

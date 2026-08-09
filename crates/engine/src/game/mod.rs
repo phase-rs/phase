@@ -145,6 +145,7 @@ pub mod public_state;
 pub mod quantity;
 pub mod replacement;
 pub mod replay;
+pub(crate) mod resolution_prompt;
 pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;
@@ -170,6 +171,12 @@ pub mod token_presets;
 pub mod topology;
 pub mod transform;
 pub mod trigger_index;
+// Tests for the `trigger_index` live-zone guard live in a sibling file
+// (declared here, not in `trigger_index.rs`, so that file stays
+// implementation-only).
+#[cfg(test)]
+#[path = "trigger_index_zone_guard_tests.rs"]
+mod trigger_index_zone_guard_tests;
 pub(crate) mod trigger_matchers;
 pub mod triggers;
 pub mod turn_control;

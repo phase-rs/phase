@@ -2420,6 +2420,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         attached_to: None,
         entered_incarnation: None,
         turn_zone_change_index: 0,
+        recorded_turn_number: 0,
         // CR 701.60b: Carry suspected status from the LKI snapshot so
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
@@ -2684,9 +2685,17 @@ fn filter_inner_for_object(
                         if source_controller == Some(obj_ctrl) {
                             return false;
                         }
-                        // CR 102.3 + CR 800.4a: A player who has left the game is
-                        // not an opponent; cards in their zones are not legal
-                        // targets (Captain N'ghathrod class).
+                        // Two claims, two authorities — kept apart deliberately.
+                        // SEAT: CR 800.4 + CR 102.1 — a player who has left the game is
+                        // no longer one of the people in the game, so they are not an
+                        // opponent. (CR 102.3 is scoped to games BETWEEN TEAMS and does
+                        // not define "opponent" in a free-for-all, which is the board
+                        // this seam serves; the engine's free-for-all authority is
+                        // `topology::is_opponent`.)
+                        // OBJECTS: CR 800.4a — "all objects owned by that player leave
+                        // the game" — so cards in their zones are not legal targets
+                        // (Captain N'ghathrod class). This is the half CR 800.4a really
+                        // governs.
                         if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }
@@ -5006,7 +5015,7 @@ fn matches_filter_prop(
         // (recorded in the source's `convoked_creatures`). Source-relative,
         // mirroring `SaddledSource`.
         FilterProp::ConvokedSource => source.convoked_creatures.contains(&object_id),
-        // CR 310.8a: "each battle they protect" — protector is an opponent of
+        // CR 310.9 + CR 310.9e: "each battle they protect" — protector is an opponent of
         // the source controller (Joyful Stormsculptor class).
         FilterProp::ProtectorMatches { controller } => {
             if !obj.card_types.core_types.contains(&CoreType::Battle) {
@@ -7311,6 +7320,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -12815,6 +12825,7 @@ mod tests {
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             is_suspected: false,
         };
         let goblin_filter = make_subtype_filter("Goblin");

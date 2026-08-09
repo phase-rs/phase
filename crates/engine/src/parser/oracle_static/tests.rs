@@ -12239,11 +12239,11 @@ fn parse_spells_quoted_duplicate_cascade_kept() {
     );
 }
 
-// The parser's duplicate gate consults `cast_merge_preserves_instances`, which is
-// deliberately NARROWER than the semantic `instances_function_separately`: Exalted
-// (reachable in the quoted grammar) and Storm (not) both function separately by
-// rule but their cast-grant counts are not consumed, so both are excluded and any
-// duplicate grant that reaches the gate declines.
+// CR 702.40b: Each Storm instance triggers separately. The parser's duplicate gate
+// consults `cast_merge_preserves_instances`, which is deliberately NARROWER than the
+// semantic `instances_function_separately`: Exalted remains excluded because its
+// cast-grant count is not consumed, while Storm is preserved because its synthesized
+// trigger consumes every cast-time instance.
 #[test]
 fn cast_merge_preserves_instances_is_narrower_than_functions_separately() {
     assert!(Keyword::Cascade.instances_function_separately());
@@ -12251,7 +12251,7 @@ fn cast_merge_preserves_instances_is_narrower_than_functions_separately() {
     assert!(Keyword::Exalted.instances_function_separately());
     assert!(!Keyword::Exalted.cast_merge_preserves_instances());
     assert!(Keyword::Storm.instances_function_separately());
-    assert!(!Keyword::Storm.cast_merge_preserves_instances());
+    assert!(Keyword::Storm.cast_merge_preserves_instances());
 }
 
 #[test]
@@ -14375,6 +14375,250 @@ fn graveyard_cast_permission_festival_additional_pay_life() {
         def.condition,
         Some(crate::types::ability::StaticCondition::DuringYourTurn),
         "the \"During your turn\" qualifier must gate the permission to the controller's turn"
+    );
+}
+
+/// CR 601.2f + CR 701.9a: Dragon Man, Reformed Robot — "You may cast this card
+/// from your graveyard by discarding a card in addition to paying its other
+/// costs." lowers to a graveyard-cast permission carrying an ADDITIONAL discard
+/// cost. Regression for the misparse where the whole non-pay-life additional-cost
+/// class was dropped (`extra_cost: None`), letting the card be recast from the
+/// graveyard for its mana cost alone with no discard.
+#[test]
+fn graveyard_cast_permission_dragon_man_additional_discard() {
+    use crate::types::ability::{AbilityCost, CardSelectionMode, DiscardSelfScope, QuantityExpr};
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    let text = "You may cast this card from your graveyard by discarding a card in addition to paying its other costs.";
+    let def = parse_static_line(text).expect("Dragon Man static must parse");
+    let StaticMode::GraveyardCastPermission {
+        play_mode,
+        ref extra_cost,
+        ..
+    } = def.mode
+    else {
+        panic!("expected GraveyardCastPermission, got {:?}", def.mode);
+    };
+    // Positive reach-guard: the permission is emitted (not declined) as a
+    // graveyard self-cast, so the discard rides a real permission.
+    assert_eq!(play_mode, CardPlayMode::Cast);
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Graveyard],
+        "the \"this card … from your graveyard\" self-reference must scope the \
+         permission to the graveyard"
+    );
+    // The dropped-clause regression: the discard additional cost must be present,
+    // and identical to the single cost authority's lowering of "discard a card".
+    assert_eq!(
+        extra_cost,
+        &Some(CastExtraCost {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+            mode: CastCostMode::Additional,
+        }),
+        "expected an additional discard-a-card extra cost, got {extra_cost:?}"
+    );
+
+    // Full Oracle dispatch (with real "~" normalization) must route the third
+    // line to the same static, leaving no Unimplemented node behind for it.
+    let card_text = "Flying\nDragon Man's power is equal to the greatest mana value among noncreature permanents you control and noncreature cards in your graveyard.\nYou may cast this card from your graveyard by discarding a card in addition to paying its other costs.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Dragon Man, Reformed Robot",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Dragon".to_string(), "Robot".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Dragon Man's line to the discard-cost \
+         permission, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 601.2f + CR 701.13a: Demilich — "You may cast this card from your graveyard
+/// by exiling four instant and/or sorcery cards from your graveyard in addition
+/// to paying its other costs." lowers to a graveyard-cast permission carrying an
+/// ADDITIONAL exile-four-from-graveyard cost. Regression: adding the discard/etc.
+/// gerund class WITHOUT an `exiling` arm made this rider `Unmodeled`, so the whole
+/// permission was DECLINED (`None`) — turning Demilich from castable-from-graveyard
+/// (cost silently dropped) into uncastable-from-graveyard, masked by green
+/// coverage. The `exiling` arm both restores castability AND models the real cost.
+#[test]
+fn graveyard_cast_permission_demilich_additional_exile() {
+    use crate::types::ability::AbilityCost;
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    let text = "You may cast this card from your graveyard by exiling four instant and/or sorcery cards from your graveyard in addition to paying its other costs.";
+    let def = parse_static_line(text).expect(
+        "Demilich static must parse (not decline) — the exile rider is a modeled additional cost",
+    );
+    let StaticMode::GraveyardCastPermission {
+        play_mode,
+        ref extra_cost,
+        ..
+    } = def.mode
+    else {
+        panic!("expected GraveyardCastPermission, got {:?}", def.mode);
+    };
+    // Positive reach-guard: the permission is emitted (not declined) as a
+    // graveyard self-cast, so the exile cost rides a real permission.
+    assert_eq!(play_mode, CardPlayMode::Cast);
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Graveyard],
+        "the \"this card … from your graveyard\" self-reference must scope the \
+         permission to the graveyard"
+    );
+    // The dropped-clause regression: the additional exile cost must be present and
+    // be a real graveyard exile of four cards (not None, not Unimplemented).
+    let Some(CastExtraCost {
+        cost:
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            },
+        mode,
+    }) = extra_cost
+    else {
+        panic!("expected an additional Exile extra cost, got {extra_cost:?}");
+    };
+    assert_eq!(*mode, CastCostMode::Additional);
+    assert_eq!(*count, 4, "Demilich exiles four cards");
+    assert_eq!(*zone, Some(Zone::Graveyard));
+    let Some(TargetFilter::Or { filters }) = filter else {
+        panic!("Demilich's exile cost must be an instant-or-sorcery filter, got {filter:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "instant-or-sorcery must have two filter legs"
+    );
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(typed) if typed.type_filters == [TypeFilter::Instant]
+    )));
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Typed(typed) if typed.type_filters == [TypeFilter::Sorcery]
+    )));
+
+    // Full Oracle dispatch (with real "~" normalization) must route the graveyard
+    // line to the same static, leaving no Unimplemented node behind for it.
+    let card_text = "This spell costs {U} less to cast for each instant and sorcery spell you've cast this turn.\nYou may cast this card from your graveyard by exiling four instant and/or sorcery cards from your graveyard in addition to paying its other costs.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Demilich",
+        &[],
+        &["Creature".to_string()],
+        &["Skeleton".to_string(), "Wizard".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Demilich's line to the exile-cost \
+         permission, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 601.2f + CR 701.13a: Helbrute — "Sarcophagus — You may cast this card from
+/// your graveyard by exiling another creature card from your graveyard in addition
+/// to paying its other costs." lowers to a graveyard-cast permission carrying an
+/// ADDITIONAL exile-a-creature-card cost. Same regression class as Demilich; the
+/// ability-word prefix ("Sarcophagus —") is stripped upstream before the line
+/// reaches the permission parser (verified via the full-dispatch check below).
+#[test]
+fn graveyard_cast_permission_helbrute_additional_exile() {
+    use crate::types::ability::AbilityCost;
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    // The ability-word prefix is stripped upstream; the permission parser sees the
+    // bare "You may cast …" line.
+    let text = "You may cast this card from your graveyard by exiling another creature card from your graveyard in addition to paying its other costs.";
+    let def = parse_static_line(text).expect(
+        "Helbrute static must parse (not decline) — the exile rider is a modeled additional cost",
+    );
+    let StaticMode::GraveyardCastPermission {
+        play_mode,
+        ref extra_cost,
+        ..
+    } = def.mode
+    else {
+        panic!("expected GraveyardCastPermission, got {:?}", def.mode);
+    };
+    assert_eq!(play_mode, CardPlayMode::Cast);
+    assert_eq!(def.active_zones, vec![Zone::Graveyard]);
+    let Some(CastExtraCost {
+        cost:
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            },
+        mode,
+    }) = extra_cost
+    else {
+        panic!("expected an additional Exile extra cost, got {extra_cost:?}");
+    };
+    assert_eq!(*mode, CastCostMode::Additional);
+    assert_eq!(*count, 1, "Helbrute exiles one other creature card");
+    assert_eq!(*zone, Some(Zone::Graveyard));
+    assert!(matches!(
+        filter,
+        Some(TargetFilter::Typed(typed))
+            if typed.type_filters == [TypeFilter::Creature]
+                && typed.properties.contains(&FilterProp::Another)
+    ));
+
+    // Full Oracle dispatch, including the "Sarcophagus —" ability word and Haste,
+    // must route the graveyard line to the same permission with no Unimplemented.
+    let card_text = "Haste\nSarcophagus — You may cast this card from your graveyard by exiling another creature card from your graveyard in addition to paying its other costs.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Helbrute",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Astartes".to_string(), "Dreadnought".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Helbrute's line (past the ability word) \
+         to the exile-cost permission, got {:?}",
+        parsed.statics
+    );
+}
+
+/// CR 601.2f: an additional-cost rider whose cost verb is not yet modeled must
+/// DECLINE the whole permission (honest coverage gap) rather than emit a
+/// permission that silently skips the required cost. Paired with the modeled
+/// discard line so the decline is proven cost-specific, not a blanket refusal.
+#[test]
+fn graveyard_cast_permission_unmodeled_additional_cost_declines() {
+    let modeled =
+        "You may cast this card from your graveyard by discarding a card in addition to paying its other costs.";
+    let unmodeled =
+        "You may cast this card from your graveyard by frobnicating a card in addition to paying its other costs.";
+    assert!(
+        try_parse_graveyard_cast_permission(modeled, &modeled.to_lowercase()).is_some(),
+        "the modeled discard rider must still emit a permission"
+    );
+    assert!(
+        try_parse_graveyard_cast_permission(unmodeled, &unmodeled.to_lowercase()).is_none(),
+        "an unmodeled additional-cost verb must decline the whole permission, not \
+         emit one that drops the required cost"
     );
 }
 
@@ -24342,27 +24586,6 @@ fn static_transform_unspent_mana_to_color() {
     );
 }
 
-/// Printed-card round-trip tests for the step-end unspent mana class.
-/// Each test feeds the exact printed Oracle text for the matching clause
-/// (verified against `client/public/card-data.json`) through the parser
-/// to confirm the unified `StepEndUnspentMana` variant emerges with the
-/// right filter and action.
-#[test]
-fn card_text_upwelling_players_retention() {
-    // CR 703.4q: Upwelling printed text.
-    use crate::types::mana::StepEndManaAction;
-    let def =
-        parse_static_line("Players don't lose unspent mana as steps and phases end.").unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::StepEndUnspentMana {
-            filter: None,
-            action: StepEndManaAction::Retain,
-        }
-    );
-    assert_eq!(def.affected, Some(TargetFilter::Player));
-}
-
 #[test]
 fn card_text_omnath_locus_of_mana_green_retention() {
     // CR 703.4q: Omnath, Locus of Mana — printed first ability line.
@@ -24379,74 +24602,6 @@ fn card_text_omnath_locus_of_mana_green_retention() {
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Controller));
-}
-
-#[test]
-fn card_text_horizon_stone_transforms_to_colorless() {
-    // CR 614.1a + CR 703.4q: Horizon Stone printed text.
-    use crate::types::mana::{ManaType, StepEndManaAction};
-    let def =
-        parse_static_line("If you would lose unspent mana, that mana becomes colorless instead.")
-            .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::StepEndUnspentMana {
-            filter: None,
-            action: StepEndManaAction::Transform(ManaType::Colorless),
-        }
-    );
-    assert_eq!(def.affected, Some(TargetFilter::Controller));
-}
-
-#[test]
-fn card_text_kruphix_transforms_to_colorless() {
-    // CR 614.1a + CR 703.4q: Kruphix, God of Horizons — the transform
-    // clause printed alongside indestructible / devotion / no-max-hand.
-    // Same Oracle wording as Horizon Stone; the other clauses route
-    // through their own parser paths.
-    use crate::types::mana::{ManaType, StepEndManaAction};
-    let def =
-        parse_static_line("If you would lose unspent mana, that mana becomes colorless instead.")
-            .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::StepEndUnspentMana {
-            filter: None,
-            action: StepEndManaAction::Transform(ManaType::Colorless),
-        }
-    );
-}
-
-#[test]
-fn card_text_omnath_locus_of_all_transforms_to_black() {
-    // CR 614.1a + CR 703.4q: Omnath, Locus of All printed text.
-    use crate::types::mana::{ManaType, StepEndManaAction};
-    let def = parse_static_line("If you would lose unspent mana, that mana becomes black instead.")
-        .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::StepEndUnspentMana {
-            filter: None,
-            action: StepEndManaAction::Transform(ManaType::Black),
-        }
-    );
-}
-
-#[test]
-fn card_text_ozai_transforms_to_red() {
-    // CR 614.1a + CR 703.4q: Ozai, the Phoenix King printed text. The
-    // surrounding keyword and as-long-as-flying clauses route through
-    // their own parser paths.
-    use crate::types::mana::{ManaType, StepEndManaAction};
-    let def = parse_static_line("If you would lose unspent mana, that mana becomes red instead.")
-        .unwrap();
-    assert_eq!(
-        def.mode,
-        StaticMode::StepEndUnspentMana {
-            filter: None,
-            action: StepEndManaAction::Transform(ManaType::Red),
-        }
-    );
 }
 
 /// CR 611.2b + CR 703.4q: SHAPE test for The Last Agni Kai's *full

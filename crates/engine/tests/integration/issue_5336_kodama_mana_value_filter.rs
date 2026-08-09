@@ -276,7 +276,12 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
 
     let mut runner = scenario.build();
     let forest = seed_forest_on_library_top(&mut runner);
-    runner.cast(natures_lore).search_first_legal().resolve();
+    runner.cast(natures_lore).resolve();
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest],
+        })
+        .expect("selecting Nature's Lore's Forest must succeed");
 
     assert_eq!(
         runner.state().objects[&forest].zone,

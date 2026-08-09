@@ -15,14 +15,15 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use engine::game::game_object::GameObject;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectKind, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef,
+    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectKind, ObjectScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    GameState, PendingCast, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    GameState, PendingCast, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -44,6 +45,7 @@ struct Body {
     toughness: i32,
     damage_marked: u32,
     indestructible: bool,
+    power: i32,
 }
 
 impl Body {
@@ -52,6 +54,7 @@ impl Body {
             toughness,
             damage_marked: 0,
             indestructible: false,
+            power: 1,
         }
     }
 
@@ -62,6 +65,11 @@ impl Body {
 
     const fn indestructible(mut self) -> Self {
         self.indestructible = true;
+        self
+    }
+
+    const fn power(mut self, power: i32) -> Self {
+        self.power = power;
         self
     }
 }
@@ -75,7 +83,7 @@ fn shape_body(state: &mut GameState, object_id: ObjectId, body: Body) {
         core_types: vec![CoreType::Creature],
         subtypes: Vec::new(),
     };
-    obj.power = Some(1);
+    obj.power = Some(body.power);
     obj.toughness = Some(body.toughness);
     obj.damage_marked = body.damage_marked;
     if body.indestructible {
@@ -219,10 +227,41 @@ fn with_pending<R>(
     effect: Effect,
     probe: impl FnOnce(&PolicyContext<'_>, ObjectId, &GameObject) -> R,
 ) -> R {
+    with_pending_and_source(spell_keywords, body, effect, None, probe)
+}
+
+/// Like [`with_pending`], but optionally pre-binds a `DamageSource::Target`
+/// source object in `selection.selected_slots[0]` — mirroring a real later-slot
+/// decision for a Self-Destruct-class spell. The FIRST object target is the
+/// damage source (CR 120.3) and, once it is declared during interative target
+/// selection, lives in `TargetSelectionProgress.selected_slots` (CR 601.2c) even
+/// though `ability.targets` stays empty until `assign_selected_slots_in_chain`
+/// welds the final selection. `source` (an AI-controlled creature) is created in
+/// the state and bound as slot 0.
+fn with_pending_and_source<R>(
+    spell_keywords: &[Keyword],
+    body: Body,
+    effect: Effect,
+    source: Option<Body>,
+    probe: impl FnOnce(&PolicyContext<'_>, ObjectId, &GameObject) -> R,
+) -> R {
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     let spell = create_object(&mut state, CardId(1), AI, "Removal".into(), Zone::Stack);
     let target = create_object(&mut state, CardId(2), OPP, "Body".into(), Zone::Battlefield);
     shape_body(&mut state, target, body);
+    let selected_slots = if let Some(source_body) = source {
+        let source_id = create_object(
+            &mut state,
+            CardId(3),
+            AI,
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        shape_body(&mut state, source_id, source_body);
+        vec![Some(TargetRef::Object(source_id))]
+    } else {
+        Vec::new()
+    };
     {
         let obj = state.objects.get_mut(&spell).unwrap();
         obj.keywords.extend(spell_keywords.iter().cloned());
@@ -243,7 +282,10 @@ fn with_pending<R>(
                 effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
-            selection: Default::default(),
+            selection: TargetSelectionProgress {
+                selected_slots,
+                ..Default::default()
+            },
         },
         candidates: Vec::new(),
     };
@@ -279,6 +321,39 @@ fn pending_for(spell_keywords: &[Keyword], body: Body, effect: Effect) -> Pendin
     with_pending(spell_keywords, body, effect, |ctx, id, target| {
         pending_damage_to_object(ctx, id, target)
     })
+}
+
+/// Same as [`with_pending`] but with a pre-bound `DamageSource::Target` source
+/// of `source_power` in `selected_slots[0]` (Self-Destruct class). `X` in the
+/// effect resolves to `its power` (CR 120.3).
+fn pending_for_with_source(
+    spell_keywords: &[Keyword],
+    body: Body,
+    source_power: i32,
+    effect: Effect,
+) -> PendingDamage {
+    with_pending_and_source(
+        spell_keywords,
+        body,
+        effect,
+        Some(Body::new(1).power(source_power)),
+        pending_damage_to_object,
+    )
+}
+
+fn bonus_for_with_source(
+    spell_keywords: &[Keyword],
+    body: Body,
+    source_power: i32,
+    effect: Effect,
+) -> f64 {
+    with_pending_and_source(
+        spell_keywords,
+        body,
+        effect,
+        Some(Body::new(1).power(source_power)),
+        lethality_bonus,
+    )
 }
 
 fn burn(damage: i32) -> Effect {
@@ -424,13 +499,14 @@ fn wither_short_of_toughness_scales_the_waste_by_the_surviving_body() {
 #[test]
 fn target_sourced_damage_stays_neutral() {
     // CR 120.3: with `DamageSource::Target` the first object target IS the
-    // damage source and is excluded from the recipients, so this object may not
-    // be dealt damage at all. Its deathtouch/wither are likewise unknown while
-    // targets are still being chosen → stay out of the ranking entirely.
+    // damage source and is excluded from the recipients. With NO source slot
+    // bound yet (`selected_slots` empty — the first-slot / source-declaration
+    // case, CR 601.2c), the source is not knowable while targets are still
+    // being chosen → stay out of the ranking entirely rather than guess.
     assert_eq!(
         pending_for(&[], Body::new(3), burn_from(3, Some(DamageSource::Target))),
         PendingDamage::Unresolved,
-        "a target-sourced damage effect must not be modelled as a recipient hit"
+        "an unbound target-sourced damage effect must not be modelled as a recipient hit"
     );
     assert_eq!(
         bonus_for(&[], Body::new(3), burn_from(3, Some(DamageSource::Target))),
@@ -439,6 +515,81 @@ fn target_sourced_damage_stays_neutral() {
     // Discriminating control: the identical amount with the default source IS
     // scored, so the neutrality above comes from the source, not the filter.
     assert!(bonus_for(&[], Body::new(3), burn(3)) > 0.0);
+}
+
+// ─── DamageSource::Target with a pre-bound source (Self-Destruct class) ──────
+// CR 120.3: the first object target of a `DamageSource::Target` spell IS the
+// damage source. Once it is declared during a later slot's interactive target
+// selection it sits in `TargetSelectionProgress.selected_slots[0]` (CR 601.2c),
+// so its power (the `X` of "deals X damage" — CR 208.1, CR 120.3) and its
+// keywords (CR 120.3d wither/infect, CR 702.2b deathtouch) become knowable and
+// lethality against the recipient can be modelled.
+
+/// A `DealDamage` whose amount is `its power` (Self-Destruct's `X = power`) and
+/// whose source is the first object target — the faithful production shape. The
+/// amount is `Power { scope: Target }` exactly as the parser emits it, and
+/// resolves against the first object target (the bound source) via the
+/// targets-aware resolver.
+fn burn_source_power() -> Effect {
+    Effect::DealDamage {
+        amount: QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        },
+        target: TargetFilter::Any,
+        damage_source: Some(DamageSource::Target),
+        excess: None,
+    }
+}
+
+#[test]
+fn bound_target_sourced_damage_to_lethal_recipient_is_rewarded() {
+    // CR 120.3: with the 2/2 source bound as slot 0, Self-Destruct deals 2
+    // damage; a 2/2 recipient is destroyed (CR 704.5g) → the clean-kill bonus.
+    // The amount is resolved against the SOURCE's power (CR 208.1), so the
+    // recipient's own 1/1 body is irrelevant to the amount.
+    let b = bonus_for_with_source(&[], Body::new(2), 2, burn_source_power());
+    assert!(
+        (b - LETHAL_BONUS).abs() < 1e-9,
+        "a 2-power source must score a clean kill on a 2/2, got {b}"
+    );
+    // Positive reach-guard: resolve the real pipeline, not just the score.
+    assert_eq!(
+        pending_for_with_source(&[], Body::new(2), 2, burn_source_power()),
+        PendingDamage::Dealt(DamageOutcome {
+            marked: 2,
+            minus_counters: 0,
+            deathtouch: false,
+        })
+    );
+}
+
+#[test]
+fn bound_target_sourced_damage_to_nonlethal_recipient_is_penalized() {
+    // CR 120.3: the same 2/2 source deals 2 damage into a 3/3, which it cannot
+    // kill (CR 704.5g). The waste penalty scales by the body it failed to kill.
+    let b = bonus_for_with_source(&[], Body::new(3), 2, burn_source_power());
+    let expected = -(3.0_f64 * WASTE_PENALTY_MULT).min(WASTE_PENALTY_MAX);
+    assert!(
+        (b - expected).abs() < 1e-9,
+        "2 damage on a 3/3 must be penalized by the surviving toughness, got {b}"
+    );
+    // Discriminating control — identical source & amount, only the recipient's
+    // body differs: the same spell must rank the lethal small body above this.
+    assert!(b < bonus_for_with_source(&[], Body::new(2), 2, burn_source_power()));
+}
+
+#[test]
+fn bound_target_sourced_damage_has_no_bound_source_stays_neutral() {
+    // CR 601.2c: before the source slot is declared (`selected_slots` empty)
+    // there is no source to resolve `its power` against → stay neutral rather
+    // than guess. This is the first-slot / source-declaration guard.
+    assert_eq!(
+        pending_for(&[], Body::new(3), burn_source_power()),
+        PendingDamage::Unresolved
+    );
+    assert_eq!(bonus_for(&[], Body::new(3), burn_source_power()), 0.0);
 }
 
 #[test]

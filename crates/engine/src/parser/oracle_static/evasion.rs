@@ -110,13 +110,12 @@ fn strip_redundant_block_exception_by(filter_text: &str) -> Cow<'_, str> {
 /// Oracle text. Trigger doublers name the doubled ability's source as
 /// "a triggered ability of <SOURCE>" — e.g. "a Ninja creature you control"
 /// (Splinter), "another creature you control of the chosen type" (Roaming
-/// Throne), or the unrestricted "a permanent you control" (Panharmonicon-class).
+/// Throne), or "a permanent you control" (Panharmonicon-class).
 ///
-/// Returns `Some(filter)` only when `<SOURCE>` narrows beyond a bare controlled
-/// permanent (a subtype, a specific core type, or a property such as "another"
-/// / "of the chosen type"). A bare "permanent you control" needs no filter —
-/// `apply_trigger_doubling`'s controller match already enforces control — so
-/// this returns `None`, leaving `affected` unset (Panharmonicon/Isshin/Drivnod).
+/// Returns `Some(filter)` when `<SOURCE>` supplies a source-domain constraint.
+/// In particular, "permanent you control" must remain a `Permanent` filter:
+/// the controller check alone would also admit spell-source triggers such as
+/// Storm, which this phrase does not name.
 ///
 /// CR 603.2d: The source may itself be a flat disjunction of typed clauses
 /// sharing one trailing controller scope — "a Shaman or another Wizard you
@@ -137,9 +136,9 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
         .parse(i)
     })?;
 
-    // Parse the leading typed clause. A bare controlled permanent
-    // ("a permanent you control", Panharmonicon) adds nothing the controller
-    // match doesn't already enforce, so an unrestrictive clause yields `None`.
+    // Parse the leading typed clause. A bare controlled permanent remains a
+    // source-domain constraint: the controller match cannot distinguish a
+    // permanent's triggered ability from a spell's triggered ability.
     let (first, remainder) = parse_doubler_disjunct(source_phrase);
     if !doubler_source_is_restrictive(&first) {
         return None;
@@ -161,12 +160,10 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     let mut branches = vec![first];
     loop {
         let (filter, remainder) = parse_doubler_disjunct(rest);
-        // Each disjunct must independently narrow to a restrictive typed clause.
+        // Each disjunct must independently name a source-domain constraint.
         // If one does not — e.g. a stray "or" inside an unrelated suffix
-        // ("power 4 or greater") split the phrase mid-clause — bail so the
-        // doubler falls back to its conservative controller-only scope. This
-        // keeps the fallback strictly safe: a mis-parse can only widen back to
-        // "all your triggers", never narrow to a wrong subset.
+        // ("power 4 or greater") split the phrase mid-clause — abort the
+        // union extraction instead of constructing a partial source scope.
         if !doubler_source_is_restrictive(&filter) {
             return None;
         }
@@ -198,20 +195,18 @@ fn doubler_disjunct_connector(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 603.2d: A doubler `affected` filter must narrow beyond a bare controlled
-/// permanent — `apply_trigger_doubling`'s controller match already enforces
-/// control, so `Permanent`/`Card`/`Any` core types add nothing. A clause is
-/// restrictive when it carries a concrete type/subtype restriction or any
-/// property (subtype designations, "another", "of the chosen type", etc.).
+/// CR 603.2d: A doubler `affected` filter must name a source-domain constraint.
+/// `Permanent` is a real constraint because spells are not permanents; `Card`
+/// and `Any` alone do not constrain the source. A clause is therefore valid
+/// when it carries a permanent or concrete type/subtype restriction, or a
+/// property such as "another" / "of the chosen type".
 fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
-            tf.type_filters.iter().any(|t| {
-                !matches!(
-                    t,
-                    TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
-                )
-            }) || !tf.properties.is_empty()
+            tf.type_filters
+                .iter()
+                .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
+                || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
         // CR 603.2d: "a triggered ability of ~" names the doubler's own source
