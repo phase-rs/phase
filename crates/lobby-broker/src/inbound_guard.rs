@@ -276,10 +276,11 @@ mod tests {
     #[test]
     fn borrowed_create_guard_rejects_limited_range_until_supported() {
         let mut format_config = FormatConfig::standard();
-        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
-            default_range: 0,
-            player_overrides: std::collections::BTreeMap::new(),
-        });
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
 
         let err = guard_create_game_settings_inbound(CreateGameSettingsInbound {
             deck: &deck(1, 0),

@@ -908,10 +908,11 @@ mod tests {
         let first = create(&mut conn, &mut broker, &env);
         let first_code = game_code_of(&first);
         let mut format_config = engine::types::format::FormatConfig::standard();
-        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
-            default_range: 0,
-            player_overrides: std::collections::BTreeMap::new(),
-        });
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
 
         let out = broker.handle(
             &mut conn,

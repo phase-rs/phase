@@ -7890,10 +7890,11 @@ mod full_create_guard_tests {
         let deck = deck();
         let mut fields = fields(&deck, None, None);
         let mut format_config = engine::types::format::FormatConfig::standard();
-        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
-            default_range: 0,
-            player_overrides: std::collections::BTreeMap::new(),
-        });
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
         fields.format_config = Some(&format_config);
 
         let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();

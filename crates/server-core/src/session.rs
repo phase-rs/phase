@@ -1971,10 +1971,10 @@ mod tests {
         let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
         let mut state = persisted.state.into_game_state();
         state.format_config.range_of_influence =
-            Some(engine::types::format::RangeOfInfluenceConfig {
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
                 default_range: 0,
                 player_overrides: std::collections::BTreeMap::new(),
-            });
+            }));
         persisted.state = PersistedGameState::capture(state);
 
         let error = GameSession::from_persisted(persisted, &CardDatabase::default())
@@ -2040,10 +2040,11 @@ mod tests {
     fn create_game_rejects_limited_range_until_supported() {
         let mut mgr = SessionManager::new();
         let mut format_config = FormatConfig::standard();
-        format_config.range_of_influence = Some(engine::types::format::RangeOfInfluenceConfig {
-            default_range: 0,
-            player_overrides: std::collections::BTreeMap::new(),
-        });
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
 
         assert!(mgr
             .create_game_n_players(

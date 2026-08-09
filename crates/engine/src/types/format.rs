@@ -152,17 +152,19 @@ enum RangeOfInfluenceConfigWire {
 
 fn deserialize_range_of_influence<'de, D>(
     deserializer: D,
-) -> Result<Option<RangeOfInfluenceConfig>, D::Error>
+) -> Result<Option<Box<RangeOfInfluenceConfig>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     Option::<RangeOfInfluenceConfigWire>::deserialize(deserializer).map(|range| {
-        range.map(|range| match range {
-            RangeOfInfluenceConfigWire::Current(config) => config,
-            RangeOfInfluenceConfigWire::Legacy(default_range) => RangeOfInfluenceConfig {
-                default_range,
-                player_overrides: BTreeMap::new(),
-            },
+        range.map(|range| {
+            Box::new(match range {
+                RangeOfInfluenceConfigWire::Current(config) => config,
+                RangeOfInfluenceConfigWire::Legacy(default_range) => RangeOfInfluenceConfig {
+                    default_range,
+                    player_overrides: BTreeMap::new(),
+                },
+            })
         })
     })
 }
@@ -186,7 +188,7 @@ pub struct FormatConfig {
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
     #[serde(default, deserialize_with = "deserialize_range_of_influence")]
-    pub range_of_influence: Option<RangeOfInfluenceConfig>,
+    pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
     /// CR 904.2a / CR 904.6: In default Archenemy, the single-player team is
     /// designated as the archenemy and takes the first turn.
@@ -1380,10 +1382,10 @@ mod tests {
     #[test]
     fn range_of_influence_validation_uses_actual_seating() {
         let mut config = FormatConfig::commander();
-        config.range_of_influence = Some(RangeOfInfluenceConfig {
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
             default_range: 0,
             player_overrides: BTreeMap::from([(PlayerId(1), 1), (PlayerId(3), 2)]),
-        });
+        }));
         assert!(config.validate_for_player_count(4).is_ok());
 
         config.range_of_influence.as_mut().unwrap().player_overrides =

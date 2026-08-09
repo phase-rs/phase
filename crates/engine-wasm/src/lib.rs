@@ -179,10 +179,10 @@ mod external_format_config_tests {
     #[test]
     fn external_initialization_rejects_limited_range_configuration() {
         let mut config = FormatConfig::standard();
-        config.range_of_influence = Some(RangeOfInfluenceConfig {
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
             default_range: 0,
             player_overrides: BTreeMap::new(),
-        });
+        }));
 
         assert!(validate_external_format_config(&config, 2)
             .expect_err("limited range must remain disabled at the WASM boundary")
@@ -208,10 +208,10 @@ mod external_format_config_tests {
     #[test]
     fn restored_state_with_limited_range_is_rejected_before_rehydration() {
         let mut state = GameState::new_two_player(42);
-        state.format_config.range_of_influence = Some(RangeOfInfluenceConfig {
+        state.format_config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
             default_range: 0,
             player_overrides: BTreeMap::new(),
-        });
+        }));
         let json = serde_json::to_string(&state).expect("state serializes");
 
         assert!(decode_restored_game_state(&json)
