@@ -76,6 +76,7 @@ mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
 mod claim_jumper_repeat;
+mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;

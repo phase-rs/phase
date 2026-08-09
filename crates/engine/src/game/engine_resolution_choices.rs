@@ -22,7 +22,7 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs, mana_abilities};
+use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
 
 /// CR 701.23a + CR 614.1: offer every found card as its own replaceable event.
 /// Original survivors remain in the printed search continuation; modified cards
@@ -4451,14 +4451,39 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let event_start = events.len();
             if turns::finish_cleanup_discard(state, player, &chosen, events) {
                 return Ok(action_result_outcome(events, state.waiting_for.clone()));
             }
 
-            let _ = turns::advance_phase_once(state, events);
-            return Ok(ResolutionChoiceOutcome::WaitingFor(turns::auto_advance(
-                state, events,
-            )));
+            // CR 514.3a + CR 603.3 + CR 117.5: cleanup-discard events must pass
+            // through the ordinary SBA/trigger settlement before cleanup can end.
+            // Synchronize the provisional priority first: this is the authority
+            // that normalizes legacy waiting states and derives the authorized
+            // priority submitter under turn control.
+            let provisional_cleanup_priority = WaitingFor::Priority { player };
+            public_state::sync_waiting_for(state, &provisional_cleanup_priority);
+            let settled = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &provisional_cleanup_priority,
+                false,
+                false,
+            )?;
+            public_state::sync_waiting_for(state, &settled);
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty() {
+                let _ = turns::advance_phase_once(state, events);
+                let advanced = turns::auto_advance(state, events);
+                public_state::sync_waiting_for(state, &advanced);
+            }
+
+            // The suffix pipeline above already processed this action's discard
+            // events, including persistent delayed triggers. Return the completed
+            // action rather than entering apply_action's outer full-buffer pipeline,
+            // which would otherwise scan those discard events a second time.
+            return Ok(action_result_outcome(events, state.waiting_for.clone()));
         }
         (
             WaitingFor::ConniveDiscard {
