@@ -2090,7 +2090,14 @@ fn collect_matching_triggers_inner(
             } else {
                 trig_def.trigger_zones.contains(&zone)
             };
-            if !zones_match && use_latched_trigger_entries {
+            // A zone-change record may let the moving source's own trigger
+            // function from its destination zone. An observer's LKI only
+            // proves it functioned from `zone_filter` immediately before the
+            // event; it must not gain the destination's trigger zone.
+            if !zones_match
+                && use_latched_trigger_entries
+                && matches!(visit, TriggerSourceVisit::EventSubject)
+            {
                 if let GameEvent::ZoneChanged { record, to, .. } = event {
                     zones_match = record.from_zone == Some(source_context.identity.expected_zone)
                         && trig_def.trigger_zones.contains(to);
@@ -4288,6 +4295,40 @@ fn collect_pending_triggers_with_collection(
                 {
                     continue;
                 }
+                // CR 603.10a + CR 400.7: This observer left in the same
+                // departure batch, so its own ZoneChanged record—not the
+                // post-move object in `state`—owns the source identity. The
+                // latter has already bumped its incarnation and would force
+                // damage-history conditions to choose between accepting every
+                // off-battlefield same-id source or rejecting valid co-death
+                // LKI. The record context preserves both cases precisely.
+                let observer_source_context = events.iter().find_map(|observer_event| {
+                    let GameEvent::ZoneChanged {
+                        object_id,
+                        record,
+                        ..
+                    } = observer_event
+                    else {
+                        return None;
+                    };
+                    if *object_id != observer_id || !record.co_departed.contains(moved_id) {
+                        return None;
+                    }
+                    match crate::types::game_state::battlefield_departure_trigger_source_context(
+                        observer_event,
+                    ) {
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                            context,
+                        ) => Some(context),
+                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                            None
+                        }
+                    }
+                });
+                let Some(observer_source_context) = observer_source_context else {
+                    continue;
+                };
                 // CR 303.4b + CR 603.10a: Restore the observer's LKI
                 // `attached_to` so `ControllerRef::EnchantedPlayer` resolves
                 // correctly for co-departed Curse Auras whose live
@@ -4313,19 +4354,11 @@ fn collect_pending_triggers_with_collection(
                     }
                 }
                 let matched_triggers = {
-                    let Some(obj) = state.objects.get(&observer_id) else {
-                        // Restore before continuing.
-                        if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
-                            obs_obj.attached_to = saved_attached_to;
-                        }
-                        continue;
-                    };
-                    collect_matching_triggers(
+                    collect_matching_triggers_from_context(
                         state,
                         event,
                         events,
-                        obj,
-                        obj.entered_battlefield_turn.unwrap_or(0),
+                        observer_source_context,
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
                         &mut registered_this_event,
@@ -10055,11 +10088,17 @@ fn evaluate_trigger_condition_with_source(
                 GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                 _ => None,
             });
-            match (source_id, dying_creature) {
-                (Some(src), Some(subj)) => state.damage_dealt_this_turn.iter().any(|r| {
-                    r.source_id == src
-                        && damage_record_matches_dying_object(state, r, subj, trigger_event)
-                }),
+            match (source_context, dying_creature) {
+                // CR 400.7: match the source by ObjectId AND incarnation — a
+                // re-entered source is a new object that dealt no prior damage.
+                (Some(source), Some(subj)) => {
+                    let source_id = source.identity.reference.object_id;
+                    state.damage_dealt_this_turn.iter().any(|r| {
+                        r.source_id == source_id
+                            && damage_record_source_incarnation_matches(r, source)
+                            && damage_record_matches_dying_object(state, r, subj, trigger_event)
+                    })
+                }
                 _ => false,
             }
         }
@@ -10871,7 +10910,23 @@ pub(crate) fn check_trigger_condition(
 /// not a later object reusing the same storage id. Death bumps the live
 /// incarnation, and the card can move again before an intervening-if recheck,
 /// so subtract the death move and every subsequent move of that object.
-fn damage_record_matches_dying_object(
+/// CR 400.7 + CR 603.10a: True when `record`'s source matches the trigger
+/// source. `TriggerSourceContext` preserves the pre-zone-change incarnation,
+/// including when source and subject die together, so an off-battlefield
+/// context never licenses a later same-id incarnation. `None` recorded
+/// incarnation is lenient for legacy records and fixtures.
+fn damage_record_source_incarnation_matches(
+    record: &DamageRecord,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    record
+        .source_incarnation
+        .is_none_or(|recorded_incarnation| {
+            source_context.identity.reference.incarnation == recorded_incarnation
+        })
+}
+
+pub(crate) fn damage_record_matches_dying_object(
     state: &GameState,
     record: &DamageRecord,
     object_id: ObjectId,
@@ -21442,6 +21497,129 @@ pub mod tests {
             Some(source),
             None,
         ));
+
+        // CR 120.1 multi-authority: a SECOND source also damaged the same dying
+        // creature this turn. The trigger source's own record must still be found
+        // among multiple records — this is the `source_id`-identity binding, not
+        // mere presence of any damage record on the dying creature.
+        let other_source = ObjectId(30);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: other_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(dying_creature),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        // A different dying creature was damaged ONLY by the other source, never by
+        // the trigger source → false, even though a damage record for that dying
+        // creature exists. Distinguishes identity binding from bare presence.
+        let other_only_victim = ObjectId(77);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: other_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(other_only_victim),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: true,
+            ..Default::default()
+        });
+        let other_only_event = GameEvent::CreatureDestroyed {
+            object_id: other_only_victim,
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&other_only_event),
+        ));
+    }
+
+    /// CR 400.7: a source that dealt damage, left, and re-entered keeps its
+    /// `ObjectId` but bumps its incarnation, so it is a NEW object that dealt no
+    /// prior damage. `DealtDamageBySourceThisTurn` must therefore compare the
+    /// snapshotted source incarnation, not merely the `ObjectId` — otherwise the
+    /// re-entered permanent spuriously satisfies the intervening-if and, for
+    /// Hawkeye, draws a card for damage a distinct prior incarnation dealt.
+    #[test]
+    fn test_dealt_damage_by_source_rejects_reentered_incarnation() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let source = ObjectId(10);
+        let dying_creature = ObjectId(20);
+        state.objects.insert(
+            source,
+            GameObject::new(
+                source,
+                CardId(1),
+                PlayerId(0),
+                "Damage source".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        // The source's incarnation WHEN it dealt the damage.
+        let damage_time_incarnation = state.objects.get(&source).unwrap().incarnation;
+
+        // Record damage attributed to that exact incarnation.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(dying_creature),
+            target_controller: PlayerId(0),
+            source_incarnation: Some(damage_time_incarnation),
+            amount: 3,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let condition = TriggerCondition::DealtDamageBySourceThisTurn;
+        let event = GameEvent::CreatureDestroyed {
+            object_id: dying_creature,
+        };
+
+        // Same incarnation still on the battlefield → the record is its own → true.
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        let prior_source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+
+        // CR 400.7: the source leaves and re-enters (same ObjectId, bumped
+        // incarnation). The stale record must no longer credit the new object.
+        state.objects.get_mut(&source).unwrap().bump_incarnation();
+        assert!(
+            check_trigger_condition_with_source(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(&prior_source_context),
+                Some(&event),
+            ),
+            "the prior source context must still receive its own damage trigger"
+        );
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event),),
+            "a re-entered source (bumped incarnation) must not match a prior \
+             incarnation's damage record (CR 400.7)"
+        );
     }
 
     /// CR 701.26 + CR 603.4: `FirstTimeObjectTappedThisTurn` holds only when the

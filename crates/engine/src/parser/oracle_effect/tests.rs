@@ -40892,6 +40892,160 @@ fn choose_one_of_detects_shared_target_counter_choice() {
 }
 
 #[test]
+fn dwarven_armorer_bare_distributed_counter_choice_preserves_cost_and_branches() {
+    use crate::types::counter::CounterType;
+
+    let parsed = parse_oracle_text(
+        "{R}, {T}, Discard a card: Put a +0/+1 counter or a +1/+0 counter on target creature.",
+        "Dwarven Armorer",
+        &[],
+        &["Creature".to_string()],
+        &["Dwarf".to_string()],
+    );
+
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Dwarven Armorer must produce exactly one activated ability: {:#?}",
+        parsed.abilities
+    );
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    let AbilityCost::Composite { costs } = ability
+        .cost
+        .as_ref()
+        .expect("Dwarven Armorer must retain its activation costs")
+    else {
+        panic!(
+            "expected composite mana, tap, discard cost, got {:?}",
+            ability.cost
+        );
+    };
+    assert_eq!(costs.len(), 3);
+    assert!(matches!(
+        &costs[0],
+        AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards,
+                generic: 0,
+            }
+        } if shards == &vec![ManaCostShard::Red]
+    ));
+    assert!(matches!(&costs[1], AbilityCost::Tap));
+    assert!(matches!(
+        &costs[2],
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            ..
+        }
+    ));
+
+    assert!(matches!(&*ability.effect, Effect::TargetOnly { .. }));
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the shared target must lead to the counter-choice sub-ability");
+    let Effect::ChooseOneOf { chooser, branches } = &*choice.effect else {
+        panic!(
+            "expected ChooseOneOf after shared target, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(*chooser, PlayerFilter::Controller);
+    assert_eq!(branches.len(), 2);
+
+    let expected = [(0, 1), (1, 0)];
+    for (branch, (power, toughness)) in branches.iter().zip(expected) {
+        assert!(
+            matches!(
+                &*branch.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::PowerToughness { power: actual_power, toughness: actual_toughness },
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                } if (*actual_power, *actual_toughness) == (power, toughness)
+            ),
+            "expected +{power}/+{toughness} ParentTarget counter branch, got {:?}",
+            branch.effect
+        );
+    }
+}
+
+#[test]
+fn bare_shared_noun_counter_choice_keeps_final_comma_or_separator() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    // Reluctant Role Model's three-way bare choice exercises the final `, or`
+    // separator. It must remain visible to the disjunctive splitter rather than
+    // being consumed as a generic comma list separator.
+    let ability = parse_effect_chain(
+        "Put a flying, lifelink, or +1/+1 counter on it.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*ability.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::SelfRef,
+        }
+    ));
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the shared self target must lead to the counter choice");
+    let Effect::ChooseOneOf { branches, .. } = &*choice.effect else {
+        panic!(
+            "expected a three-way counter choice, got {:?}",
+            choice.effect
+        );
+    };
+    assert_eq!(branches.len(), 3);
+    assert!(matches!(
+        &*branches[1].effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Keyword(KeywordKind::Lifelink),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        }
+    ));
+}
+
+#[test]
+fn mixed_case_counter_choice_validates_lowercase_and_keeps_branch_descriptions() {
+    let ability = parse_effect_chain(
+        "Put a +0/+1 Counter or a +1/+0 Counter on Target Creature.",
+        AbilityKind::Spell,
+    );
+
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("mixed-case counter choice must retain its shared target");
+    let Effect::ChooseOneOf { branches, .. } = &*choice.effect else {
+        panic!("expected mixed-case ChooseOneOf, got {:?}", choice.effect);
+    };
+    assert_eq!(branches.len(), 2);
+    assert_eq!(
+        branches[0].description.as_deref(),
+        Some("put a +0/+1 Counter"),
+        "original case belongs to generated branch display text, not classification"
+    );
+    assert!(matches!(
+        &*branches[1].effect,
+        Effect::PutCounter {
+            counter_type: CounterType::PowerToughness {
+                power: 1,
+                toughness: 0
+            },
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn choose_one_of_detects_from_among_counter_choice() {
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -41088,6 +41242,11 @@ fn classify_counter_choice_list_all_three_shapes() {
             ),
         ]
     );
+
+    let mixed_case =
+        classify_and_parse_counter_choice_list("A +1/+1 Counter OR Two Charge Counters")
+            .expect("counter-list grammar and validation must run on lowercased text");
+    assert_eq!(mixed_case, with_count);
 }
 
 #[test]
@@ -41105,7 +41264,101 @@ fn classify_counter_choice_list_rejects_non_counter_and_singletons() {
 }
 
 #[test]
+fn bare_distributed_counter_choice_rejects_non_counter_noun_disjunction() {
+    // Positive reach guard: the bare distributed path is live and fully
+    // supported before the hostile phrase is checked.
+    let valid = parse_effect_chain(
+        "Put a +0/+1 counter or a +1/+0 counter on target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*valid.effect, Effect::TargetOnly { .. })
+            && valid
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2)),
+        "a valid bare distributed counter list must reach ChooseOneOf: {valid:?}"
+    );
+
+    let hostile = parse_effect_chain(
+        "Put a red or blue creature on target creature.",
+        AbilityKind::Spell,
+    );
+    let is_counter_choice = matches!(&*hostile.effect, Effect::TargetOnly { .. })
+        && hostile.sub_ability.as_deref().is_some_and(|sub| {
+            matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. }
+                if branches.iter().all(|branch| matches!(&*branch.effect, Effect::PutCounter { .. })))
+        });
+    assert!(
+        !is_counter_choice,
+        "bare non-counter noun disjunction must not reach counter branches: {hostile:?}"
+    );
+}
+
+#[test]
+fn bare_counter_conjunctions_fall_through_to_the_multi_counter_parser() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    // These are ordinary multi-counter placements, not resolution-time
+    // choices. They cover Unexpected Fangs (the All Will Be One/Stalwart
+    // driver) and Abigale's three keyword counters respectively.
+    let cases = [
+        (
+            "Put a +1/+1 counter and a lifelink counter on target creature.",
+            vec![
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        ),
+        (
+            "Put a flying counter, a first strike counter, and a lifelink counter on that creature.",
+            vec![
+                CounterType::Keyword(KeywordKind::Flying),
+                CounterType::Keyword(KeywordKind::FirstStrike),
+                CounterType::Keyword(KeywordKind::Lifelink),
+            ],
+        ),
+    ];
+
+    for (text, expected_counter_types) in cases {
+        let ability = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&ability);
+        assert_eq!(
+            effects.len(),
+            expected_counter_types.len(),
+            "the ordinary multi-counter parser must retain every conjunct: {text}"
+        );
+        for (effect, expected_counter_type) in effects.iter().zip(expected_counter_types) {
+            assert!(
+                matches!(
+                    effect,
+                    Effect::PutCounter {
+                        counter_type,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    } if counter_type == &expected_counter_type
+                ),
+                "counter conjunction must fall through instead of becoming ChooseOneOf: {text}; got {effect:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_noun_counter_choice_rejects_non_counter_list() {
+    let valid = parse_effect_chain(
+        "Put your choice of a flying or haste counter on target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*valid.effect, Effect::TargetOnly { .. })
+            && valid.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(&*sub.effect, Effect::ChooseOneOf { branches, .. } if branches.len() == 2)
+            }),
+        "positive reach guard: a shared-noun counter list must reach ChooseOneOf: {valid:?}"
+    );
+
     // "a red or blue creature" is a noun-phrase disjunction, not a counter
     // choice — the per-item strict-counter-type guard must reject it so the
     // shared-noun arm does not produce a ChooseOneOf-of-PutCounter shape.
